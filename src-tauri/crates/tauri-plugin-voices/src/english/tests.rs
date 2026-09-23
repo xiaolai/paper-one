@@ -65,7 +65,12 @@ fn each_word_knows_where_it_sits_in_the_text_and_in_the_sounds() {
     assert_eq!(first_sounds, "ði");
     let third = &out.words[2];
     assert_eq!((third.source_start, third.source_len), (10, 3), "`dog`");
-    let sounds: String = out.phonemes.chars().skip(third.phoneme_start).take(third.phoneme_len).collect();
+    let sounds: String = out
+        .phonemes
+        .chars()
+        .skip(third.phoneme_start)
+        .take(third.phoneme_len)
+        .collect();
     assert_eq!(sounds, "dˈɔɡ");
 }
 
@@ -75,14 +80,24 @@ fn source_offsets_are_utf16_because_the_highlight_is_drawn_from_javascript() {
     // char index would sit one place to the left of every word after it.
     let text = "🙂 the dog";
     let out = front_end().phonemise(text);
-    assert_eq!(out.words[0].source_start, 3, "`the` after a surrogate pair and a space");
-    assert_eq!(text.encode_utf16().skip(3).take(3).collect::<Vec<_>>(), "the".encode_utf16().collect::<Vec<_>>());
+    assert_eq!(
+        out.words[0].source_start, 3,
+        "`the` after a surrogate pair and a space"
+    );
+    assert_eq!(
+        text.encode_utf16().skip(3).take(3).collect::<Vec<_>>(),
+        "the".encode_utf16().collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn inflected_words_are_built_from_their_stems() {
     // None of these four is in the lexicon; all four of their stems are.
-    assert_eq!(said("students"), "stˈudənts", "an unvoiced /t/ takes /s/, not /z/");
+    assert_eq!(
+        said("students"),
+        "stˈudənts",
+        "an unvoiced /t/ takes /s/, not /z/"
+    );
     assert_eq!(said("policies"), "pˈɑlɪsiz");
     assert_eq!(said("boxes"), "bˈɑksᵻz");
     assert_eq!(said("originated"), "ɔɹˈɪʤɪnˌAɾᵻd");
@@ -106,7 +121,10 @@ fn a_number_and_its_words_point_back_at_the_whole_number() {
     for word in out.words.iter().take(4) {
         assert_eq!((word.source_start, word.source_len), (0, 3));
     }
-    assert_eq!(out.words[4].source_start, 4, "`books` starts after the space");
+    assert_eq!(
+        out.words[4].source_start, 4,
+        "`books` starts after the space"
+    );
 }
 
 #[test]
@@ -134,7 +152,10 @@ fn an_acronym_is_spelled_and_an_unknown_word_is_not() {
 fn a_web_address_is_passed_over() {
     let out = front_end().phonemise("the dog https://example.com/a/b the dog");
     assert_eq!(out.phonemes, "ði dˈɔɡ ði dˈɔɡ");
-    assert!(out.unknown.is_empty(), "an address is skipped, not reported as a word");
+    assert!(
+        out.unknown.is_empty(),
+        "an address is skipped, not reported as a word"
+    );
 }
 
 #[test]
@@ -163,7 +184,9 @@ fn every_symbol_it_emits_is_one_kokoro_can_say() {
     // misaki's American alphabet, which is what this front end may emit, plus
     // the punctuation Kokoro has tokens for.
     let vocab: std::collections::HashSet<char> =
-        "AIOWYbdfhijklmnpstuvwzæðŋɑɔəɛɜɡɪɹɾʃʊʌʒʤʧˈˌθᵊᵻʔ,.!?;:—…\"() ".chars().collect();
+        "AIOWYbdfhijklmnpstuvwzæðŋɑɔəɛɜɡɪɹɾʃʊʌʒʤʧˈˌθᵊᵻʔ,.!?;:—…\"() "
+            .chars()
+            .collect();
     let out = front_end()
         .phonemise("The quick dog, 128 boxes; Mr. Smith read 1980s policies — 20% (OKR)…");
     assert!(!out.phonemes.is_empty());
@@ -175,7 +198,19 @@ fn every_symbol_it_emits_is_one_kokoro_can_say() {
 #[test]
 fn punctuation_is_kept_where_kokoro_knows_it_and_dropped_where_it_does_not() {
     assert_eq!(said("the dog, the dog."), "ði dˈɔɡ, ði dˈɔɡ.");
-    assert_eq!(said("the “dog”"), "ði \"dˈɔɡ\"", "curly quotes become the straight ones");
-    assert_eq!(said("the dog–the dog"), "ði dˈɔɡ—ði dˈɔɡ", "an en dash becomes the em dash");
-    assert_eq!(said("the/dog"), "ði dˈɔɡ", "a slash has no sound and no token");
+    assert_eq!(
+        said("the “dog”"),
+        "ði \"dˈɔɡ\"",
+        "curly quotes become the straight ones"
+    );
+    assert_eq!(
+        said("the dog–the dog"),
+        "ði dˈɔɡ—ði dˈɔɡ",
+        "an en dash becomes the em dash"
+    );
+    assert_eq!(
+        said("the/dog"),
+        "ði dˈɔɡ",
+        "a slash has no sound and no token"
+    );
 }

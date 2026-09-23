@@ -6,7 +6,6 @@
 //! classifier that cannot tell a refusal from a truncation leaves nine written
 //! sentences unreachable.
 
-
 /// A failure a reader may see.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -28,9 +27,17 @@ pub enum Error {
     #[error("{route} answered in a way this download cannot use: {why}")]
     Malformed { route: String, why: String },
     #[error("{path} arrived as {got} bytes where the catalogue says {expected}")]
-    SizeMismatch { path: String, expected: u64, got: u64 },
+    SizeMismatch {
+        path: String,
+        expected: u64,
+        got: u64,
+    },
     #[error("{path} did not match its digest: expected {expected}, got {got}")]
-    DigestMismatch { path: String, expected: String, got: String },
+    DigestMismatch {
+        path: String,
+        expected: String,
+        got: String,
+    },
     /// The reader stopped it. Not a failure, and reported as neither.
     #[error("the download was stopped")]
     Cancelled,

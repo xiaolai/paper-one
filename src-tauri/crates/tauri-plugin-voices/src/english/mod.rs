@@ -113,8 +113,11 @@ const SYMBOLS: &[(char, &str)] = &[
 ];
 
 /// Currencies, and what one of them is called.
-const CURRENCIES: &[(char, &str, &str)] =
-    &[('$', "dollar", "dollars"), ('£', "pound", "pounds"), ('€', "euro", "euros")];
+const CURRENCIES: &[(char, &str, &str)] = &[
+    ('$', "dollar", "dollars"),
+    ('£', "pound", "pounds"),
+    ('€', "euro", "euros"),
+];
 
 /// A word to say, and where it came from in the text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,7 +287,10 @@ fn normalise(text: &str) -> Vec<Piece> {
             // A straight quote is whichever it is by where it stands: after a
             // space or at the start it opens, otherwise it closes.
             let opens = i == 0 || chars[i - 1].is_whitespace();
-            out.push(Piece::Punctuation('"', if opens { Leans::Right } else { Leans::Left }));
+            out.push(Piece::Punctuation(
+                '"',
+                if opens { Leans::Right } else { Leans::Left },
+            ));
             i += 1;
             continue;
         }
@@ -322,7 +328,9 @@ fn normalise(text: &str) -> Vec<Piece> {
             // `Mr.` and `vol.` keep their full stop in the table, so the stop is
             // consumed here rather than read as the end of a sentence.
             let abbreviated = chars.get(i) == Some(&'.')
-                && ABBREVIATIONS.iter().any(|(from, _)| from.eq_ignore_ascii_case(&raw));
+                && ABBREVIATIONS
+                    .iter()
+                    .any(|(from, _)| from.eq_ignore_ascii_case(&raw));
             let end = if abbreviated { i + 1 } else { i };
             if abbreviated {
                 i += 1;
@@ -331,7 +339,12 @@ fn normalise(text: &str) -> Vec<Piece> {
                 .iter()
                 .find(|(from, _)| from.eq_ignore_ascii_case(&raw))
                 .map_or(raw.clone(), |(_, to)| (*to).to_owned());
-            push_words(&mut out, &expanded, utf16_at[start], utf16_at[end] - utf16_at[start]);
+            push_words(
+                &mut out,
+                &expanded,
+                utf16_at[start],
+                utf16_at[end] - utf16_at[start],
+            );
             continue;
         }
         // Anything else — a stray glyph — is passed over rather than guessed at.
@@ -343,7 +356,11 @@ fn normalise(text: &str) -> Vec<Piece> {
 /// Add one or more words, all pointing at the same place in the text.
 fn push_words(out: &mut Vec<Piece>, words: &str, source_start: usize, source_len: usize) {
     for word in words.split_whitespace() {
-        out.push(Piece::Word(Spoken { say: word.to_owned(), source_start, source_len }));
+        out.push(Piece::Word(Spoken {
+            say: word.to_owned(),
+            source_start,
+            source_len,
+        }));
     }
 }
 
@@ -358,7 +375,10 @@ fn number_at(chars: &[char], at: usize) -> Option<(String, usize)> {
     while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == ',') {
         i += 1;
     }
-    let whole: String = chars[digits_start..i].iter().filter(|c| c.is_ascii_digit()).collect();
+    let whole: String = chars[digits_start..i]
+        .iter()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
     if whole.is_empty() {
         return None;
     }
@@ -386,11 +406,19 @@ fn number_at(chars: &[char], at: usize) -> Option<(String, usize)> {
     let is_decade = suffix == "s" || (suffix.starts_with('s') && suffix.len() == 1);
 
     let words = if let Some((_, one, many)) = currency {
-        let unit = if value == 1 && fraction.is_empty() { one } else { many };
+        let unit = if value == 1 && fraction.is_empty() {
+            one
+        } else {
+            many
+        };
         if fraction.is_empty() {
             format!("{} {unit}", numbers::cardinal(value))
         } else {
-            format!("{} {unit} {}", numbers::cardinal(value), numbers::decimal(0, &fraction).replace("zero point ", ""))
+            format!(
+                "{} {unit} {}",
+                numbers::cardinal(value),
+                numbers::decimal(0, &fraction).replace("zero point ", "")
+            )
         }
     } else if !fraction.is_empty() {
         numbers::decimal(value, &fraction)
@@ -412,7 +440,8 @@ fn number_at(chars: &[char], at: usize) -> Option<(String, usize)> {
 fn web_address_at(chars: &[char], at: usize) -> Option<usize> {
     let rest: String = chars[at..].iter().take(8).collect();
     let lower = rest.to_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("www.")) {
+    if !(lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("www."))
+    {
         return None;
     }
     let mut i = at;

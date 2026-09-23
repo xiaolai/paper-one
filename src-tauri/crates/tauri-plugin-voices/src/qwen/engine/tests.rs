@@ -53,7 +53,10 @@ fn a_runaway_is_rendered_again_with_a_different_seed() {
     .expect("the second attempt is kept");
     assert_eq!(spoken.attempts, 2);
     let seeds = seeds.borrow();
-    assert_ne!(seeds[0], seeds[1], "the retry is a different draw, not the same one again");
+    assert_ne!(
+        seeds[0], seeds[1],
+        "the retry is a different draw, not the same one again"
+    );
 }
 
 #[test]
@@ -65,10 +68,22 @@ fn a_sentence_that_babbles_every_time_is_refused_by_name() {
         audio(expected * 3.4)
     })
     .expect_err("refused");
-    assert_eq!(*calls.borrow(), ATTEMPTS, "it is tried every time it is allowed");
+    assert_eq!(
+        *calls.borrow(),
+        ATTEMPTS,
+        "it is tried every time it is allowed"
+    );
     assert_eq!(skipped.text, SENTENCE, "the refusal names the sentence");
-    assert!(skipped.why.contains("should take"), "and what it should have taken: {}", skipped.why);
-    assert!(skipped.why.contains('s'), "with the lengths in it: {}", skipped.why);
+    assert!(
+        skipped.why.contains("should take"),
+        "and what it should have taken: {}",
+        skipped.why
+    );
+    assert!(
+        skipped.why.contains('s'),
+        "with the lengths in it: {}",
+        skipped.why
+    );
 }
 
 #[test]
@@ -77,7 +92,11 @@ fn the_recorded_runaway_is_what_this_is_measured_against() {
     // same shape, so the guard meets the real proportions.
     let text: String = "a".repeat(302);
     let skipped = say(&text, RATE, |_seed, _cap, _room| audio(82.6)).expect_err("refused");
-    assert!(skipped.why.contains("82.6"), "the refusal quotes what came back: {}", skipped.why);
+    assert!(
+        skipped.why.contains("82.6"),
+        "the refusal quotes what came back: {}",
+        skipped.why
+    );
 }
 
 #[test]
@@ -120,7 +139,10 @@ fn the_cap_and_the_room_handed_to_the_bridge_match_the_sentence() {
     let (cap, room) = *seen.borrow();
     assert_eq!(cap, text::frame_cap(SENTENCE));
     assert_eq!(room, buffer_samples(cap, RATE));
-    assert!(room > cap * 1_000, "the room is samples, not frames: {room} for {cap} frames");
+    assert!(
+        room > cap * 1_000,
+        "the room is samples, not frames: {room} for {cap} frames"
+    );
 }
 
 #[test]
@@ -137,7 +159,10 @@ fn one_hard_sentence_does_not_end_the_passage() {
     });
     assert_eq!(reading.spoken.len(), 2, "the other two are still read");
     assert_eq!(reading.skipped.len(), 1);
-    assert!(reading.skipped[0].text.contains("Second"), "and the reader is told which");
+    assert!(
+        reading.skipped[0].text.contains("Second"),
+        "and the reader is told which"
+    );
     assert_eq!(reading.sample_rate, RATE);
 }
 
@@ -149,14 +174,21 @@ fn a_passage_is_read_one_sentence_at_a_time_and_not_all_at_once() {
         asked.borrow_mut().push(sentence.to_owned());
         audio(text::expected_seconds(sentence))
     });
-    assert_eq!(asked.borrow().len(), 2, "two sentences, two renders: {:?}", asked.borrow());
+    assert_eq!(
+        asked.borrow().len(),
+        2,
+        "two sentences, two renders: {:?}",
+        asked.borrow()
+    );
     assert_eq!(reading.spoken.len(), 2);
     assert!(reading.skipped.is_empty());
 }
 
 #[test]
 fn nothing_at_all_is_read_as_nothing_rather_than_refused() {
-    let reading = read("   \n  ", RATE, |_s, _seed, _cap, _room| panic!("nothing to render"));
+    let reading = read("   \n  ", RATE, |_s, _seed, _cap, _room| {
+        panic!("nothing to render")
+    });
     assert!(reading.spoken.is_empty());
     assert!(reading.skipped.is_empty());
 }
@@ -167,9 +199,16 @@ fn a_seed_is_the_same_every_time_for_the_same_sentence() {
     // whoever looks into it, and a book does not change between readings.
     assert_eq!(seed_for(SENTENCE, 0), seed_for(SENTENCE, 0));
     assert_ne!(seed_for(SENTENCE, 0), seed_for(SENTENCE, 1));
-    assert_ne!(seed_for(SENTENCE, 0), seed_for("another sentence entirely.", 0));
+    assert_ne!(
+        seed_for(SENTENCE, 0),
+        seed_for("another sentence entirely.", 0)
+    );
     for attempt in 0..ATTEMPTS {
-        assert_ne!(seed_for("", attempt), 0, "a seed is never the value that means uninitialised");
+        assert_ne!(
+            seed_for("", attempt),
+            0,
+            "a seed is never the value that means uninitialised"
+        );
     }
 }
 
@@ -183,9 +222,18 @@ fn a_code_from_the_bridge_is_named_not_numbered() {
     assert_eq!(Failure::of(-4), Failure::Overflowed);
     assert_eq!(Failure::of(-5), Failure::NoAudio);
     assert_eq!(Failure::of(-99), Failure::Unknown(-99));
-    assert!(Failure::of(-99).why().contains("-99"), "an unknown code is quoted");
-    assert!(Failure::of(-99).why().contains("version"), "and read as a skew");
-    assert!(!Failure::Unknown(-99).worth_retrying(), "an unknown answer is not retried blindly");
+    assert!(
+        Failure::of(-99).why().contains("-99"),
+        "an unknown code is quoted"
+    );
+    assert!(
+        Failure::of(-99).why().contains("version"),
+        "and read as a skew"
+    );
+    assert!(
+        !Failure::Unknown(-99).worth_retrying(),
+        "an unknown answer is not retried blindly"
+    );
 }
 
 #[test]
@@ -218,7 +266,10 @@ fn the_buffer_has_room_for_every_frame_the_cap_allows() {
 fn a_mac_with_too_little_memory_is_told_both_numbers() {
     let err = memory_allows(8, 4, "chinese-qwen").expect_err("refused");
     let text = format!("{err}");
-    assert!(text.contains('8') && text.contains('4'), "both numbers are named: {text}");
+    assert!(
+        text.contains('8') && text.contains('4'),
+        "both numbers are named: {text}"
+    );
     assert!(text.contains("chinese-qwen"), "and the pack: {text}");
     memory_allows(8, 8, "chinese-qwen").expect("exactly enough is enough");
     memory_allows(8, 16, "chinese-qwen").expect("more than enough");
@@ -229,8 +280,14 @@ fn a_mac_with_too_little_memory_is_told_both_numbers() {
 fn without_the_bridge_the_voice_refuses_by_name_rather_than_being_absent() {
     let err = super::load(std::path::Path::new("/anywhere")).expect_err("refused");
     let text = format!("{err}");
-    assert!(text.contains("no Chinese voice"), "the refusal says the BUILD has none: {text}");
-    assert!(text.contains("macOS"), "and what a build that has one needs: {text}");
+    assert!(
+        text.contains("no Chinese voice"),
+        "the refusal says the BUILD has none: {text}"
+    );
+    assert!(
+        text.contains("macOS"),
+        "and what a build that has one needs: {text}"
+    );
     super::unload();
 }
 
@@ -250,5 +307,8 @@ fn the_bridge_is_linked_in_and_answers() {
     let err = super::load(std::path::Path::new("/nonexistent/paper-voices-pack"))
         .expect_err("a pack that is not there cannot load");
     let text = format!("{err}");
-    assert!(text.contains("nonexistent"), "the refusal names the path: {text}");
+    assert!(
+        text.contains("nonexistent"),
+        "the refusal names the path: {text}"
+    );
 }

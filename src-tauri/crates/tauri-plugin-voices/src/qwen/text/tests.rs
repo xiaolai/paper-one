@@ -42,8 +42,16 @@ fn both_recorded_runaways_are_caught() {
     // 8-bit one 75.8 s, where every healthy render of it took 20-25 s.
     let text = of(0, 302);
     for seconds in [82.6, 75.8] {
-        assert_eq!(verdict(&text, seconds, 2), Verdict::Again, "{seconds} s should be re-rendered");
-        assert_eq!(verdict(&text, seconds, 0), Verdict::Refuse, "{seconds} s with no attempts left");
+        assert_eq!(
+            verdict(&text, seconds, 2),
+            Verdict::Again,
+            "{seconds} s should be re-rendered"
+        );
+        assert_eq!(
+            verdict(&text, seconds, 0),
+            Verdict::Refuse,
+            "{seconds} s with no attempts left"
+        );
     }
 }
 
@@ -55,12 +63,18 @@ fn the_widest_healthy_reading_and_the_closest_runaway_do_not_touch() {
     let text = of(24, 27);
     let expected = expected_seconds(&text);
     let (_, high) = band(&text);
-    assert!(high > expected * 1.63, "the mixed passage's real 1.63x must be kept");
+    assert!(
+        high > expected * 1.63,
+        "the mixed passage's real 1.63x must be kept"
+    );
     // The nearer runaway ran 75.8 s against 24.2 s expected, so 3.13 is its
     // ratio rounded DOWN — the conservative side, and far enough from 3.14 that
     // clippy stops reading the literal as an approximation of pi.
     let nearest_runaway = 3.13_f64;
-    assert!(high < expected * nearest_runaway, "the nearest runaway must still be refused");
+    assert!(
+        high < expected * nearest_runaway,
+        "the nearest runaway must still be refused"
+    );
 }
 
 #[test]
@@ -101,7 +115,10 @@ fn script_decides_the_rate_and_not_the_declared_language() {
     // book is full of Latin.
     let wide = expected_seconds(&of(100, 0));
     let narrow = expected_seconds(&of(0, 100));
-    assert!(wide > narrow * 2.5, "{wide} s of Han against {narrow} s of Latin");
+    assert!(
+        wide > narrow * 2.5,
+        "{wide} s of Han against {narrow} s of Latin"
+    );
     // Mixed text is the sum of its parts, not either rate over the whole.
     let mixed = expected_seconds(&of(50, 50));
     assert!((mixed - (wide + narrow) / 2.0).abs() < 1e-9);
@@ -121,8 +138,15 @@ fn the_cap_is_above_the_refusal_bound_rather_than_equal_to_it() {
     let text = of(0, 302);
     let (_, high) = band(&text);
     let cap_seconds = frame_cap(&text) as f64 / FRAMES_PER_SECOND;
-    assert!(cap_seconds > high, "cap {cap_seconds:.1} s must exceed the bound {high:.1} s");
-    assert_eq!(verdict(&text, high + 0.1, 0), Verdict::Refuse, "and the excess is refused");
+    assert!(
+        cap_seconds > high,
+        "cap {cap_seconds:.1} s must exceed the bound {high:.1} s"
+    );
+    assert_eq!(
+        verdict(&text, high + 0.1, 0),
+        Verdict::Refuse,
+        "and the excess is refused"
+    );
 }
 
 #[test]
@@ -146,8 +170,16 @@ fn a_paragraph_is_split_into_sentences_that_rejoin_exactly() {
     let text = "He left. She stayed! Did they? Yes\u{2026} Then night fell.";
     let pieces = sentences(text);
     assert_eq!(pieces.len(), 5, "{pieces:?}");
-    assert_eq!(pieces.concat(), text, "nothing is lost or duplicated in splitting");
-    assert!(pieces[0].ends_with('.'), "the mark stays with its sentence: {:?}", pieces[0]);
+    assert_eq!(
+        pieces.concat(),
+        text,
+        "nothing is lost or duplicated in splitting"
+    );
+    assert!(
+        pieces[0].ends_with('.'),
+        "the mark stays with its sentence: {:?}",
+        pieces[0]
+    );
 }
 
 #[test]
@@ -163,7 +195,11 @@ fn a_closing_quotation_belongs_to_the_sentence_it_ends() {
     let text = "\u{300C}\u{597D}\u{3002}\u{300D}\u{4ED6}\u{8BF4}\u{3002}";
     let pieces = sentences(text);
     assert_eq!(pieces.len(), 2, "{pieces:?}");
-    assert!(pieces[0].ends_with('\u{300D}'), "the bracket closes the first: {:?}", pieces[0]);
+    assert!(
+        pieces[0].ends_with('\u{300D}'),
+        "the bracket closes the first: {:?}",
+        pieces[0]
+    );
     assert_eq!(pieces.concat(), text);
 }
 
@@ -185,7 +221,8 @@ fn text_with_no_mark_at_all_is_still_one_piece() {
 #[test]
 fn every_sentence_gets_its_own_cap() {
     // The point of splitting: a runaway costs one sentence, not the paragraph.
-    let text = "\u{5929}\u{6C14}\u{5F88}\u{597D}\u{3002}This is a much longer English sentence about it.";
+    let text =
+        "\u{5929}\u{6C14}\u{5F88}\u{597D}\u{3002}This is a much longer English sentence about it.";
     let pieces = sentences(text);
     assert_eq!(pieces.len(), 2);
     assert!(

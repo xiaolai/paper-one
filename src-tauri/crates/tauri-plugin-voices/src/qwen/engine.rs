@@ -96,7 +96,9 @@ impl Failure {
             Self::GenerationFailed => "the voice could not say it".to_owned(),
             Self::Overflowed => "the voice ran on past what the sentence should take".to_owned(),
             Self::NoAudio => "the voice produced no sound".to_owned(),
-            Self::Unknown(code) => format!("the voice answered {code}, which this version does not know"),
+            Self::Unknown(code) => {
+                format!("the voice answered {code}, which this version does not know")
+            }
         }
     }
 
@@ -107,7 +109,10 @@ impl Failure {
     /// however many times it is asked — retrying those is pure delay.
     #[must_use]
     pub fn worth_retrying(self) -> bool {
-        matches!(self, Self::Overflowed | Self::GenerationFailed | Self::NoAudio)
+        matches!(
+            self,
+            Self::Overflowed | Self::GenerationFailed | Self::NoAudio
+        )
     }
 }
 
@@ -180,7 +185,11 @@ pub enum Attempt {
 /// # Errors
 /// Never returns an error: a sentence that cannot be said is [`Skipped`], since
 /// one bad sentence must not end a chapter.
-pub fn say<F>(sentence: &str, sample_rate: u32, mut render: F) -> std::result::Result<Spoken, Skipped>
+pub fn say<F>(
+    sentence: &str,
+    sample_rate: u32,
+    mut render: F,
+) -> std::result::Result<Spoken, Skipped>
 where
     F: FnMut(u64, usize, usize) -> Attempt,
 {
@@ -219,12 +228,18 @@ where
             Attempt::Failed(failure) => {
                 last = failure.why();
                 if !failure.worth_retrying() {
-                    return Err(Skipped { text: sentence.to_owned(), why: last });
+                    return Err(Skipped {
+                        text: sentence.to_owned(),
+                        why: last,
+                    });
                 }
             }
         }
     }
-    Err(Skipped { text: sentence.to_owned(), why: last })
+    Err(Skipped {
+        text: sentence.to_owned(),
+        why: last,
+    })
 }
 
 /// Read a whole passage, sentence by sentence.
@@ -236,13 +251,19 @@ pub fn read<F>(passage: &str, sample_rate: u32, mut render: F) -> Reading
 where
     F: FnMut(&str, u64, usize, usize) -> Attempt,
 {
-    let mut reading = Reading { spoken: Vec::new(), skipped: Vec::new(), sample_rate };
+    let mut reading = Reading {
+        spoken: Vec::new(),
+        skipped: Vec::new(),
+        sample_rate,
+    };
     for sentence in text::sentences(passage) {
         let trimmed = sentence.trim();
         if trimmed.is_empty() {
             continue;
         }
-        match say(trimmed, sample_rate, |seed, cap, room| render(trimmed, seed, cap, room)) {
+        match say(trimmed, sample_rate, |seed, cap, room| {
+            render(trimmed, seed, cap, room)
+        }) {
             Ok(spoken) => reading.spoken.push(spoken),
             Err(skipped) => reading.skipped.push(skipped),
         }
@@ -333,7 +354,15 @@ pub fn unload() {}
 /// [`Attempt`] and leaves every judgement to [`say`].
 #[cfg(all(target_os = "macos", qwen_bridge))]
 #[must_use]
-pub fn through_bridge(sentence: &str, voice: &str, language: &str, sample_rate: u32, seed: u64, cap: usize, room: usize) -> Attempt {
+pub fn through_bridge(
+    sentence: &str,
+    voice: &str,
+    language: &str,
+    sample_rate: u32,
+    seed: u64,
+    cap: usize,
+    room: usize,
+) -> Attempt {
     let (Ok(text), Ok(voice), Ok(language)) = (
         std::ffi::CString::new(sentence),
         std::ffi::CString::new(voice),

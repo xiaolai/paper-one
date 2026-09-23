@@ -31,7 +31,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let front = FrontEnd::load(&pack.join("lexicon"))?;
     let prepared = front.phonemise(text.trim());
     if !prepared.unknown.is_empty() {
-        eprintln!("words with no pronunciation: {}", prepared.unknown.join(", "));
+        eprintln!(
+            "words with no pronunciation: {}",
+            prepared.unknown.join(", ")
+        );
     }
 
     let threads: usize = std::env::var("PAPER_VOICES_THREADS")
@@ -76,7 +79,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .words
         .iter()
         .map(|w| {
-            let word = String::from_utf16_lossy(&utf16[w.source_start..w.source_start + w.source_len]);
+            let word =
+                String::from_utf16_lossy(&utf16[w.source_start..w.source_start + w.source_len]);
             serde_json::json!({"word": word, "startMs": w.start_ms, "endMs": w.end_ms})
         })
         .collect();

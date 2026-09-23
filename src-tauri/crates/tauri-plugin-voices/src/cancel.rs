@@ -129,7 +129,10 @@ mod tests {
     async fn dropping_the_stopper_does_not_cancel_the_work() {
         let (cancel, stopper) = Cancel::new();
         drop(stopper);
-        assert!(!cancel.is_cancelled(), "a download outliving its handle is still wanted");
+        assert!(
+            !cancel.is_cancelled(),
+            "a download outliving its handle is still wanted"
+        );
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), cancel.cancelled())
                 .await
@@ -142,8 +145,10 @@ mod tests {
     async fn a_token_nothing_can_stop_never_resolves() {
         let cancel = Cancel::never();
         assert!(!cancel.is_cancelled());
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), cancel.cancelled())
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), cancel.cancelled())
+                .await
+                .is_err()
+        );
     }
 }

@@ -76,7 +76,11 @@ impl Lexicon {
         let gold = read_misaki(&dir.join("us_gold.json"))?;
         let silver = read_misaki(&dir.join("us_silver.json"))?;
         let cmudict = read_cmudict(&dir.join("cmudict.dict"))?;
-        Ok(Self { gold, silver, cmudict })
+        Ok(Self {
+            gold,
+            silver,
+            cmudict,
+        })
     }
 
     /// Build one from parsed entries — what the tests use, and what a future
@@ -87,7 +91,11 @@ impl Lexicon {
         silver: HashMap<String, String>,
         cmudict: HashMap<String, String>,
     ) -> Self {
-        Self { gold, silver, cmudict }
+        Self {
+            gold,
+            silver,
+            cmudict,
+        }
     }
 
     /// How many words each source knows, for the Settings section and for a test
@@ -107,7 +115,10 @@ impl Lexicon {
             (&self.cmudict, Source::Cmudict),
         ] {
             if let Some(phonemes) = map.get(word).or_else(|| map.get(&lower)) {
-                return Some(Found { phonemes: phonemes.clone(), source });
+                return Some(Found {
+                    phonemes: phonemes.clone(),
+                    source,
+                });
             }
         }
         None
@@ -127,7 +138,10 @@ fn read_misaki(path: &std::path::Path) -> std::io::Result<HashMap<String, String
     let text = std::fs::read_to_string(path)?;
     let raw: HashMap<String, serde_json::Value> = serde_json::from_str(&text)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    Ok(raw.into_iter().filter_map(|(word, value)| Some((word, reading_of(&value)?))).collect())
+    Ok(raw
+        .into_iter()
+        .filter_map(|(word, value)| Some((word, reading_of(&value)?)))
+        .collect())
 }
 
 /// One reading out of a misaki entry.
@@ -150,7 +164,9 @@ fn read_cmudict(path: &std::path::Path) -> std::io::Result<HashMap<String, Strin
     let mut out = HashMap::new();
     for line in text.lines() {
         let line = line.split(" #").next().unwrap_or(line).trim();
-        let Some((word, arpa)) = line.split_once(' ') else { continue };
+        let Some((word, arpa)) = line.split_once(' ') else {
+            continue;
+        };
         // `word(2)` is another way to say the same word; the first wins, which
         // is CMUdict's own most common reading.
         let word = word.split('(').next().unwrap_or(word);

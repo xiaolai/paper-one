@@ -70,7 +70,10 @@ impl Layout {
     /// is still checked here, because a check that lives only at the boundary is
     /// a check the next caller can walk around.
     pub fn pack_path(&self, id: &str, relative: &str) -> Result<PathBuf> {
-        Ok(self.packs_dir.join(safe_component(id)?).join(safe_relative(relative)?))
+        Ok(self
+            .packs_dir
+            .join(safe_component(id)?)
+            .join(safe_relative(relative)?))
     }
 
     /// Where a pack's bytes land while they are still arriving.
@@ -82,7 +85,10 @@ impl Layout {
     /// # Errors
     /// As [`Layout::pack_path`].
     pub fn staging_path(&self, id: &str, relative: &str) -> Result<PathBuf> {
-        Ok(self.staging_dir.join(safe_component(id)?).join(safe_relative(relative)?))
+        Ok(self
+            .staging_dir
+            .join(safe_component(id)?)
+            .join(safe_relative(relative)?))
     }
 
     /// Everything of one pack, for removing it.
@@ -114,7 +120,9 @@ pub fn safe_component(name: &str) -> Result<&str> {
         && name.len() <= 120
         && name != "."
         && name != ".."
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-');
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-');
     if ok {
         Ok(name)
     } else {
@@ -175,7 +183,10 @@ mod tests {
     fn a_pack_id_cannot_traverse() {
         let layout = Layout::under(Path::new("/data/Paper"));
         for bad in ["..", ".", "", "a/b", "../../etc/passwd", "a\\b", "a b"] {
-            assert!(layout.pack_path(bad, "model.onnx").is_err(), "{bad:?} should be refused");
+            assert!(
+                layout.pack_path(bad, "model.onnx").is_err(),
+                "{bad:?} should be refused"
+            );
         }
         assert!(layout.pack_path("english-kokoro", "model.onnx").is_ok());
     }
@@ -184,7 +195,9 @@ mod tests {
     fn a_nested_file_is_allowed_and_a_traversing_one_is_not() {
         let layout = Layout::under(Path::new("/data/Paper"));
         assert_eq!(
-            layout.pack_path("english-kokoro", "voices/af_heart.bin").expect("nested"),
+            layout
+                .pack_path("english-kokoro", "voices/af_heart.bin")
+                .expect("nested"),
             PathBuf::from("/data/Paper/voices/packs/english-kokoro/voices/af_heart.bin")
         );
         for bad in ["../x", "a//b", "voices/../../x", "/etc/passwd", "a\\b", ""] {
@@ -198,7 +211,9 @@ mod tests {
     #[test]
     fn a_refused_path_names_what_was_asked_for() {
         let layout = Layout::under(Path::new("/data/Paper"));
-        let err = layout.pack_path("english-kokoro", "voices/../../x").expect_err("refused");
+        let err = layout
+            .pack_path("english-kokoro", "voices/../../x")
+            .expect_err("refused");
         assert!(
             matches!(&err, Error::BadPath(p) if p == "voices/../../x"),
             "the whole path is what a reader would have to find, not one component: {err}"

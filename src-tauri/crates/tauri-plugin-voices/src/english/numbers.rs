@@ -9,8 +9,25 @@
 //! American usage throughout, matching the voices: no *and* before the tens.
 
 const ONES: [&str; 20] = [
-    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
     "nineteen",
 ];
 const TENS: [&str; 10] = [
@@ -57,7 +74,11 @@ pub fn cardinal(value: u64) -> String {
         if value >= scale {
             let (count, rest) = (value / scale, value % scale);
             let head = format!("{} {name}", cardinal(count));
-            return if rest == 0 { head } else { format!("{head} {}", cardinal(rest)) };
+            return if rest == 0 {
+                head
+            } else {
+                format!("{head} {}", cardinal(rest))
+            };
         }
     }
     ONES[0].to_owned()
@@ -76,7 +97,8 @@ pub fn ordinal(value: u64) -> String {
         .find_map(|(cardinal, ordinal)| (*cardinal == last).then(|| (*ordinal).to_owned()))
         .unwrap_or_else(|| {
             // The regular forms: `-th`, with `-y` becoming `-ieth`.
-            last.strip_suffix('y').map_or_else(|| format!("{last}th"), |stem| format!("{stem}ieth"))
+            last.strip_suffix('y')
+                .map_or_else(|| format!("{last}th"), |stem| format!("{stem}ieth"))
         });
     match head {
         Some(head) => format!("{head} {last}"),

@@ -83,7 +83,11 @@ impl Rendered {
                 why: "the model produced no audio".to_owned(),
             });
         }
-        Ok(Self { samples, sample_rate: SAMPLE_RATE, words })
+        Ok(Self {
+            samples,
+            sample_rate: SAMPLE_RATE,
+            words,
+        })
     }
 
     /// How long it is, in milliseconds.
@@ -141,7 +145,12 @@ impl Kokoro {
             route: model.display().to_string(),
             why: e.to_string(),
         })?;
-        Ok(Self { session, vocab, voices_dir: pack_dir.join("voices"), styles: HashMap::new() })
+        Ok(Self {
+            session,
+            vocab,
+            voices_dir: pack_dir.join("voices"),
+            styles: HashMap::new(),
+        })
     }
 
     /// Speak what the front end prepared.
@@ -173,10 +182,14 @@ impl Kokoro {
         let mut ids = Vec::with_capacity(phonemes.chars().count() + 2);
         ids.push(0i64);
         for c in phonemes.chars() {
-            let id = self.vocab.get(&c).copied().ok_or_else(|| Error::Malformed {
-                route: format!("kokoro:{voice}"),
-                why: format!("{c:?} is not a sound this model can say"),
-            })?;
+            let id = self
+                .vocab
+                .get(&c)
+                .copied()
+                .ok_or_else(|| Error::Malformed {
+                    route: format!("kokoro:{voice}"),
+                    why: format!("{c:?} is not a sound this model can say"),
+                })?;
             ids.push(id);
         }
         ids.push(0);
@@ -207,7 +220,9 @@ impl Kokoro {
     /// The style vector for a voice at this token count, read once per voice.
     fn style(&mut self, voice: &str, tokens: usize) -> Result<Vec<f32>> {
         if !self.styles.contains_key(voice) {
-            let path = self.voices_dir.join(format!("{}.bin", crate::paths::safe_component(voice)?));
+            let path = self
+                .voices_dir
+                .join(format!("{}.bin", crate::paths::safe_component(voice)?));
             let bytes = std::fs::read(&path)?;
             if bytes.len() != STYLE_ROWS * STYLE_WIDTH * 4 {
                 return Err(Error::Malformed {
@@ -242,7 +257,10 @@ fn open(model: &Path, threads: usize) -> std::result::Result<Session, Box<dyn st
 }
 
 fn malformed(voice: &str, error: &impl std::fmt::Display) -> Error {
-    Error::Malformed { route: format!("kokoro:{voice}"), why: error.to_string() }
+    Error::Malformed {
+        route: format!("kokoro:{voice}"),
+        why: error.to_string(),
+    }
 }
 
 /// Kokoro's phoneme vocabulary, from the pack's `tokenizer.json`.
@@ -252,10 +270,12 @@ fn read_vocab(path: &Path) -> Result<HashMap<char, i64>> {
         route: path.display().to_string(),
         why: e.to_string(),
     })?;
-    let map = json["model"]["vocab"].as_object().ok_or_else(|| Error::Malformed {
-        route: path.display().to_string(),
-        why: "no model.vocab in the tokenizer".to_owned(),
-    })?;
+    let map = json["model"]["vocab"]
+        .as_object()
+        .ok_or_else(|| Error::Malformed {
+            route: path.display().to_string(),
+            why: "no model.vocab in the tokenizer".to_owned(),
+        })?;
     let mut vocab = HashMap::new();
     for (symbol, id) in map {
         let mut chars = symbol.chars();

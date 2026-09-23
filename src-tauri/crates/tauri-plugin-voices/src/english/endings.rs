@@ -84,34 +84,61 @@ pub fn candidates(word: &str) -> Vec<Candidate> {
 
     if len >= 3 && lower.ends_with('s') {
         if !lower.ends_with("ss") {
-            out.push(Candidate { stem: take(len - 1), ending: Ending::Plural });
+            out.push(Candidate {
+                stem: take(len - 1),
+                ending: Ending::Plural,
+            });
         }
         if lower.ends_with("'s") || (len > 4 && lower.ends_with("es") && !lower.ends_with("ies")) {
-            out.push(Candidate { stem: take(len - 2), ending: Ending::Plural });
+            out.push(Candidate {
+                stem: take(len - 2),
+                ending: Ending::Plural,
+            });
         }
         if len > 4 && lower.ends_with("ies") {
-            out.push(Candidate { stem: format!("{}y", take(len - 3)), ending: Ending::Plural });
+            out.push(Candidate {
+                stem: format!("{}y", take(len - 3)),
+                ending: Ending::Plural,
+            });
         }
     }
     if len >= 4 && lower.ends_with('d') {
         if !lower.ends_with("dd") {
-            out.push(Candidate { stem: take(len - 1), ending: Ending::Past });
+            out.push(Candidate {
+                stem: take(len - 1),
+                ending: Ending::Past,
+            });
         }
         if len > 4 && lower.ends_with("ed") && !lower.ends_with("eed") {
-            out.push(Candidate { stem: take(len - 2), ending: Ending::Past });
+            out.push(Candidate {
+                stem: take(len - 2),
+                ending: Ending::Past,
+            });
         }
         if len > 4 && lower.ends_with("ied") {
-            out.push(Candidate { stem: format!("{}y", take(len - 3)), ending: Ending::Past });
+            out.push(Candidate {
+                stem: format!("{}y", take(len - 3)),
+                ending: Ending::Past,
+            });
         }
     }
     if len >= 5 && lower.ends_with("ing") {
         if len > 5 {
-            out.push(Candidate { stem: take(len - 3), ending: Ending::Progressive });
+            out.push(Candidate {
+                stem: take(len - 3),
+                ending: Ending::Progressive,
+            });
         }
-        out.push(Candidate { stem: format!("{}e", take(len - 3)), ending: Ending::Progressive });
+        out.push(Candidate {
+            stem: format!("{}e", take(len - 3)),
+            ending: Ending::Progressive,
+        });
         // `running` from `run`: a doubled consonant before the ending.
         if len > 5 && doubled_before_ing(&chars) {
-            out.push(Candidate { stem: take(len - 4), ending: Ending::Progressive });
+            out.push(Candidate {
+                stem: take(len - 4),
+                ending: Ending::Progressive,
+            });
         }
     }
     out
@@ -161,9 +188,17 @@ mod tests {
 
     #[test]
     fn the_plural_is_voiced_by_the_sound_before_it() {
-        assert_eq!(plural("pˈɛt").as_deref(), Some("pˈɛts"), "unvoiced takes /s/");
+        assert_eq!(
+            plural("pˈɛt").as_deref(),
+            Some("pˈɛts"),
+            "unvoiced takes /s/"
+        );
         assert_eq!(plural("dˈɔɡ").as_deref(), Some("dˈɔɡz"), "voiced takes /z/");
-        assert_eq!(plural("bˈʌs").as_deref(), Some("bˈʌsᵻz"), "a sibilant takes a vowel first");
+        assert_eq!(
+            plural("bˈʌs").as_deref(),
+            Some("bˈʌsᵻz"),
+            "a sibilant takes a vowel first"
+        );
         assert_eq!(plural("ʧˈɜɹʧ").as_deref(), Some("ʧˈɜɹʧᵻz"));
         assert_eq!(plural(""), None);
     }
@@ -172,7 +207,11 @@ mod tests {
     fn the_past_is_voiced_by_the_sound_before_it_too() {
         assert_eq!(past("wˈɔk").as_deref(), Some("wˈɔkt"), "unvoiced takes /t/");
         assert_eq!(past("fˈɪl").as_deref(), Some("fˈɪld"), "voiced takes /d/");
-        assert_eq!(past("nˈid").as_deref(), Some("nˈidᵻd"), "after /d/ a vowel is needed");
+        assert_eq!(
+            past("nˈid").as_deref(),
+            Some("nˈidᵻd"),
+            "after /d/ a vowel is needed"
+        );
     }
 
     #[test]
@@ -187,7 +226,8 @@ mod tests {
 
     #[test]
     fn a_written_word_offers_the_stems_it_could_be_built_from() {
-        let stems = |w: &str| -> Vec<String> { candidates(w).into_iter().map(|c| c.stem).collect() };
+        let stems =
+            |w: &str| -> Vec<String> { candidates(w).into_iter().map(|c| c.stem).collect() };
         assert!(stems("students").contains(&"student".to_owned()));
         assert!(stems("policies").contains(&"policy".to_owned()));
         assert!(stems("boxes").contains(&"box".to_owned()));
@@ -205,21 +245,35 @@ mod tests {
         assert!(!candidates("class").iter().any(|c| c.stem == "clas"));
         assert!(!candidates("agreed").iter().any(|c| c.stem == "agre"));
         assert!(candidates("is").is_empty());
-        assert!(candidates("sing").is_empty(), "too short to be an -ing form");
+        assert!(
+            candidates("sing").is_empty(),
+            "too short to be an -ing form"
+        );
     }
 
     #[test]
     fn every_symbol_these_rules_add_is_one_kokoro_knows() {
         let vocab: std::collections::HashSet<char> =
-            "AIOWYbdfhijklmnpstuvwzæðŋɑɔəɛɜɡɪɹɾʃʊʌʒʤʧˈˌθᵊᵻʔ".chars().collect();
+            "AIOWYbdfhijklmnpstuvwzæðŋɑɔəɛɜɡɪɹɾʃʊʌʒʤʧˈˌθᵊᵻʔ"
+                .chars()
+                .collect();
         let built = [
-            plural("pˈɛt"), plural("dˈɔɡ"), plural("bˈʌs"),
-            past("wˈɔk"), past("fˈɪl"), past("nˈid"), past("wˈAt"),
-            progressive("wˈAt"), progressive("lˈɪft"),
+            plural("pˈɛt"),
+            plural("dˈɔɡ"),
+            plural("bˈʌs"),
+            past("wˈɔk"),
+            past("fˈɪl"),
+            past("nˈid"),
+            past("wˈAt"),
+            progressive("wˈAt"),
+            progressive("lˈɪft"),
         ];
         for word in built.into_iter().flatten() {
             for c in word.chars() {
-                assert!(vocab.contains(&c), "{word} contains {c}, which Kokoro cannot say");
+                assert!(
+                    vocab.contains(&c),
+                    "{word} contains {c}, which Kokoro cannot say"
+                );
             }
         }
     }

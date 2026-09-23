@@ -17,9 +17,13 @@ use tauri_plugin_voices::qwen::text;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let (Some(pack), Some(voice), Some(language), Some(input), Some(output)) =
-        (args.next(), args.next(), args.next(), args.next(), args.next())
-    else {
+    let (Some(pack), Some(voice), Some(language), Some(input), Some(output)) = (
+        args.next(),
+        args.next(),
+        args.next(),
+        args.next(),
+        args.next(),
+    ) else {
         eprintln!("usage: zh <pack dir> <voice> <language> <text file> <out.wav>");
         std::process::exit(2);
     };
@@ -28,10 +32,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let started = Instant::now();
     let sample_rate = engine::load(std::path::Path::new(&pack))?;
-    println!("loaded in {:.1} s, {sample_rate} Hz", started.elapsed().as_secs_f64());
+    println!(
+        "loaded in {:.1} s, {sample_rate} Hz",
+        started.elapsed().as_secs_f64()
+    );
 
     let pieces = text::sentences(passage);
-    println!("{} sentence(s), expecting {:.1} s of audio", pieces.len(), text::expected_seconds(passage));
+    println!(
+        "{} sentence(s), expecting {:.1} s of audio",
+        pieces.len(),
+        text::expected_seconds(passage)
+    );
 
     // A way to make the model overrun on purpose, so the refusal path can be
     // measured through the REAL bridge rather than only against a stub. It
@@ -58,7 +69,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let at = Instant::now();
         let cap = ((cap as f64 * scale).ceil() as usize).max(1);
         let room = ((room as f64 * room_scale).ceil() as usize).max(1);
-        let attempt = engine::through_bridge(sentence, &voice, &language, sample_rate, seed, cap, room);
+        let attempt =
+            engine::through_bridge(sentence, &voice, &language, sample_rate, seed, cap, room);
         match &attempt {
             Attempt::Audio(_, seconds) => println!(
                 "  {seconds:6.2} s of audio in {:5.1} s — {}",
@@ -71,7 +83,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let elapsed = started.elapsed().as_secs_f64();
 
-    let samples: Vec<i16> = reading.spoken.iter().flat_map(|s| s.samples.iter().copied()).collect();
+    let samples: Vec<i16> = reading
+        .spoken
+        .iter()
+        .flat_map(|s| s.samples.iter().copied())
+        .collect();
     let seconds = samples.len() as f64 / f64::from(sample_rate);
     let retried: u32 = reading.spoken.iter().map(|s| s.attempts - 1).sum();
     println!(
@@ -114,13 +130,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A pause either side of the unload, so a watcher sampling this process's
     // resident size can see what it gave back. Without it the process exits
     // within milliseconds and "the memory comes back" stays a claim.
-    if let Some(seconds) = std::env::var("PAPER_VOICES_LINGER_S").ok().and_then(|s| s.parse().ok()) {
+    if let Some(seconds) = std::env::var("PAPER_VOICES_LINGER_S")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         println!("holding the model for {seconds} s");
         std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
     }
     engine::unload();
     println!("unloaded");
-    if let Some(seconds) = std::env::var("PAPER_VOICES_LINGER_S").ok().and_then(|s| s.parse().ok()) {
+    if let Some(seconds) = std::env::var("PAPER_VOICES_LINGER_S")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
     }
     Ok(())

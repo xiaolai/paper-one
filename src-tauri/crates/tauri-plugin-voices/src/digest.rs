@@ -155,10 +155,17 @@ mod tests {
         let staged = dir.join("staged");
         let target = dir.join("packs/english/model.bin");
         std::fs::write(&staged, b"hello").expect("write");
-        let expected = Expected { path: "model.bin".into(), bytes: 5, sha256: HELLO.into() };
+        let expected = Expected {
+            path: "model.bin".into(),
+            bytes: 5,
+            sha256: HELLO.into(),
+        };
         promote(&staged, &target, &expected).await.expect("promote");
         assert_eq!(std::fs::read(&target).expect("target"), b"hello");
-        assert!(!staged.exists(), "the staged file moved rather than being copied");
+        assert!(
+            !staged.exists(),
+            "the staged file moved rather than being copied"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -169,8 +176,14 @@ mod tests {
         let target = dir.join("model.bin");
         std::fs::write(&staged, b"tampered").expect("write");
         std::fs::write(&target, b"the one already here").expect("write");
-        let expected = Expected { path: "model.bin".into(), bytes: 8, sha256: HELLO.into() };
-        let err = promote(&staged, &target, &expected).await.expect_err("refused");
+        let expected = Expected {
+            path: "model.bin".into(),
+            bytes: 8,
+            sha256: HELLO.into(),
+        };
+        let err = promote(&staged, &target, &expected)
+            .await
+            .expect_err("refused");
         assert!(matches!(err, Error::DigestMismatch { .. }), "{err}");
         assert_eq!(
             std::fs::read(&target).expect("target"),
@@ -189,10 +202,21 @@ mod tests {
         let dir = scratch();
         let staged = dir.join("staged");
         std::fs::write(&staged, b"hell").expect("write");
-        let expected = Expected { path: "model.bin".into(), bytes: 5, sha256: HELLO.into() };
+        let expected = Expected {
+            path: "model.bin".into(),
+            bytes: 5,
+            sha256: HELLO.into(),
+        };
         let err = verify(&staged, &expected).await.expect_err("refused");
         assert!(
-            matches!(err, Error::SizeMismatch { expected: 5, got: 4, .. }),
+            matches!(
+                err,
+                Error::SizeMismatch {
+                    expected: 5,
+                    got: 4,
+                    ..
+                }
+            ),
             "a truncated transfer reads as tampering unless it is named: {err}"
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -203,9 +227,14 @@ mod tests {
         let dir = scratch();
         let file = dir.join("hello.txt");
         std::fs::write(&file, b"hello").expect("write");
-        let expected =
-            Expected { path: "hello.txt".into(), bytes: 5, sha256: HELLO.to_uppercase() };
-        verify(&file, &expected).await.expect("case is not the check");
+        let expected = Expected {
+            path: "hello.txt".into(),
+            bytes: 5,
+            sha256: HELLO.to_uppercase(),
+        };
+        verify(&file, &expected)
+            .await
+            .expect("case is not the check");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

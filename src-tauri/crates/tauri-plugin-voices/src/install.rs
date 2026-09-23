@@ -85,7 +85,10 @@ pub async fn install(
         cancel.check()?;
         let path = layout.staging_path(&pack.id, &artifact.path)?;
         fetch(client, artifact, &path, cancel, |received| {
-            report(Progress::Downloading { received: received_before + received, total });
+            report(Progress::Downloading {
+                received: received_before + received,
+                total,
+            });
         })
         .await?;
         received_before += artifact.bytes;
@@ -207,13 +210,16 @@ async fn fetch(
     if have > 0 {
         request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|e| Error::Unreachable { route: route.clone(), why: e.to_string() })?;
+    let response = request.send().await.map_err(|e| Error::Unreachable {
+        route: route.clone(),
+        why: e.to_string(),
+    })?;
     let status = response.status();
     if !status.is_success() {
-        return Err(Error::Http { status: status.as_u16(), route });
+        return Err(Error::Http {
+            status: status.as_u16(),
+            route,
+        });
     }
 
     // A server that ignored the Range answers 200 with the WHOLE file. Appending
@@ -223,7 +229,10 @@ async fn fetch(
     let mut written = if resumed { have } else { 0 };
 
     let mut file = if resumed {
-        tokio::fs::OpenOptions::new().append(true).open(path).await?
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .await?
     } else {
         tokio::fs::File::create(path).await?
     };

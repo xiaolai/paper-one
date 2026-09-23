@@ -114,7 +114,7 @@ fn is_wide(c: char) -> bool {
         | 0xFE30..=0xFE4F      // CJK compatibility forms
         | 0xFF00..=0xFF60      // full-width forms
         | 0xFFE0..=0xFFE6
-        | 0x20000..=0x3FFFD)   // CJK extensions B and beyond
+        | 0x20000..=0x3FFFD) // CJK extensions B and beyond
 }
 
 /// The most codec frames this text may take before generation is cut off.
@@ -216,14 +216,24 @@ pub fn sentences(text: &str) -> Vec<&str> {
 
 /// A mark that ends a sentence, in either script.
 fn is_end_mark(c: char) -> bool {
-    matches!(c, '.' | '!' | '?' | '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '\u{FF1B}' | ';' | '\u{2026}')
+    matches!(
+        c,
+        '.' | '!' | '?' | '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '\u{FF1B}' | ';' | '\u{2026}'
+    )
 }
 
 /// A mark that belongs to the sentence it follows rather than the next one.
 fn is_closer(c: char) -> bool {
     matches!(
         c,
-        '"' | '\'' | '\u{201D}' | '\u{2019}' | '\u{300D}' | '\u{300F}' | '\u{FF09}' | ')' | '\u{300B}'
+        '"' | '\''
+            | '\u{201D}'
+            | '\u{2019}'
+            | '\u{300D}'
+            | '\u{300F}'
+            | '\u{FF09}'
+            | ')'
+            | '\u{300B}'
     )
 }
 

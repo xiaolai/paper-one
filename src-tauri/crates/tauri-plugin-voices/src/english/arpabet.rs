@@ -124,7 +124,11 @@ mod tests {
 
     #[test]
     fn an_unknown_symbol_drops_the_whole_word_rather_than_part_of_it() {
-        assert_eq!(to_kokoro("P AO1 QQ"), None, "a word missing a sound is worse than no word");
+        assert_eq!(
+            to_kokoro("P AO1 QQ"),
+            None,
+            "a word missing a sound is worse than no word"
+        );
         assert_eq!(to_kokoro(""), None);
     }
 
@@ -132,17 +136,25 @@ mod tests {
     fn every_symbol_it_emits_is_one_kokoro_knows() {
         // The vocabulary Kokoro v1.0 ships, as measured from its tokenizer.
         let vocab: std::collections::HashSet<char> =
-            "AIOWYbdfhijklmnpstuvwzæðŋɑɔəɛɜɡɪɹɾʃʊʌʒʤʧˈˌθᵊᵻʔ".chars().collect();
+            "AIOWYbdfhijklmnpstuvwzæðŋɑɔəɛɜɡɪɹɾʃʊʌʒʤʧˈˌθᵊᵻʔ"
+                .chars()
+                .collect();
         for (symbol, unstressed, stressed) in VOWELS {
             for reading in [unstressed, stressed] {
                 for c in reading.chars() {
-                    assert!(vocab.contains(&c), "{symbol} emits {c}, which Kokoro cannot say");
+                    assert!(
+                        vocab.contains(&c),
+                        "{symbol} emits {c}, which Kokoro cannot say"
+                    );
                 }
             }
         }
         for (symbol, reading) in CONSONANTS {
             for c in reading.chars() {
-                assert!(vocab.contains(&c), "{symbol} emits {c}, which Kokoro cannot say");
+                assert!(
+                    vocab.contains(&c),
+                    "{symbol} emits {c}, which Kokoro cannot say"
+                );
             }
         }
     }

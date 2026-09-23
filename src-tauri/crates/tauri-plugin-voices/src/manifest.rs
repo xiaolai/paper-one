@@ -153,8 +153,14 @@ impl Pack {
     /// is how `kernel.readingVoice` is keyed.
     #[must_use]
     pub fn reads(&self, language: &str) -> bool {
-        let primary = language.split(['-', '_']).next().unwrap_or(language).to_ascii_lowercase();
-        self.languages.iter().any(|l| l.eq_ignore_ascii_case(&primary))
+        let primary = language
+            .split(['-', '_'])
+            .next()
+            .unwrap_or(language)
+            .to_ascii_lowercase();
+        self.languages
+            .iter()
+            .any(|l| l.eq_ignore_ascii_case(&primary))
     }
 }
 
@@ -189,19 +195,29 @@ impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unreadable(why) => write!(f, "the voices manifest will not read: {why}"),
-            Self::Version(v) => write!(f, "the voices manifest is version {v}, and this build speaks {MANIFEST_VERSION}"),
+            Self::Version(v) => write!(
+                f,
+                "the voices manifest is version {v}, and this build speaks {MANIFEST_VERSION}"
+            ),
             Self::NoPacks => write!(f, "the voices manifest offers no packs"),
             Self::DuplicatePack(id) => write!(f, "two packs are called {id}"),
-            Self::DuplicatePath { pack, path } => write!(f, "{pack} writes two artifacts to {path}"),
+            Self::DuplicatePath { pack, path } => {
+                write!(f, "{pack} writes two artifacts to {path}")
+            }
             Self::NoVoices(id) => write!(f, "{id} offers no voice"),
             Self::NoLanguages(id) => write!(f, "{id} reads no language"),
             Self::NoPlatforms(id) => write!(f, "{id} is offered on no platform"),
             Self::NoArtifacts(id) => write!(f, "{id} has no artifacts"),
             Self::Digest { pack, path } => write!(f, "{pack}'s {path} has no usable sha256"),
-            Self::Unpinned { pack, url } => write!(f, "{pack} names an unpinned url, with no 40-character revision in it: {url}"),
+            Self::Unpinned { pack, url } => write!(
+                f,
+                "{pack} names an unpinned url, with no 40-character revision in it: {url}"
+            ),
             Self::Size { pack, path } => write!(f, "{pack}'s {path} declares no size"),
             Self::Licence { pack, path } => write!(f, "{pack}'s {path} names no licence"),
-            Self::EscapingPath { pack, path } => write!(f, "{pack}'s {path} would be written outside the pack"),
+            Self::EscapingPath { pack, path } => {
+                write!(f, "{pack}'s {path} would be written outside the pack")
+            }
         }
     }
 }
@@ -215,7 +231,9 @@ fn stays_inside(path: &str) -> bool {
         && !path.starts_with('/')
         && !path.contains('\\')
         && !path.contains(':')
-        && path.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 /// Whether a URL names a 40-character revision, which is what makes the digest a
@@ -223,13 +241,18 @@ fn stays_inside(path: &str) -> bool {
 fn is_pinned(url: &str) -> bool {
     url.starts_with("https://")
         && url.split('/').any(|part| {
-            part.len() == 40 && part.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            part.len() == 40
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         })
 }
 
 fn is_sha256(digest: &str) -> bool {
     digest.len() == 64
-        && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Read a catalogue and refuse everything the header lists.
@@ -278,7 +301,10 @@ pub fn parse(text: &str) -> Result<Manifest, Refusal> {
                 return Err(Refusal::Digest { pack, path });
             }
             if !is_pinned(&artifact.url) {
-                return Err(Refusal::Unpinned { pack: pack.id.clone(), url: artifact.url.clone() });
+                return Err(Refusal::Unpinned {
+                    pack: pack.id.clone(),
+                    url: artifact.url.clone(),
+                });
             }
             if artifact.bytes == 0 {
                 let (pack, path) = at();
@@ -307,7 +333,9 @@ pub fn embedded() -> Manifest {
 /// The packs this machine may be offered: the right platform, and enough memory.
 #[must_use]
 pub fn offered(manifest: &Manifest, platform: Option<Platform>, memory_gb: u32) -> Vec<&Pack> {
-    let Some(platform) = platform else { return Vec::new() };
+    let Some(platform) = platform else {
+        return Vec::new();
+    };
     manifest
         .packs
         .iter()
@@ -354,7 +382,10 @@ mod tests {
     fn the_shipped_catalogue_is_valid() {
         let manifest = parse(EMBEDDED).expect("the shipped catalogue must parse");
         assert_eq!(manifest.version, MANIFEST_VERSION);
-        assert!(!manifest.packs.is_empty(), "a catalogue with no packs offers nothing");
+        assert!(
+            !manifest.packs.is_empty(),
+            "a catalogue with no packs offers nothing"
+        );
         for pack in &manifest.packs {
             assert!(pack.total_bytes() > 0, "{} declares no bytes", pack.id);
         }
@@ -381,26 +412,44 @@ mod tests {
     #[test]
     fn an_unpinned_url_is_refused() {
         assert!(matches!(
-            with_artifact("url", serde_json::json!("https://huggingface.co/owner/repo/resolve/main/onnx/model.onnx")),
+            with_artifact(
+                "url",
+                serde_json::json!("https://huggingface.co/owner/repo/resolve/main/onnx/model.onnx")
+            ),
             Err(Refusal::Unpinned { .. })
         ));
     }
 
     #[test]
     fn an_artifact_without_a_size_is_refused() {
-        assert!(matches!(with_artifact("bytes", serde_json::json!(0)), Err(Refusal::Size { .. })));
+        assert!(matches!(
+            with_artifact("bytes", serde_json::json!(0)),
+            Err(Refusal::Size { .. })
+        ));
     }
 
     #[test]
     fn an_artifact_without_a_licence_is_refused() {
-        assert!(matches!(with_artifact("licence", serde_json::json!("  ")), Err(Refusal::Licence { .. })));
+        assert!(matches!(
+            with_artifact("licence", serde_json::json!("  ")),
+            Err(Refusal::Licence { .. })
+        ));
     }
 
     #[test]
     fn a_path_that_leaves_the_pack_is_refused() {
-        for escape in ["../outside.onnx", "/etc/passwd", "voices/../../x", "C:/x", "a\\b"] {
+        for escape in [
+            "../outside.onnx",
+            "/etc/passwd",
+            "voices/../../x",
+            "C:/x",
+            "a\\b",
+        ] {
             assert!(
-                matches!(with_artifact("path", serde_json::json!(escape)), Err(Refusal::EscapingPath { .. })),
+                matches!(
+                    with_artifact("path", serde_json::json!(escape)),
+                    Err(Refusal::EscapingPath { .. })
+                ),
                 "{escape} must not be writable"
             );
         }
@@ -410,7 +459,10 @@ mod tests {
     fn a_pack_is_offered_only_where_its_platform_and_memory_allow() {
         let manifest = parse(EMBEDDED).expect("the shipped catalogue must parse");
         let mac = offered(&manifest, Some(Platform::Macos), 64);
-        assert!(!mac.is_empty(), "the packs are offered on a Mac with memory to spare");
+        assert!(
+            !mac.is_empty(),
+            "the packs are offered on a Mac with memory to spare"
+        );
         assert!(
             offered(&manifest, Some(Platform::Windows), 64).is_empty(),
             "no pack is offered on Windows yet"
@@ -419,7 +471,12 @@ mod tests {
             offered(&manifest, None, 64).is_empty(),
             "a platform Paper does not know is offered nothing"
         );
-        let smallest = manifest.packs.iter().map(|p| p.minimum_memory_gb).min().expect("packs");
+        let smallest = manifest
+            .packs
+            .iter()
+            .map(|p| p.minimum_memory_gb)
+            .min()
+            .expect("packs");
         assert!(
             offered(&manifest, Some(Platform::Macos), smallest - 1).is_empty(),
             "a machine under every floor is offered nothing"
@@ -429,7 +486,11 @@ mod tests {
     #[test]
     fn a_pack_reads_by_primary_subtag() {
         let manifest = parse(EMBEDDED).expect("the shipped catalogue must parse");
-        let english = manifest.packs.iter().find(|p| p.family == Family::Kokoro).expect("english");
+        let english = manifest
+            .packs
+            .iter()
+            .find(|p| p.family == Family::Kokoro)
+            .expect("english");
         assert!(english.reads("en"));
         assert!(english.reads("en-GB"));
         assert!(english.reads("EN_us"));
@@ -441,15 +502,24 @@ mod tests {
         let mut doc = good();
         let copy = doc["packs"][0].clone();
         doc["packs"].as_array_mut().expect("packs").push(copy);
-        assert!(matches!(parse(&doc.to_string()), Err(Refusal::DuplicatePack(_))));
+        assert!(matches!(
+            parse(&doc.to_string()),
+            Err(Refusal::DuplicatePack(_))
+        ));
     }
 
     #[test]
     fn two_artifacts_at_one_path_are_refused() {
         let mut doc = good();
         let copy = doc["packs"][0]["artifacts"][0].clone();
-        doc["packs"][0]["artifacts"].as_array_mut().expect("artifacts").push(copy);
-        assert!(matches!(parse(&doc.to_string()), Err(Refusal::DuplicatePath { .. })));
+        doc["packs"][0]["artifacts"]
+            .as_array_mut()
+            .expect("artifacts")
+            .push(copy);
+        assert!(matches!(
+            parse(&doc.to_string()),
+            Err(Refusal::DuplicatePath { .. })
+        ));
     }
 
     #[test]
@@ -472,13 +542,22 @@ mod tests {
         assert!(matches!(parse(&doc.to_string()), Err(Refusal::NoVoices(_))));
         let mut doc = good();
         doc["packs"][0]["languages"] = serde_json::json!([]);
-        assert!(matches!(parse(&doc.to_string()), Err(Refusal::NoLanguages(_))));
+        assert!(matches!(
+            parse(&doc.to_string()),
+            Err(Refusal::NoLanguages(_))
+        ));
         let mut doc = good();
         doc["packs"][0]["platforms"] = serde_json::json!([]);
-        assert!(matches!(parse(&doc.to_string()), Err(Refusal::NoPlatforms(_))));
+        assert!(matches!(
+            parse(&doc.to_string()),
+            Err(Refusal::NoPlatforms(_))
+        ));
         let mut doc = good();
         doc["packs"][0]["artifacts"] = serde_json::json!([]);
-        assert!(matches!(parse(&doc.to_string()), Err(Refusal::NoArtifacts(_))));
+        assert!(matches!(
+            parse(&doc.to_string()),
+            Err(Refusal::NoArtifacts(_))
+        ));
     }
 
     #[test]

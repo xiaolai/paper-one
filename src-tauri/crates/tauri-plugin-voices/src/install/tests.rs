@@ -47,7 +47,9 @@ async fn serve(body: Vec<u8>, mode: Mode) -> Server {
     let (counter, seen) = (Arc::clone(&requests), Arc::clone(&ranges));
     tokio::spawn(async move {
         loop {
-            let Ok((mut socket, _)) = listener.accept().await else { return };
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
             let body = body.clone();
             let counter = Arc::clone(&counter);
             let seen = Arc::clone(&seen);
@@ -75,7 +77,9 @@ async fn serve(body: Vec<u8>, mode: Mode) -> Server {
                     .and_then(|start| start.parse::<usize>().ok());
                 let (status, start) = match (mode, from) {
                     (Mode::Ranges, Some(from)) => ("206 Partial Content", from),
-                    (Mode::WrongOffset, Some(from)) => ("206 Partial Content", from.saturating_sub(1)),
+                    (Mode::WrongOffset, Some(from)) => {
+                        ("206 Partial Content", from.saturating_sub(1))
+                    }
                     _ => ("200 OK", 0),
                 };
                 let slice = &body[start.min(body.len())..];
@@ -99,7 +103,11 @@ async fn serve(body: Vec<u8>, mode: Mode) -> Server {
             });
         }
     });
-    Server { url: format!("http://127.0.0.1:{port}/artifact.bin"), requests, ranges }
+    Server {
+        url: format!("http://127.0.0.1:{port}/artifact.bin"),
+        requests,
+        ranges,
+    }
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -146,7 +154,10 @@ fn pack_of(url: &str, body: &[u8], sha: &str) -> Pack {
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder().no_proxy().build().expect("client")
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client")
 }
 
 #[tokio::test]
@@ -157,11 +168,15 @@ async fn a_pack_installs_and_reports_as_it_goes() {
     let server = serve(body.clone(), Mode::Ranges).await;
     let pack = pack_of(&server.url, &body, &sha256(&body));
     let mut seen = Vec::new();
-    install(&client(), &layout, &pack, &Cancel::never(), |p| seen.push(p))
-        .await
-        .expect("install");
+    install(&client(), &layout, &pack, &Cancel::never(), |p| {
+        seen.push(p)
+    })
+    .await
+    .expect("install");
 
-    let landed = layout.pack_path(&pack.id, "voices/af_heart.bin").expect("path");
+    let landed = layout
+        .pack_path(&pack.id, "voices/af_heart.bin")
+        .expect("path");
     assert_eq!(std::fs::read(&landed).expect("installed file"), body);
     assert!(installed(&layout, &pack).expect("installed"));
     assert!(
@@ -181,14 +196,24 @@ async fn an_interrupted_download_resumes_rather_than_starting_over() {
     let pack = pack_of(&server.url, &body, &sha256(&body));
 
     // What a stopped download left behind: the first 1000 bytes, in staging.
-    let staged = layout.staging_path(&pack.id, "voices/af_heart.bin").expect("staged");
+    let staged = layout
+        .staging_path(&pack.id, "voices/af_heart.bin")
+        .expect("staged");
     std::fs::create_dir_all(staged.parent().expect("parent")).expect("dirs");
     std::fs::write(&staged, &body[..1000]).expect("partial");
 
-    install(&client(), &layout, &pack, &Cancel::never(), |_| {}).await.expect("install");
+    install(&client(), &layout, &pack, &Cancel::never(), |_| {})
+        .await
+        .expect("install");
 
-    let landed = layout.pack_path(&pack.id, "voices/af_heart.bin").expect("path");
-    assert_eq!(std::fs::read(&landed).expect("installed"), body, "the file is whole and correct");
+    let landed = layout
+        .pack_path(&pack.id, "voices/af_heart.bin")
+        .expect("path");
+    assert_eq!(
+        std::fs::read(&landed).expect("installed"),
+        body,
+        "the file is whole and correct"
+    );
     let ranges = server.ranges.lock().expect("ranges").clone();
     assert_eq!(
         ranges,
@@ -205,13 +230,19 @@ async fn a_server_that_ignores_the_range_is_restarted_rather_than_appended_to() 
     let body: Vec<u8> = (0..4096u32).map(|i| (i % 241) as u8).collect();
     let server = serve(body.clone(), Mode::IgnoreRange).await;
     let pack = pack_of(&server.url, &body, &sha256(&body));
-    let staged = layout.staging_path(&pack.id, "voices/af_heart.bin").expect("staged");
+    let staged = layout
+        .staging_path(&pack.id, "voices/af_heart.bin")
+        .expect("staged");
     std::fs::create_dir_all(staged.parent().expect("parent")).expect("dirs");
     std::fs::write(&staged, &body[..1000]).expect("partial");
 
-    install(&client(), &layout, &pack, &Cancel::never(), |_| {}).await.expect("install");
+    install(&client(), &layout, &pack, &Cancel::never(), |_| {})
+        .await
+        .expect("install");
 
-    let landed = layout.pack_path(&pack.id, "voices/af_heart.bin").expect("path");
+    let landed = layout
+        .pack_path(&pack.id, "voices/af_heart.bin")
+        .expect("path");
     assert_eq!(
         std::fs::read(&landed).expect("installed"),
         body,
@@ -227,7 +258,9 @@ async fn a_resume_from_the_wrong_offset_is_refused_before_a_byte_is_written() {
     let body: Vec<u8> = (0..4096u32).map(|i| (i % 239) as u8).collect();
     let server = serve(body.clone(), Mode::WrongOffset).await;
     let pack = pack_of(&server.url, &body, &sha256(&body));
-    let staged = layout.staging_path(&pack.id, "voices/af_heart.bin").expect("staged");
+    let staged = layout
+        .staging_path(&pack.id, "voices/af_heart.bin")
+        .expect("staged");
     std::fs::create_dir_all(staged.parent().expect("parent")).expect("dirs");
     std::fs::write(&staged, &body[..1000]).expect("partial");
 
@@ -257,17 +290,24 @@ async fn bytes_that_do_not_match_the_digest_are_refused_and_removed() {
         .expect_err("a wrong digest must refuse");
     assert!(matches!(err, Error::DigestMismatch { .. }), "{err}");
 
-    let staged = layout.staging_path(&pack.id, "voices/af_heart.bin").expect("staged");
+    let staged = layout
+        .staging_path(&pack.id, "voices/af_heart.bin")
+        .expect("staged");
     assert!(
         !staged.exists(),
         "a staged file known to be wrong must go, or every retry skips it as the right size and fails for ever"
     );
-    assert!(!installed(&layout, &pack).expect("installed"), "nothing was installed");
+    assert!(
+        !installed(&layout, &pack).expect("installed"),
+        "nothing was installed"
+    );
 
     // And the proof that the removal is what makes a retry possible: with the
     // real digest, the same pack installs.
     let good = pack_of(&server.url, &body, &sha256(&body));
-    install(&client(), &layout, &good, &Cancel::never(), |_| {}).await.expect("retry");
+    install(&client(), &layout, &good, &Cancel::never(), |_| {})
+        .await
+        .expect("retry");
     assert!(installed(&layout, &good).expect("installed"));
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -286,7 +326,14 @@ async fn a_short_transfer_is_named_a_size_failure() {
         .await
         .expect_err("a short transfer must refuse");
     assert!(
-        matches!(err, Error::SizeMismatch { expected: 200, got: 100, .. }),
+        matches!(
+            err,
+            Error::SizeMismatch {
+                expected: 200,
+                got: 100,
+                ..
+            }
+        ),
         "a truncation reported as a digest failure sends the next reader the wrong way: {err}"
     );
     std::fs::remove_dir_all(&dir).ok();
@@ -307,7 +354,11 @@ async fn a_stopped_download_keeps_its_partial_and_installs_nothing() {
         .expect_err("a stopped download does not install");
     assert!(matches!(err, Error::Cancelled), "{err}");
     assert!(!installed(&layout, &pack).expect("installed"));
-    assert_eq!(server.requests.load(Ordering::SeqCst), 0, "it stopped before asking");
+    assert_eq!(
+        server.requests.load(Ordering::SeqCst),
+        0,
+        "it stopped before asking"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -318,9 +369,13 @@ async fn removing_a_pack_leaves_no_file_behind() {
     let body = vec![9u8; 256];
     let server = serve(body.clone(), Mode::Ranges).await;
     let pack = pack_of(&server.url, &body, &sha256(&body));
-    install(&client(), &layout, &pack, &Cancel::never(), |_| {}).await.expect("install");
+    install(&client(), &layout, &pack, &Cancel::never(), |_| {})
+        .await
+        .expect("install");
     // Something a stopped download left behind, too.
-    let staged = layout.staging_path(&pack.id, "voices/af_heart.bin").expect("staged");
+    let staged = layout
+        .staging_path(&pack.id, "voices/af_heart.bin")
+        .expect("staged");
     std::fs::create_dir_all(staged.parent().expect("parent")).expect("dirs");
     std::fs::write(&staged, b"partial").expect("partial");
 
@@ -338,7 +393,9 @@ async fn removing_a_pack_that_was_never_installed_is_not_a_failure() {
     let dir = scratch();
     let layout = Layout::under(&dir);
     layout.ensure().expect("ensure");
-    remove(&layout, "english-kokoro").await.expect("removing nothing is fine");
+    remove(&layout, "english-kokoro")
+        .await
+        .expect("removing nothing is fine");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -351,11 +408,15 @@ async fn a_pack_with_a_missing_or_short_file_does_not_report_as_installed() {
     let pack = pack_of(&server.url, &body, &sha256(&body));
     assert!(!installed(&layout, &pack).expect("nothing yet"));
 
-    install(&client(), &layout, &pack, &Cancel::never(), |_| {}).await.expect("install");
+    install(&client(), &layout, &pack, &Cancel::never(), |_| {})
+        .await
+        .expect("install");
     assert!(installed(&layout, &pack).expect("installed"));
 
     // A file that lost bytes — a disk that filled, an interrupted copy.
-    let landed = layout.pack_path(&pack.id, "voices/af_heart.bin").expect("path");
+    let landed = layout
+        .pack_path(&pack.id, "voices/af_heart.bin")
+        .expect("path");
     std::fs::write(&landed, &body[..10]).expect("truncate");
     assert!(
         !installed(&layout, &pack).expect("installed"),

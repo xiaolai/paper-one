@@ -48,12 +48,17 @@ fn a_real_book_is_more_than_ninety_nine_percent_sayable() {
     // punctuation Kokoro has tokens for. One outside it is the v1.1 defect —
     // a sound the model cannot say, dropped where nobody hears it go.
     let allowed: std::collections::HashSet<char> =
-        "AIOWYbdfhijklmnpstuvwzæðŋɑɔəɛɜɡɪɹɾʃʊʌʒʤʧˈˌθᵊᵻʔ,.!?;:—…\"() ".chars().collect();
+        "AIOWYbdfhijklmnpstuvwzæðŋɑɔəɛɜɡɪɹɾʃʊʌʒʤʧˈˌθᵊᵻʔ,.!?;:—…\"() "
+            .chars()
+            .collect();
     for line in text.split('\n') {
         let out = front.phonemise(line);
         spoken += out.words.len();
         for c in out.phonemes.chars() {
-            assert!(allowed.contains(&c), "{c:?} is outside Kokoro's alphabet, in: {line}");
+            assert!(
+                allowed.contains(&c),
+                "{c:?} is outside Kokoro's alphabet, in: {line}"
+            );
         }
         for word in out.unknown {
             *unknown.entry(word).or_default() += 1;
@@ -96,7 +101,10 @@ fn the_ending_rules_are_misakis_own() {
     .expect("the parity fixture is checked in beside this crate");
     let fixture: serde_json::Value = serde_json::from_str(&text).expect("parity json");
     let cases = fixture["cases"].as_array().expect("cases");
-    assert!(cases.len() > 1_000, "a fixture this small would measure nothing");
+    assert!(
+        cases.len() > 1_000,
+        "a fixture this small would measure nothing"
+    );
     let mut checked = 0usize;
     for case in cases {
         let stem = case["stem"].as_str().expect("stem");
@@ -144,7 +152,9 @@ fn how_often_the_rules_and_misakis_dictionary_agree() {
     let mut agreed = 0usize;
     let mut differed: Vec<(String, String, String)> = Vec::new();
     for (word, value) in &raw {
-        let Some(expected) = value.as_str() else { continue };
+        let Some(expected) = value.as_str() else {
+            continue;
+        };
         if &word.to_lowercase() != word {
             continue;
         }
