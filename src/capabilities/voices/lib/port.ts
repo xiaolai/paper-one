@@ -83,13 +83,17 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
       /* A failed stop is READ, not dropped. `void`-ing this promise left an
        * unhandled rejection and, worse, let a download the reader stopped run
        * on to "Installed" with nothing saying the stop had failed. */
-      let stopping: Promise<void> | null = null
+      /* A HOLDER, not a `let`: TypeScript narrows a `let` assigned inside a
+         callback back to `null` wherever it is read, and working round that
+         with a cast would be hiding a real question behind an assertion. */
+      const asked: { stopping: Promise<void> | null } = { stopping: null }
       const abort = () => {
         /* Stopping is the plugin's to do: it holds the token the fetch loop
          * waits on, and it is what leaves nothing half-installed. */
-        stopping = wire.stop(packId)
+        const stopping = wire.stop(packId)
         /* Read below; this only keeps it from being unhandled in between. */
         stopping.catch(() => {})
+        asked.stopping = stopping
       }
       signal?.addEventListener('abort', abort, { once: true })
       /* HELD RATHER THAN RETHROWN, so the stop below is asked about on BOTH
@@ -111,8 +115,9 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
        * yet. A refused stop outranks the install's own error: it is the more
        * actionable news, and it is the one case where the pane's *"Nothing was
        * left half-installed"* would be false. */
+      const stopping = asked.stopping
       if (stopping) {
-        const failed = await (stopping as Promise<void>).then(
+        const failed = await stopping.then(
           () => null,
           (cause: unknown) => cause,
         )
