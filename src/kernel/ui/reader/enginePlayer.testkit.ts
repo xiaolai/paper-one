@@ -64,8 +64,18 @@ export class FakeAudioHost implements AudioHost {
     return source
   }
 
+  /** How many times each was asked for, so a case can pin the lifecycle. */
+  resumes = 0
+  closes = 0
+
   async resume(): Promise<void> {
+    this.resumes += 1
     this.state = 'running'
+  }
+
+  async close(): Promise<void> {
+    this.closes += 1
+    this.state = 'closed'
   }
 
   /** Move the context's clock, in milliseconds. */

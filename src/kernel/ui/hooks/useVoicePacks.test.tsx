@@ -125,30 +125,88 @@ describe('with one', () => {
     expect(catalogue.mock.calls.length).toBe(before)
   })
 
-  it('makes no audio context until something asks to play', async () => {
-    // ⚠️ A context takes an output device and counts against a per-page limit
-    // in some browsers. A reader who never presses Listen should not have one.
-    const made = vi.fn()
+  /** A stub context that records its own lifecycle. */
+  function stubAudio() {
+    const log = { made: 0, resumes: 0, closes: 0, last: null as { state: string } | null }
     vi.stubGlobal(
       'AudioContext',
       class {
+        state = 'suspended'
         constructor() {
-          made()
+          log.made += 1
+          log.last = this
         }
-        async resume() {}
+        async resume() {
+          log.resumes += 1
+          this.state = 'running'
+        }
+        async close() {
+          log.closes += 1
+          this.state = 'closed'
+        }
       },
     )
+    return log
+  }
+
+  it('makes no audio context until something asks to play', async () => {
+    // ⚠️ A context takes an output device and counts against a per-page limit
+    // in some browsers. A reader who never presses Listen should not have one.
+    const log = stubAudio()
     const { seen } = await mount(servicesWith(portOver()))
-    expect(made).not.toHaveBeenCalled()
+    expect(log.made).toBe(0)
     act(() => {
       seen.current?.engine?.host()
     })
-    expect(made).toHaveBeenCalledTimes(1)
+    expect(log.made).toBe(1)
     // And only one, however many passages are read.
     act(() => {
       seen.current?.engine?.host()
     })
-    expect(made).toHaveBeenCalledTimes(1)
+    expect(log.made).toBe(1)
+    vi.unstubAllGlobals()
+  })
+
+  it('gives the output device back when the app is torn down', async () => {
+    /* ⚠️ Only the MODEL was released on unmount. The context stayed, holding an
+       output device and counting against the per-page limit, and a hook that
+       mounted again handed out the one it had left behind. */
+    const log = stubAudio()
+    const { seen, view } = await mount(servicesWith(portOver()))
+    act(() => {
+      seen.current?.engine?.host()
+    })
+    expect(log.closes).toBe(0)
+    view.unmount()
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(log.closes).toBe(1)
+    vi.unstubAllGlobals()
+  })
+
+  it('asks a suspended context to run again, rather than handing back a silent one', async () => {
+    /* ⚠️ `host()` is reached from `#play`, AFTER an async render — not from the
+       Listen gesture, whatever the comment used to say. So the first `resume`
+       can be refused, and a cached context was then handed out suspended for
+       ever, playing nothing with nothing saying why. */
+    const log = stubAudio()
+    const { seen } = await mount(servicesWith(portOver()))
+    act(() => {
+      seen.current?.engine?.host()
+    })
+    expect(log.resumes).toBe(1)
+    // As though the first resume had been refused.
+    act(() => {
+      if (log.last) log.last.state = 'suspended'
+      seen.current?.engine?.host()
+    })
+    expect(log.resumes).toBe(2)
+    // And a running one is left alone.
+    act(() => {
+      seen.current?.engine?.host()
+    })
+    expect(log.resumes).toBe(2)
     vi.unstubAllGlobals()
   })
 

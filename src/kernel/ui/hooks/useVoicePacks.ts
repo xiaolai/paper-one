@@ -70,6 +70,14 @@ export function useVoicePacks(services: KernelServices): VoicesState {
       /* The model is the reader's memory — 2.5 GB for the Chinese pack — and
        * an app being torn down is the last moment anything asks for it back. */
       void port()?.release().catch(() => {})
+      /* ⚠️ **AND THE AUDIO CONTEXT, WHICH WENT UNRELEASED.** Only the model was
+       * given back; the `AudioContext` made on the first Listen stayed, holding
+       * an output device and counting against the per-page limit some browsers
+       * apply. The ref is cleared too, so a hook that mounts again makes a
+       * fresh one rather than handing out a closed context that plays nothing. */
+      const made = context.current
+      context.current = null
+      void made?.close().catch(() => {})
     },
     [port],
   )
@@ -83,7 +91,18 @@ export function useVoicePacks(services: KernelServices): VoicesState {
         packs: () => packsRef.current,
         render: (request) => bound.render(request),
         host: () => {
-          if (context.current) return context.current
+          /* ⚠️ **A CACHED CONTEXT IS ASKED AGAIN WHETHER IT IS RUNNING**, and it
+           * was not. A context is suspended until a gesture in several engines,
+           * and this is NOT on the gesture: it is reached from `#play`, after
+           * an async render — the comment here used to claim pressing Listen is
+           * the gesture, which was wrong by one `await`. So the first `resume`
+           * can be refused, and every later playback was then silent for ever
+           * with nothing saying why. */
+          const held = context.current
+          if (held) {
+            if (held.state !== 'running') void held.resume().catch(() => {})
+            return held
+          }
           const Ctor =
             typeof AudioContext === 'function'
               ? AudioContext
@@ -91,8 +110,6 @@ export function useVoicePacks(services: KernelServices): VoicesState {
           if (!Ctor) return null
           const made = new Ctor() as unknown as AudioHost
           context.current = made
-          /* Suspended until a gesture in several engines, and pressing Listen
-           * IS the gesture — so this resume is on the path that has one. */
           void made.resume().catch(() => {})
           return made
         },

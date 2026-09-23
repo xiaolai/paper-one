@@ -25,6 +25,16 @@ export interface AudioHost {
   createBufferSource(): SourceLike
   readonly destination: unknown
   resume(): Promise<void>
+  /**
+   * Give the output device back.
+   *
+   * ⚠️ **NOT OPTIONAL, BECAUSE A CONTEXT NOBODY CLOSES IS A DEVICE NOBODY GETS
+   * BACK.** `useVoicePacks` makes one on the first Listen and released only the
+   * MODEL on unmount; the context stayed, holding an output device and counting
+   * against the per-page limit some browsers apply. Declared here so every host
+   * — including the fake the tests drive — has to answer it.
+   */
+  close(): Promise<void>
 }
 
 export interface AudioBufferLike {

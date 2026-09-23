@@ -63,19 +63,27 @@ export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
   /* So a poll that lands after the pane closes does not set state on an
    * unmounted tree — the same reason every other polling pane holds one. */
   const alive = useRef(true)
+  /* ⚠️ **TWO READS CAN BE IN FLIGHT, AND THE OLDER ONE USED TO WIN.** The timer
+   * polls while `install` and `remove` each ask for a fresh read of their own,
+   * so the answers arrive in whatever order the plugin finishes them — and a
+   * stale one landing last put `installed: false` back on a pack that had just
+   * finished installing. `alive` cannot see this: both reads belong to a live
+   * pane. Only the newest answer is applied. */
+  const asked = useRef(0)
   /* One per download in flight, so Stop can reach the fetch. The port takes an
    * `AbortSignal` and the plugin holds the token the fetch loop waits on —
    * which is what leaves nothing half-installed. */
   const stopping = useRef(new Map<string, AbortController>())
 
   const refresh = useCallback(async () => {
+    const mine = ++asked.current
     try {
       const rows = await port.catalogue()
-      if (!alive.current) return
+      if (!alive.current || mine !== asked.current) return
       setPacks(rows)
       setFailed(null)
     } catch (cause) {
-      if (!alive.current) return
+      if (!alive.current || mine !== asked.current) return
       /* The catalogue is embedded in the binary, so a failure here is the
        * plugin not answering rather than a network problem — said plainly
        * instead of leaving an empty pane that reads as "no voices exist". */
@@ -138,7 +146,13 @@ export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
     [port, refresh],
   )
 
-  if (failed !== null) {
+  /* ⚠️ **A FAILED POLL USED TO REPLACE THE WHOLE PANE, STOP BUTTONS AND ALL.**
+   * The catalogue is re-read every few seconds; one refusal in the middle of a
+   * 2.3 GB download took away the rows, the progress line and the only control
+   * that could stop it, and put them back on the next poll. The sentence is
+   * only the whole pane when there is nothing else to show — which is the case
+   * it was written for, a plugin that never answered at all. */
+  if (failed !== null && packs === null) {
     return (
       <div className={ui.section}>
         <p className={ui.hint}>The voices could not be listed: {failed}</p>
@@ -167,6 +181,8 @@ export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
       <p className={ui.hint}>
         A voice is downloaded once and read on this device. Nothing you listen to leaves it.
       </p>
+      {/* Beside the rows, not instead of them — see the guard above. */}
+      {failed !== null ? <p className={ui.hint}>The voices could not be listed: {failed}</p> : null}
       {packs.map((pack) => {
         const state = states[pack.id]
         const busy = state?.progress != null
