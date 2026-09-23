@@ -414,12 +414,41 @@ describe('the device, shelf and size ports', () => {
     expect([services.devices(), services.shelf(), services.sizes()]).toEqual([null, null, null])
   })
 
+  /* ⚠️ **THE SPEECH AND HASH SLOTS HAD NO ROUND TRIP AT ALL**, and the
+     mutation gate found the first of them: `speechEngines: () => speechSlot.get()`
+     could be replaced with `() => undefined` and every test still passed, so
+     the app could have bound a voice port and read back nothing. Same shape as
+     the three above; separate case because the getters are not named after
+     their binders and cannot be derived from them. */
+  it('answers the speech engine and hash ports the same way', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const engines = { catalogue: async () => [] } as never
+    const hashes = { hashFile: async () => ({ blake3: '', size: 0 }) } as never
+    expect([services.speechEngines(), services.hashes()]).toEqual([null, null])
+
+    const bound = [services.bindSpeechEngines(engines), services.bindHashPort(hashes)]
+    expect(services.speechEngines(), 'a bound voice port must read back').toBe(engines)
+    expect(services.hashes(), 'a bound hash port must read back').toBe(hashes)
+    for (const off of bound) off.dispose()
+    expect([services.speechEngines(), services.hashes()]).toEqual([null, null])
+  })
+
   /* ONE BINDER AT A TIME, and the refusal names the port — the same message a
-     re-composition that forgot to dispose would read. */
+     re-composition that forgot to dispose would read.
+
+     ⚠️ **THIS TABLE IS HAND-KEPT AND WENT STALE, WHICH THE MUTATION GATE FOUND
+     RATHER THAN ANY READER.** `bindHashPort` and `bindSpeechEngines` were both
+     added without a row, so each one's refusal message was a string nothing
+     asserted — and `bindSpeechEngines`'s survived the sweep of phase 30. The
+     case below this one closes the CLASS: it derives the binder list from the
+     services object itself, so the next slot needs no row here at all. This
+     table stays because it pins the exact WORDS, which a derived case cannot. */
   it.each([
     ['bindDevicePort', 'bindDevicePort: the device port is already bound'],
     ['bindShelfPort', 'bindShelfPort: the shelf port is already bound'],
     ['bindSizePort', 'bindSizePort: the size port is already bound'],
+    ['bindHashPort', 'bindHashPort: the hash port is already bound'],
+    ['bindSpeechEngines', 'bindSpeechEngines: the speech engine port is already bound'],
     ['bindPrivateAudience', 'bindPrivateAudience: the private-audience port is already bound'],
   ])('refuses a second %s by name', (bind, message) => {
     const services = servicesWith(spyRecorder().recorder)
@@ -435,6 +464,44 @@ describe('the device, shelf and size ports', () => {
     })()
     expect(cause).toBeInstanceOf(Error)
     expect((cause as Error).message).toBe(message)
+  })
+
+  /**
+   * EVERY binder, derived from the object rather than listed.
+   *
+   * ⚠️ **THE TABLE ABOVE WENT STALE TWICE AND NOBODY NOTICED EITHER TIME**, so
+   * the rule is asserted over the services object's own keys: a slot added
+   * without a row still has to refuse a second bind, and the refusal still has
+   * to name the binder that was called twice. Derived from the VALUE, never
+   * from the source — reading `services.ts` here would take it out of its own
+   * mutation sweep, which is the defect `state.source.test.ts` exists for.
+   *
+   * `bindServiceHost` is left out and says why: it is not an `exclusiveSlot`,
+   * it takes the host and the grants together and replaces what is there.
+   */
+  it('refuses a second bind on every binder there is, naming it', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const binders = Object.keys(services).filter(
+      (key) => key.startsWith('bind') && key !== 'bindServiceHost',
+    )
+    expect(binders.length, 'the services object has binders to check').toBeGreaterThan(5)
+    for (const bind of binders) {
+      const fresh = servicesWith(spyRecorder().recorder)
+      const call = fresh[bind as 'bindDevicePort'] as (next: never) => unknown
+      const port = (async () => []) as never
+      call(port)
+      const cause = (() => {
+        try {
+          call(port)
+          return null
+        } catch (error: unknown) {
+          return error
+        }
+      })()
+      expect(cause, `${bind} accepted a second bind`).toBeInstanceOf(Error)
+      expect((cause as Error).message, `${bind}'s refusal does not name it`).toContain(bind)
+      expect((cause as Error).message, `${bind}'s refusal does not say why`).toContain('already bound')
+    }
   })
 })
 

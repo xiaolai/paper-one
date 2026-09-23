@@ -1,11 +1,13 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { KERNEL_SETTINGS } from '../core/settings'
+import { BUNDLED_FACES, faceById } from '../core/typefaces'
 
 /**
- * The two things about `state.ts` that can only be read off its SOURCE — and
- * they are here, away from every behavioural case, on purpose.
+ * Every pin in the reader's state that can only be read off SOURCE — and they
+ * are here, away from every behavioural case, on purpose.
  *
  * ⚠️ **A TEST THAT READS A SUBJECT'S SOURCE TAKES THE WHOLE FILE OUT OF THAT
  * SUBJECT'S MUTATION RUN.** Stryker rewrites the very file such a test reads,
@@ -15,9 +17,22 @@ import { KERNEL_SETTINGS } from '../core/settings'
  * Read the source in a file that asserts nothing else, and the behaviour tests
  * next door keep counting.
  *
- * Both pins are answers to "is the thing that is right also the thing that
- * runs": there is no renderer here to observe a hook, and a missing entry in a
- * literal dependency array is a fact about source and about nothing else.
+ * Every pin here is an answer to "is the thing that is right also the thing
+ * that runs": there is no renderer to observe a hook, a missing entry in a
+ * literal dependency array is a fact about source and about nothing else, and
+ * a `font-family` naming a family with no `@font-face` rule is not an error —
+ * CSS simply takes the next entry in the chain.
+ *
+ * ⚠️ **THE TYPEFACE AND SCROLL-PORT PINS MOVED HERE ON 2026-09-23, AND THE
+ * MUTATION GATE IS WHAT MADE THEM.** They read `screens/Reader.tsx`,
+ * `main.tsx`, `pane/FacePicker.tsx` and `pane/Settings.tsx` from inside
+ * `state.test.ts`, which holds hundreds of behavioural cases — so all four of
+ * those subjects were left out of every sweep that file covers. `AGENTS.md`
+ * named this pair as a known remaining instance and said *"neither has bitten
+ * yet because those subjects sweep clean — the first survivor in any of them
+ * refuses the file."* `Settings.tsx` grew a survivor, and the gate answered
+ * `reading-changed`: not a pass, not a failure, nothing authorised. This is
+ * the documented remedy, and `SidePane.source.test.ts` is its precedent.
  */
 
 /**
@@ -142,5 +157,142 @@ describe('the write effect names every preference', () => {
     expect(missingFrom(complete), 'a complete hand list').toEqual([])
     const forgot = complete.replace('prefs.readingNotesAloud', '')
     expect(missingFrom(forgot), 'one setting left out').toEqual(['readingNotesAloud'])
+  })
+})
+
+/**
+ * The scroll port's three hooks, checked against the fork that reads them.
+ *
+ * They are custom property NAMES agreed between two repositories, and a
+ * disagreement is silent in both directions: a stylesheet declaration naming a
+ * property nobody sets falls back to its default, and a property nobody reads
+ * is simply inert. Either way the app renders plausibly and the scrollbar is
+ * back in the middle of the page.
+ *
+ * Read from the INSTALLED module, not from the checkout, because what ships is
+ * whatever `package.json` pins — and the pin has been moved without the working
+ * copy following it before.
+ */
+describe('the scroll port hooks match the fork', () => {
+  const paginator = readFileSync(
+    fileURLToPath(import.meta.resolve('foliate-js/paginator.js')),
+    'utf8',
+  )
+  const reader = readFileSync(
+    fileURLToPath(new URL('./screens/Reader.tsx', import.meta.url)),
+    'utf8',
+  )
+
+  it('sets exactly the properties the installed paginator reads', () => {
+    for (const hook of [
+      '--paper-scroll-pad-start',
+      '--paper-scroll-pad-end',
+      '--paper-scrollbar-width',
+    ]) {
+      expect(paginator, `the fork must read ${hook}`).toContain(`var(${hook},`)
+      expect(reader, `Reader must set ${hook}`).toContain(hook)
+    }
+  })
+
+  /* Inert defaults are what make this a hook rather than a fork of behaviour:
+   * a host that sets none of them must get upstream's rendering exactly. */
+  it('leaves upstream rendering untouched when the host sets nothing', () => {
+    expect(paginator).toContain('var(--paper-scroll-pad-start, 0px)')
+    expect(paginator).toContain('var(--paper-scroll-pad-end, 0px)')
+    expect(paginator).toContain('var(--paper-scrollbar-width, auto)')
+  })
+
+  /* The rule they live in. If a rebase moves these declarations out from under
+   * the scrolled-flow selector they would apply in paginated flow too, where
+   * padding on the port shifts the page rather than the scrollbar. */
+  it('reads them only in scrolled flow', () => {
+    const rule = paginator.slice(
+      paginator.indexOf(':host([flow="scrolled"]) #container'),
+    )
+    const end = rule.indexOf('}')
+    expect(rule.slice(0, end)).toContain('--paper-scrollbar-width')
+  })
+})
+
+/**
+ * The one failure mode a typeface picker has, and it is silent.
+ *
+ * A `font-family` naming a family with no `@font-face` rule is not an error.
+ * CSS skips it and takes the next entry in the chain, so the book renders in
+ * Georgia — or in whatever the platform offers — while every value in the app
+ * says otherwise. That is not hypothetical here: `bookCss`'s own header records
+ * the month in which every book in Paper was set in Georgia, because
+ * `@font-face` does not cross an iframe boundary and nothing reported it.
+ *
+ * So the registry, the CSS stacks and the imports are checked against each
+ * other from SOURCE. Reading the files is the only way — a test that asks the
+ * registry about itself agrees with itself, and the three things that must
+ * match live in three files.
+ */
+describe('every offered typeface is a font that exists', () => {
+  const read = (path: string) =>
+    readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8')
+  const main = read('../../main.tsx')
+
+  /* Crimson Pro is still BUNDLED and no longer OFFERED: the interface sets its
+   * empty states and note bodies in it, so the webfont must stay, while as a
+   * reading choice it duplicated Literata's role and was the face whose small
+   * x-height made a size mean two different things. Bundled and offered are
+   * separate lists now, and this asserts the relationship rather than an equal
+   * count — every offered bundled face must be one main.tsx actually loads. */
+  it('bundles a family for every face it offers as bundled', () => {
+    const imported = new Set(
+      [...main.matchAll(/@fontsource[^'"]*\/([a-z-]+)/g)].map((m) => m[1]),
+    )
+    const wanted: Record<string, string> = {
+      literata: 'literata',
+      instrument: 'instrument-sans',
+      plex: 'ibm-plex-mono',
+    }
+    for (const face of BUNDLED_FACES) {
+      const pkg = wanted[face.id]
+      expect(pkg, `no @fontsource package known for ${face.id}`).toBeDefined()
+      expect(imported.has(pkg as string), `main.tsx must import ${pkg}`).toBe(true)
+    }
+  })
+
+  it('leads every BUNDLED book stack with a family the app actually loads', () => {
+    /* Only the bundled ones. A system face's stack leads with a family this app
+     * never loads — that is what makes it a system face — so asserting a
+     * `@font-face` behind every entry would have failed the moment the reader's
+     * own fonts were offered, and asserting it behind none would have stopped
+     * catching the bug this test exists for: a bundled face named slightly
+     * wrong falls through to Georgia with nothing on screen to say so. */
+    const LEADS: Record<string, string> = {
+      literata: "'Literata Variable'",
+      instrument: "'Instrument Sans Variable'",
+      plex: "'IBM Plex Mono'",
+    }
+    for (const [id, lead] of Object.entries(LEADS)) {
+      const face = faceById(id)
+      expect(face.id, `${id} is not in the registry`).toBe(id)
+      expect(face.stack.startsWith(lead), `${id} must lead with ${lead}`).toBe(true)
+    }
+  })
+
+  /* THE PREVIEW IS THE BOOK'S OWN STACK. There used to be a second table of
+   * preview stacks in the settings panel, so a face could be sampled in one
+   * thing and read in another with nothing comparing them. The panel reads
+   * `face.stack` now, which is the same string `bookCss` sets the book in —
+   * asserted here rather than trusted, because it is one edit from being a
+   * copy again. */
+  it('samples a face in the same stack the book is set in', () => {
+    const picker = read('./pane/FacePicker.tsx')
+    expect(picker).toContain('fontFamily: face.stack')
+    expect(read('./pane/Settings.tsx')).not.toContain('PREVIEW_STACKS')
+  })
+
+  /* The picker corrects each sample by the same x-height scale the book gets,
+   * or a list of eight faces at one nominal size is a list of eight sizes —
+   * measured on this machine, 8.0px to 9.3px of x-height at a flat 17. */
+  it('shows every sample at the same optical size', () => {
+    const picker = read('./pane/FacePicker.tsx')
+    expect(picker).toContain('opticalScale(face)')
+    expect(picker).toContain('--face-scale')
   })
 })

@@ -75,6 +75,11 @@ const reader = vi.hoisted(() => ({
   /** The prose the section on screen holds, or null for a book that publishes
    *  no document — which is what read-aloud has nothing to say about. */
   prose: null as string | null,
+  /** What the section DECLARES, which is the only thing a pack can match on:
+      `documentLang` reads `<html lang>` and `packsFor` answers nothing for a
+      book that declares none. Null keeps every case that predates the packs
+      exactly as it was. */
+  lang: null as string | null,
   /** A jacket, for the one effect that files it. */
   cover: null as Blob | null,
   /** How many of the next opens fail the way a book the reader cannot see fails. */
@@ -316,6 +321,7 @@ vi.mock('./reader/session', async (importActual) => {
          to say and the transport never appears. */
       if (reader.prose !== null) {
         const doc = document.implementation.createHTMLDocument('section')
+        if (reader.lang !== null) doc.documentElement.setAttribute('lang', reader.lang)
         doc.body.innerHTML = reader.prose
         this.#callbacks.onDocument(doc)
       }
@@ -354,6 +360,7 @@ afterEach(() => {
   reader.chapter = 'Loomings'
   reader.chapterHref = 'chapter-1.xhtml'
   reader.prose = null
+  reader.lang = null
   reader.author = 'Herman Melville'
   reader.toc = []
   reader.cover = null
@@ -1658,14 +1665,46 @@ describe('the Listen control and the voices this machine has', () => {
     delete (window as { SpeechSynthesisUtterance?: unknown }).SpeechSynthesisUtterance
   })
 
-  async function listenWith(voices: readonly { name: string; lang: string; voiceURI: string }[]) {
+  /** A catalogue with one English pack, installed or not. */
+  function withEnglishPack(installed: boolean) {
+    return (services: ReturnType<typeof createKernelServices>) => {
+      services.bindSpeechEngines({
+        catalogue: async () => [
+          {
+            id: 'english-kokoro',
+            name: 'English',
+            summary: '',
+            family: 'kokoro',
+            languages: ['en'],
+            bytes: 336_822_660,
+            minimumMemoryGb: 4,
+            voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+            installed,
+          },
+        ],
+        install: async () => {},
+        remove: async () => {},
+        render: async () => ({ pcm: new Uint8Array(0), sampleRate: 24_000, words: [], skipped: [] }),
+        release: async () => {},
+      })
+    }
+  }
+
+  async function listenWith(
+    voices: readonly { name: string; lang: string; voiceURI: string }[],
+    before?: (services: ReturnType<typeof createKernelServices>) => void,
+  ) {
     const synth = new FakeSynth()
     synth.voices = [...voices]
     Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true, writable: true })
     window.SpeechSynthesisUtterance = FakeUtterance as unknown as typeof SpeechSynthesisUtterance
     const moby = await shelved(BYTES, 'Moby-Dick')
-    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [], undefined, before)
     await open('Moby-Dick')
+    /* The catalogue is READ, not handed over: `useVoicePacks` asks the port in
+       an effect and publishes what comes back, so the first answer lands a few
+       turns after the mount. */
+    await settled()
     /* BY ITS LABEL ATTRIBUTE, not by role and name: the reading chrome is faded
        out until the pointer asks for it, which takes it out of the
        accessibility tree, and an element there computes an empty accessible
@@ -1691,6 +1730,39 @@ describe('the Listen control and the voices this machine has', () => {
     ])
     expect(button).toHaveProperty('disabled', false)
     expect(button.getAttribute('title')).toBe('Read this chapter aloud')
+  })
+
+  /**
+   * ⚠️ **A DOWNLOADED PACK IS ASKED FIRST, AND NOTHING HELD `App` TO IT.** The
+   * mutation gate found it: `engineVoiceFor(...)` in `listenRefusal` could be
+   * replaced with `false` and every test still passed — so a Mac with the
+   * English pack installed, where no platform voice clears the floor, would
+   * show the control disabled saying no high-quality voice is available while
+   * the reading was perfectly able to read the book. That exact sentence over
+   * an installed pack is the defect WI-30.11 found in the running app.
+   */
+  it('reads on a downloaded pack even where every platform voice is below the floor', async () => {
+    reader.prose = '<p>Call me Ishmael.</p>'
+    reader.lang = 'en'
+    const button = await listenWith(
+      [{ name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }],
+      withEnglishPack(true),
+    )
+    expect(button).toHaveProperty('disabled', false)
+    expect(button.getAttribute('title')).toBe('Read this chapter aloud')
+  })
+
+  /* And a pack that is OFFERED but not here names itself and its size, which is
+     advice a reader can act on where NO_GOOD_VOICE alone is a dead end. */
+  it('names the pack that would read it, when the pack is not installed', async () => {
+    reader.prose = '<p>Call me Ishmael.</p>'
+    reader.lang = 'en'
+    const button = await listenWith(
+      [{ name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }],
+      withEnglishPack(false),
+    )
+    expect(button).toHaveProperty('disabled', true)
+    expect(button.getAttribute('title')).toMatch(/Download the English voice \(321 MB\)/u)
   })
 })
 
