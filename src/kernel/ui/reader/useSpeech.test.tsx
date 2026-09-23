@@ -2,7 +2,16 @@
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeSynth, FakeUtterance } from './speechSynth.testkit'
-import { CONTINUE_GRACE_MS, CONTINUE_TICK_MS, TURN_SETTLE_MS, useSpeech, type Speech } from './useSpeech'
+import { FakeAudioHost, pcmOf } from './enginePlayer.testkit'
+import type { VoicePack } from '../../core/ports'
+import {
+  CONTINUE_GRACE_MS,
+  CONTINUE_TICK_MS,
+  TURN_SETTLE_MS,
+  useSpeech,
+  type ReadingEngine,
+  type Speech,
+} from './useSpeech'
 import { Speaker, collectText, type SpeakPrefs } from './speech'
 
 /**
@@ -119,6 +128,7 @@ function mount(
     lands = true,
     can,
     prefs,
+    engine = null,
   }: {
     chapters?: boolean
     lands?: boolean
@@ -126,6 +136,8 @@ function mount(
      *  from its own answer, and a book answers differently at either end. */
     can?: (by: -1 | 1) => boolean
     prefs?: SpeakPrefs
+    /** The downloaded voices, where a case is about routing to them. */
+    engine?: ReadingEngine | null
   } = {},
 ) {
   const next = vi.fn()
@@ -141,6 +153,7 @@ function mount(
       doc,
       chapters ? { next, chapter: { can: can ?? (() => lands), go: chapter } } : { next },
       prefs,
+      engine,
     )
     return null
   }
@@ -1316,5 +1329,81 @@ describe('a step with nowhere to go', () => {
     expect(spoken()).toEqual(['One.'])
     expect(speech().speaking).toBe(false)
     a.remove()
+  })
+})
+
+describe('reading on a downloaded voice', () => {
+  /** A pack that reads English, installed. */
+  const ENGLISH: VoicePack = {
+    id: 'english-kokoro',
+    name: 'English',
+    summary: '',
+    family: 'kokoro',
+    languages: ['en'],
+    bytes: 1,
+    minimumMemoryGb: 4,
+    voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+    installed: true,
+  }
+
+  /** An engine whose renders the case controls. */
+  function downloaded(packs: readonly VoicePack[]) {
+    const host = new FakeAudioHost()
+    const asked: string[] = []
+    const engine: ReadingEngine = {
+      packs: () => packs,
+      host: () => host,
+      render: async (request) => {
+        asked.push(request.text)
+        return { pcm: pcmOf(2_400), sampleRate: 24_000, words: [], skipped: [] }
+      },
+    }
+    return { engine, asked, host }
+  }
+
+  it('reads a book the pack can read through the engine, not the platform', async () => {
+    /* ⚠️ THE WIRING ITSELF, which nothing else here touches: every other case
+     * in this file drives the platform speaker, so the router could have been
+     * absent and all of them would still pass. */
+    const { engine, asked, host } = downloaded([ENGLISH])
+    const page = section('Hello there.', 'en')
+    const { speech, unmount } = mount(page.doc, { engine })
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(asked).toEqual(['Hello there.'])
+    expect(host.sources).toHaveLength(1)
+    expect(synth.queued).toHaveLength(0)
+    unmount()
+    page.remove()
+  })
+
+  it('reads a book no pack can read through the platform', async () => {
+    const { engine, asked } = downloaded([ENGLISH])
+    const page = section('Bonjour.', 'fr')
+    const { speech, unmount } = mount(page.doc, { engine })
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(asked).toEqual([])
+    expect(synth.queued).toHaveLength(1)
+    unmount()
+    page.remove()
+  })
+
+  it('reads through the platform when no engine was given at all', async () => {
+    // A build without the voices capability — a phone, a browser client —
+    // reads exactly as it did before.
+    const page = section('Hello there.', 'en')
+    const { speech, unmount } = mount(page.doc)
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(synth.queued).toHaveLength(1)
+    unmount()
+    page.remove()
   })
 })

@@ -8,6 +8,7 @@ import {
   speechAvailable,
   type DoneReason,
   type SpeakPrefs,
+  type SpeakerCallbacks,
   type SpokenText,
 } from './speech'
 import { placeSpokenWord, removeSpokenWord } from './rulerBand'
@@ -17,6 +18,11 @@ import {
   stepSentence as sentenceStep,
   type ReadingPlan,
 } from './readingCursor'
+import { EngineSpeaker } from './engineSpeaker'
+import type { AudioHost } from './enginePlayer'
+import { engineVoiceFor } from './engineVoice'
+import { routedSpeaker } from './speakerRouting'
+import type { SpeechRequest, SpokenAudio, VoicePack } from '../../core/ports'
 import { resolveSegmenterLocale } from './wordSnap/classify'
 import { sentenceSpansOf } from './wordSnap/sentenceOf'
 
@@ -38,6 +44,20 @@ import { sentenceSpansOf } from './wordSnap/sentenceOf'
  * the book, or the engine failing — and a section ending, or changing under
  * the voice, is a step inside it.
  */
+
+/**
+ * The downloaded voices, as the reading needs them.
+ *
+ * `packs` is a FUNCTION: the catalogue changes while the app runs, and a
+ * reading holding a snapshot would keep the platform voice after a pack
+ * arrived. `host` is one too — an `AudioContext` costs a device, so it is made
+ * on the first passage that needs it and not on every book that is opened.
+ */
+export interface ReadingEngine {
+  readonly packs: () => readonly VoicePack[]
+  readonly render: (request: SpeechRequest) => Promise<SpokenAudio>
+  readonly host: () => AudioHost | null
+}
 
 export interface Speech {
   readonly available: boolean
@@ -215,6 +235,7 @@ export function useSpeech(
   doc: Document | null,
   paging: SpeechPaging,
   prefs: SpeakPrefs = NO_PREFS,
+  engine: ReadingEngine | null = null,
 ): Speech {
   const [speaking, setSpeaking] = useState(false)
   const [paused, setPaused] = useState(false)
@@ -227,6 +248,12 @@ export function useSpeech(
    * reader changes mid-chapter takes effect at the next section rather than
    * needing the reading stopped and started again. */
   const prefsRef = useRef(prefs)
+  /* THE DOWNLOADED VOICES, read at `speak` time for the reason above and one
+   * more: the catalogue changes while the app runs. A reader who downloads a
+   * pack mid-chapter gets it at the next sentence, where a captured snapshot
+   * would keep the platform voice until the reading was restarted — which is
+   * not something anybody would guess to do. */
+  const engineRef = useRef(engine)
   /* The collected text AND the document it was collected from, together.
    *
    * Kept as one value on purpose. Held apart, `docRef` is reassigned during
@@ -326,6 +353,7 @@ export function useSpeech(
     docRef.current = doc
     pagingRef.current = paging
     prefsRef.current = prefs
+    engineRef.current = engine
     followsRef.current = followsWords
   })
 
@@ -399,7 +427,7 @@ export function useSpeech(
        * `continueReading`, and everything outside it reaches in through a ref. */
       continueRef.current = continueReading
 
-      return new Speaker({
+      const callbacks: SpeakerCallbacks = {
         onWord: (index, length) => {
           const current = spokenRef.current
           if (!current || !followsRef.current) return
@@ -467,7 +495,24 @@ export function useSpeech(
           setFollowsWords(false)
           removeSpokenWord(docRef.current)
         },
-      })
+      }
+
+      const platform = new Speaker(callbacks)
+      const downloaded = engineRef.current
+      /* NO PACK, NO ROUTER. A build without the voices capability — a phone, a
+       * browser client — reads exactly as it did before, through one speaker
+       * with nothing in front of it. */
+      if (!downloaded) return platform
+      return routedSpeaker(
+        new EngineSpeaker(callbacks, {
+          render: (request) => downloaded.render(request),
+          host: () => downloaded.host(),
+          choose: (lang, speakPrefs) =>
+            engineVoiceFor(downloaded.packs(), lang, speakPrefs.voices ?? {}),
+        }),
+        platform,
+        () => engineRef.current?.packs() ?? [],
+      )
     },
     // Stryker disable next-line ArrayDeclaration: all three are built once — `available` from an empty list, both clears from no dependency — so this list never moves.
     [available, clearGap, clearContinuation],
