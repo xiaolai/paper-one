@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CAPABILITY_UI as ui, messageOf, type InstallProgress, type VoicePack } from '../../../kernel'
+import { CAPABILITY_UI as ui, messageOf, packArrived, packSize, type InstallProgress, type VoicePack } from '../../../kernel'
 import type { SpeechEnginePort } from '../../../kernel'
 
 /**
@@ -19,40 +19,19 @@ import type { SpeechEnginePort } from '../../../kernel'
 /** How often the catalogue is re-read while the pane is open. */
 const POLL_MS = 5000
 
-/** Bytes in the unit a person reads them in. */
-function inUnits(bytes: number): string {
-  const mb = bytes / 1_048_576
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`
-}
-
-/** A pack's SIZE, where a missing one is refused rather than drawn. */
-export function sizeOf(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return 'unknown size'
-  return inUnits(bytes)
-}
-
-/**
- * How much has ARRIVED — where zero is a real answer and not a missing one.
- *
- * ⚠️ **`sizeOf` SAID "unknown size" FOR IT, AND A READER SAW THAT SENTENCE.**
- * Measured in the running app on 2026-09-23, pressing Download on the 2.3 GB
- * Chinese pack: the first line was *"Downloading · unknown size of 2.3 GB"*,
- * which reads as though the app has lost track of the download it has just
- * begun. `sizeOf` refuses zero deliberately — a catalogue row with no size
- * must not be offered as `NaN MB` — but a COUNT of bytes received starts at
- * zero every time, so it is the wrong function for this side of the sentence.
- */
-export function arrivedOf(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return 'unknown size'
-  return inUnits(bytes)
-}
+/* ⚠️ **THE KERNEL'S, NOT A SECOND PAIR.** These lived here and `engineVoice.ts`
+   had its own copy for the Listen control's notice; the two rounded in
+   different orders and disagreed at 1 023.6 MiB — `1.0 GB` against `1024 MB` —
+   which nobody would have found by reading either. Re-exported so this file's
+   own cases can drive them directly. */
+export { packArrived as arrivedOf, packSize as sizeOf }
 
 /** What a download has got to, as a sentence. */
 export function progressLine(progress: InstallProgress): string {
   if (progress.kind === 'verifying') return 'Checking every byte'
   if (progress.kind === 'installed') return 'Installed'
-  const total = progress.total > 0 ? ` of ${sizeOf(progress.total)}` : ''
-  return `Downloading · ${arrivedOf(progress.received)}${total}`
+  const total = progress.total > 0 ? ` of ${packSize(progress.total)}` : ''
+  return `Downloading · ${packArrived(progress.received)}${total}`
 }
 
 /** The languages a pack reads, spelled for a person. */
@@ -226,7 +205,7 @@ export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
               </div>
             </div>
             <div className={ui.hint}>
-              {pack.summary} · {languagesOf(pack)} · {sizeOf(pack.bytes)} · needs {pack.minimumMemoryGb} GB of memory
+              {pack.summary} · {languagesOf(pack)} · {packSize(pack.bytes)} · needs {pack.minimumMemoryGb} GB of memory
             </div>
             <div className={ui.hint}>{pack.voices.map((voice) => voice.name).join(', ')}</div>
             {busy && state?.progress ? <div className={ui.hint}>{progressLine(state.progress)}</div> : null}
