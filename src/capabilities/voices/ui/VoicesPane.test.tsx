@@ -234,26 +234,42 @@ describe('the pane', () => {
   it('keeps the rows, and the Stop control, when a poll fails mid-download', async () => {
     /* ⚠️ A single failed poll used to replace the whole pane — the rows, the
        progress line and the only control that could stop a 2.3 GB download —
-       and put them back a few seconds later. */
-    let answers = 0
-    const port = portOver([pack()], {
-      catalogue: async () => {
-        answers += 1
-        if (answers > 1) throw new Error('the plugin did not answer')
-        return [pack()]
-      },
-      install: async () => new Promise(() => {}),
-    })
-    await show(port)
-    act(() => screen.getByRole('button', { name: 'Download' }).click())
-    await act(async () => {
-      await Promise.resolve()
-    })
-    // The install's own refresh is the failing read.
-    await act(async () => {
-      await Promise.resolve()
-    })
-    expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy()
+       and put them back a few seconds later.
+
+       ⚠️ **AND THE FIRST VERSION OF THIS CASE NEVER FAILED A POLL.** It left
+       the install pending, so the refresh that follows one never ran, and no
+       second read happened inside the test at all: it asserted Stop after the
+       successful FIRST read and would have passed against the defect. The poll
+       is driven here, and the failure is checked to have actually landed. */
+    vi.useFakeTimers()
+    try {
+      let answers = 0
+      const port = portOver([pack()], {
+        catalogue: async () => {
+          answers += 1
+          if (answers > 1) throw new Error('the plugin did not answer')
+          return [pack()]
+        },
+        install: async () => new Promise(() => {}),
+      })
+      const view = render(<VoicesPane port={port} downloads={makeDownloads()} />)
+      await act(async () => {
+        await Promise.resolve()
+      })
+      act(() => screen.getByRole('button', { name: 'Download' }).click())
+      await act(async () => {
+        await Promise.resolve()
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000)
+      })
+      expect(answers, 'the poll really did run and really did fail').toBeGreaterThan(1)
+      expect(screen.getByText(/could not be listed/), 'and says so').toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Stop' }), 'beside the rows, not instead of them').toBeTruthy()
+      view.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('says the plugin is not answering rather than showing an empty shelf', async () => {

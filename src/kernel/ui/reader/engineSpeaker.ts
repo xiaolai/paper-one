@@ -16,13 +16,20 @@
  * is `Speaker`'s late-`end` problem moved earlier in the story, and it is why
  * `#generation` is the first thing every continuation reads.
  *
- * ⚠️ **AND AN ENGINE THAT REPORTS NO WORDS MUST NOT LOSE THE HIGHLIGHT.**
- * Kokoro answers word timings; Qwen answers none. `Speaker` reports
- * `onNoBoundaries` and the reading drops the follow-along entirely, which is
- * right for a platform voice that simply cannot say. Here the sentence IS
- * known — it is what was asked for — so the honest unit is the sentence, and
- * `onWord(0, text.length)` is how that is said without inventing a second
- * callback the other speaker would never call.
+ * ⚠️ **AN ENGINE THAT REPORTS NO WORDS SAYS SO, AND DRAWS NOTHING.** Kokoro
+ * answers word timings; Qwen answers none, and this reports `onNoBoundaries`
+ * once, exactly as `Speaker` does for a platform voice that cannot say.
+ *
+ * ⚠️ **THIS PARAGRAPH PROMISED A SENTENCE HIGHLIGHT UNTIL 2026-09-23, AND THE
+ * CODE UNDER IT DID THE OPPOSITE.** It called `onWord(0, text.length)` and
+ * then `onNoBoundaries()`, and `useSpeech` answers that second callback by
+ * REMOVING the band and refusing every later `onWord` — so the highlight was
+ * drawn and revoked in one tick and nothing was ever shown. The band's
+ * geometry is a word's: `placeSpokenWord` takes one box, so a sentence over
+ * two lines would draw a rectangle across both and cover the text between
+ * them. Saying nothing finer is coming is the honest answer until there is a
+ * band shaped like a sentence. Found by an audit, not by a test — the unit
+ * test asserted both callbacks and never traced what the pair does together.
  */
 
 import { playPcm, type AudioHost, type Playing } from './enginePlayer'
@@ -76,9 +83,29 @@ export class EngineSpeaker {
   #paused = false
   /** The words of the passage being read, for rescheduling across a pause. */
   #words: SpokenAudio['words'] = []
+  /**
+   * How many of them have been reported.
+   *
+   * ⚠️ **A COUNT, NOT A COMPARISON AGAINST THE CLOCK.** The rebuild first
+   * skipped every word at or before the player's position, which assumes such
+   * a word was already reported — and one at `startMs` 0, on a render held at
+   * its first sample by a pause that arrived before it landed, never had been.
+   * It was dropped silently. Counting what was said leaves nothing to assume.
+   */
+  #said = 0
   /** A render done ahead of time, by `prepare`. */
   #ready: { key: string; audio: SpokenAudio } | null = null
-  #preparing: string | null = null
+  /**
+   * The look-ahead still in flight, if there is one.
+   *
+   * ⚠️ **THE PROMISE, NOT JUST ITS KEY.** It was a key alone, so `speak` could
+   * only reuse a render that had FINISHED — and the moment `useSpeech` began
+   * asking for the look-ahead, a sentence whose render outlived the one before
+   * it was rendered twice. The engine serialises renders, so that is slower
+   * than not preparing at all: the second request waits behind the first for
+   * the same audio.
+   */
+  #preparing: { key: string; work: Promise<SpokenAudio> } | null = null
 
   constructor(callbacks: SpeakerCallbacks, deps: EngineSpeakerDeps) {
     this.#cb = callbacks
@@ -107,8 +134,7 @@ export class EngineSpeaker {
     }
 
     const request = requestFor(voice, text, prefs)
-    const prepared = this.#takePrepared(keyOf(request))
-    const rendering = prepared ? Promise.resolve(prepared) : this.#render(request)
+    const rendering = this.#renderOrJoin(request)
 
     void rendering
       .then(
@@ -142,11 +168,12 @@ export class EngineSpeaker {
     /* Already have it, or already asking for it. Rendering the same sentence
      * twice costs the whole of a render and loads the machine the reader is
      * listening on. */
-    if (this.#ready?.key === key || this.#preparing === key) return
-    this.#preparing = key
-    void this.#render(request).then(
+    if (this.#ready?.key === key || this.#preparing?.key === key) return
+    const work = this.#render(request)
+    this.#preparing = { key, work }
+    void work.then(
       (audio) => {
-        if (this.#preparing === key) {
+        if (this.#preparing?.key === key) {
           this.#preparing = null
           this.#ready = { key, audio }
         }
@@ -155,7 +182,7 @@ export class EngineSpeaker {
         /* A failed look-ahead is not an error the reader hears about: the
          * sentence has not been asked for yet, and `speak` will render it
          * again and report properly if it fails then. */
-        if (this.#preparing === key) this.#preparing = null
+        if (this.#preparing?.key === key) this.#preparing = null
       },
     )
   }
@@ -189,17 +216,35 @@ export class EngineSpeaker {
     this.#generation += 1
     this.#paused = false
     this.#words = []
+    this.#said = 0
     this.#clearTimers()
     this.#playing?.stop()
     this.#playing = null
   }
 
-  /** Take a prepared render if it is the one being asked for. */
-  #takePrepared(key: string): SpokenAudio | null {
-    if (this.#ready?.key !== key) return null
-    const audio = this.#ready.audio
-    this.#ready = null
-    return audio
+  /**
+   * The render for this request: the one already done, the one already in
+   * flight, or a fresh one.
+   *
+   * ⚠️ **THE IN-FLIGHT CASE IS THE WHOLE POINT.** Reusing only a FINISHED
+   * look-ahead means a sentence whose render outlives the sentence before it
+   * is rendered twice — and the engine serialises renders, so the second
+   * request waits behind the first for the same audio. Preparing would then be
+   * slower than not preparing, which is the opposite of what it is for.
+   */
+  #renderOrJoin(request: SpeechRequest): Promise<SpokenAudio> {
+    const key = keyOf(request)
+    if (this.#ready?.key === key) {
+      const audio = this.#ready.audio
+      this.#ready = null
+      return Promise.resolve(audio)
+    }
+    const preparing = this.#preparing
+    if (preparing?.key === key) {
+      this.#preparing = null
+      return preparing.work
+    }
+    return this.#render(request)
   }
 
   async #render(request: SpeechRequest): Promise<SpokenAudio> {
@@ -237,6 +282,7 @@ export class EngineSpeaker {
     })
     this.#playing = playing
     this.#words = audio.words
+    this.#said = 0
     /* ⚠️ **A RENDER THAT LANDS DURING A PAUSE MUST NOT SPEAK.** The reader
      * pressed Pause while this was still rendering; there was no player then to
      * take it, and there is one now. Paused at its first sample rather than
@@ -262,11 +308,23 @@ export class EngineSpeaker {
       this.#noWordBoundaries()
       return
     }
-    for (const word of audio.words) {
+    this.#scheduleFrom(generation, 0, 0)
+  }
+
+  /**
+   * Schedule the words from `first` onwards, offset by where the audio is.
+   *
+   * One routine for the first schedule and for every rebuild after a pause, so
+   * the two cannot report a different set.
+   */
+  #scheduleFrom(generation: number, first: number, positionMs: number): void {
+    for (let index = first; index < this.#words.length; index += 1) {
+      const word = this.#words[index]!
       const at = setTimeout(() => {
         if (generation !== this.#generation) return
+        this.#said = index + 1
         this.#cb.onWord(word.start, word.length)
-      }, word.startMs)
+      }, Math.max(0, word.startMs - positionMs))
       this.#timers.push(at)
     }
   }
@@ -301,18 +359,11 @@ export class EngineSpeaker {
    * Against the PLAYER's position rather than the wall clock, so a pause of
    * any length lands the next word where the sound does — and so does a
    * reading at a speed other than 1, which `positionMs` already accounts for
-   * and a wall clock never could.
+   * and a wall clock never could. Resumes at the first word NOT YET SAID, so
+   * nothing is repeated and nothing is skipped.
    */
   #scheduleRemainingWords(generation: number, playing: Playing): void {
-    const at = playing.positionMs()
-    for (const word of this.#words) {
-      if (word.startMs <= at) continue
-      const timer = setTimeout(() => {
-        if (generation !== this.#generation) return
-        this.#cb.onWord(word.start, word.length)
-      }, word.startMs - at)
-      this.#timers.push(timer)
-    }
+    this.#scheduleFrom(generation, this.#said, playing.positionMs())
   }
 
   #clearTimers(): void {
@@ -329,6 +380,7 @@ export class EngineSpeaker {
     this.#generation += 1
     this.#paused = false
     this.#words = []
+    this.#said = 0
     this.#clearTimers()
     this.#playing = null
     this.#cb.onDone(reason)

@@ -294,6 +294,46 @@ describe('pausing and resuming', () => {
   })
 })
 
+describe('joining a look-ahead rather than repeating it', () => {
+  it('speaks a sentence still being prepared without rendering it again', async () => {
+    /* ⚠️ **THE REGRESSION WIRING `prepare` WOULD HAVE SHIPPED.** `speak` reused
+       only a FINISHED look-ahead, so a sentence whose render outlived the one
+       before it was rendered twice — and the engine serialises renders, so the
+       second request waits behind the first for the same audio. Preparing was
+       then slower than not preparing. */
+    const asked: string[] = []
+    let land: (audio: SpokenAudio) => void = () => {}
+    const { speaker, host } = speakerOver((text) => {
+      asked.push(text)
+      return new Promise<SpokenAudio>((resolve) => { land = resolve })
+    })
+    speaker.prepare('the next one', 'en')
+    expect(asked).toEqual(['the next one'])
+    speaker.speak('the next one', 'en')
+    expect(asked, 'the render in flight is joined, not repeated').toEqual(['the next one'])
+    land(audio())
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.sources).toHaveLength(1)
+  })
+
+  it('reports the word a pause held at the very first sample', async () => {
+    /* ⚠️ The rebuild skipped every word at or before the player's position,
+       which assumes such a word was already reported — and one at `startMs` 0,
+       on a render held at its first sample by a pause that arrived before it
+       landed, never had been. It was dropped silently. */
+    let land: (audio: SpokenAudio) => void = () => {}
+    const { speaker, cb } = speakerOver(() => new Promise<SpokenAudio>((resolve) => { land = resolve }))
+    speaker.speak('hello world', 'en')
+    speaker.pause()
+    land(audio({ words: [{ start: 0, length: 5, startMs: 0, endMs: 100 }] }))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onWord).not.toHaveBeenCalled()
+    speaker.resume()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onWord).toHaveBeenCalledWith(0, 5)
+  })
+})
+
 describe('when the host refuses to play', () => {
   it('reports an error rather than leaving an unhandled rejection', async () => {
     /* ⚠️ **A HANDLER PASSED TO `then` DOES NOT CATCH THE OTHER HANDLER'S

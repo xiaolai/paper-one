@@ -17,7 +17,7 @@
  * the app's and not a view's.
  */
 
-import type { InstallProgress } from '../../../kernel'
+import { notifyAll, type InstallProgress } from '../../../kernel'
 import { StopFailed } from './port'
 
 /**
@@ -73,7 +73,18 @@ export function makeDownloads(): Downloads {
     if (state) next[packId] = state
     else delete next[packId]
     states = next
-    for (const listener of [...listeners]) listener()
+    /* ⚠️ **`notifyAll`, NOT A LOOP OF MY OWN.** Calling each subscriber
+       straight out of a loop was found and fixed in five files before anybody
+       wrote this helper, and in four more after — a throwing subscriber
+       silences every later one and throws back into the operation that had
+       already succeeded. `notify.test.ts` walks `src/` for that shape and
+       found this file the first time it ran.
+
+       ⚠️ **AND THEN FOUND THIS COMMENT**, which spelled the loop out: the walk
+       reads raw source, so prose about the rule breaks the rule. The same
+       lesson `test-environment.test.mjs` records — when explaining a shape a
+       scanner looks for, do not write the shape. */
+    notifyAll(listeners, 'voice download')
   }
 
   return {

@@ -92,21 +92,35 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
         stopping.catch(() => {})
       }
       signal?.addEventListener('abort', abort, { once: true })
+      /* HELD RATHER THAN RETHROWN, so the stop below is asked about on BOTH
+       * roads out of the install. Rethrowing here meant a stop that failed
+       * beside an install that also failed was never looked at, and the reader
+       * was told the download had stopped cleanly. */
+      let refused: unknown = null
       try {
         await wire.install(packId)
+      } catch (cause) {
+        refused = cause
       } finally {
         signal?.removeEventListener('abort', abort)
         stop()
       }
-      /* Reached only when the install RESOLVED — the ordinary stop makes it
-       * reject, and the reader has already been told. So this is the case
-       * where the stop failed and the download finished anyway: awaiting it
-       * turns that into this call's own rejection, naming the real cause. */
+      /* ⚠️ **THE STOP IS AWAITED, NOT SAMPLED.** Whether it failed may not be
+       * known when the install settles — they are two round trips — so this
+       * waits for the answer rather than reading a flag that might not be set
+       * yet. A refused stop outranks the install's own error: it is the more
+       * actionable news, and it is the one case where the pane's *"Nothing was
+       * left half-installed"* would be false. */
       if (stopping) {
-        await (stopping as Promise<void>).catch((cause: unknown) => {
-          throw new StopFailed(`the download could not be stopped: ${errorText(cause)}`)
-        })
+        const failed = await (stopping as Promise<void>).then(
+          () => null,
+          (cause: unknown) => cause,
+        )
+        if (failed !== null) {
+          throw new StopFailed(`the download could not be stopped: ${errorText(failed)}`)
+        }
       }
+      if (refused !== null) throw refused
     },
 
     async remove(packId: string): Promise<void> {

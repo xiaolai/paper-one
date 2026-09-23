@@ -170,6 +170,30 @@ describe('installing a pack', () => {
        edited it. */
     expect((cause as Error).message).toMatch(/could not be stopped/u)
   })
+
+  it('reports a failed stop even when the install refuses too', async () => {
+    /* ⚠️ **THE COMPOUND CASE, AND IT WAS SILENT.** The stop was only asked
+       about when the install RESOLVED, so a stop that failed beside an install
+       that also failed went unlooked-at and the reader was told the download
+       had stopped cleanly. The stop is awaited on both roads now, and outranks
+       the install's own error because it is the more actionable news. */
+    const control = new AbortController()
+    const port = voicesPortOver(
+      wireOver({
+        stop: async () => {
+          throw new Error('the plugin could not stop it')
+        },
+        install: async () =>
+          new Promise((_resolve, reject) => {
+            control.signal.addEventListener('abort', () => reject(new Error('the fetch was interrupted')), { once: true })
+            control.abort()
+          }),
+      }),
+    )
+    const cause = await refusalOf(port.install('english-kokoro', () => {}, control.signal))
+    expect(cause).toBeInstanceOf(StopFailed)
+    expect((cause as Error).message).toMatch(/could not stop it/u)
+  })
 })
 
 describe('a rendered passage', () => {
