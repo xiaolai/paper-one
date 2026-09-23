@@ -7,12 +7,6 @@ use tauri::{Manager, Runtime};
 
 use crate::commands::{self, VoicesState};
 
-/// Where packs are installed, under the app's own data root.
-///
-/// A sibling of `books/` and `peer/` rather than inside either: a voice pack is
-/// not a book and is not a peer's, and a reader who removes one should not have
-/// to reason about what else is in the folder.
-const VOICES_DIR: &str = "voices";
 
 /// The plugin.
 ///
@@ -37,7 +31,13 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             // The data root is the app's, resolved once here rather than by
             // each command: a command that resolved its own root could be
             // asked to write somewhere else by whoever called it.
-            let root: PathBuf = app.path().app_data_dir()?.join(VOICES_DIR);
+            /* ⚠️ **THE APP'S DATA ROOT, NOT A `voices/` UNDER IT.**
+             * `Layout::under` joins its own `voices` segment, so passing one
+             * here made the real path `…/one.paper.reader/voices/voices/packs`.
+             * Found by looking at the disk after a real install on 2026-09-23;
+             * nothing failed, because a doubled directory works perfectly and
+             * is merely wrong. */
+            let root: PathBuf = app.path().app_data_dir()?;
             state.set_root(root);
             app.manage(state);
             Ok(())
