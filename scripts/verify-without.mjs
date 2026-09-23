@@ -37,7 +37,23 @@ import { REPO_ROOT, runSteps, spawnStep } from './verify.mjs'
  * Exit code: the copy's — the first failing step's, or 0.
  */
 
-/** Names skipped at any depth when the tree is copied. */
+/**
+ * Names skipped at any depth when the tree is copied.
+ *
+ * ⚠️ **EVERY TOOLCHAIN IN THE TREE NEEDS ITS BUILD DIRECTORY NAMED HERE, AND
+ * SwiftPM's WAS MISSING FOR A PHASE.** `no-binary-source.test.mjs` imports this
+ * list rather than restating it, *"so the two cannot drift"* — but the drift
+ * came from the other side: `.gitignore` gained
+ * a `.build/` rule under `crates/tauri-plugin-voices/swift/` when the Qwen
+ * bridge landed and
+ * this list did not, so the copy carried SwiftPM's vendored checkouts. The
+ * deletion proof then failed on a NUL byte in yyjson's own UTF-16 test fixture
+ * — third-party data, in a directory a fresh clone does not have. In the real
+ * tree the check asks git and never saw it; only the copy, which cannot, did.
+ *
+ * Cargo is `target`, SwiftPM is `.build`. The next one goes here in the change
+ * that adds it.
+ */
 export const COPY_EXCLUDE = Object.freeze([
   'node_modules',
   '.git',
@@ -45,6 +61,7 @@ export const COPY_EXCLUDE = Object.freeze([
   '.types',
   'coverage',
   'target', // src-tauri/target
+  '.build', // SwiftPM, under crates/tauri-plugin-voices/swift/
   '.claude',
   '.codex',
   '.agents',
