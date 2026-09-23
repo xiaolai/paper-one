@@ -682,7 +682,14 @@ describe('the pane', () => {
         }),
       )
       downloads.stop('english-kokoro')
-      await stopping.catch(() => {})
+      /* With a deadline: this only ends because the stop reached the download,
+         so a registry that aborted nothing would hold the case here until
+         vitest's own 15 s bound — half a minute of saying nothing, which a
+         mutation sweep can only read as a timeout. */
+      await Promise.race([
+        stopping.catch(() => {}),
+        new Promise((_resolve, reject) => setTimeout(() => reject(new Error('the download never settled')), 2000)),
+      ])
     })
     await show(portOver([pack({ installed: true })]), downloads)
     expect(screen.getByText(STOPPED)).toBeTruthy()

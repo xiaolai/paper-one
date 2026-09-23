@@ -4,9 +4,34 @@ import { STOPPED, makeDownloads } from './downloads'
 import { StopFailed } from './port'
 import type { InstallProgress } from '../../../kernel'
 
-/** The value a rejected promise carries, whatever it is. */
+/** How long a promise here may take to settle before a case gives up on it. */
+const SETTLE_MS = 2000
+
+/**
+ * The value a rejected promise carries, whatever it is — with a deadline.
+ *
+ * ⚠️ **A LIVENESS BOUND, NOT A PERFORMANCE ONE, AND IT IS WHAT TURNS A STOP
+ * THAT DOES NOTHING INTO A FAILURE RATHER THAN A HANG.** Every promise in this
+ * file settles in microseconds; what it awaits, though, is a download that only
+ * ends because the registry aborted it — so a registry that lost its controller
+ * leaves this waiting for ever. Under vitest's own 15 s bound that is a case
+ * which takes half a minute to say anything, and **a mutation sweep can only
+ * call it a wall-clock timeout, which is the one verdict meaning "whether a
+ * test kills it is unknown"**. Measured 2026-09-24: with `stop`'s body emptied
+ * the two cases below took 30.7 s between them and the gate reported
+ * `repeated`, not `killed`. Two seconds is a thousand-fold margin, and it
+ * reports by name.
+ */
 async function refusalOf(run: Promise<unknown>): Promise<unknown> {
-  return run.then(() => null, (cause: unknown) => cause)
+  let bell: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    bell = setTimeout(() => reject(new Error('the download never settled')), SETTLE_MS)
+  })
+  try {
+    return await Promise.race([run.then(() => null, (cause: unknown) => cause), deadline])
+  } finally {
+    clearTimeout(bell)
+  }
 }
 
 describe('a download that outlives the pane', () => {
@@ -55,6 +80,21 @@ describe('a download that outlives the pane', () => {
     })
     held.report?.({ kind: 'downloading', received: 9, total: 10 })
     expect(downloads.states()['english-kokoro']?.progress).toBeNull()
+  })
+
+  it('aborts the download it is holding, which is the whole of what a stop can do', () => {
+    /* Asserted on the SIGNAL rather than on what the download does with it, so
+       the case says nothing about how long anything takes — and so a registry
+       that lost its controller fails here in a millisecond rather than in the
+       cases below, which can only find out by waiting. */
+    const downloads = makeDownloads()
+    const held: { signal: AbortSignal | null } = { signal: null }
+    void downloads.begin('english-kokoro', 1, (_report, signal) => {
+      held.signal = signal
+      return new Promise(() => {})
+    })
+    downloads.stop('english-kokoro')
+    expect(held.signal?.aborted, 'the registry kept the controller, and used it').toBe(true)
   })
 
   it('calls a stop the reader’s own doing, and a failure a failure', async () => {
