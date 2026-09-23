@@ -6,4 +6,11 @@
 //! why the catalogue is embedded rather than fetched, and `install` for what
 //! makes a stopped download leave nothing half-installed.
 
+pub mod cancel;
+pub mod digest;
+pub mod error;
+pub mod install;
 pub mod manifest;
+pub mod paths;
+
+pub use error::{Error, Result};
