@@ -23,6 +23,10 @@ tokio = { version = "1", features = ["rt", "fs", "sync", "io-util", "macros"] }
 futures-util = { version = "0.3", default-features = false }
 # `stream` is what makes a 2 GB download arrive in chunks rather than in memory.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "http2"] }
+# ONNX Runtime, which is what runs Kokoro. `tract` — pure Rust, nothing fetched
+# at build time — was tried first and cannot load the model: it refuses the
+# vocoder's STFT node. See `kokoro.rs`.
+ort = "2.0.0-rc.13"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

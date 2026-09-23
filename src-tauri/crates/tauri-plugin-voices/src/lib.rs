@@ -11,6 +11,7 @@ pub mod digest;
 pub mod english;
 pub mod error;
 pub mod install;
+pub mod kokoro;
 pub mod manifest;
 pub mod paths;
 
