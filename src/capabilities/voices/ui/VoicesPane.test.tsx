@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { STOPPED, VoicesPane, arrivedOf, languagesOf, progressLine, sizeOf } from './VoicesPane'
 import type { InstallProgress, SpeechEnginePort, SpokenAudio, VoicePack } from '../../../kernel'
 import { StopFailed } from '../lib/port'
+import { makeDownloads } from '../lib/downloads'
 
 afterEach(cleanup)
 
@@ -34,9 +35,14 @@ function portOver(packs: readonly VoicePack[], over: Partial<SpeechEnginePort> =
   }
 }
 
-/** Mount and let the first catalogue read land. */
-async function show(port: SpeechEnginePort) {
-  const view = render(<VoicesPane port={port} />)
+/** Mount and let the first catalogue read land.
+ *
+ * ⚠️ **ITS OWN REGISTRY, NEVER `theDownloads`.** The downloads deliberately
+ * outlive the pane, so the app's one is module-level — which would carry a
+ * half-stopped download from one case into the next. `makeDownloads` exists
+ * for exactly this. */
+async function show(port: SpeechEnginePort, downloads = makeDownloads()) {
+  const view = render(<VoicesPane port={port} downloads={downloads} />)
   await act(async () => {
     await Promise.resolve()
   })
@@ -256,6 +262,68 @@ describe('the pane', () => {
     const port = portOver([], { catalogue: async () => { throw new Error('the plugin did not answer') } })
     await show(port)
     expect(screen.getByText(/could not be listed/).textContent).toContain('did not answer')
+  })
+
+  it('keeps a download, its progress and its Stop across a close and reopen', async () => {
+    /* ⚠️ **THE DEFECT: THE DOWNLOAD BELONGED TO THE PANEL.** Each lived in a
+       ref of `AbortController`s beside React state, so closing Settings — or a
+       hot reload, which is how this was first seen on 2026-09-23 — threw away
+       the progress and the only control that could stop a 2.3 GB fetch, while
+       the plugin went on fetching. Reopening showed Download on a pack that was
+       half here. */
+    const downloads = makeDownloads()
+    let report: ((progress: InstallProgress) => void) | null = null
+    const port = portOver([pack()], {
+      install: async (_id, onProgress) => {
+        report = onProgress
+        return new Promise(() => {})
+      },
+    })
+    await show(port, downloads)
+    act(() => screen.getByRole('button', { name: 'Download' }).click())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    act(() => report?.({ kind: 'downloading', received: 104_857_600, total: 336_822_660 }))
+    expect(screen.getByText(/100 MB of 321 MB/)).toBeTruthy()
+
+    cleanup()
+    await show(port, downloads)
+    expect(screen.getByText(/100 MB of 321 MB/), 'the progress survived the close').toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Stop' }), 'and so did the way to stop it').toBeTruthy()
+  })
+
+  it('starts one download for a pack, however many times Download is pressed', async () => {
+    const downloads = makeDownloads()
+    const install = vi.fn(async () => new Promise<void>(() => {}))
+    await show(portOver([pack()], { install }), downloads)
+    act(() => screen.getByRole('button', { name: 'Download' }).click())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(install).toHaveBeenCalledTimes(1)
+  })
+
+  it('removes a pack once however many times Remove is pressed, and clears the last error', async () => {
+    /* ⚠️ A second press used to start a second removal, and a retry that worked
+       left the previous sentence on the row. */
+    let fails = true
+    const remove = vi.fn(async () => {
+      if (fails) throw new Error('the files would not go')
+    })
+    await show(portOver([pack({ installed: true })], { remove }))
+    act(() => screen.getByRole('button', { name: 'Remove' }).click())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.getByText(/would not go/)).toBeTruthy()
+    fails = false
+    act(() => screen.getByRole('button', { name: 'Remove' }).click())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByText(/would not go/), 'a retry that worked clears the sentence').toBeNull()
+    expect(remove).toHaveBeenCalledTimes(2)
   })
 
   it('stops polling once it is closed', async () => {

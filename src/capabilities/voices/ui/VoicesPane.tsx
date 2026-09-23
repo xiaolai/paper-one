@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CAPABILITY_UI as ui, messageOf, packArrived, packSize, type InstallProgress, type VoicePack } from '../../../kernel'
 import type { SpeechEnginePort } from '../../../kernel'
-import { StopFailed } from '../lib/port'
+import { STOPPED, theDownloads, type Downloads } from '../lib/downloads'
 
 /**
  * Settings → **Voices**: the packs a reader can download, and the ones they have.
@@ -49,18 +49,24 @@ export function languagesOf(pack: VoicePack, names = new Intl.DisplayNames(['en'
   return spelled.join(', ')
 }
 
-interface PackState {
-  readonly progress: InstallProgress | null
-  readonly error: string | null
-}
+/* The sentence belongs to the registry, which is the only thing that knows who
+   asked for the stop. Re-exported because this is the file a reader of the pane
+   looks in for it. */
+export { STOPPED }
 
-/** What a reader is told when they stop a download themselves. */
-export const STOPPED = 'Download stopped. Nothing was left half-installed.'
-
-export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
+export function VoicesPane({
+  port,
+  downloads = theDownloads,
+}: {
+  readonly port: SpeechEnginePort
+  /** The app's registry; a case passes its own so two cannot leak into each other. */
+  readonly downloads?: Downloads
+}) {
   const [packs, setPacks] = useState<readonly VoicePack[] | null>(null)
-  const [states, setStates] = useState<Readonly<Record<string, PackState>>>({})
   const [failed, setFailed] = useState<string | null>(null)
+  /** Which packs are being removed, and what a removal said if it refused. */
+  const [removing, setRemoving] = useState<Readonly<Record<string, boolean>>>({})
+  const [failedRemoval, setFailedRemoval] = useState<Readonly<Record<string, string | null>>>({})
   /* So a poll that lands after the pane closes does not set state on an
    * unmounted tree — the same reason every other polling pane holds one. */
   const alive = useRef(true)
@@ -71,10 +77,14 @@ export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
    * finished installing. `alive` cannot see this: both reads belong to a live
    * pane. Only the newest answer is applied. */
   const asked = useRef(0)
-  /* One per download in flight, so Stop can reach the fetch. The port takes an
-   * `AbortSignal` and the plugin holds the token the fetch loop waits on —
-   * which is what leaves nothing half-installed. */
-  const stopping = useRef(new Map<string, AbortController>())
+  /* ⚠️ **THE DOWNLOADS ARE NOT THIS PANE'S**, and they were. Each lived in a
+   * `useRef` map of `AbortController`s beside React state, so closing Settings
+   * — or a hot reload, which is how this was first seen — threw away the
+   * progress and the only control that could stop a 2.3 GB fetch, while the
+   * plugin went on fetching. Reopening showed **Download** on a pack that was
+   * half here. `theDownloads` outlives the tree; this only watches it. */
+  const [running, setRunning] = useState(downloads.states)
+  useEffect(() => downloads.watch(() => setRunning(downloads.states())), [downloads])
 
   const refresh = useCallback(async () => {
     const mine = ++asked.current
@@ -104,54 +114,36 @@ export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
 
   const install = useCallback(
     async (pack: VoicePack) => {
-      const controller = new AbortController()
-      stopping.current.set(pack.id, controller)
-      setStates((was) => ({ ...was, [pack.id]: { progress: { kind: 'downloading', received: 0, total: pack.bytes }, error: null } }))
       try {
-        await port.install(
-          pack.id,
-          (progress) => {
-            if (!alive.current) return
-            setStates((was) => ({ ...was, [pack.id]: { progress, error: null } }))
-          },
-          controller.signal,
-        )
-        if (!alive.current) return
-        setStates((was) => ({ ...was, [pack.id]: { progress: null, error: null } }))
-      } catch (cause) {
-        if (!alive.current) return
-        /* ⚠️ NAMED, NEVER SWALLOWED. A refused digest, a stopped download and a
-         * full disk all end here, and a row that simply goes back to "Download"
-         * tells a reader their tap did nothing. A stop is the reader's own
-         * doing, so it says so rather than reading as a failure.
-         *
-         * ⚠️ **EXCEPT WHEN THE STOP ITSELF FAILED**, which the aborted signal
-         * cannot tell you: it says the reader ASKED, not that it worked. A
-         * refused stop leaves the download running to completion, and saying
-         * *"Nothing was left half-installed"* over that is the one sentence
-         * here that would be false. `StopFailed` is the port's own answer for
-         * it, a type rather than a message so an edit cannot break the test. */
-        const why = cause instanceof StopFailed ? messageOf(cause) : controller.signal.aborted ? STOPPED : messageOf(cause)
-        setStates((was) => ({ ...was, [pack.id]: { progress: null, error: why } }))
+        await downloads.begin(pack.id, pack.bytes, (report, signal) => port.install(pack.id, report, signal))
+      } catch {
+        /* The registry has already recorded why, and it is drawn from there —
+           `messageOf`'s sentence and nothing else is lost. Caught so an
+           ordinary refusal is not an unhandled rejection. */
       }
-      stopping.current.delete(pack.id)
       void refresh()
     },
-    [port, refresh],
+    [downloads, port, refresh],
   )
 
   const remove = useCallback(
     async (pack: VoicePack) => {
+      /* ⚠️ **A SECOND PRESS USED TO START A SECOND REMOVAL**, and a retry that
+       * worked left the previous sentence on the row. Marked pending, which
+       * also disables the control, and cleared on the way in. */
+      if (removing[pack.id]) return
+      setRemoving((was) => ({ ...was, [pack.id]: true }))
+      downloads.clear(pack.id)
+      setFailedRemoval((was) => ({ ...was, [pack.id]: null }))
       try {
         await port.remove(pack.id)
       } catch (cause) {
-        if (alive.current) {
-          setStates((was) => ({ ...was, [pack.id]: { progress: null, error: messageOf(cause) } }))
-        }
+        if (alive.current) setFailedRemoval((was) => ({ ...was, [pack.id]: messageOf(cause) }))
       }
+      if (alive.current) setRemoving((was) => ({ ...was, [pack.id]: false }))
       void refresh()
     },
-    [port, refresh],
+    [downloads, port, refresh, removing],
   )
 
   /* ⚠️ **A FAILED POLL USED TO REPLACE THE WHOLE PANE, STOP BUTTONS AND ALL.**
@@ -192,8 +184,9 @@ export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
       {/* Beside the rows, not instead of them — see the guard above. */}
       {failed !== null ? <p className={ui.hint}>The voices could not be listed: {failed}</p> : null}
       {packs.map((pack) => {
-        const state = states[pack.id]
+        const state = running[pack.id]
         const busy = state?.progress != null
+        const error = state?.error ?? failedRemoval[pack.id] ?? null
         return (
           /* ⚠️ **THE FACTS GO UNDER THE ROW, NOT INSIDE IT** — measured in the
            * running app on 2026-09-23. They were in a `paper-cap-grow`, whose
@@ -210,15 +203,16 @@ export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
               </div>
               <div className={ui.actions}>
                 {pack.installed ? (
-                  <button type="button" className={`${ui.button} ${ui.buttonDanger}`} onClick={() => void remove(pack)}>
+                  <button
+                    type="button"
+                    className={`${ui.button} ${ui.buttonDanger}`}
+                    disabled={removing[pack.id] === true}
+                    onClick={() => void remove(pack)}
+                  >
                     Remove
                   </button>
                 ) : busy ? (
-                  <button
-                    type="button"
-                    className={ui.button}
-                    onClick={() => stopping.current.get(pack.id)?.abort()}
-                  >
+                  <button type="button" className={ui.button} onClick={() => downloads.stop(pack.id)}>
                     Stop
                   </button>
                 ) : (
@@ -233,7 +227,7 @@ export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
             </div>
             <div className={ui.hint}>{pack.voices.map((voice) => voice.name).join(', ')}</div>
             {busy && state?.progress ? <div className={ui.hint}>{progressLine(state.progress)}</div> : null}
-            {state?.error != null ? <div className={ui.hint}>{state.error}</div> : null}
+            {error !== null ? <div className={ui.hint}>{error}</div> : null}
           </div>
         )
       })}
