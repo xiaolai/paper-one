@@ -51,4 +51,3 @@ export const voices: Capability = {
 }
 
 export { voicesPortOver } from './lib/port'
-export { offered, packsFor, qualify, unqualify } from './lib/rows'

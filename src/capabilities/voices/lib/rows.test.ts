@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { asProgress, offered, packOf, packsFor, progressOf, qualify, unqualify } from './rows'
-import type { VoicePack } from '../../../kernel'
+import { asProgress, packOf, progressOf } from './rows'
 
 const ROW = {
   id: 'chinese-qwen',
@@ -13,8 +12,6 @@ const ROW = {
   voices: [{ id: 'Vivian', name: 'Vivian', language: 'zh-CN', note: 'Bright young woman.' }],
   installed: false,
 }
-
-const pack = (over: Partial<VoicePack> = {}): VoicePack => ({ ...(packOf(ROW) as VoicePack), ...over })
 
 describe('reading what the plugin answers', () => {
   it('reads a pack row', () => {
@@ -82,47 +79,5 @@ describe('reading a download’s progress', () => {
       total: 9,
     })
     expect(asProgress({ pack: 'p', kind: 'installed' })).toEqual({ kind: 'installed' })
-  })
-})
-
-describe('naming a voice', () => {
-  it('qualifies by engine, because two packs may ship the same name', () => {
-    expect(qualify('kokoro', 'af_heart')).toBe('kokoro:af_heart')
-    expect(unqualify('kokoro:af_heart')).toEqual({ family: 'kokoro', voiceId: 'af_heart' })
-  })
-
-  it('leaves a stored WebView identifier alone', () => {
-    // A reader who chose a system voice before this existed must keep it, and
-    // an Apple identifier has dots and no colon.
-    expect(unqualify('com.apple.voice.compact.en-US.Samantha')).toBeNull()
-    expect(unqualify('com.apple.speech.synthesis.voice.Alex')).toBeNull()
-  })
-
-  it('refuses a name with nothing on one side of the colon', () => {
-    expect(unqualify(':af_heart')).toBeNull()
-    expect(unqualify('kokoro:')).toBeNull()
-    expect(unqualify('')).toBeNull()
-  })
-
-  it('keeps a voice id that itself contains a colon', () => {
-    expect(unqualify('qwen:Uncle_Fu:2')).toEqual({ family: 'qwen', voiceId: 'Uncle_Fu:2' })
-  })
-})
-
-describe('what this machine may be offered', () => {
-  it('refuses a pack the Mac has too little memory for', () => {
-    // Not a warning: a 2.5 GB download followed by the system killing the app
-    // on the first sentence is worse than not being offered it.
-    expect(offered(pack(), 16)).toBe(true)
-    expect(offered(pack(), 8)).toBe(true)
-    expect(offered(pack(), 4)).toBe(false)
-  })
-
-  it('finds the packs that can read a language, by its primary subtag', () => {
-    const zh = pack()
-    const en = pack({ id: 'english-kokoro', family: 'kokoro', languages: ['en'] })
-    expect(packsFor([zh, en], 'zh-Hans-CN').map((p) => p.id)).toEqual(['chinese-qwen'])
-    expect(packsFor([zh, en], 'en-GB').map((p) => p.id)).toEqual(['english-kokoro'])
-    expect(packsFor([zh, en], 'fr')).toEqual([])
   })
 })

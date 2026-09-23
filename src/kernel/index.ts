@@ -160,6 +160,15 @@ export type {
  * to `serveServices`, and what an in-process caller runs directly — one set
  * of handlers, three ways of reaching them. */
 export { buildReadServices, buildServices, handlerFor } from './core/services/handlers'
+export {
+  engineVoiceFor,
+  missingPackNotice,
+  packsFor,
+  qualify,
+  unqualify,
+  withinMemory,
+  type EngineVoice,
+} from './ui/reader/engineVoice'
 export type {
   DevicePort,
   DeviceRow,
