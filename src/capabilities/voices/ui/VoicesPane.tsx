@@ -88,6 +88,8 @@ export function VoicesPane({
    * protects the rows is this token: both reads belong to a live pane, which
    * is the case `alive` could never see. */
   const asked = useRef<object>({})
+  /** Which packs are being removed RIGHT NOW — see `remove` for why not state. */
+  const removingNow = useRef<Set<string>>(new Set())
   /* ⚠️ **THE DOWNLOADS ARE NOT THIS PANE'S**, and they were. Each lived in a
    * `useRef` map of `AbortController`s beside React state, so closing Settings
    * — or a hot reload, which is how this was first seen — threw away the
@@ -137,8 +139,16 @@ export function VoicesPane({
     async (pack: VoicePack) => {
       /* ⚠️ **A SECOND PRESS USED TO START A SECOND REMOVAL**, and a retry that
        * worked left the previous sentence on the row. Marked pending, which
-       * also disables the control, and cleared on the way in. */
-      if (removing[pack.id]) return
+       * also disables the control, and cleared on the way in.
+       *
+       * ⚠️ **THE LOCK IS THE REF, NOT THE STATE.** `removing` is a RENDER
+       * SNAPSHOT: two presses before React has committed the first both read
+       * the old map and both started a removal — the same defect
+       * `useAudiobook` records for `running`, which is why the disabled
+       * attribute alone is not the answer either. The ref is written before
+       * the first `await`, so the second press sees it. */
+      if (removingNow.current.has(pack.id)) return
+      removingNow.current.add(pack.id)
       setRemoving((was) => ({ ...was, [pack.id]: true }))
       downloads.clear(pack.id)
       setFailedRemoval((was) => ({ ...was, [pack.id]: null }))
@@ -147,10 +157,11 @@ export function VoicesPane({
       } catch (cause) {
         setFailedRemoval((was) => ({ ...was, [pack.id]: messageOf(cause) }))
       }
+      removingNow.current.delete(pack.id)
       setRemoving((was) => ({ ...was, [pack.id]: false }))
       void refresh()
     },
-    [downloads, port, refresh, removing],
+    [downloads, port, refresh],
   )
 
   /* ⚠️ **A FAILED POLL USED TO REPLACE THE WHOLE PANE, STOP BUTTONS AND ALL.**
@@ -237,7 +248,7 @@ export function VoicesPane({
               {pack.summary} · {languagesOf(pack)} · {packSize(pack.bytes)} · needs {pack.minimumMemoryGb} GB of memory
             </div>
             <div className={ui.hint}>{pack.voices.map((voice) => voice.name).join(', ')}</div>
-            {busy && state?.progress ? <div className={ui.hint}>{progressLine(state.progress)}</div> : null}
+            {progress !== null ? <div className={ui.hint}>{progressLine(progress)}</div> : null}
             {error !== null ? <div className={ui.hint}>{error}</div> : null}
           </div>
         )

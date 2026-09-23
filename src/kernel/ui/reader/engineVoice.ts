@@ -66,13 +66,14 @@ export function unqualify(stored: string): { family: string; voiceId: string } |
 
 /** The packs that can read a language, installed or not. */
 export function packsFor(packs: readonly VoicePack[], lang: string | null): readonly VoicePack[] {
-  /* ⚠️ **TRIMMED BEFORE IT IS READ, NOT ONLY BEFORE IT IS TESTED FOR EMPTY.**
-     The trim was in the guard alone, so `" en "` — which an EPUB's own
-     `xml:lang` can be — passed the guard and then matched no pack at all:
-     a book with a perfectly good language answered as a book no pack reads. */
-  const named = (lang ?? '').trim()
-  if (named === '') return []
-  const primary = primaryOf(named)
+  /* ⚠️ **NO EMPTY TEST IN FRONT OF THIS, AND IT HAD TWO.** `primaryOf` goes
+     through `normalize`, which trims and folds case — so a language of nothing
+     but spaces already answers a primary tag no pack declares, and the filter
+     already answers none for it. The only thing that has to be caught here is
+     `null`, which `normalize` would throw on. A guard for the rest was three
+     branches repeating the answer the filter gives. */
+  if (lang === null) return []
+  const primary = primaryOf(lang)
   return packs.filter((pack) => pack.languages.some((l) => primaryOf(l) === primary))
 }
 

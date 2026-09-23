@@ -2,7 +2,7 @@
 import { type ComponentProps } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Settings } from './Settings'
+import { Settings, voicePickerValue, type Narration } from './Settings'
 import {
   DEFAULT_ALIGN,
   DEFAULT_READING_STYLE,
@@ -1386,6 +1386,73 @@ describe('the voice the picker shows', () => {
     cleanup()
     const other = pickerFor({ en: 'qwen:Vivian' }, [compact], [englishPack])
     expect(other.selectedOptions[0]?.textContent, 'nor a family no pack has').toBe('Automatic (Heart)')
+  })
+
+  /**
+   * ⚠️ **THE ROW'S VALUE IS ASSERTED DIRECTLY, AND IT HAS TO BE.** A `<select>`
+   * given a value no option carries reports `''` and shows its first row, so
+   * "fell through to Automatic" and "named an option that is not there" are
+   * the same DOM. Three of the four decisions below are invisible to any case
+   * that drives the pane; the function is pure, so it is asked itself.
+   */
+  describe('the value the row is given', () => {
+    const narration = (
+      chosen: Readonly<Record<string, string>>,
+      voices: readonly (typeof installed)[],
+      packs: readonly VoicePack[],
+    ): Narration => ({
+      lang: 'en-US',
+      voices,
+      packs,
+      chosen,
+      rate: 1,
+      sentenceGapMs: 150,
+      paragraphGapMs: 600,
+      notesAloud: false,
+      onVoice: vi.fn(),
+      onRate: vi.fn(),
+      onSentenceGap: vi.fn(),
+      onParagraphGap: vi.fn(),
+      onNotesAloud: vi.fn(),
+    })
+
+    it('is the reader’s own pack voice, when the pack is here and ships it', () => {
+      expect(voicePickerValue(narration({ en: 'kokoro:af_bella' }, [compact], [englishPack]))).toBe(
+        'kokoro:af_bella',
+      )
+    })
+
+    it('is Automatic for a stored voice the pack does not ship, or a family no pack has', () => {
+      expect(voicePickerValue(narration({ en: 'kokoro:af_nobody' }, [compact], [englishPack]))).toBe('')
+      expect(voicePickerValue(narration({ en: 'qwen:Vivian' }, [compact], [englishPack]))).toBe('')
+      expect(voicePickerValue(narration({ en: 'kokoro:af_bella' }, [compact], []))).toBe('')
+    })
+
+    it('reads a stored PLATFORM identifier without trying to split it as ours', () => {
+      /* ⚠️ A reader who chose a system voice before any of this existed has
+         `com.apple.voice.enhanced.en-US.Zoe` stored. Treated as an engine
+         choice it is a read of `null.family`, which takes the whole pane
+         down — and it is the commonest stored value there is. */
+      const stored = narration({ en: installed.voiceURI }, [installed], [englishPack])
+      expect(() => voicePickerValue(stored)).not.toThrow()
+      expect(voicePickerValue(stored)).toBe(installed.voiceURI)
+    })
+
+    it('is the platform’s own answer when nothing is stored at all', () => {
+      expect(voicePickerValue(narration({}, [installed], [englishPack]))).toBe('')
+    })
+
+    it('takes the pack the FAMILY names, with two installed', () => {
+      const chinese: VoicePack = {
+        ...englishPack,
+        id: 'chinese-qwen',
+        family: 'qwen',
+        voices: [{ id: 'Vivian', name: 'Vivian', language: 'zh-CN', note: '' }],
+      }
+      expect(voicePickerValue(narration({ en: 'qwen:Vivian' }, [compact], [englishPack, chinese]))).toBe(
+        'qwen:Vivian',
+      )
+    })
   })
 
   it('shows a stored pack voice, and falls through to Automatic once the pack has gone', () => {

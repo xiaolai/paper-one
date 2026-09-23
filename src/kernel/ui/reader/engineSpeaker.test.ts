@@ -545,7 +545,12 @@ describe('the states one reading leaves the next', () => {
     errors.mockRestore()
   })
 
-  it('refuses a render with nowhere to play it, and says so once', async () => {
+  it('refuses a render with nowhere to play it, and says so once, without calling it a failure', async () => {
+    /* A build with no audio at all is not a render that went wrong, so there
+       is nothing to write down about it — and reaching this through the
+       failure road would put a line in the log of every such build, once a
+       sentence. */
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
     const cb = callbacks()
     const speaker = new EngineSpeaker(cb, {
       render: async () => audio({ words: WORDS }),
@@ -556,6 +561,24 @@ describe('the states one reading leaves the next', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(cb.onDone).toHaveBeenCalledTimes(1)
     expect(cb.onDone).toHaveBeenCalledWith('error')
+    expect(errors).not.toHaveBeenCalled()
+    errors.mockRestore()
+  })
+
+  it('reads a new sentence after a pause, rather than holding it at its first sample', async () => {
+    /* ⚠️ The pause flag belongs to the READING, and a new one clears it. Left
+       set, every later render is paused the moment it lands: the control says
+       it is reading and no sound ever comes, which is exactly the defect the
+       flag was added to fix, one reading later. */
+    const { speaker, cb, host } = speakerOver(async () => audio({ words: WORDS }))
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.pause()
+    speaker.speak('second one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(host.sources).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(cb.onWord).toHaveBeenCalledTimes(2)
   })
 
   it('says an engine reports no words even when the reader paused before the render landed', async () => {
@@ -672,6 +695,81 @@ describe('what makes two renders the same render', () => {
       'second one',
       'first one',
     ])
+  })
+
+  it('keeps a look-ahead that landed, and hands it to the sentence when it is asked for', async () => {
+    /* ⚠️ The ready render and the one still in flight are NOT interchangeable,
+       though they answer alike while nothing else happens: a second `prepare`
+       replaces what is in flight, so a render that landed and was not put
+       somewhere of its own is a render thrown away — and the sentence it was
+       for is rendered a second time, behind the one that replaced it. */
+    const settles: ((value: SpokenAudio) => void)[] = []
+    const texts: string[] = []
+    const cb = callbacks()
+    const speaker = new EngineSpeaker(cb, {
+      render: (request) =>
+        new Promise<SpokenAudio>((resolve) => {
+          texts.push(request.text)
+          settles.push(resolve)
+        }),
+      host: () => new FakeAudioHost(),
+      choose: () => ({ packId: 'english-kokoro', voiceId: 'af_heart' }),
+    })
+    speaker.prepare('first one', 'en')
+    settles[0]?.(audio())
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.prepare('second one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(texts, 'the render that landed was kept, not asked for again').toEqual(['first one', 'second one'])
+  })
+
+  it('a failed look-ahead forgets only ITSELF', async () => {
+    /* Two in flight: the older one failing must not throw away the newer,
+       which is a render the reader is about to want. */
+    const settles: { ok: (value: SpokenAudio) => void; no: (cause: unknown) => void }[] = []
+    const texts: string[] = []
+    const cb = callbacks()
+    const speaker = new EngineSpeaker(cb, {
+      render: (request) =>
+        new Promise<SpokenAudio>((resolve, reject) => {
+          texts.push(request.text)
+          settles.push({ ok: resolve, no: reject })
+        }),
+      host: () => new FakeAudioHost(),
+      choose: () => ({ packId: 'english-kokoro', voiceId: 'af_heart' }),
+    })
+    speaker.prepare('first one', 'en')
+    speaker.prepare('second one', 'en')
+    settles[0]?.no(new Error('the plugin refused'))
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.speak('second one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(texts).toEqual(['first one', 'second one'])
+  })
+
+  it('survives a look-ahead failing after the sentence has taken it over', async () => {
+    /* `speak` takes the promise out of the look-ahead slot, so the slot is
+       EMPTY when the failure handler runs — and a handler that reads it
+       without asking throws from a place nothing catches. */
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const settles: ((cause: unknown) => void)[] = []
+    const cb = callbacks()
+    const speaker = new EngineSpeaker(cb, {
+      render: () =>
+        new Promise<SpokenAudio>((_resolve, reject) => {
+          settles.push(reject)
+        }),
+      host: () => new FakeAudioHost(),
+      choose: () => ({ packId: 'english-kokoro', voiceId: 'af_heart' }),
+    })
+    speaker.prepare('first one', 'en')
+    speaker.speak('first one', 'en')
+    settles[0]?.(new Error('the plugin refused'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onDone).toHaveBeenCalledWith('error')
+    errors.mockRestore()
   })
 
   it('does not ask twice for a look-ahead it is already waiting on', async () => {

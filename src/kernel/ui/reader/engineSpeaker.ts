@@ -38,6 +38,13 @@ import { audible } from './pcm'
 import type { DoneReason, SpeakPrefs, SpeakerCallbacks } from './speech'
 import type { SpeechRequest, SpokenAudio } from '../../core/ports'
 
+/** A reading in progress: the sound, its words, and how many have been said. */
+interface Reading {
+  readonly playing: Playing
+  readonly words: SpokenAudio['words']
+  said: number
+}
+
 /** Which pack and voice read a given language, or nothing if none can. */
 export type VoiceChoosing = (lang: string | null, prefs: SpeakPrefs) => { packId: string; voiceId: string } | null
 
@@ -92,7 +99,7 @@ export class EngineSpeaker {
    * never had been. It was dropped silently. Counting what was said leaves
    * nothing to assume.
    */
-  #reading: { readonly playing: Playing; readonly words: SpokenAudio['words']; said: number } | null = null
+  #reading: Reading | null = null
   /**
    * The word timers in flight.
    *
@@ -115,6 +122,11 @@ export class EngineSpeaker {
    * control said paused. The flag is what a pause means; the player is only
    * where it lands once there is one.
    */
+  /* Stryker disable next-line BooleanLiteral: nothing reads this before it has
+     been written. `speak` calls `stop` first and `stop` sets it false, and the
+     only other reader — `resume` — answers the same way on a speaker with no
+     reading either way. Hand-applied 2026-09-24: the whole suite passes with
+     `true` here, which is what an unobservable initial value looks like. */
   #paused = false
   /** A render done ahead of time, by `prepare`. */
   #ready: { key: string; audio: SpokenAudio } | null = null
@@ -161,7 +173,7 @@ export class EngineSpeaker {
     void rendering
       .then(
         (audio) => this.#play(token, audio),
-        (cause: unknown) => this.#failed(token, cause),
+        (cause: unknown) => this.#ended(token, 'error', cause),
       )
       /* ⚠️ **A HANDLER PASSED TO `then` DOES NOT CATCH THE OTHER HANDLER'S
        * THROW.** `#play` builds an audio buffer and a source node, and a host
@@ -169,7 +181,7 @@ export class EngineSpeaker {
        * the rejection handler beside it cannot see it. The reading then sat
        * lit for ever with an unhandled rejection in the console and no
        * `onDone` anywhere. */
-      .catch((cause: unknown) => this.#failed(token, cause))
+      .catch((cause: unknown) => this.#ended(token, 'error', cause))
     return true
   }
 
@@ -236,7 +248,7 @@ export class EngineSpeaker {
      * reading at a speed other than 1, which `positionMs` already accounts for
      * and a wall clock never could. From the first word NOT YET SAID, so
      * nothing is repeated and nothing is skipped. */
-    this.#scheduleFrom(reading.said, reading.playing.positionMs())
+    this.#scheduleFrom(reading, reading.said, reading.playing.positionMs())
   }
 
   /** End the reading. `onDone` is NOT called: the caller already knows. */
@@ -292,27 +304,14 @@ export class EngineSpeaker {
     }
   }
 
-  /**
-   * A render that did not arrive.
-   *
-   * ⚠️ **THE REASON IS SAID, WHERE IT USED TO BE DROPPED.** `onDone('error')`
-   * is all the reading needs, and it is all the READER gets — so the timeout's
-   * own words, and whatever the plugin refused with, reached nobody at all. A
-   * chapter that stops part way with no reason anywhere is the shape this
-   * repository keeps having to debug from the outside.
-   */
-  #failed(token: object, cause: unknown): void {
-    if (token !== this.#current) return
-    console.error('Paper: the reading could not be rendered', cause)
-    this.#endIfCurrent(token, 'error')
-  }
-
   /** Play a render, if it is still the one the reader is waiting for. */
   #play(token: object, audio: SpokenAudio): void {
     if (token !== this.#current) return
     const host = this.#deps.host()
     if (!host) {
-      this.#endIfCurrent(token, 'error')
+      /* No cause: a build with nowhere to play is not a render that failed,
+         and a line about one would be a line nobody can act on. */
+      this.#ended(token, 'error')
       return
     }
     /* ⚠️ SILENCE OF THE RIGHT LENGTH IS THE FAILURE NOBODY HEARS UNTIL THEY
@@ -321,12 +320,12 @@ export class EngineSpeaker {
      * arrives with correct-looking timings. Reported as an error rather than
      * played, so the reader is told instead of sitting through nothing. */
     if (!audible(audio.pcm)) {
-      this.#endIfCurrent(token, 'error')
+      this.#ended(token, 'error')
       return
     }
 
     const playing = playPcm(host, audio.pcm, audio.sampleRate, () => {
-      this.#endIfCurrent(token, 'ended')
+      this.#ended(token, 'ended')
     })
     this.#reading = { playing, words: audio.words, said: 0 }
     /* ⚠️ **A RENDER THAT LANDS DURING A PAUSE MUST NOT SPEAK.** The reader
@@ -346,7 +345,7 @@ export class EngineSpeaker {
       this.#noWordBoundaries()
       return
     }
-    this.#scheduleFrom(0, 0)
+    this.#scheduleFrom(this.#reading, 0, 0)
   }
 
   /**
@@ -368,9 +367,7 @@ export class EngineSpeaker {
    * cases below prove the clearing instead, one per road, which is what fails
    * loudly if a fourth road forgets.
    */
-  #scheduleFrom(first: number, positionMs: number): void {
-    const reading = this.#reading
-    if (!reading) return
+  #scheduleFrom(reading: Reading, first: number, positionMs: number): void {
     for (let index = first; index < reading.words.length; index += 1) {
       const word = reading.words[index]!
       const at = setTimeout(() => {
@@ -410,16 +407,26 @@ export class EngineSpeaker {
     this.#timers.length = 0
   }
 
-  /** Report an ending, once, and only for the utterance that is current. */
-  #endIfCurrent(token: object, reason: DoneReason): void {
+  /**
+   * Report an ending, once, and only for the utterance that is current.
+   *
+   * ⚠️ **ONE GUARD, AND IT IS THIS ONE.** A `#failed` beside it checked the
+   * token too and then came straight here to have it checked again — so
+   * whichever of the two ran second could never answer, and a branch that
+   * cannot come back false is a branch no test can reach. Every road out of a
+   * reading passes through here, and `stop()` below is what it does: the token
+   * moves first, so a render still in flight cannot report a second time.
+   *
+   * ⚠️ **AND THE REASON IS SAID, WHERE IT USED TO BE DROPPED.**
+   * `onDone('error')` is all the reading needs, and it is all the READER gets
+   * — so the two-minute deadline's own words, and whatever the plugin refused
+   * with, reached nobody at all. A chapter that stops part way with no reason
+   * anywhere is the shape this repository keeps having to debug from outside.
+   */
+  #ended(token: object, reason: DoneReason, cause?: unknown): void {
     if (token !== this.#current) return
-    /* Moved on before reporting, so a second ending — a late `onended` beside
-     * a timeout, say — cannot report twice. `Speaker` does the same thing for
-     * the same reason. */
-    this.#current = {}
-    this.#paused = false
-    this.#clearTimers()
-    this.#reading = null
+    if (cause !== undefined) console.error('Paper: the reading could not be rendered', cause)
+    this.stop()
     this.#cb.onDone(reason)
   }
 }

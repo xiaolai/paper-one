@@ -96,12 +96,15 @@ describe('which packs can read a language', () => {
   })
 
   it('reads a language with space around it, rather than answering none for it', () => {
-    /* A book's `xml:lang` is metadata somebody typed. Trimmed only before the
-       empty test, `" en "` passed the guard and then matched no pack — a book
-       with a perfectly good language reported as one no pack reads. */
+    /* A book's `xml:lang` is metadata somebody typed. `primaryOf` normalises
+       it — the same normalisation a stored choice's KEY goes through, which is
+       why there is no second trim here to disagree with it. */
     expect(packsFor([pack()], ' en ')).toEqual([pack()])
+    expect(packsFor([pack()], 'EN-gb')).toEqual([pack()])
     expect(packsFor([pack()], '   '), 'and nothing but space is no language').toEqual([])
     expect(packsFor([pack()], ''), 'nor is nothing at all').toEqual([])
+    expect(() => packsFor([pack()], null), 'and null is the one it cannot normalise').not.toThrow()
+    expect(packsFor([pack()], null)).toEqual([])
   })
 
   it('matches a pack that reads several languages on ANY of them', () => {

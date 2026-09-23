@@ -229,6 +229,26 @@ describe('the wiring, and the states this player cannot be in', () => {
     expect(playing.paused).toBe(false)
   })
 
+  it('counts a pause from when the sound started, and at the speed it was played', () => {
+    /* ⚠️ TWO ARITHMETIC MISTAKES THAT LOOK RIGHT FROM A CLOCK THAT STARTS AT
+       ZERO: adding the start time instead of subtracting it, and dividing by
+       the speed instead of multiplying. Both are invisible while the context
+       clock is 0 and the speed is 1 — which is every reading in a test and no
+       reading in the app, where the clock has been running since the first
+       Listen and the reader may have chosen 1.5×. */
+    const host = new FakeAudioHost()
+    host.advance(9000)
+    const playing = playPcm(host, ONE_SECOND, 24_000, () => {}, 2)
+    host.advance(300)
+    playing.pause()
+    expect(playing.positionMs()).toBeCloseTo(600, 6)
+    host.advance(5000)
+    expect(playing.positionMs(), 'and nothing accrues while it is paused').toBeCloseTo(600, 6)
+    playing.resume()
+    host.advance(100)
+    expect(playing.positionMs()).toBeCloseTo(800, 6)
+  })
+
   it('ends at exactly the end, rather than starting a source of no length', () => {
     /* The bound is `>=`: paused on the last sample, there is nothing left to
        play, and a source started at the buffer's own duration is silence in

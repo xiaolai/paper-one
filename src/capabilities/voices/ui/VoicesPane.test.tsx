@@ -516,6 +516,118 @@ describe('the pane', () => {
     expect(screen.getByText(/Downloading/), 'the new registry is the one watched').toBeTruthy()
   })
 
+  it('lets an older read’s FAILURE land nowhere either, not only its answer', async () => {
+    /* The stale check guards both roads out of a read, and the failing one is
+       the road that matters more: a poll that refuses after a newer poll has
+       already answered would replace live rows with "the voices could not be
+       listed" for something that is no longer being asked. */
+    vi.useFakeTimers()
+    try {
+      const settles: { ok: (rows: readonly VoicePack[]) => void; no: (cause: unknown) => void }[] = []
+      const catalogue = () =>
+        new Promise<readonly VoicePack[]>((resolve, reject) => {
+          settles.push({ ok: resolve, no: reject })
+        })
+      render(<VoicesPane port={portOver([], { catalogue })} downloads={makeDownloads()} />)
+      await act(async () => {
+        await Promise.resolve()
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_MS + 10)
+      })
+      expect(settles.length).toBe(2)
+      await act(async () => {
+        settles[1]?.ok([pack()])
+        await Promise.resolve()
+      })
+      await act(async () => {
+        settles[0]?.no(new Error('the plugin did not answer'))
+        await Promise.resolve()
+      })
+      expect(screen.queryByText(/could not be listed/), 'the abandoned read said nothing').toBeNull()
+      expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('starts one removal for a pack, however fast Remove is pressed twice', async () => {
+    /* ⚠️ Both presses before React commits the first read the same `removing`
+       map, so a lock kept in state is no lock at all — and the disabled
+       attribute cannot help either, because it only appears on the render
+       that has not happened yet. */
+    const remove = vi.fn(async () => new Promise<void>(() => {}))
+    await show(portOver([pack({ installed: true })], { remove }))
+    const button = screen.getByRole('button', { name: 'Remove' })
+    act(() => {
+      button.click()
+      button.click()
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(remove).toHaveBeenCalledTimes(1)
+  })
+
+  it('downloads and removes through the port it has NOW', async () => {
+    /* Both controls close over the port, and a pane that kept the first goes
+       on asking a plugin the composition has replaced — a press that appears
+       to do nothing at all. */
+    const first = { install: vi.fn(async () => {}), remove: vi.fn(async () => {}) }
+    const second = { install: vi.fn(async () => {}), remove: vi.fn(async () => {}) }
+    const view = render(<VoicesPane port={portOver([pack()], first)} downloads={makeDownloads()} />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    view.rerender(<VoicesPane port={portOver([pack()], second)} downloads={makeDownloads()} />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    act(() => screen.getByRole('button', { name: 'Download' }).click())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(first.install).not.toHaveBeenCalled()
+    expect(second.install).toHaveBeenCalledTimes(1)
+
+    view.rerender(<VoicesPane port={portOver([pack({ installed: true })], second)} downloads={makeDownloads()} />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    act(() => screen.getByRole('button', { name: 'Remove' }).click())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(first.remove).not.toHaveBeenCalled()
+    expect(second.remove).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves another row’s Remove disabled while its own removal ends', async () => {
+    /* One map for every row: replacing it wholesale on the way OUT of one
+       removal re-enables a control for a removal that is still running. */
+    const held: { done: () => void } = { done: () => {} }
+    const remove = vi.fn(async (id: string) => {
+      if (id === 'english-kokoro') return new Promise<void>(() => {})
+      return new Promise<void>((resolve) => {
+        held.done = resolve
+      })
+    })
+    const chinese = pack({ id: 'chinese-qwen', name: 'Chinese', installed: true })
+    await show(portOver([pack({ installed: true }), chinese], { remove }))
+    const buttons = () => screen.getAllByRole('button', { name: 'Remove' }) as HTMLButtonElement[]
+    act(() => buttons()[0]?.click())
+    act(() => buttons()[1]?.click())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(buttons().map((button) => button.disabled)).toEqual([true, true])
+    await act(async () => {
+      held.done()
+      await Promise.resolve()
+    })
+    expect(buttons().map((button) => button.disabled), 'only the one that finished').toEqual([true, false])
+  })
+
   it('marks only the pack being removed, and leaves another row’s sentence alone', async () => {
     const refuse = vi.fn(async (id: string) => {
       if (id === 'chinese-qwen') throw new Error('the files would not go')

@@ -396,8 +396,15 @@ function voicePickerGroups(narration: Narration): readonly SelectGroup[] {
  * takes, so a preference naming a pack that has since been removed falls
  * through to Automatic here exactly as it does there, rather than selecting an
  * option the list no longer carries.
+ *
+ * ⚠️ **EXPORTED BECAUSE THE DOM CANNOT TELL ITS ANSWERS APART.** A
+ * `<select>` handed a value no `<option>` carries reports the EMPTY STRING and
+ * shows its first row — measured, not assumed — which is exactly what the
+ * fall-through produces. So three of the four decisions below render
+ * identically, and a case driving the pane can only ever see one of them. The
+ * function is pure; it is asserted directly.
  */
-function voicePickerValue(narration: Narration): string {
+export function voicePickerValue(narration: Narration): string {
   /* ABSENT AND `''` ALIKE, which is the rule `chosenVoice` states for its own
      side: `''` is what the Automatic row stores, and `unqualify` refuses it.
      Asked as "is there one", rather than with a `?? ''` in front of it: the
