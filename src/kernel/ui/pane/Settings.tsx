@@ -426,7 +426,14 @@ function voicePickerValue(narration: Narration): string {
  * however many packs are downloaded.
  */
 function voicePickerLead(narration: Narration): string {
-  const engine = engineVoiceFor(narration.packs, narration.lang, narration.chosen)
+  /* ⚠️ **ASKED WITH NO STORED CHOICE, BECAUSE THAT IS WHAT THIS ROW OFFERS.**
+     `engineVoiceFor` honours a stored voice, so passing `narration.chosen` made
+     the label say "Automatic (Bella)" to a reader who had explicitly CHOSEN
+     Bella — naming the choice back as though it were the automatic pick, and
+     promising the wrong voice to anybody who then selected this row. Selecting
+     it stores `''`, which is the empty record this asks with. `bestVoice`, one
+     branch below, has always been asked this way. */
+  const engine = engineVoiceFor(narration.packs, narration.lang, {})
   const detail = engine ? packVoiceOf(narration.packs, engine) : null
   if (detail) return `Automatic (${detail.voice.name})`
   if (voiceFor(narration.voices, narration.lang, narration.chosen).kind === 'none') {
@@ -560,10 +567,13 @@ function SelectRow({
           </option>
         )}
         {groups.map((group, at) =>
-          /* Stryker disable next-line ConditionalExpression: `voiceGroups`
-             appends a voice as it opens each run, so it never emits an empty
-             group — this is the component's contract for a caller that would,
-             and nothing in the app is one. */
+          /* ⚠️ **A PACK CAN BE EMPTY, SO THIS IS REACHABLE — AND IT WAS NOT.**
+             The directive here said `voiceGroups` appends a voice as it opens
+             each run, so no caller ever emits an empty group. That stopped
+             being true when the picker began offering DOWNLOADED packs:
+             `VoicePack.voices` is data from a manifest, and a pack with none
+             would draw a heading with nothing under it. Tested rather than
+             disabled now. */
           group.options.length === 0 ? null : (
             /* KEYED BY POSITION AS WELL AS LABEL. `voiceGroups` deliberately
                emits non-contiguous groups from one tier — the same label twice —

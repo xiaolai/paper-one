@@ -1341,6 +1341,27 @@ describe('the voice the picker shows', () => {
     expect([...select.querySelectorAll('optgroup')].map((group) => group.label)).toEqual(['English', 'Enhanced'])
   })
 
+  it('says what Automatic means, not what the reader already chose', () => {
+    /* ⚠️ Selecting the Automatic row stores `''`, so the label has to name what
+       the reading would pick with NOTHING stored. Asked with the choice in
+       hand, `engineVoiceFor` honours it and the row said "Automatic (Bella)" to
+       a reader who had chosen Bella — promising the wrong voice to anybody who
+       then selected it. `bestVoice`, the platform's side, was never asked the
+       other way. */
+    const select = pickerFor({ en: 'kokoro:af_bella' }, [compact], [englishPack])
+    expect(select.options[0]?.textContent).toBe('Automatic (Heart)')
+    expect(select.value).toBe('kokoro:af_bella')
+  })
+
+  it('draws no heading for a pack with no voices in it', () => {
+    /* ⚠️ A heading with nothing under it. The empty-group guard in `SelectRow`
+       carried a directive saying no caller could emit one, which stopped being
+       true when the picker began offering packs: `VoicePack.voices` is data
+       from a manifest, not something this file constructs. */
+    const select = pickerFor({}, [installed], [{ ...englishPack, voices: [] }])
+    expect([...select.querySelectorAll('optgroup')].map((group) => group.label)).toEqual(['Enhanced'])
+  })
+
   it('shows a stored pack voice, and falls through to Automatic once the pack has gone', () => {
     /* Same rule as a platform voice that has been uninstalled: a preference
        naming something that is no longer here must not leave the reader with a
