@@ -24,9 +24,16 @@ pub const HEADER_BYTES: usize = 44;
 
 /// A 16-bit sample from a float one, CLAMPED.
 ///
-/// The engine hands back float32, and a float outside ±1 is not impossible — a
-/// wrap-around would be an audible click in the middle of a word, where a clamp
-/// is inaudible.
+/// ⚠️ **IT SERVES THE TESTS ALONE NOW, AND IS GATED TO SAY SO.** The engine
+/// that handed back float32 was `narrate_render` over AVSpeechSynthesizer,
+/// deleted in phase 30; the downloadable engines answer 16-bit PCM already. It
+/// is kept because the packager's own cases build synthetic audio with it, and
+/// ungated it is `dead_code` in a release build — which `-D warnings` makes a
+/// failed build, on Linux first.
+///
+/// A wrap-around would be an audible click in the middle of a word, where a
+/// clamp is inaudible.
+#[cfg(test)]
 pub fn to_i16(sample: f32) -> i16 {
     let clamped = sample.clamp(-1.0, 1.0);
     (clamped * f32::from(i16::MAX)) as i16

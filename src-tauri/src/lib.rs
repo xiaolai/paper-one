@@ -475,8 +475,6 @@ pub fn run() {
             open_external,
             atomic::write_atomic,
             atomic::fsync_in_data_dir,
-            narrate::narrate_voices,
-            narrate::narrate_render,
             narrate::narrate_package
         ])
         // Scoped by `capabilities/default.json`, not by these registrations —

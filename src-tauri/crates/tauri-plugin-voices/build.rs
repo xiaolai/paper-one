@@ -9,10 +9,16 @@
 //! - **The Apple frameworks must be named here.** `swift-rs` links the Swift
 //!   runtime and nothing else, so without these the Rust binary fails to link
 //!   with undefined BNNS and cblas symbols.
-//! - **`mlx-swift_Cmlx.bundle` must ship beside the executable** — it is a
-//!   Tauri resource for that reason. Linking is not enough: MLX looks for its
-//!   Metal shaders at run time and dies with "Failed to load the default
-//!   metallib" when they are not there.
+//! - **`mlx-swift_Cmlx.bundle` must ship inside the app bundle** — it is named
+//!   in `tauri.conf.json`'s `bundle.resources` for that reason. Linking is not
+//!   enough: MLX looks for its Metal shaders at run time and dies with "Failed
+//!   to load the default metallib" when they are not there.
+//!
+//!   ⚠️ **AND THE PATH IT IS COPIED FROM IS A BUILD OUTPUT**, so the Swift half
+//!   must have been built before `tauri build` runs — which it always has been,
+//!   because this script builds it. A `tauri build` that somehow ran first
+//!   would fail on a missing resource rather than produce an app that cannot
+//!   speak, which is the right way round.
 //!
 //! Off macOS this does nothing, and `qwen::engine` refuses by name instead.
 

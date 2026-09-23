@@ -27,9 +27,31 @@ const conf = (name) => JSON.parse(readFileSync(new URL(`../src-tauri/${name}`, i
 const EVERY_CONF = [
   'tauri.conf.json',
   'tauri.dev.conf.json',
+  'tauri.macos.conf.json',
   'tauri.ios.conf.json',
   'tauri.android.conf.json',
 ]
+
+/**
+ * What each config may declare. Adding a line here is a DECISION, and the
+ * comment beside it says what the resource is and why it belongs where it is.
+ */
+const ALLOWED = {
+  /* Everyone's, and stated so that "mobile carries no extra resources" cannot
+     be achieved by emptying the base. */
+  'tauri.conf.json': ['../THIRD-PARTY-NOTICES.md'],
+  /* ⚠️ **MLX's METAL SHADERS, macOS ONLY, AND IN THE macOS CONFIG BECAUSE OF
+     THE MERGE RULE ABOVE.** The Chinese voice links MLX, which looks for
+     `default.metallib` at run time and dies with "Failed to load the default
+     metallib" without it — so the app has to carry the bundle SwiftPM builds.
+     Declared here and never in the base: a phone build must not carry Metal
+     shaders for an engine it does not compile, and a platform file cannot
+     remove what the base declares. The path is a BUILD OUTPUT, written by the
+     voices crate's `build.rs`, so a `tauri build` that somehow ran before it
+     fails on a missing resource rather than producing an app that cannot
+     speak. */
+  'tauri.macos.conf.json': ['crates/tauri-plugin-voices/swift/QwenKit/.build/release/mlx-swift_Cmlx.bundle'],
+}
 
 describe('what the bundle carries', () => {
   /* THE NOTICES ARE EVERYONE'S. Stated so that "mobile carries no extra
@@ -45,11 +67,11 @@ describe('what the bundle carries', () => {
      the deleted runtime was the only one there has ever been — belongs in the
      platform configs that want it, and this case is what notices one arriving
      in the base by habit. */
-  it('declares nothing but the notices, anywhere', () => {
+  it('declares nothing it has not been told about, anywhere', () => {
     for (const name of EVERY_CONF) {
       const declared = Object.keys(conf(name).bundle?.resources ?? {})
       expect(declared, `${name} declares a resource this test has not been told about`).toEqual(
-        name === 'tauri.conf.json' ? ['../THIRD-PARTY-NOTICES.md'] : [],
+        ALLOWED[name] ?? [],
       )
     }
   })

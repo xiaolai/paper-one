@@ -206,7 +206,8 @@ export async function tauriAudiobook(
   /**
    * The installed packs, so an engine-qualified voice can be resolved to the
    * pack that holds it. Empty in a build with no voices capability, where
-   * every render goes to `narrate_render` as it always did.
+   * empty in a build with no voices capability, where an export has no voice
+   * to render on at all and refuses.
    *
    * ⚠️ **THE STORED NAME CARRIES THE FAMILY, AND THE COMMAND WANTS THE PACK
    * ID.** They differ deliberately: a family outlives a re-cut pack, which is
@@ -237,21 +238,27 @@ export async function tauriAudiobook(
 
   return {
     /**
-     * ⚠️ **THE VOICE'S OWN SHAPE IS WHAT ROUTES THIS**, and it is the same
-     * string the reading stores, so one choice serves both. An
-     * engine-qualified name (`kokoro:af_heart`) is a downloaded pack; anything
-     * else is a Web Speech identifier and goes to `narrate_render` over
-     * AVSpeechSynthesizer, which is unchanged.
+     * ⚠️ **ONLY A DOWNLOADED VOICE CAN RENDER A BOOK.** `narrate_render` over
+     * AVSpeechSynthesizer was deleted in phase 30: every voice it reached on a
+     * Mac is below the floor the reading refuses, so it could not produce a
+     * file anybody would want. The voice's own shape is what says whether this
+     * is one — the same string the reading stores, so one choice serves both.
      *
-     * Either way the file is the one WAV shape `narrate/wav.rs` accepts, and
+     * The file is the one WAV shape `narrate/wav.rs` accepts, and
      * `narrate_package` — the muxer, `afconvert`, the chapter track and both
-     * readers' checks — reads it without knowing which engine wrote it.
+     * readers' checks — reads it unchanged.
      */
     render: async (job) => {
       const named = unqualify(job.voice)
       if (!named) {
-        await invoke('narrate_render', { ...job })
-        return
+        /* ⚠️ THERE IS NO LONGER ANYWHERE ELSE TO SEND IT. `narrate_render`
+         * over AVSpeechSynthesizer was deleted in phase 30: every voice it
+         * could reach on a Mac is below the floor the reading refuses, so it
+         * could not produce a file anybody would want. A job that arrives with
+         * a platform identifier is a caller that has not asked the packs, and
+         * it is refused by name rather than rendered in a voice the reading
+         * would not use. */
+        throw new Error(`${job.voice} is not a downloaded voice, and an audiobook is rendered on one`)
       }
       await invoke('plugin:voices|voices_render_file', {
         pack: packs.find((pack) => pack.family === named.family)?.id ?? named.family,

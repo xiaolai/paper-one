@@ -174,25 +174,6 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSResponder"] }
-# Rendering a book to audio — `src/narrate/apple.rs`. Web Speech has no
-# audio-capture API at all, so an audiobook cannot be built on the engine the
-# reader hears; `AVSpeechSynthesizer.writeUtterance:toBufferCallback:toMarkerCallback:`
-# is the same voices with the samples and the word markers handed back.
-#
-# `objc2`, `objc2-foundation` and `block2` are ALREADY IN THE TREE beneath tao,
-# wry and objc2-app-kit, so naming them declares what is there rather than
-# adding to it — the argument the note above makes for objc2-app-kit itself.
-# `objc2-avf-audio` and the `objc2-core-audio-types` it pulls are the two that
-# are genuinely new.
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSValue", "NSRange"] }
-block2 = "0.6"
-objc2-avf-audio = { version = "0.3", features = [
-    "AVSpeechSynthesis",
-    "AVAudioBuffer",
-    "AVAudioFormat",
-    "block2",
-] }
 
 [features]
 default = ["desktop"]

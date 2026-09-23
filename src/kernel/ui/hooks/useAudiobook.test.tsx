@@ -8,8 +8,6 @@ import {
   type AudiobookDeps,
   type AudiobookSource,
 } from './useAudiobook'
-import { NO_GOOD_VOICE } from '../reader/voiceChoice'
-import type { VoiceFacts } from '../reader/voiceChoice'
 import type { AudiobookPlatform } from '../reader/audiobook'
 import type { VoicePack } from '../../core/ports'
 
@@ -59,13 +57,24 @@ beforeEach(() => {
 
 afterEach(cleanup)
 
-/* ABOVE THE FLOOR — see `voiceChoice.ts`. A compact voice, which is all a Mac's
-   WebView offers, is refused, and so is the export. */
-const VOICE: VoiceFacts = {
-  name: 'Zoe',
-  lang: 'en-US',
-  voiceURI: 'com.apple.voice.enhanced.en-US.Zoe',
-  localService: true,
+
+/**
+ * A pack that reads the harness's books, installed.
+ *
+ * ⚠️ **THE DEFAULT SINCE PHASE 30, AND IT HAS TO BE.** An export renders on a
+ * downloaded voice and on nothing else now, so a harness with no pack refuses
+ * every case before it reaches the behaviour it is about.
+ */
+const INSTALLED: VoicePack = {
+  id: 'english-kokoro',
+  name: 'English',
+  summary: '',
+  family: 'kokoro',
+  languages: ['en'],
+  bytes: 336_822_660,
+  minimumMemoryGb: 4,
+  voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+  installed: true,
 }
 
 function mount(over: Partial<AudiobookDeps> = {}) {
@@ -73,9 +82,7 @@ function mount(over: Partial<AudiobookDeps> = {}) {
   const say = vi.fn()
   const deps: AudiobookDeps = {
     available: true,
-    /* No pack, so every existing case still measures the platform voice and
-     * the floor exactly as it did. The pack cases below supply their own. */
-    packs: [],
+    packs: [INSTALLED],
     source: {
       title: 'A Measured Book',
       author: 'Paper',
@@ -85,7 +92,6 @@ function mount(over: Partial<AudiobookDeps> = {}) {
       skip: { notes: false },
       sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
     },
-    voices: [VOICE],
     chosen: {},
     rate: 1,
     say,
@@ -184,51 +190,67 @@ describe('a book laid out in fixed pages', () => {
 })
 
 describe('a book with no voice this app would choose', () => {
-  it('refuses a book whose only voices are below the floor — the Mac, as measured', async () => {
-    const compact = { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }
-    const { seen, say } = mount({ voices: [compact] })
+  /* ⚠️ **THESE USED TO BE ABOUT THE PLATFORM'S OWN VOICES AND THE FLOOR OVER
+   * THEM.** Phase 30 deleted `narrate_render` over AVSpeechSynthesizer —
+   * every voice it reached on a Mac is below that floor, so it could not
+   * produce a file anybody would want — and the only question now is whether a
+   * downloaded pack reads this book's language. Each refusal has to say what
+   * would fix it, or plainly say that nothing will. */
+
+  const ENGLISH_PACK: VoicePack = {
+    id: 'english-kokoro',
+    name: 'English',
+    summary: '',
+    family: 'kokoro',
+    languages: ['en'],
+    bytes: 336_822_660,
+    minimumMemoryGb: 4,
+    voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+    installed: false,
+  }
+
+  it('names the pack that would read it, and its size', async () => {
+    const { seen, say } = mount({ source: book(), packs: [ENGLISH_PACK] })
     await act(async () => {
-      seen[0]?.run()
+      await seen[0]?.run()
     })
-    expect(say).toHaveBeenCalledWith(NO_GOOD_VOICE)
+    expect(say).toHaveBeenCalledWith(expect.stringContaining('321 MB'))
+    expect(say).toHaveBeenCalledWith(expect.stringContaining('Settings'))
   })
 
-  it('refuses a remote voice, which is the privacy half of the same rule', async () => {
-    const { seen, say } = mount({ voices: [{ ...VOICE, localService: false }] })
-    await act(async () => {
-      seen[0]?.run()
-    })
-    expect(say).toHaveBeenCalledWith(NO_GOOD_VOICE)
-  })
-
-  it('says the voices have not arrived, rather than sending the reader to Settings', async () => {
-    /* An engine that has listed nothing yet: a render needs a voice named, and
-       there is nothing in Settings to name. */
-    const { seen, say } = mount({ voices: [] })
-    await act(async () => {
-      seen[0]?.run()
-    })
-    expect(say).toHaveBeenCalledWith('No voices are available yet — try again in a moment.')
-  })
-
-  it('asks for a voice to be named for a book that declares no language', async () => {
+  it('says plainly that nothing reads the language, where no pack does', async () => {
     const { seen, say } = mount({
-      source: {
-        title: 'An Unlabelled Book',
-        author: 'Paper',
-        lang: null,
-        toc: [],
-        fixedLayout: false,
-        skip: { notes: false },
-        sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
-      },
+      source: { ...book(), lang: 'is-IS' },
+      packs: [{ ...ENGLISH_PACK, installed: true }],
     })
     await act(async () => {
-      seen[0]?.run()
+      await seen[0]?.run()
+    })
+    expect(say).toHaveBeenCalledWith('No downloadable voice reads this book’s language yet.')
+  })
+
+  it('says a book that declares no language cannot be matched to one', async () => {
+    // A pack is chosen BY language, so there is nothing to choose from — and
+    // unlike the case above, this is about the book rather than the machine.
+    const { seen, say } = mount({
+      source: { ...book(), lang: null },
+      packs: [{ ...ENGLISH_PACK, installed: true }],
+    })
+    await act(async () => {
+      await seen[0]?.run()
     })
     expect(say).toHaveBeenCalledWith(
-      'This book does not say what language it is in — choose a voice for it in Settings first.',
+      'This book does not say what language it is in, so no voice can be chosen for it.',
     )
+  })
+
+  it('renders nothing at all when it refuses', async () => {
+    const { rendered } = engine()
+    const { seen } = mount({ source: book(), packs: [ENGLISH_PACK] })
+    await act(async () => {
+      await seen[0]?.run()
+    })
+    expect(rendered).toEqual([])
   })
 })
 
@@ -475,14 +497,16 @@ describe('an export that runs to the end', () => {
   })
 
   it('renders in the voice the reading would use, at the reader’s rate, into the book’s own name', async () => {
+    /* The voice is the engine-qualified name the reading stores, since phase
+     * 30: one choice serves the reading and the export alike. */
     const { rendered, packaged } = engine()
     const { seen } = mount({ source: book(), rate: 1.25 })
     await act(async () => {
       seen.at(-1)?.run()
     })
     expect(rendered).toEqual([
-      { text: 'The first chapter.', voice: VOICE.voiceURI, rate: 1.25, path: '/scratch/chapter-0.wav' },
-      { text: 'The second chapter.', voice: VOICE.voiceURI, rate: 1.25, path: '/scratch/chapter-2.wav' },
+      { text: 'The first chapter.', voice: 'kokoro:af_heart', rate: 1.25, path: '/scratch/chapter-0.wav' },
+      { text: 'The second chapter.', voice: 'kokoro:af_heart', rate: 1.25, path: '/scratch/chapter-2.wav' },
     ])
     expect(packaged).toEqual([
       {
@@ -796,35 +820,25 @@ describe('exporting on a downloaded voice', () => {
   })
 
   it('exports a book the platform floor would have refused outright', async () => {
-    /* ⚠️ THE CASE THAT MAKES THIS FEATURE EXIST. Before a pack, every voice on
-     * a Mac is below the floor and the export is simply off. */
-    const compact = { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }
+    /* ⚠️ THE CASE THAT MAKES THIS FEATURE EXIST. Before a pack, every voice a
+     * Mac offers is below the floor and the export is simply off. */
     const { rendered } = engine()
-    const { seen, say } = mount({ source: book(), voices: [compact], packs: [ENGLISH] })
-    await act(async () => {
-      await seen[0]?.run()
-    })
-    expect(say).not.toHaveBeenCalledWith(NO_GOOD_VOICE)
-    expect(rendered.length).toBeGreaterThan(0)
-  })
-
-  it('still uses the platform voice where no pack reads the language', async () => {
-    const { rendered } = engine()
-    const { seen } = mount({ source: book(), packs: [{ ...ENGLISH, languages: ['zh'] }] })
+    const { seen } = mount({ source: book(), packs: [ENGLISH] })
     await act(async () => {
       await seen[0]?.run()
     })
     expect(rendered.length).toBeGreaterThan(0)
-    expect(new Set(rendered.map((job) => job.voice))).toEqual(new Set([VOICE.voiceURI]))
   })
 
-  it('names the pack that would give a refused book a voice', async () => {
-    // Advice a reader can act on, where `NO_GOOD_VOICE` alone is a dead end.
-    const compact = { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }
-    const { seen, say } = mount({ source: book(), voices: [compact], packs: [{ ...ENGLISH, installed: false }] })
+  it('refuses where no pack reads the language, rather than falling back', async () => {
+    /* ⚠️ THERE IS NOWHERE TO FALL BACK TO. `narrate_render` is gone, and a
+     * platform voice would be one the reading itself refuses. */
+    const { rendered } = engine()
+    const { seen, say } = mount({ source: book(), packs: [{ ...ENGLISH, languages: ['zh'] }] })
     await act(async () => {
       await seen[0]?.run()
     })
-    expect(say).toHaveBeenCalledWith(expect.stringContaining('321 MB'))
+    expect(rendered).toEqual([])
+    expect(say).toHaveBeenCalledWith('No downloadable voice reads this book’s language yet.')
   })
 })

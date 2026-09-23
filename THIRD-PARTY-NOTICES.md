@@ -626,7 +626,7 @@ only one of those targets links is listed anyway — naming a crate a particular
 copy does not contain costs a reader a line, and omitting one it does contain is
 the thing the licence forbids.
 
-674 crates, 352 distinct licence and notice texts.
+671 crates, 352 distinct licence and notice texts.
 
 | Crate | Version | Licence |
 | --- | --- | --- |
@@ -959,10 +959,7 @@ the thing the licence forbids.
 | `objc2` | 0.6.4 | MIT |
 | `objc2-app-kit` | 0.2.2 | MIT |
 | `objc2-app-kit` | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
-| `objc2-audio-toolbox` | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
-| `objc2-avf-audio` | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | `objc2-cloud-kit` | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
-| `objc2-core-audio-types` | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | `objc2-core-data` | 0.2.2 | MIT |
 | `objc2-core-data` | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | `objc2-core-foundation` | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
@@ -1307,7 +1304,7 @@ the thing the licence forbids.
 
 ### Crates that declare terms and publish no licence text
 
-These 65 crates state an SPDX identifier in their manifest and ship no licence
+These 62 crates state an SPDX identifier in their manifest and ship no licence
 file of any kind. The standard text for each identifier they name is reproduced
 below, taken verbatim from the SPDX licence list, and the copyright holders are
 the crate’s own declared authors — the substitution `cargo-about` makes for
@@ -1345,10 +1342,7 @@ than inventing one.
 | `objc2` | 0.6.4 | MIT | `Mads Marquart <mads@marquart.dk>` |
 | `objc2-app-kit` | 0.2.2 | MIT | *the crate declares none* |
 | `objc2-app-kit` | 0.3.2 | Zlib OR Apache-2.0 OR MIT | *the crate declares none* |
-| `objc2-audio-toolbox` | 0.3.2 | Zlib OR Apache-2.0 OR MIT | *the crate declares none* |
-| `objc2-avf-audio` | 0.3.2 | Zlib OR Apache-2.0 OR MIT | *the crate declares none* |
 | `objc2-cloud-kit` | 0.3.2 | Zlib OR Apache-2.0 OR MIT | *the crate declares none* |
-| `objc2-core-audio-types` | 0.3.2 | Zlib OR Apache-2.0 OR MIT | *the crate declares none* |
 | `objc2-core-data` | 0.2.2 | MIT | *the crate declares none* |
 | `objc2-core-data` | 0.3.2 | Zlib OR Apache-2.0 OR MIT | *the crate declares none* |
 | `objc2-core-foundation` | 0.3.2 | Zlib OR Apache-2.0 OR MIT | *the crate declares none* |
@@ -1386,7 +1380,7 @@ than inventing one.
 
 #### Text 1 of 352
 
-Applies to 43 crates: `acto` 0.8.2, `binary-merge` 0.1.2, `crc-catalog` 2.5.0, `defmt-parser` 1.0.0, `dispatch2` 0.3.1, `document-features` 0.2.12, `enum-assoc` 1.4.0, `genawaiter-macro` 0.99.1, `genawaiter-proc-macro` 0.99.1, `inplace-vec-builder` 0.1.1, `iroh-base` 1.0.3, `iroh-dns` 1.0.3, `iroh-mdns-address-lookup` 0.4.0, `iroh-metrics-derive` 1.0.1, `irpc-derive` 0.17.0, `libappindicator-sys` 0.9.0, `n0-error-macros` 1.0.0, `netwatch` 0.19.1, `objc2-app-kit` 0.3.2, `objc2-audio-toolbox` 0.3.2, `objc2-avf-audio` 0.3.2, `objc2-cloud-kit` 0.3.2, `objc2-core-audio-types` 0.3.2, `objc2-core-data` 0.3.2, `objc2-core-foundation` 0.3.2, `objc2-core-graphics` 0.3.2, `objc2-core-image` 0.3.2, `objc2-core-text` 0.3.2, `objc2-core-video` 0.3.2, `objc2-core-wlan` 0.3.2, `objc2-exception-helper` 0.1.1, `objc2-io-surface` 0.3.2, `objc2-quartz-core` 0.3.2, `objc2-security` 0.3.2, `objc2-security-foundation` 0.3.2, `objc2-system-configuration` 0.3.2, `objc2-web-kit` 0.3.2, `portmapper` 0.19.1, `unic-char-property` 0.9.0, `unic-char-range` 0.9.0, `unic-common` 0.9.0, `unic-ucd-ident` 0.9.0, `unic-ucd-version` 0.9.0.
+Applies to 40 crates: `acto` 0.8.2, `binary-merge` 0.1.2, `crc-catalog` 2.5.0, `defmt-parser` 1.0.0, `dispatch2` 0.3.1, `document-features` 0.2.12, `enum-assoc` 1.4.0, `genawaiter-macro` 0.99.1, `genawaiter-proc-macro` 0.99.1, `inplace-vec-builder` 0.1.1, `iroh-base` 1.0.3, `iroh-dns` 1.0.3, `iroh-mdns-address-lookup` 0.4.0, `iroh-metrics-derive` 1.0.1, `irpc-derive` 0.17.0, `libappindicator-sys` 0.9.0, `n0-error-macros` 1.0.0, `netwatch` 0.19.1, `objc2-app-kit` 0.3.2, `objc2-cloud-kit` 0.3.2, `objc2-core-data` 0.3.2, `objc2-core-foundation` 0.3.2, `objc2-core-graphics` 0.3.2, `objc2-core-image` 0.3.2, `objc2-core-text` 0.3.2, `objc2-core-video` 0.3.2, `objc2-core-wlan` 0.3.2, `objc2-exception-helper` 0.1.1, `objc2-io-surface` 0.3.2, `objc2-quartz-core` 0.3.2, `objc2-security` 0.3.2, `objc2-security-foundation` 0.3.2, `objc2-system-configuration` 0.3.2, `objc2-web-kit` 0.3.2, `portmapper` 0.19.1, `unic-char-property` 0.9.0, `unic-char-range` 0.9.0, `unic-common` 0.9.0, `unic-ucd-ident` 0.9.0, `unic-ucd-version` 0.9.0.
 
 ```
 Apache License
@@ -1466,7 +1460,7 @@ limitations under the License.
 
 #### Text 2 of 352
 
-Applies to 62 crates: `acto` 0.8.2, `binary-merge` 0.1.2, `block2` 0.5.1, `block2` 0.6.2, `crc-catalog` 2.5.0, `defmt-parser` 1.0.0, `dispatch2` 0.3.1, `dlopen2` 0.8.2, `dlopen2_derive` 0.4.3, `enum-assoc` 1.4.0, `genawaiter` 0.99.1, `genawaiter-macro` 0.99.1, `genawaiter-proc-macro` 0.99.1, `inplace-vec-builder` 0.1.1, `iroh-base` 1.0.3, `iroh-dns` 1.0.3, `iroh-mdns-address-lookup` 0.4.0, `iroh-metrics-derive` 1.0.1, `irpc-derive` 0.17.0, `libappindicator-sys` 0.9.0, `n0-error-macros` 1.0.0, `netwatch` 0.19.1, `objc-sys` 0.3.5, `objc2` 0.5.2, `objc2` 0.6.4, `objc2-app-kit` 0.2.2, `objc2-app-kit` 0.3.2, `objc2-audio-toolbox` 0.3.2, `objc2-avf-audio` 0.3.2, `objc2-cloud-kit` 0.3.2, `objc2-core-audio-types` 0.3.2, `objc2-core-data` 0.2.2, `objc2-core-data` 0.3.2, `objc2-core-foundation` 0.3.2, `objc2-core-graphics` 0.3.2, `objc2-core-image` 0.2.2, `objc2-core-image` 0.3.2, `objc2-core-text` 0.3.2, `objc2-core-video` 0.3.2, `objc2-core-wlan` 0.3.2, `objc2-encode` 4.1.0, `objc2-exception-helper` 0.1.1, `objc2-foundation` 0.2.2, `objc2-foundation` 0.3.2, `objc2-io-surface` 0.3.2, `objc2-metal` 0.2.2, `objc2-quartz-core` 0.2.2, `objc2-quartz-core` 0.3.2, `objc2-security` 0.3.2, `objc2-security-foundation` 0.3.2, `objc2-system-configuration` 0.3.2, `objc2-web-kit` 0.2.2, `objc2-web-kit` 0.3.2, `portmapper` 0.19.1, `unic-char-property` 0.9.0, `unic-char-range` 0.9.0, `unic-common` 0.9.0, `unic-ucd-ident` 0.9.0, `unic-ucd-version` 0.9.0, `webview2-com` 0.38.2, `webview2-com-macros` 0.8.1, `webview2-com-sys` 0.38.2.
+Applies to 59 crates: `acto` 0.8.2, `binary-merge` 0.1.2, `block2` 0.5.1, `block2` 0.6.2, `crc-catalog` 2.5.0, `defmt-parser` 1.0.0, `dispatch2` 0.3.1, `dlopen2` 0.8.2, `dlopen2_derive` 0.4.3, `enum-assoc` 1.4.0, `genawaiter` 0.99.1, `genawaiter-macro` 0.99.1, `genawaiter-proc-macro` 0.99.1, `inplace-vec-builder` 0.1.1, `iroh-base` 1.0.3, `iroh-dns` 1.0.3, `iroh-mdns-address-lookup` 0.4.0, `iroh-metrics-derive` 1.0.1, `irpc-derive` 0.17.0, `libappindicator-sys` 0.9.0, `n0-error-macros` 1.0.0, `netwatch` 0.19.1, `objc-sys` 0.3.5, `objc2` 0.5.2, `objc2` 0.6.4, `objc2-app-kit` 0.2.2, `objc2-app-kit` 0.3.2, `objc2-cloud-kit` 0.3.2, `objc2-core-data` 0.2.2, `objc2-core-data` 0.3.2, `objc2-core-foundation` 0.3.2, `objc2-core-graphics` 0.3.2, `objc2-core-image` 0.2.2, `objc2-core-image` 0.3.2, `objc2-core-text` 0.3.2, `objc2-core-video` 0.3.2, `objc2-core-wlan` 0.3.2, `objc2-encode` 4.1.0, `objc2-exception-helper` 0.1.1, `objc2-foundation` 0.2.2, `objc2-foundation` 0.3.2, `objc2-io-surface` 0.3.2, `objc2-metal` 0.2.2, `objc2-quartz-core` 0.2.2, `objc2-quartz-core` 0.3.2, `objc2-security` 0.3.2, `objc2-security-foundation` 0.3.2, `objc2-system-configuration` 0.3.2, `objc2-web-kit` 0.2.2, `objc2-web-kit` 0.3.2, `portmapper` 0.19.1, `unic-char-property` 0.9.0, `unic-char-range` 0.9.0, `unic-common` 0.9.0, `unic-ucd-ident` 0.9.0, `unic-ucd-version` 0.9.0, `webview2-com` 0.38.2, `webview2-com-macros` 0.8.1, `webview2-com-sys` 0.38.2.
 
 ```
 MIT License
@@ -8708,7 +8702,7 @@ SOFTWARE.
 
 #### Text 92 of 352
 
-Applies to 20 crates: `dispatch2` 0.3.1, `objc2-app-kit` 0.3.2, `objc2-audio-toolbox` 0.3.2, `objc2-avf-audio` 0.3.2, `objc2-cloud-kit` 0.3.2, `objc2-core-audio-types` 0.3.2, `objc2-core-data` 0.3.2, `objc2-core-foundation` 0.3.2, `objc2-core-graphics` 0.3.2, `objc2-core-image` 0.3.2, `objc2-core-text` 0.3.2, `objc2-core-video` 0.3.2, `objc2-core-wlan` 0.3.2, `objc2-exception-helper` 0.1.1, `objc2-io-surface` 0.3.2, `objc2-quartz-core` 0.3.2, `objc2-security` 0.3.2, `objc2-security-foundation` 0.3.2, `objc2-system-configuration` 0.3.2, `objc2-web-kit` 0.3.2.
+Applies to 17 crates: `dispatch2` 0.3.1, `objc2-app-kit` 0.3.2, `objc2-cloud-kit` 0.3.2, `objc2-core-data` 0.3.2, `objc2-core-foundation` 0.3.2, `objc2-core-graphics` 0.3.2, `objc2-core-image` 0.3.2, `objc2-core-text` 0.3.2, `objc2-core-video` 0.3.2, `objc2-core-wlan` 0.3.2, `objc2-exception-helper` 0.1.1, `objc2-io-surface` 0.3.2, `objc2-quartz-core` 0.3.2, `objc2-security` 0.3.2, `objc2-security-foundation` 0.3.2, `objc2-system-configuration` 0.3.2, `objc2-web-kit` 0.3.2.
 
 ```
 zlib License

@@ -6,7 +6,6 @@ import { messageOf } from '../../core/messageOf'
 import type { SpeechSkipPrefs } from '../reader/speechSkip'
 import type { SectionTextWalk } from '../reader/session'
 import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
-import { NO_GOOD_VOICE, voiceFor, type VoiceFacts } from '../reader/voiceChoice'
 import { engineVoiceFor, missingPackNotice, qualify } from '../reader/engineVoice'
 import type { VoicePack } from '../../core/ports'
 import { documentLang } from '../reader/speech'
@@ -106,8 +105,15 @@ export interface AudiobookDeps {
   /** Present only where the engine is — see `narrate`'s platform gate. */
   readonly available: boolean
   readonly source: AudiobookSource | null
-  readonly voices: readonly VoiceFacts[]
-  /** The downloaded packs, which are asked before the platform's voices. */
+  /**
+   * The downloaded packs — the only voices an export can use.
+   *
+   * ⚠️ **THE PLATFORM'S LIST USED TO BE HERE TOO, AND IS NOT.** Phase 30
+   * deleted `narrate_render` over AVSpeechSynthesizer: every voice it reached
+   * on a Mac is below the floor the reading refuses, so it could not produce a
+   * file anybody would want. A book with no pack is refused, and told which
+   * pack would read it.
+   */
   readonly packs: readonly VoicePack[]
   readonly chosen: Readonly<Record<string, string>>
   readonly rate: number
@@ -128,7 +134,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
    * no test could tell from its absence. */
   const stop = useRef(false)
 
-  const { available, source, voices, packs, chosen, rate, say } = deps
+  const { available, source, packs, chosen, rate, say } = deps
 
   /**
    * ⚠️ **ONE LONG FUNCTION, AND THAT IS THE DECISION RATHER THAN THE DEBT.** An
@@ -208,30 +214,32 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
         const engineVoice = downloaded
           ? qualify(packs.find((pack) => pack.id === downloaded.packId)?.family ?? '', downloaded.voiceId)
           : null
-        const answer = engineVoice ? null : voiceFor(voices, source.lang, chosen)
-        if (answer !== null && answer.kind !== 'voice') {
-          /* THE REFUSALS THAT ARE ABOUT THE MACHINE rather than the book, each
-             saying what is true. `none` is the floor: no voice good enough
-             speaks the book's language, and a book is not rendered in a
-             low-quality one — the reading's rule, so the file never says it in
-             a voice the reading would have refused. `platform` is a book the
-             reading would leave to the platform's own voice, which a render
-             cannot do — it needs a voice named — and it is one of two things: an
-             engine that has listed nothing yet, which the reader cannot fix in
-             Settings, or a book that declares no language, which they can. */
+        /* ⚠️ **A DOWNLOADED VOICE IS THE ONLY ONE THAT CAN RENDER NOW.**
+         * `narrate_render` over AVSpeechSynthesizer was deleted in phase 30:
+         * every voice it reached on a Mac is below the floor the reading
+         * refuses, so it could not produce a file anybody would want. The
+         * platform's list is still consulted, but only to tell the two
+         * refusals apart — a book whose language no pack reads, and one this
+         * app would refuse to read at all. */
+        if (engineVoice === null) {
+          /* ⚠️ **THE REFUSALS SAY WHAT WOULD FIX THEM, AND THEY CHANGED SHAPE
+           * IN PHASE 30.** They used to be about the platform's own voices and
+           * the floor over them; with `narrate_render` deleted, the only
+           * question is whether a pack reads this book's language. Each answer
+           * is something a reader can act on, or plainly says it is not. */
+          const language = source.lang?.trim() ?? ''
           say(
-            answer.kind === 'none'
-              ? (missingPackNotice(packs, source.lang) ?? NO_GOOD_VOICE)
-              : voices.length === 0
-                ? 'No voices are available yet — try again in a moment.'
-                : 'This book does not say what language it is in — choose a voice for it in Settings first.',
+            language === ''
+              ? 'This book does not say what language it is in, so no voice can be chosen for it.'
+              : (missingPackNotice(packs, source.lang) ??
+                'No downloadable voice reads this book’s language yet.'),
           )
           return
         }
-        /* The engine-qualified name, or the platform voice's own identifier.
-         * `audiobookTauri` reads the shape and routes the render — the same
-         * string the reading stores, so one choice serves both. */
-        const voice = engineVoice ?? answer!.voice.voiceURI
+
+        /* The engine-qualified name — the same string the reading stores, so
+         * one choice serves both. */
+        const voice = engineVoice
 
         say('Reading the book…')
         /* THE STOP GOES IN, rather than being checked only on the way out. A long
@@ -306,7 +314,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
     /* NO `running` HERE. It is not read — the claim is `inFlight.current`, which
        is the whole point of that ref — so listing it only changed this callback's
        identity on every start and stop, for a value the body never looks at. */
-  }, [source, voices, chosen, rate, say])
+  }, [source, packs, chosen, rate, say])
 
   /**
    * ⚠️ **MEMOISED BECAUSE A CONSUMER HAS TO BE ABLE TO DEPEND ON IT.** A fresh

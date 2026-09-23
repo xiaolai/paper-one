@@ -759,7 +759,6 @@ export function App({
        palette entry follows the same platform the rest of the app reads. */
     available: platform === 'macos',
     source: audiobookSource,
-    voices,
     packs: voicePacks,
     chosen: state.readingVoice,
     rate: state.readingRate,
