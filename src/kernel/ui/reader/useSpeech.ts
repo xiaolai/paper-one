@@ -21,7 +21,7 @@ import {
 import { EngineSpeaker } from './engineSpeaker'
 import type { AudioHost } from './enginePlayer'
 import { engineVoiceFor } from './engineVoice'
-import { routedSpeaker } from './speakerRouting'
+import { routedSpeaker, type SpeakerLike } from './speakerRouting'
 import type { SpeechRequest, SpokenAudio, VoicePack } from '../../core/ports'
 import { resolveSegmenterLocale } from './wordSnap/classify'
 import { sentenceSpansOf } from './wordSnap/sentenceOf'
@@ -386,7 +386,12 @@ export function useSpeech(
     }
   }, [])
 
-  const speaker = useMemo(
+  /* TYPED AS `SpeakerLike`, WHICH IS WHAT THE READING ACTUALLY TALKS TO. The
+     inferred union `Speaker | SpeakerLike` has no `prepare` at all — the
+     platform speaker does not declare one — so the look-ahead below could not
+     be asked for even optionally. `Speaker` satisfies this interface; the
+     optional member is exactly the difference between them. */
+  const speaker = useMemo<SpeakerLike | null>(
     () => {
       if (!available) return null
 
@@ -562,11 +567,35 @@ export function useSpeech(
        * none. Removed here rather than in the boundary handler, because the case
        * is a sentence that produces no boundary at all. */
       removeSpokenWord(current.doc)
-      return speaker!.speak(
+      const began = speaker!.speak(
         current.spoken.text.slice(sentence.start, sentence.end),
         current.lang,
         prefsRef.current,
       )
+      /* ⚠️ **THE LOOK-AHEAD WAS BUILT AND NEVER ASKED FOR.** `EngineSpeaker`
+       * has had `prepare` since the speaker landed — render the next passage
+       * while this one is read, *"so the gap between them is a gap and not a
+       * wait"* — and `routedSpeaker` forwards it, and nothing called either.
+       * Measured in the running app on 2026-09-23 with the sentence gap at
+       * zero: a sentence boundary still costs about 2.3 s, most of it the next
+       * sentence's render. This is the one call that was missing.
+       *
+       * After `speak`, never before: `speak` stops both speakers and takes the
+       * prepared render for THIS sentence out of the cache, so preparing first
+       * would hand it the passage it is about to discard. And only when a
+       * reading actually began — a refusal means there is no next sentence to
+       * get ready for. */
+      if (began) {
+        const next = current.plan.sentences[at + 1]
+        if (next) {
+          speaker!.prepare?.(
+            current.spoken.text.slice(next.start, next.end),
+            current.lang,
+            prefsRef.current,
+          )
+        }
+      }
+      return began
     },
     // Stryker disable next-line ArrayDeclaration: `speaker` is memoised on values that never move, so this list and an empty one rebuild this callback equally often — never.
     [speaker],

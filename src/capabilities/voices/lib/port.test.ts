@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest'
-import { voicesPortOver } from './port'
+import { StopFailed, voicesPortOver } from './port'
 import type { VoicesWire, SpokenRow } from './wire'
 
 const PACK = {
@@ -162,8 +162,13 @@ describe('installing a pack', () => {
       }),
     )
     const cause = await refusalOf(port.install('english-kokoro', () => {}, control.signal))
-    expect(cause).toBeInstanceOf(Error)
+    expect(cause).toBeInstanceOf(StopFailed)
     expect((cause as Error).message).toMatch(/could not stop it/u)
+    /* A TYPE and not a sentence: the pane says "Download stopped. Nothing was
+       left half-installed." for every aborted install, and this is the one case
+       where that is false. Matching on the message would hold until somebody
+       edited it. */
+    expect((cause as Error).message).toMatch(/could not be stopped/u)
   })
 })
 

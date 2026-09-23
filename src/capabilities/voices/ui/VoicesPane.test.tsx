@@ -3,6 +3,7 @@ import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { STOPPED, VoicesPane, arrivedOf, languagesOf, progressLine, sizeOf } from './VoicesPane'
 import type { InstallProgress, SpeechEnginePort, SpokenAudio, VoicePack } from '../../../kernel'
+import { StopFailed } from '../lib/port'
 
 afterEach(cleanup)
 
@@ -194,6 +195,59 @@ describe('the pane', () => {
     expect(seen?.aborted).toBe(true)
     // A stop is the reader's own doing, so it does not read as a failure.
     expect(screen.getByText(STOPPED)).toBeTruthy()
+  })
+
+  it('says a stop that FAILED, rather than reporting nothing was left behind', async () => {
+    /* ⚠️ An aborted signal says the reader ASKED to stop, not that it worked. A
+       refused stop leaves the download running to completion, and "Nothing was
+       left half-installed" over that is the one sentence in this pane that
+       would be false. */
+    const port = portOver([pack()], {
+      install: async (_id, _onProgress, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => reject(new StopFailed('the download could not be stopped: the plugin refused')),
+            { once: true },
+          )
+        }),
+    })
+    await show(port)
+    act(() => screen.getByRole('button', { name: 'Download' }).click())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    act(() => screen.getByRole('button', { name: 'Stop' }).click())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByText(STOPPED)).toBeNull()
+    expect(screen.getByText(/could not be stopped/)).toBeTruthy()
+  })
+
+  it('keeps the rows, and the Stop control, when a poll fails mid-download', async () => {
+    /* ⚠️ A single failed poll used to replace the whole pane — the rows, the
+       progress line and the only control that could stop a 2.3 GB download —
+       and put them back a few seconds later. */
+    let answers = 0
+    const port = portOver([pack()], {
+      catalogue: async () => {
+        answers += 1
+        if (answers > 1) throw new Error('the plugin did not answer')
+        return [pack()]
+      },
+      install: async () => new Promise(() => {}),
+    })
+    await show(port)
+    act(() => screen.getByRole('button', { name: 'Download' }).click())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    // The install's own refresh is the failing read.
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy()
   })
 
   it('says the plugin is not answering rather than showing an empty shelf', async () => {

@@ -32,11 +32,18 @@ import { VoicesPane } from './ui/VoicesPane'
 /**
  * The port the Settings pane draws from.
  *
- * ⚠️ **ONE PORT, MADE ONCE, AND NOT THE ONE `start` BINDS.** The pane can be
- * opened before a reading has ever begun and after the composition has been
- * torn down, so it cannot reach through the kernel's slot — which is null in
- * both cases. A module-level port is what every other capability's settings
- * section does for the same reason, and it costs one closure.
+ * ⚠️ **ONE PORT, MADE ONCE, AND NOT THE ONE `start` BINDS.** The pane outlives
+ * the composition: it can be drawn after a teardown, when the kernel's slot is
+ * null, and a Settings section that answered "no voices" because the app was
+ * being rebuilt would be a pane that empties itself for no reason a reader can
+ * see. A module-level port is what every other capability's settings section
+ * does for the same reason, and it costs one closure.
+ *
+ * ⚠️ **THIS ALSO SAID THE SLOT IS NULL "before a reading has ever begun", AND
+ * IT IS NOT.** `start` binds it during composition, which completes before
+ * anything is mounted — so that half of the reason was never true, and a
+ * reason with a false half is one somebody removes the whole of. Found by the
+ * 2026-09-23 audit.
  */
 let pane: SpeechEnginePort | null = null
 const panePort = (): SpeechEnginePort => (pane ??= voicesPortOver())

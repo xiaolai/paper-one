@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CAPABILITY_UI as ui, messageOf, packArrived, packSize, type InstallProgress, type VoicePack } from '../../../kernel'
 import type { SpeechEnginePort } from '../../../kernel'
+import { StopFailed } from '../lib/port'
 
 /**
  * Settings → **Voices**: the packs a reader can download, and the ones they have.
@@ -122,8 +123,15 @@ export function VoicesPane({ port }: { readonly port: SpeechEnginePort }) {
         /* ⚠️ NAMED, NEVER SWALLOWED. A refused digest, a stopped download and a
          * full disk all end here, and a row that simply goes back to "Download"
          * tells a reader their tap did nothing. A stop is the reader's own
-         * doing, so it says so rather than reading as a failure. */
-        const why = controller.signal.aborted ? STOPPED : messageOf(cause)
+         * doing, so it says so rather than reading as a failure.
+         *
+         * ⚠️ **EXCEPT WHEN THE STOP ITSELF FAILED**, which the aborted signal
+         * cannot tell you: it says the reader ASKED, not that it worked. A
+         * refused stop leaves the download running to completion, and saying
+         * *"Nothing was left half-installed"* over that is the one sentence
+         * here that would be false. `StopFailed` is the port's own answer for
+         * it, a type rather than a message so an edit cannot break the test. */
+        const why = cause instanceof StopFailed ? messageOf(cause) : controller.signal.aborted ? STOPPED : messageOf(cause)
         setStates((was) => ({ ...was, [pack.id]: { progress: null, error: why } }))
       }
       stopping.current.delete(pack.id)

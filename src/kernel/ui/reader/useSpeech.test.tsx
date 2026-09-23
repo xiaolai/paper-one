@@ -1379,6 +1379,43 @@ describe('reading on a downloaded voice', () => {
     page.remove()
   })
 
+  it('renders the NEXT sentence while this one is being read', async () => {
+    /* ⚠️ **THE LOOK-AHEAD EXISTED AND NOTHING ASKED FOR IT.** `EngineSpeaker`
+       has had `prepare` since it landed — *"so the gap between them is a gap
+       and not a wait"* — and `routedSpeaker` forwards it, and no production
+       caller ever called either. Measured in the running app on 2026-09-23
+       with the sentence gap at zero, a boundary still cost about 2.3 s, most of
+       it the next sentence's render. This case is what keeps that wired. */
+    const { engine, asked } = downloaded([ENGLISH])
+    const page = section('Hello there. And then this. And a third.', 'en')
+    const { speech, unmount } = mount(page.doc, { engine })
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    /* The spans carry their trailing space — a sentence ends where the next
+       one begins — so these are the exact strings the engine is handed. */
+    expect(asked, 'the second sentence is asked for before it is needed').toEqual([
+      'Hello there. ',
+      'And then this. ',
+    ])
+    unmount()
+    page.remove()
+  })
+
+  it('asks for no look-ahead past the last sentence', async () => {
+    const { engine, asked } = downloaded([ENGLISH])
+    const page = section('Only one.', 'en')
+    const { speech, unmount } = mount(page.doc, { engine })
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(asked).toEqual(['Only one.'])
+    unmount()
+    page.remove()
+  })
+
   it('reads a book no pack can read through the platform', async () => {
     const { engine, asked } = downloaded([ENGLISH])
     const page = section('Bonjour.', 'fr')

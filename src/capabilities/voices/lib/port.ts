@@ -16,6 +16,20 @@ import type {
 import { asProgress, packOf, progressOf, spokenOf } from './rows'
 import { voicesWire, type VoicesWire } from './wire'
 
+/**
+ * A download the reader asked to stop, which did not stop.
+ *
+ * ⚠️ **A TYPE RATHER THAN A MESSAGE, BECAUSE THE CALLER HAS TO TELL IT FROM AN
+ * ORDINARY STOP.** The pane says *"Download stopped. Nothing was left
+ * half-installed."* whenever the signal aborted — which is right for the
+ * ordinary case and exactly wrong here, where the stop was refused and the
+ * download ran on to completion. Matching on the message would work until
+ * somebody edited it; the same reason `BlobFetchError` carries a `kind`.
+ */
+export class StopFailed extends Error {
+  readonly stopFailed = true
+}
+
 /** The port over a wire. */
 export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePort {
   return {
@@ -88,7 +102,11 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
        * reject, and the reader has already been told. So this is the case
        * where the stop failed and the download finished anyway: awaiting it
        * turns that into this call's own rejection, naming the real cause. */
-      if (stopping) await stopping
+      if (stopping) {
+        await (stopping as Promise<void>).catch((cause: unknown) => {
+          throw new StopFailed(`the download could not be stopped: ${errorText(cause)}`)
+        })
+      }
     },
 
     async remove(packId: string): Promise<void> {
@@ -109,4 +127,9 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
       await wire.release()
     },
   }
+}
+
+/** Whatever a rejection carries, as something a reader can read. */
+function errorText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause)
 }
