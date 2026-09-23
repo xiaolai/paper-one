@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { audible, durationMs, sampleCount, toFloats } from './pcm'
+import { audible, sampleCount, toFloats } from './pcm'
 
 /** 16-bit little-endian bytes for the given samples. */
 function bytes(...samples: number[]): Uint8Array {
@@ -56,22 +56,25 @@ describe('reading the samples', () => {
   })
 })
 
-describe('how long it lasts', () => {
-  it('is the sample count over the rate', () => {
-    expect(durationMs(bytes(...new Array(24_000).fill(0)), 24_000)).toBe(1000)
-    expect(durationMs(bytes(...new Array(12_000).fill(0)), 24_000)).toBe(500)
-  })
-
-  it('answers zero for a rate that cannot be one', () => {
-    // A rate of 0 would divide to Infinity, which reaches the interface as a
-    // progress bar that never moves and a timer that never fires.
-    expect(durationMs(bytes(1, 2, 3), 0)).toBe(0)
-    expect(durationMs(bytes(1, 2, 3), -1)).toBe(0)
-    expect(durationMs(bytes(1, 2, 3), Number.NaN)).toBe(0)
-  })
-})
-
 describe('whether it is audible at all', () => {
+  it('hears a tone whose period divides the old sampling stride', () => {
+    /* ⚠️ **THE DEFECT THIS FUNCTION WAS REWRITTEN FOR, 2026-09-23.** `audible`
+       took 512 evenly-spaced samples, and evenly spaced is the one arrangement
+       that can land on a periodic signal's zero crossings every time. At
+       `sampleRate / step` — 258.06 Hz for 48 000 samples at 24 kHz — a tone
+       peaking at 7 994 of 32 767 came back `false`, and the reader loses a
+       sentence that rendered perfectly. */
+    const count = 48_000
+    const rate = 24_000
+    const freq = rate / Math.max(1, Math.floor(count / 512))
+    const buf = new ArrayBuffer(count * 2)
+    const view = new DataView(buf)
+    for (let i = 0; i < count; i += 1) {
+      view.setInt16(i * 2, Math.round(0.244 * 32_767 * Math.sin((2 * Math.PI * freq * i) / rate)), true)
+    }
+    expect(audible(new Uint8Array(buf))).toBe(true)
+  })
+
   it('hears speech', () => {
     const speech = bytes(...new Array(48_000).fill(0).map((_, i) => Math.round(8000 * Math.sin(i / 8))))
     expect(audible(speech)).toBe(true)

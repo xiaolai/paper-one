@@ -40,12 +40,6 @@ export function toFloats(pcm: Uint8Array): Float32Array {
   return out
 }
 
-/** How long a block of samples lasts, in milliseconds. */
-export function durationMs(pcm: Uint8Array, sampleRate: number): number {
-  if (sampleRate <= 0 || !Number.isFinite(sampleRate)) return 0
-  return (sampleCount(pcm) / sampleRate) * 1000
-}
-
 /**
  * Whether a block is audible at all, or silence of the right length.
  *
@@ -56,16 +50,27 @@ export function durationMs(pcm: Uint8Array, sampleRate: number): number {
  * refuse an empty render on their own side; this is the check at the other end
  * of the wire, where a transfer that dropped its payload arrives.
  *
- * Sampled rather than scanned: a minute of audio is a million samples, and a
- * render that is silent is silent everywhere. 512 evenly-spaced samples find
- * any real speech, and cost nothing on the main thread.
+ * ⚠️ **IT SAMPLED ON A FIXED STRIDE, AND A FIXED STRIDE ALIASES.** The old
+ * version took 512 evenly-spaced samples and said they *"find any real
+ * speech"*. Evenly spaced is exactly the arrangement that can land on one
+ * phase of a periodic signal every time: REPRODUCED 2026-09-23, 48 000 samples
+ * of a 258.06 Hz tone — `sampleRate / step` — with a peak of 7 994 of 32 767
+ * came back `false`, and a perfectly good render is then thrown away as
+ * silence. A synthesised vowel is close enough to periodic for that to matter,
+ * and the failure is silent in both directions: the reader loses a sentence
+ * and nothing says why.
+ *
+ * Every sample, with an early exit. The common case is a HEALTHY render, which
+ * returns on the first sample past the leading pad — a few thousand
+ * iterations. The full scan happens only for audio that really is silent,
+ * which is the case where the cost does not matter: 1.4 million `getInt16`
+ * calls is about a millisecond.
  */
 export function audible(pcm: Uint8Array, threshold = 32): boolean {
   const count = sampleCount(pcm)
   if (count === 0) return false
   const view = new DataView(pcm.buffer, pcm.byteOffset, count * 2)
-  const step = Math.max(1, Math.floor(count / 512))
-  for (let i = 0; i < count; i += step) {
+  for (let i = 0; i < count; i += 1) {
     if (Math.abs(view.getInt16(i * 2, true)) > threshold) return true
   }
   return false
