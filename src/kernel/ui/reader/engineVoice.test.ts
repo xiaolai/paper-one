@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { engineVoiceFor, missingPackNotice, packsFor, qualify, unqualify, withinMemory } from './engineVoice'
+import {
+  engineVoiceFor,
+  installedPacksFor,
+  missingPackNotice,
+  packVoiceOf,
+  packsFor,
+  qualify,
+  unqualify,
+  withinMemory,
+} from './engineVoice'
 import type { VoicePack } from '../../core/ports'
 
 function pack(over: Partial<VoicePack> = {}): VoicePack {
@@ -189,5 +198,31 @@ describe('telling a reader what would give this book a voice', () => {
     // been for every language.
     expect(missingPackNotice([pack({ installed: false })], 'fr')).toBeNull()
     expect(missingPackNotice([], 'en')).toBeNull()
+  })
+})
+
+describe('naming a chosen voice back to a reader', () => {
+  it('answers the pack a language can be read by, only once it is here', () => {
+    // ONE RULE for the reading and for the picker. A picker with its own filter
+    // is a second copy of it, and the first symptom of the two disagreeing is a
+    // list whose selected row is not the voice being heard.
+    expect(installedPacksFor([pack(), CHINESE], 'en')).toEqual([pack()])
+    expect(installedPacksFor([pack({ installed: false })], 'en')).toEqual([])
+    expect(installedPacksFor([pack()], 'fr')).toEqual([])
+  })
+
+  it('finds the catalogue rows an engine voice names', () => {
+    // ⚠️ `engineVoiceFor` answers two ids, which is the right shape to SEND and
+    // the wrong one to SHOW. Without this the Voice row could not say "Heart".
+    const found = packVoiceOf([pack(), CHINESE], { packId: 'english-kokoro', voiceId: 'bf_emma' })
+    expect(found?.pack.name).toBe('English')
+    expect(found?.voice.name).toBe('Emma')
+  })
+
+  it('answers nothing for a pack or a voice that is not in the catalogue', () => {
+    // A pack removed between the reading resolving a voice and the picker
+    // drawing it: the row falls back rather than naming something that is gone.
+    expect(packVoiceOf([pack()], { packId: 'chinese-qwen', voiceId: 'Vivian' })).toBeNull()
+    expect(packVoiceOf([pack()], { packId: 'english-kokoro', voiceId: 'nobody' })).toBeNull()
   })
 })

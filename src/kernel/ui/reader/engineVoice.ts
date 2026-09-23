@@ -15,7 +15,7 @@
  * platform voice the floor admits, or nothing.
  */
 
-import type { VoicePack } from '../../core/ports'
+import type { VoiceChoice, VoicePack } from '../../core/ports'
 import { primaryOf } from './voiceChoice'
 
 /** A voice inside an installed pack. */
@@ -72,6 +72,19 @@ export function packsFor(packs: readonly VoicePack[], lang: string | null): read
 }
 
 /**
+ * The packs that can read a language AND are here.
+ *
+ * ONE RULE, because two callers ask it: the reading, through [`engineVoiceFor`],
+ * and the Voice picker, which must offer exactly the voices the reading would
+ * accept. A picker with its own filter is a second copy of this rule, and the
+ * first symptom of the two disagreeing is a list whose selected row is not the
+ * voice being heard — the drift `voiceGroups` records for the platform's side.
+ */
+export function installedPacksFor(packs: readonly VoicePack[], lang: string | null): readonly VoicePack[] {
+  return packsFor(packs, lang).filter((pack) => pack.installed)
+}
+
+/**
  * Whether this Mac may be offered a pack at all.
  *
  * A machine under the pack's floor is not offered it, rather than allowed to
@@ -96,7 +109,7 @@ export function engineVoiceFor(
   lang: string | null,
   chosen: Readonly<Record<string, string>> = {},
 ): EngineVoice | null {
-  const usable = packsFor(packs, lang).filter((pack) => pack.installed)
+  const usable = installedPacksFor(packs, lang)
   if (usable.length === 0) return null
 
   const stored = lang === null ? undefined : chosen[primaryOf(lang)]
@@ -118,6 +131,25 @@ export function engineVoiceFor(
     if (voice) return { packId: pack.id, voiceId: voice.id }
   }
   return null
+}
+
+/**
+ * The catalogue rows an [`EngineVoice`] names, or `null` when it names none.
+ *
+ * ⚠️ **A READER HAS TO BE TOLD THE VOICE'S NAME, AND AN `EngineVoice` IS TWO
+ * IDS.** `engineVoiceFor` answers what the RENDER PORT needs — a pack id and a
+ * voice id — which is the right shape to send and the wrong one to show. This
+ * is the lookup back, kept beside it so the picker names the voice the reading
+ * resolved rather than resolving a second time and possibly differently.
+ */
+export function packVoiceOf(
+  packs: readonly VoicePack[],
+  engine: EngineVoice,
+): { readonly pack: VoicePack; readonly voice: VoiceChoice } | null {
+  const pack = packs.find((candidate) => candidate.id === engine.packId)
+  if (!pack) return null
+  const voice = pack.voices.find((candidate) => candidate.id === engine.voiceId)
+  return voice ? { pack, voice } : null
 }
 
 /**

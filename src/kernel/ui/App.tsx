@@ -355,9 +355,17 @@ export function App({
      place, so the picker offers voices for the language the reading will ask
      for rather than for the interface's. */
   const voices = useVoices()
+  /* ⚠️ **THE CATALOGUE IS PART OF THIS, AND ITS ABSENCE WAS A ROW THAT LIED.**
+     Measured in the running app on 2026-09-23: with the English pack installed
+     the Voice row said *"None — no high-quality voice is available here"* while
+     Heart was reading the book. The picker asked only `voiceFor`, which refuses
+     every voice a Mac's WebView offers — so on a Mac it answered `none` however
+     many packs had been downloaded. Passed live rather than as a snapshot, for
+     the reason `speakerRouting` gives: a reader who downloads a pack mid-chapter
+     should see it in the picker without relaunching. */
   const narration = useMemo(
-    () => ({ lang: book.doc ? documentLang(book.doc) : null, voices }),
-    [book.doc, voices],
+    () => ({ lang: book.doc ? documentLang(book.doc) : null, voices, packs: voicePacks }),
+    [book.doc, voices, voicePacks],
   )
   /* ⚠️ **THE SAME ANSWER THE SPEAKER WILL REACH, ASKED BEFORE THE PRESS.** The
      floor refuses every voice a Mac's WebView offers (see `voiceChoice.ts`), so

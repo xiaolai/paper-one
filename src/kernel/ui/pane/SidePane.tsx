@@ -33,6 +33,7 @@ import type { CopyOutcome } from '../clipboard'
 import { Settings, type SettingsProps } from './Settings'
 import styles from './SidePane.module.css'
 import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
+import type { VoicePack } from '../../core/ports'
 import type { VoiceFacts } from '../reader/voiceChoice'
 
 /**
@@ -202,13 +203,17 @@ export interface SidePaneProps {
    * What the Voice group needs from the HOST, as opposed to from app state.
    *
    * The reader's chosen voice and speed are `state`'s and are read here; the
-   * open book's language and the engine's voice list are facts about the
-   * machine and the book, which only the host can answer. Absent on a host with
-   * no reader — the group is not drawn, which is the same convention as
-   * `markControls` and the Page row's setters.
+   * open book's language, the engine's voice list and the DOWNLOADED packs are
+   * facts about the machine and the book, which only the host can answer.
+   * Absent on a host with no reader — the group is not drawn, which is the same
+   * convention as `markControls` and the Page row's setters.
    */
   narration?:
-    | { readonly lang: string | null; readonly voices: readonly VoiceFacts[] }
+    | {
+        readonly lang: string | null
+        readonly voices: readonly VoiceFacts[]
+        readonly packs: readonly VoicePack[]
+      }
     | undefined
 }
 
