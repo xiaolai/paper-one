@@ -30,7 +30,6 @@ import type { ScreenContribution } from '../../core/capability'
 import { CONTRIBUTION_ICONS } from '../contributionIcon'
 import type { AppDispatch, AppState, KernelPaneId } from '../state'
 import type { Speech } from '../reader/useSpeech'
-import { NO_GOOD_VOICE } from '../reader/voiceChoice'
 import styles from './TitleBar.module.css'
 
 /** Traffic-light fills, in AppKit's order. Preview only — see below. */
@@ -70,11 +69,15 @@ export interface TitleBarProps {
   /** Reading aloud — the Listen control drives this directly. */
   speech: Speech
   /**
-   * True when no voice good enough can read the book on screen — `voiceFor`
-   * answered `none`. The control is then disabled and says why, rather than
-   * starting a reading the speaker refuses at its first sentence.
+   * Why no voice can read the book on screen, or `null` when one can.
+   *
+   * ⚠️ **THE REASON AND THE REFUSAL ARE ONE VALUE**, so a control cannot be
+   * disabled with nothing to say — which is what a boolean beside a message
+   * allows, and what a reader meets as a greyed-out button and no explanation.
+   * The sentence differs by what would fix it: a pack that can be downloaded
+   * names itself and its size, and a language nothing can read says so.
    */
-  listenRefused: boolean
+  listenRefusal: string | null
   /** False with no book open: there is nothing to read aloud. */
   hasBook: boolean
   /**
@@ -134,7 +137,7 @@ export function TitleBar({
   bookTitle,
   bookSubtitle,
   speech,
-  listenRefused,
+  listenRefusal,
   hasBook,
   screens,
 }: TitleBarProps) {
@@ -353,14 +356,14 @@ export function TitleBar({
                 title={
                   !speech.available
                     ? 'Listen — this build has no speech engine'
-                    : listenRefused
-                      ? `Listen — ${NO_GOOD_VOICE}`
+                    : listenRefusal !== null
+                      ? `Listen — ${listenRefusal}`
                       : 'Read this chapter aloud'
                 }
                 aria-label="Read aloud"
                 aria-pressed={false}
-                disabled={!speech.available || !hasBook || listenRefused}
-                data-disabled={!speech.available || !hasBook || listenRefused}
+                disabled={!speech.available || !hasBook || listenRefusal !== null}
+                data-disabled={!speech.available || !hasBook || listenRefusal !== null}
                 onClick={() => speech.start()}
               >
                 <AudioLines size={ICON.control} strokeWidth={ICON.stroke} />

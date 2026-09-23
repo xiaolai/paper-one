@@ -467,6 +467,16 @@ const REVIEWED_FOOTPRINT = [
    *    pack is not a book, and removing one can never name a reader's library.
    */
   'voices/lib/port.ts wire.remove(packId)',
+
+  /* -- voices/ui/VoicesPane.tsx -- the Remove button.
+   *
+   * The same call one layer up, and listed for the same reason: the scan
+   * matches a `remove`-shaped call, and this one goes through the kernel PORT
+   * — `services.fs` is never reached and no path is built in TypeScript. What
+   * it can name is bounded by the entry the reader pressed, and every id in
+   * that list came from the embedded catalogue. The review of what the call
+   * beneath it reaches is on the entry above. */
+  'voices/ui/VoicesPane.tsx port.remove(pack.id)',
 ].sort()
 
 /** Path constants the footprint above leans on: each must resolve under the

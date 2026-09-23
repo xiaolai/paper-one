@@ -71,7 +71,9 @@ import { parseBook } from './reader/parseBook'
 import { chapterSteps } from './tocOrder'
 import { useSpeech } from './reader/useSpeech'
 import { documentLang } from './reader/speech'
-import { voiceFor } from './reader/voiceChoice'
+import { NO_GOOD_VOICE, voiceFor } from './reader/voiceChoice'
+import { engineVoiceFor, missingPackNotice } from './reader/engineVoice'
+import { useVoicePacks } from './hooks/useVoicePacks'
 import { useVoices } from './hooks/useVoices'
 import { audiobookSourceOf, useAudiobook } from './hooks/useAudiobook'
 
@@ -216,6 +218,11 @@ export function App({
    * hook, which explains why there is deliberately no control for it. */
   const reducedMotion = usePrefersReducedMotion()
   const [state, dispatch] = useAppState(services.settings, composition.panes)
+  /* The downloadable voices: what this device has, and the engine the reading
+   * uses when a pack can read the book on screen. Empty and null in a build
+   * with no voices capability — a phone, a browser client — where everything
+   * below reads exactly as it did before. */
+  const { packs: voicePacks, engine: voiceEngine } = useVoicePacks(services)
   /* ⚠️ IT SUBSCRIBES TO THE FLAG, NOT TO THE VALUES, and that is the whole
      point. `persistent` flips the first time the store's write is REFUSED, and
      that refusal happens after `values` has already changed and been published
@@ -341,7 +348,7 @@ export function App({
     }),
     [book.next, book.goTo, book.toc, book.position.chapterHref],
   )
-  const speech = useSpeech(book.doc, speechPaging, speechPrefs)
+  const speech = useSpeech(book.doc, speechPaging, speechPrefs, voiceEngine)
   /* What the Voice group in Settings needs that app state cannot answer: the
      language of the book on screen, and what this machine can actually say.
      `documentLang` is the same fact the utterance is given, read from the same
@@ -358,7 +365,26 @@ export function App({
      stops at its first sentence. Same function, same list, same language and
      same stored choice as `Speaker.speak` — so the control cannot promise a
      reading the speaker then refuses, or refuse one it would have read. */
-  const listenRefused = voiceFor(narration.voices, narration.lang, state.readingVoice).kind === 'none'
+  /**
+   * Why this book cannot be read aloud, or `null` when it can.
+   *
+   * ⚠️ **THE DOWNLOADED VOICES ARE ASKED FIRST, AND THE FLOOR IS UNCHANGED
+   * BEHIND THEM.** `voiceFor` refuses every platform voice below Enhanced
+   * wherever the tier is legible, which on a Mac is all of them; a pack is not
+   * subject to that and does not need to be, since its voices are in the
+   * catalogue because the owner listened to them. So a book a pack can read is
+   * never refused, whatever the platform offers.
+   *
+   * And where nothing can read it, the sentence says what would: a pack that
+   * exists for the language names itself and its size. That is advice a reader
+   * can act on, which *"install a system voice"* would not have been — macOS
+   * withholds the good ones from this app however they are installed.
+   */
+  const listenRefusal = useMemo((): string | null => {
+    if (engineVoiceFor(voicePacks, narration.lang, state.readingVoice)) return null
+    if (voiceFor(narration.voices, narration.lang, state.readingVoice).kind !== 'none') return null
+    return missingPackNotice(voicePacks, narration.lang) ?? NO_GOOD_VOICE
+  }, [voicePacks, narration.voices, narration.lang, state.readingVoice])
 
   /* One file picker for the window. The reader's empty state, the palette and
    * the switcher all ask for books, and one input serves all three rather than
@@ -734,6 +760,7 @@ export function App({
     available: platform === 'macos',
     source: audiobookSource,
     voices,
+    packs: voicePacks,
     chosen: state.readingVoice,
     rate: state.readingRate,
     say: setImportNotice,
@@ -2462,7 +2489,7 @@ export function App({
             bookTitle={title}
             bookSubtitle={subtitle}
             speech={speech}
-            listenRefused={listenRefused}
+            listenRefusal={listenRefusal}
             hasBook={book.source !== null}
             screens={composition.screens}
           />
