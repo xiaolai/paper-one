@@ -66,11 +66,6 @@ export const SEARCHING: LibraryState = { kind: 'searching' }
 /** Nothing has been asked yet — the panel's first state. */
 export const NOTHING_ASKED: LibraryResult = { needle: '', state: IDLE }
 
-/** This needle is not one the library is being asked about. */
-export function idleAt(needle: string): LibraryResult {
-  return { needle, state: IDLE }
-}
-
 /** This needle has been asked and has not answered. */
 export function searchingAt(needle: string): LibraryResult {
   return { needle, state: SEARCHING }

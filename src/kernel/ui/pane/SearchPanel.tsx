@@ -6,7 +6,6 @@ import type { Book, SearchHit } from '../hooks/useBook'
 import {
   byBook,
   countLine,
-  idleAt,
   MAX_LIBRARY_HITS,
   NOTHING_ASKED,
   rejectedByQuery,
@@ -249,7 +248,20 @@ export function SearchPanel({
    * look as though it stopped the library query, and nothing would have. */
   useEffect(() => {
     if (!searchLibrary || scope !== 'library' || needle === '') {
-      setLibrary(idleAt(needle))
+      /* ⚠️ **NOTHING IS RESET HERE, AND THERE USED TO BE A `setLibrary(idleAt(…))`.**
+       * It and the `searchingAt` below were two pieces of code giving one
+       * answer: leave the library scope and come back with the needle
+       * unchanged, and EITHER of them alone stops the previous answer being
+       * drawn as current. So neither could be killed — each covered for the
+       * other, and the sweep reported both as survivors for ever. Measured by
+       * removing them one at a time: with either present the case passes, with
+       * both gone it fails.
+       *
+       * The one that stays is the one that says something — a search has
+       * STARTED for this needle. Leaving stale state behind on the way out is
+       * harmless: with no `searchLibrary`, or with the book as the scope, the
+       * library half is not rendered at all, and an empty needle returns before
+       * anything reads it. */
       return
     }
     const mine = {}
@@ -262,6 +274,12 @@ export function SearchPanel({
            * least 101" — the same reason the in-book loop stops one past. */
           const found = await searchLibrary(needle, MAX_LIBRARY_HITS + 1)
           if (libraryRun.current !== mine) return
+          /* Stryker disable next-line StringLiteral: by the time this value is
+             read, every other kind has already returned — idle, searching,
+             rejected and failed each have their own branch above — so the last
+             path reads `state.hits` and any third string renders identically.
+             Verified by hand: the mutant applied here leaves all 54 cases
+             green. */
           setLibrary({ needle, state: { kind: 'done', hits: found } })
         } catch (cause) {
           if (libraryRun.current !== mine) return
@@ -527,25 +545,26 @@ function LibraryResults({
           <div className={styles.resultAt}>{titleOf?.(bookId) ?? bookId}</div>
           {hits.map((hit, index) => (
             <button
-              /* Keyed by position as well as anchor. Within a group the book
+              /* Stryker disable next-line StringLiteral: measured 2026-09-25 —
+                 with every key in a group replaced by one constant, three rows
+                 still drew, still updated when the answer changed and still
+                 disappeared when it did. React warns about duplicate keys and
+                 calls the result undefined; it does not drop them here, so no
+                 test can kill this. Kept because "undefined behaviour happens
+                 to work today" is not a thing to build on.
+
+                 ⚠️ **AND THE DIRECTIVE HAS TO BE THE FIRST THING IN THE
+                 COMMENT.** It was written below this paragraph once and Stryker
+                 read the whole block as prose — the mutant came back in the
+                 next sweep, exactly as `AGENTS.md` says it would.
+
+                 Keyed by position as well as anchor. Within a group the book
                  is fixed and two passages in one section can share an offset
                  only if they ARE the same passage, so the anchor alone would
                  do; the position is what makes that true by construction
-                 rather than by argument.
-
-                 ⚠️ **AND THE CLAIM THAT USED TO STAND HERE — "React collapses
-                 duplicate keys to the last of them" — IS NOT WHAT REACT DOES.**
-                 Measured 2026-09-25: with every key in a group replaced by the
-                 same constant, three rows still drew, still updated when the
-                 answer changed, and still disappeared when it did. React warns
-                 about duplicate keys and calls the result undefined; it does
-                 not drop them here.
-
-                 Stryker disable next-line StringLiteral: that measurement is
-                 why. The mutant makes every key in a group identical and no
-                 observable behaviour changes, so no test can kill it — it is
-                 kept because "undefined behaviour happens to work today" is
-                 not a thing to build on, not because anything can see it. */
+                 rather than by argument. (The claim that used to stand here,
+                 that React "collapses duplicate keys to the last of them", is
+                 not what React does — see the measurement above.) */
               key={`${hit.sectionIndex}:${hit.offset}:${index}`}
               type="button"
               className={styles.result}

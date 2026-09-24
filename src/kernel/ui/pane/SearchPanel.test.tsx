@@ -885,3 +885,38 @@ describe('rows that share a book and a section survive a re-render', () => {
     expect(screen.queryByRole('button', { name: /the whale one/u })).toBeNull()
   })
 })
+
+describe('coming back to the library with the same question', () => {
+  it('shows it is searching again, not the answer from last time', async () => {
+    /* ⚠️ **THE ONE OF THE THREE `setLibrary` CALLS THAT IS OBSERVABLE.** Leave
+     * the scope and come back with the needle unchanged, and the held result's
+     * needle MATCHES — so `shownState` hands back the previous answer and the
+     * panel draws stale hits as though they were current, while a fresh query
+     * is still in flight underneath. Setting `searching` on the way in is what
+     * stops that, and nothing else does. */
+    let asked = 0
+    const gate: { resolve: ((hits: PassageHit[]) => void) | null } = { resolve: null }
+    const searchLibrary = () => {
+      asked += 1
+      if (asked === 1) return Promise.resolve([{ ...PASSAGE, quote: 'the first whale' }])
+      return new Promise<readonly PassageHit[]>((r) => {
+        gate.resolve = r as (hits: PassageHit[]) => void
+      })
+    }
+    render(<SearchPanel book={quiet()} searchLibrary={searchLibrary} />)
+    choose('Every book')
+    ask('whale')
+    await screen.findByRole('button', { name: /the first whale/u })
+
+    choose('This book')
+    choose('Every book')
+
+    /* The needle never changed, so the held answer is still "about" it. */
+    expect(screen.queryByRole('button', { name: /the first whale/u })).toBeNull()
+    expect(screen.getByText(/Searching/u)).toBeTruthy()
+
+    await vi.waitFor(() => expect(gate.resolve).not.toBeNull(), { timeout: DEBOUNCE_MS * 8 })
+    gate.resolve?.([{ ...PASSAGE, quote: 'the second whale' }])
+    await screen.findByRole('button', { name: /the second whale/u })
+  })
+})

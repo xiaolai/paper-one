@@ -3,7 +3,6 @@ import type { PassageHit } from '../../core/ports'
 import {
   byBook,
   countLine,
-  idleAt,
   IDLE,
   MAX_LIBRARY_HITS,
   NOTHING_ASKED,
@@ -136,10 +135,6 @@ describe('the states with nothing in them', () => {
    * directly, each is one assertion. */
   it('starts having asked nothing, at no needle', () => {
     expect(NOTHING_ASKED).toEqual({ needle: '', state: { kind: 'idle' } })
-  })
-
-  it('is idle for a needle the library is not being asked about', () => {
-    expect(idleAt('whale')).toEqual({ needle: 'whale', state: { kind: 'idle' } })
   })
 
   it('is searching for a needle that has been asked and not answered', () => {
