@@ -360,6 +360,20 @@ impl Store {
         if cleared == 0 {
             return Ok(0);
         }
+        /* ⚠️ **THE CHECKPOINT GOES TOO, OR THE BUTTON ONLY DELETES THE
+         * WARNING.** A PARTLY readable book keeps its `books` entry — that is
+         * what makes its good chapters searchable — so clearing the note alone
+         * left it `current` at that generation and freshness never offered it to
+         * another sweep. The warning vanished and the coverage stayed exactly as
+         * incomplete. Found by the verification pass of an independent audit,
+         * which is the one that catches a fix that half-lands.
+         *
+         * The POSTINGS are untouched: `put` replaces a book's sections when the
+         * re-extraction lands, so search keeps answering from what is there
+         * until there is something better. Only the claim of freshness goes. */
+        for book_id in self.state.notes.keys() {
+            self.state.books.remove(book_id);
+        }
         self.state.notes.clear();
         state::write(&self.layout.state_path, &self.state)?;
         Ok(cleared)
@@ -521,7 +535,7 @@ impl Store {
     /// is SKIPPED with its sections unreported rather than failing the whole
     /// query — one damaged book must not make the library unsearchable — and the
     /// damage is already in `state.json` for the reader to be told about.
-    pub fn search(&self, clauses: &[Clause], limits: Limits) -> Result<Vec<Hit>> {
+    pub fn search(&mut self, clauses: &[Clause], limits: Limits) -> Result<Vec<Hit>> {
         let matched = self.postings.search(clauses, limits.sections)?;
 
         /* ⚠️ **GROUPED BY BOOK BEFORE ANY TEXT IS READ, AND THAT IS ABOUT
@@ -550,6 +564,10 @@ impl Store {
         }
 
         let mut out: Vec<Hit> = Vec::new();
+        /* Collected rather than written inside the loop: the state write is one
+         * file, and a query that met three damaged books should cost one write
+         * rather than three. */
+        let mut damaged: Vec<(String, String)> = Vec::new();
         for book_id in order {
             if out.len() >= limits.total {
                 break;
@@ -562,10 +580,25 @@ impl Store {
             let Ok(path) = self.layout.text_path(&book_id) else {
                 continue;
             };
-            /* A book whose text will not read is SKIPPED, and the damage is
-             * already in `state.json` for the reader to be told about. */
-            let Some(text) = text::read(&path, &book_id).unwrap_or(None) else {
-                continue;
+            /* ⚠️ **A BOOK WHOSE TEXT WILL NOT READ IS RECORDED HERE, AND THIS
+             * SAID THE DAMAGE WAS "already in `state.json`" WHEN NOTHING HAD
+             * PUT IT THERE.** A read failure at SEARCH time was turned into
+             * `None` and skipped — so the book silently stopped answering
+             * queries while `passages_status` went on counting it as covered,
+             * and freshness, seeing a current generation, never re-extracted it.
+             * Three ways to be wrong about one book, and no way for a reader to
+             * find out. Found by an independent audit.
+             *
+             * The query still answers: one damaged book must not make the
+             * library unsearchable. What changes is that the damage is now a
+             * fact somebody can read. */
+            let text = match text::read(&path, &book_id) {
+                Ok(Some(text)) => text,
+                Ok(None) => continue,
+                Err(cause) => {
+                    damaged.push((book_id.clone(), cause.to_string()));
+                    continue;
+                }
             };
             let Some(sections) = grouped.get(&book_id) else {
                 continue;
@@ -594,6 +627,24 @@ impl Store {
                 }
             }
             /* `text` goes out of scope here — one book's worth, never more. */
+        }
+        if !damaged.is_empty() {
+            /* NOTED WITH AN EMPTY GENERATION, so the next sweep re-extracts it
+             * rather than leaving it alone: what failed is the SAVED TEXT, and
+             * nothing is known about whether the book's own bytes would read.
+             * `noted` takes the checkpoint away, which is what makes it
+             * pending. */
+            for (book_id, why) in damaged {
+                self.state.noted(
+                    &book_id,
+                    Note {
+                        why: format!("its saved text could not be read: {why}"),
+                        at: 0,
+                        generation: String::new(),
+                    },
+                );
+            }
+            state::write(&self.layout.state_path, &self.state)?;
         }
         Ok(out)
     }

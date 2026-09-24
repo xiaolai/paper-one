@@ -26,7 +26,7 @@ fn opened() -> (tempfile::TempDir, Store) {
     (dir, store)
 }
 
-fn find(store: &Store, query: &str) -> Vec<Hit> {
+fn find(store: &mut Store, query: &str) -> Vec<Hit> {
     store
         .search(&parse_query(query).expect("a legal query"), limits())
         .expect("searched")
@@ -44,7 +44,7 @@ fn a_book_is_searchable_once_it_is_flushed() {
         )
         .expect("indexed");
     store.flush().expect("flushed");
-    let found = find(&store, "whale");
+    let found = find(&mut store, "whale");
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].book_id, "book:a");
     assert_eq!(found[0].section, 1);
@@ -64,7 +64,7 @@ fn the_quote_and_its_context_abut_with_nothing_between() {
         .put("book:a", "gen1", sections(&[text]), 1)
         .expect("indexed");
     store.flush().expect("flushed");
-    let hit = &find(&store, "whale")[0];
+    let hit = &find(&mut store, "whale")[0];
     assert_eq!(format!("{}{}{}", hit.prefix, hit.quote, hit.suffix), text);
 }
 
@@ -114,7 +114,7 @@ fn a_replay_of_a_committed_book_replaces_rather_than_duplicates() {
         store.flush().expect("flushed");
     }
     assert_eq!(store.sections(), 1);
-    assert_eq!(find(&store, "whale").len(), 1);
+    assert_eq!(find(&mut store, "whale").len(), 1);
 }
 
 #[test]
@@ -132,8 +132,8 @@ fn freshness_is_the_generation_and_nothing_else() {
         .expect("indexed");
     store.flush().expect("flushed");
     assert_eq!(store.sections(), 1);
-    assert!(find(&store, "whale").is_empty());
-    assert_eq!(find(&store, "ship").len(), 1);
+    assert!(find(&mut store, "whale").is_empty());
+    assert_eq!(find(&mut store, "ship").len(), 1);
 }
 
 #[test]
@@ -144,7 +144,7 @@ fn a_removal_takes_the_book_out_of_search_and_off_the_disk() {
         .expect("indexed");
     store.flush().expect("flushed");
     store.forget("book:a", 10).expect("forgotten");
-    assert!(find(&store, "whale").is_empty());
+    assert!(find(&mut store, "whale").is_empty());
     assert!(!store.current("book:a", "gen1"));
     let text = Layout::under(dir.path())
         .text_path("book:a")
@@ -170,7 +170,7 @@ fn an_extraction_that_lost_to_a_removal_does_not_resurrect_the_book() {
         .put("book:a", "gen1", sections(&["the whale"]), 2)
         .expect("asked");
     assert!(!accepted, "the late extraction is refused, and says so");
-    assert!(find(&store, "whale").is_empty());
+    assert!(find(&mut store, "whale").is_empty());
 }
 
 #[test]
@@ -186,7 +186,7 @@ fn a_book_that_is_trashed_and_restored_is_indexed_again() {
         .expect("indexed");
     store.flush().expect("flushed");
     store.forget("book:a", 10).expect("forgotten");
-    assert!(find(&store, "whale").is_empty());
+    assert!(find(&mut store, "whale").is_empty());
 
     /* The restore: a NEW extraction, begun after the removal. */
     let accepted = store
@@ -197,7 +197,7 @@ fn a_book_that_is_trashed_and_restored_is_indexed_again() {
         "an extraction begun AFTER the removal is a restore"
     );
     store.flush().expect("flushed");
-    assert_eq!(find(&store, "whale").len(), 1);
+    assert_eq!(find(&mut store, "whale").len(), 1);
     assert!(store.current("book:a", "gen1"));
 }
 
@@ -244,7 +244,7 @@ fn a_rekey_keeps_the_work_and_moves_the_hits() {
         .expect("indexed");
     store.flush().expect("flushed");
     assert!(store.rekey("book:old", "book:new").expect("rekeyed"));
-    let found = find(&store, "whale");
+    let found = find(&mut store, "whale");
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].book_id, "book:new");
     assert!(store.current("book:new", "gen1"), "no re-extraction needed");
@@ -298,8 +298,8 @@ fn a_rebuild_reads_no_book_and_keeps_every_hit() {
 
     store.rebuild().expect("rebuilt");
 
-    assert_eq!(find(&store, "whale").len(), 1);
-    assert_eq!(find(&store, "柳树").len(), 1);
+    assert_eq!(find(&mut store, "whale").len(), 1);
+    assert_eq!(find(&mut store, "柳树").len(), 1);
     assert!(store.current("book:a", "gen1"), "the generation survives");
     assert!(store.current("book:b", "gen2"));
     assert_eq!(store.sections(), 3);
@@ -324,10 +324,10 @@ fn an_analysis_change_rebuilds_at_open_without_re_extracting() {
     held.analysis = "paper/0".to_owned();
     state::write(&layout.state_path, &held).expect("written");
 
-    let store = Store::open(dir.path()).expect("reopened");
+    let mut store = Store::open(dir.path()).expect("reopened");
     assert_eq!(store.state().analysis, tokenize::ANALYSIS);
     assert_eq!(
-        find(&store, "whale").len(),
+        find(&mut store, "whale").len(),
         1,
         "the postings came back from the retained text"
     );
@@ -360,8 +360,8 @@ fn one_damaged_text_file_costs_that_book_and_not_the_library() {
     std::fs::write(layout.text_path("book:a").expect("id"), "{ rubbish").expect("damaged");
 
     store.rebuild().expect("rebuilt");
-    assert_eq!(find(&store, "ship").len(), 1, "book:b still answers");
-    assert!(find(&store, "whale").is_empty());
+    assert_eq!(find(&mut store, "ship").len(), 1, "book:b still answers");
+    assert!(find(&mut store, "whale").is_empty());
     assert!(
         !store.state().notes.is_empty(),
         "and the damage is recorded rather than silent"
@@ -412,7 +412,7 @@ fn four_matches_in_a_chapter_are_four_hits() {
         )
         .expect("indexed");
     store.flush().expect("flushed");
-    assert_eq!(find(&store, "whale").len(), 4);
+    assert_eq!(find(&mut store, "whale").len(), 4);
 }
 
 #[test]
@@ -495,7 +495,7 @@ fn clearing_the_notes_leaves_the_index_alone() {
     store.flush().expect("flushed");
     store.note("book:b", "g", "no text", 1).expect("noted");
     store.retry_unreadable().expect("cleared");
-    assert_eq!(find(&store, "whale").len(), 1);
+    assert_eq!(find(&mut store, "whale").len(), 1);
     assert!(store.current("book:a", "gen1"));
 }
 
@@ -523,7 +523,7 @@ fn hits_from_one_book_arrive_together_even_when_another_book_scores_between() {
         .expect("indexed");
     store.flush().expect("flushed");
 
-    let found = find(&store, "whale");
+    let found = find(&mut store, "whale");
     assert_eq!(found.len(), 3);
     let books: Vec<&str> = found.iter().map(|one| one.book_id.as_str()).collect();
     /* Whichever book ranks first, its hits are contiguous. */
@@ -546,9 +546,77 @@ fn a_book_whose_text_will_not_read_costs_that_book_and_not_the_query() {
     let layout = Layout::under(dir.path());
     std::fs::write(layout.text_path("book:a").expect("id"), "{ rubbish").expect("damaged");
 
-    let found = find(&store, "whale");
+    let found = find(&mut store, "whale");
     assert_eq!(found.len(), 1, "the other book still answers");
     assert_eq!(found[0].book_id, "book:b");
+}
+
+#[test]
+fn a_damaged_book_met_during_a_search_is_recorded_rather_than_skipped() {
+    /* ⚠️ **THREE WAYS TO BE WRONG ABOUT ONE BOOK, AND NO WAY TO FIND OUT.** A
+     * text read that failed at SEARCH time was turned into `None` and skipped —
+     * so the book silently stopped answering queries, `passages_status` went on
+     * counting it as covered, and freshness, seeing a current generation, never
+     * re-extracted it. The comment beside it claimed the damage was "already in
+     * `state.json`", which nothing had put there. Found by an independent
+     * audit, and only its VERIFICATION pass caught that the first fix was to
+     * the comment rather than the code. */
+    let (dir, mut store) = opened();
+    store
+        .put("book:a", "gen1", sections(&["the whale"]), 1)
+        .expect("indexed");
+    store.flush().expect("flushed");
+    assert!(store.current("book:a", "gen1"));
+
+    std::fs::write(
+        Layout::under(dir.path()).text_path("book:a").expect("id"),
+        "{ rubbish",
+    )
+    .expect("damaged");
+
+    let _ = find(&mut store, "whale");
+
+    let note = store
+        .state()
+        .notes
+        .get("book:a")
+        .expect("the damage is recorded");
+    assert!(
+        note.why.contains("saved text could not be read"),
+        "{}",
+        note.why
+    );
+    assert!(
+        !store.current("book:a", "gen1"),
+        "and the next sweep will extract it again"
+    );
+}
+
+#[test]
+fn clearing_the_notes_makes_a_partly_indexed_book_pending_again() {
+    /* ⚠️ **THE FIRST FIX HALF-LANDED, AND THE VERIFICATION PASS IS WHAT SAID
+     * SO.** "Try these again" cleared the warning — but a PARTLY readable book
+     * keeps its checkpoint, so it stayed `current` and freshness never offered
+     * it to another sweep. The warning vanished and the coverage stayed exactly
+     * as incomplete, which is worse than the warning it removed. */
+    let (_dir, mut store) = opened();
+    store
+        .put("book:a", "gen1", sections(&["the whale"]), 1)
+        .expect("indexed");
+    store.flush().expect("flushed");
+    store
+        .note_partial("book:a", "gen1", "1 chapter could not be read", 2)
+        .expect("noted");
+    assert!(store.current("book:a", "gen1"), "indexed, and partly so");
+
+    assert_eq!(store.retry_unreadable().expect("cleared"), 1);
+    assert!(
+        !store.current("book:a", "gen1"),
+        "the next sweep must try the chapters that failed"
+    );
+    /* AND THE POSTINGS STAY, so search keeps answering from what is there until
+     * there is something better. */
+    assert_eq!(find(&mut store, "whale").len(), 1);
 }
 
 #[test]
@@ -594,12 +662,15 @@ fn noting_a_replacement_that_will_not_read_takes_the_old_answers_with_it() {
         .put("book:a", "gen1", sections(&["the whale"]), 1)
         .expect("indexed");
     store.flush().expect("flushed");
-    assert_eq!(find(&store, "whale").len(), 1);
+    assert_eq!(find(&mut store, "whale").len(), 1);
 
     store
         .note("book:a", "gen2", "the replacement would not parse", 2)
         .expect("noted");
-    assert!(find(&store, "whale").is_empty(), "the stale answers go too");
+    assert!(
+        find(&mut store, "whale").is_empty(),
+        "the stale answers go too"
+    );
     let text = Layout::under(dir.path())
         .text_path("book:a")
         .expect("a legal id");
@@ -621,7 +692,7 @@ fn a_partly_readable_book_keeps_the_chapters_that_read() {
         .note_partial("book:a", "gen1", "1 chapter could not be read", 2)
         .expect("noted");
 
-    assert_eq!(find(&store, "whale").len(), 1, "still searchable");
+    assert_eq!(find(&mut store, "whale").len(), 1, "still searchable");
     assert!(store.current("book:a", "gen1"), "still checkpointed");
     assert_eq!(
         store.state().notes.get("book:a").map(|n| n.why.as_str()),
