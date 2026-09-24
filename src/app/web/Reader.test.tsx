@@ -1270,3 +1270,170 @@ describe('searching the whole library from the browser reader', () => {
     expect(screen.getByText('two')).toBeTruthy()
   })
 })
+
+/* ------------------------------------------- the tools sheet, tab by tab */
+
+describe('the tools sheet', () => {
+  /** A reader with a table of contents, its chrome up, ready to drive. */
+  async function opened(extra: Record<string, unknown> = {}, toc: unknown[] = [{ label: 'One', href: 'c1.xhtml' }]) {
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader
+        content={content}
+        bookId="one"
+        name="Moby-Dick"
+        onClose={vi.fn()}
+        positions={fakePositions()}
+        {...extra}
+      />,
+    )
+    await waitFor(() => expect(captured['onToc']).toBeTypeOf('function'))
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, toc)
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
+    return captured
+  }
+
+  it('says whether the sheet is open, on the control that opens it', async () => {
+    /* `aria-expanded` is the only thing that says so — the sheet is a portal
+     * and the button carries the state for a screen reader. */
+    await opened()
+    const tools = await screen.findByRole('button', { name: 'Tools' })
+    expect(tools.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(tools)
+    expect(screen.getByRole('button', { name: 'Tools' }).getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('marks exactly the tab whose panel is showing', async () => {
+    /* jsdom has no `ResizeObserver`, and the Reading tab mounts `FacePicker`,
+     * which measures itself. A stub that observes nothing is enough — this is
+     * about which tab is PRESSED, not about how tall anything is. */
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    )
+    /* ⚠️ **`aria-pressed` IS WHAT A SCREEN READER HEARS AND WHAT THE CSS KEYS
+     * ON**, and four mutants sat on those four comparisons with nothing
+     * asserting any of them. */
+    await opened()
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    const pressed = () =>
+      ['Contents', 'Search', 'Reading']
+        .filter((n) => screen.getByRole('button', { name: n }).getAttribute('aria-pressed') === 'true')
+    expect(pressed()).toEqual(['Contents'])
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+    expect(pressed()).toEqual(['Search'])
+    fireEvent.click(screen.getByRole('button', { name: 'Reading' }))
+    expect(pressed()).toEqual(['Reading'])
+    vi.unstubAllGlobals()
+  })
+
+  it('offers no Contents tab for a book that has none', async () => {
+    /* ⚠️ **AND LANDING THE SHEET ON `contents` THERE OPENED A PANE NO TAB
+     * NAMES** — a blank sheet the reader could not get out of. */
+    await opened({}, [])
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    expect(screen.queryByRole('button', { name: 'Contents' })).toBeNull()
+    /* And the sheet still opens on something that exists. */
+    expect(screen.getByRole('button', { name: 'Search' }).getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('draws the Notes panel only for a host that has marks', async () => {
+    await opened()
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    expect(screen.queryByRole('button', { name: 'Notes' })).toBeNull()
+  })
+})
+
+describe('the selection bar, and what a read-only host may do with a selection', () => {
+  /** The smallest marks store this client will accept. */
+  function marksFor() {
+    return {
+      all: [],
+      allBookmarks: [],
+      allUnplaced: [],
+      persistent: true,
+      remove: () => {},
+      setNote: async () => {},
+      loadAll: () => {},
+      subscribe: () => () => {},
+      refresh: () => {},
+      dispose: () => {},
+    } as never
+  }
+
+  /** Open the reader and hand it a live selection through the view's callback. */
+  async function withSelection(extra: Record<string, unknown> = {}) {
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader
+        content={content}
+        bookId="one"
+        name="Moby-Dick"
+        onClose={vi.fn()}
+        positions={fakePositions()}
+        {...extra}
+      />,
+    )
+    await waitFor(() => expect(captured['onSelection']).toBeTypeOf('function'))
+    act(() => {
+      /* ⚠️ **THE WHOLE `SelectionSnapshot`, NOT A PLAUSIBLE SUBSET.** A
+       * two-field object left the bar unrendered and made two cases pass for
+       * the wrong reason — one found a tint SWATCH, whose accessible name also
+       * ends in "highlight", and read it as the action. */
+      ;(captured['onSelection'] as (s: unknown) => void)({
+        cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:15)',
+        sectionIndex: 0,
+        text: 'Call me Ishmael',
+        prefix: '',
+        suffix: '.',
+      })
+    })
+    return captured
+  }
+
+  it('draws nothing until there is a selection', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    render(<Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(screen.queryByRole('button', { name: '‹ Shelf' })).not.toBeNull())
+    expect(screen.queryByRole('toolbar', { name: 'Selection' })).toBeNull()
+  })
+
+  it('offers Copy on a selection even with no marks store', async () => {
+    /* ⚠️ **THE BAR NEEDS A SELECTION, NOT A MARKS STORE.** Gated on both, a
+     * reconnect gap — stores are null between channels — took COPY away, which
+     * is the one selection verb this read-only client actually owns. */
+    await withSelection()
+    const bar = await screen.findByRole('toolbar', { name: 'Selection' })
+    /* One action and no more: Copy is the only selection verb a read-only
+     * client owns, and the bar counts its own actions in `data-count`. */
+    expect(bar.querySelector('[data-count]')?.getAttribute('data-count')).toBe('1')
+  })
+
+  it('offers no highlight to a host that cannot write, even with marks', async () => {
+    /* The write verbs still require the store they write to AND the grant. A
+     * browser session holds a READ grant, so the control must not be drawn:
+     * every press would apply optimistically, be refused, and undo itself. */
+    const bar = await (async () => {
+      await withSelection({ marks: marksFor(), canWrite: false })
+      return screen.findByRole('toolbar', { name: 'Selection' })
+    })()
+    expect(bar.querySelector('[data-count]')?.getAttribute('data-count')).toBe('1')
+  })
+
+  it('offers it to a host that can', async () => {
+    await withSelection({ marks: marksFor(), canWrite: true })
+    const bar = await screen.findByRole('toolbar', { name: 'Selection' })
+    /* Highlight and Note join Copy — three. */
+    expect(bar.querySelector('[data-count]')?.getAttribute('data-count')).toBe('3')
+  })
+})
