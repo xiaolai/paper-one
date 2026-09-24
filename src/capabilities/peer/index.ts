@@ -1,4 +1,4 @@
-import { messageOf } from '../../kernel'
+import { messageOf, servableToAnotherDevice } from '../../kernel'
 import { createElement } from 'react'
 import type { Capability, CapabilityContext, DevicePort, DeviceRow, Disposable, ServiceContribution } from '../../kernel'
 import { createPeerPort, type PeerPort } from './lib/port'
@@ -651,7 +651,20 @@ export function serveWhenShelf(options: {
     if (!held || options.stopped()) return NOTHING_SERVED
     const role = await readRole(held, options.stopped, options.diagnostics)
     if (options.stopped() || role !== 'shelf' || services.length === 0) return NOTHING_SERVED
-    const unserve = await held.serve(services)
+    /* ⚠️ **THE AUDIENCE FILTER, AND THIS IS THE ONLY TRANSPORT THAT NEEDS
+     * ONE.** This host reaches ANOTHER DEVICE; the webhost reaches the reader's
+     * own authenticated browser session, which is theirs and not somebody
+     * else's. `passage.search` declares `this-shelf` for the reason the owner
+     * gave — *why should a peer be able to read at all?* — and a device granted
+     * `blob:read` in order to RECEIVE a library has not thereby been granted an
+     * oracle over it: enough queries enumerate books that were never shared and
+     * reconstruct prose from them.
+     *
+     * The filter is by MEMBERSHIP: a row says `paired-device` or it is not
+     * served here. A row added with no audience does not compile at all. */
+    const offered = servableToAnotherDevice(services)
+    if (offered.length === 0) return NOTHING_SERVED
+    const unserve = await held.serve(offered)
     if (options.stopped()) {
       unserve()
       return NOTHING_SERVED

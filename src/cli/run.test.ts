@@ -181,7 +181,16 @@ describe('--json', () => {
      * the words "every read service". `device.list` is the one deliberate
      * omission — it needs a peer transport this host does not compose — and
      * naming it here is what keeps the exemption visible. */
-    const EXEMPT = new Set(['device.list'])
+    /* ⚠️ **`passage.search` JOINS `device.list` AS AN EXEMPTION, AND FOR THE
+     * SAME KIND OF REASON.** `openNodeServices` composes no capabilities — its
+     * own header says so in as many words — so the passages port is unbound
+     * here and the row refuses `unsupported` BY NAME rather than answering an
+     * empty list. That refusal is the designed behaviour and it has its own
+     * case (`passage.search refuses by name on a host with no index`, below);
+     * what it cannot do is produce a `--json` document with exit 0, which is
+     * what this case is about. Naming it here is what keeps the exemption
+     * visible rather than silently narrowing the words "every read service". */
+    const EXEMPT = new Set(['device.list', 'passage.search'])
     const declared = readServices().map((one) => one.name)
     expect(new Set([...Object.keys(bodies), ...EXEMPT])).toEqual(new Set(declared))
 

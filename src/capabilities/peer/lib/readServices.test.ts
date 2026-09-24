@@ -5,7 +5,9 @@ import {
   parseRecord,
   tagKey,
   SERVICE_ERRORS,
+  SERVICE_GRANTS,
   SERVICE_NAMES,
+  servableToAnotherDevice,
   buildReadServices,
   buildServices,
   handlerFor,
@@ -74,6 +76,11 @@ const REQUEST: Readonly<Record<string, unknown>> = {
   'device.list': {},
 }
 
+/** A body for each row a peer may NOT be served. */
+const WITHHELD_REQUEST: Readonly<Record<string, unknown>> = {
+  'passage.search': { query: 'whale' },
+}
+
 /** Drain a stream into one flat list of rows. */
 async function drain(iterable: AsyncIterable<unknown>): Promise<unknown[]> {
   const rows: unknown[] = []
@@ -81,13 +88,89 @@ async function drain(iterable: AsyncIterable<unknown>): Promise<unknown[]> {
   return rows
 }
 
-/** Every read service, from the table rather than from a list here. */
-const READS: readonly ServiceDescriptor[] = readServices()
+/**
+ * Every read service a PEER may be served, from the table rather than a list.
+ *
+ * ⚠️ **`servableToAnotherDevice` IS THE FILTER AND IT IS NOT A CONVENIENCE.**
+ * This harness serves a peer wire, and a row whose `audience` is `this-shelf`
+ * must never reach one — `passage.search` is the first, and the case below
+ * drives a fully granted peer to a refusal rather than to an answer. Filtering
+ * here rather than excluding a name by hand is what makes the next such row
+ * covered automatically instead of needing somebody to remember.
+ */
+const READS: readonly ServiceDescriptor[] = readServices().filter(
+  (one) => servableToAnotherDevice([one]).length === 1,
+)
+
+/** Read rows a peer may NOT be served — the other side of the same filter. */
+const WITHHELD: readonly ServiceDescriptor[] = readServices().filter(
+  (one) => servableToAnotherDevice([one]).length === 0,
+)
 
 describe('the read services, service by service', () => {
-  it('covers every read service the table declares', () => {
+  it('covers every read service a peer may be served', () => {
     expect(READS.map((one) => one.name).sort()).toEqual(Object.keys(REQUEST).sort())
   })
+
+  it('withholds at least one row, so the filter is known to do something', () => {
+    /* ⚠️ **THE KNOWN POSITIVE.** With every row `paired-device`, the filter
+     * above would pass this whole file while enforcing nothing — *a detector
+     * that finds nothing looks exactly like a clean result*, which this
+     * repository has paid for in `check-browser-safe` and in the `ResolvedCfi`
+     * walk. */
+    expect(WITHHELD.map((one) => one.name)).toContain('passage.search')
+  })
+
+  it('refuses a principal holding only book:read both the bytes and the passages', async () => {
+    /* ⚠️ **THE SENTENCE IN THE DEVICES PANE, HELD TO BY TWO ROWS AT ONCE.**
+     * `describeGrants` renders `blob:read` as "book files" and `book:read`
+     * without it as "Books, highlights, reading position" — so a peer
+     * deliberately given the second and denied the first is TOLD it cannot have
+     * the files. `content.read` was gated on `book:read` once and could stream
+     * every byte of every book anyway; `passage.search` returns the same content
+     * a passage at a time, so it has to be refused the same principal.
+     *
+     * ⚠️ **AND THE TWO ARE REFUSED BY DIFFERENT MECHANISMS, WHICH IS THE
+     * POINT.** `content.read` is served and refused on the GRANT;
+     * `passage.search` is never registered on this transport at all, because
+     * its AUDIENCE is this shelf. Asserting them together is what says the
+     * boundary holds however a caller comes at it. */
+    const shelf = serveTable({ books, grants: ['book:read'] })
+    const bytes = await drain(shelf.client.stream('content.read', REQUEST['content.read'])).catch(
+      (error: unknown) => error,
+    )
+    expect(refusalCode(bytes)).toBe(FORBIDDEN)
+    const passages = await drain(
+      shelf.client.stream('passage.search', WITHHELD_REQUEST['passage.search']),
+    ).catch((error: unknown) => error)
+    expect(refusalCode(passages)).toBe(ENVELOPE_ERRORS.unknownService)
+    /* AND NEITHER HANDLER RAN — the refusal is before the body in both cases,
+     * so a peer learns nothing from timing or from a side effect either. */
+    expect(shelf.ran).toEqual([])
+  })
+
+  for (const descriptor of WITHHELD) {
+    it(`${descriptor.name} is not served to a paired device even WITH its grant`, async () => {
+      /* ⚠️ **THE OWNER'S QUESTION, ANSWERED AS A CASE**: *why should a peer be
+       * able to read at all?* A device granted `blob:read` in order to RECEIVE a
+       * library has not been granted an oracle over it — enough queries against
+       * `passage.search` enumerate books that were never shared and reconstruct
+       * prose from them. The grant is held here and the row is still refused,
+       * which is what makes the audience the thing doing the work. */
+      const shelf = serveTable({ books, grants: [...SERVICE_GRANTS] })
+      const body = WITHHELD_REQUEST[descriptor.name] ?? {}
+      const attempt =
+        descriptor.kind === 'stream'
+          ? drain(shelf.client.stream(descriptor.name, body))
+          : shelf.client.call(descriptor.name, body)
+      const refused = await attempt.catch((error: unknown) => error)
+      /* UNKNOWN-SERVICE, not `forbidden`: the row is not registered on this
+       * transport at all, so the router has nothing to check a grant against.
+       * That is the stronger refusal — there is no handler to reach. */
+      expect(refusalCode(refused)).toBe(ENVELOPE_ERRORS.unknownService)
+      expect(shelf.ran).toEqual([])
+    })
+  }
 
   for (const descriptor of READS) {
     const body = REQUEST[descriptor.name]
@@ -693,7 +776,17 @@ describe('the contributions themselves', () => {
   it('narrows to the read half without inventing a second list', () => {
     const shelf = serveTable()
     const built = buildReadServices({ services: shelf.services })
-    expect(built.map((one) => one.name).sort()).toEqual(READS.map((one) => one.name).sort())
+    /* ⚠️ **`readServices()`, NOT `READS`.** `buildReadServices` narrows by the
+     * GRANT — that is the whole of what it claims — and the audience is a
+     * different question answered by a different function at a different layer.
+     * Comparing it against the peer-filtered list here would make one of the
+     * two look like the other's implementation, which is precisely how the
+     * table's two independent refusals would come to be one. */
+    expect(built.map((one) => one.name).sort()).toEqual(
+      readServices()
+        .map((one) => one.name)
+        .sort(),
+    )
   })
 
   /* `handlerFor` is a public export, so a descriptor built by hand can reach

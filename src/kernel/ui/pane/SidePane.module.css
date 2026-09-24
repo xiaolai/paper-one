@@ -178,6 +178,39 @@
   color: var(--surface);
 }
 
+/*
+ * Which books a search asks — the phase-31 scope switch.
+ *
+ * SHAPED LIKE `.filter` AND NOT THE SAME CLASS, because it answers a different
+ * kind of question. A filter chip is one of several independent toggles, any
+ * number of which may be on; these two are mutually exclusive and exactly one
+ * is always chosen. Reusing `.filter` would have made them look like toggles
+ * that happen to be wired together, which is the reading the `.filterBar` rule
+ * above exists to prevent between its own two groups.
+ *
+ * `data-chosen` rather than `data-on` for the same reason: a reader of the DOM
+ * can tell a radio from a toggle.
+ */
+.scopeOption {
+  height: var(--control-sm);
+  padding: 0 var(--space-12);
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  font-family: inherit;
+  font-size: var(--text-small);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.scopeOption[data-chosen='true'] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+}
+
 /* An icon chip is square rather than pill-shaped — there is no word to give it
    a length, so the padding that sizes a text chip would make it a lozenge
    around a 12px glyph. */
@@ -1495,4 +1528,28 @@
   font-size: var(--text-micro);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* ⚠️ THESE FOUR WERE INLINE `style={{…}}` ON THE SEARCH PANEL, WHICH IS WHAT
+   THE TOKEN GUARD EXISTS TO PREVENT — a value in a style object is invisible to
+   `tokens.test.ts`, so `var(--space-8)` and `var(--muted)` were scattered where
+   nothing could check them. The mutation sweep priced it separately: an inline
+   object is an `ObjectLiteral` mutant and each of its values a `StringLiteral`
+   one, none of which any test can reach, so seven survivors sat here for ever. */
+
+/* The scope switch: two radios that share the row with nothing else. */
+.scopeGroup {
+  display: flex;
+  gap: var(--space-8);
+  flex: 1;
+}
+
+/* A count that takes the row it is on. */
+.metaGrow {
+  flex: 1;
+}
+
+/* The field's own glyph, which is secondary to the text beside it. */
+.searchGlyph {
+  color: var(--muted);
 }

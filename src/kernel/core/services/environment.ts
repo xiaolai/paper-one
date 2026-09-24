@@ -38,6 +38,9 @@ export type {
   DeviceRow,
   HashPort,
   InstallProgress,
+  PassageHit,
+  PassageIndexStatus,
+  PassagesPort,
   ShelfFacts,
   ShelfPort,
   SizePort,
@@ -45,6 +48,7 @@ export type {
   SpeechRequest,
   SpokenAudio,
   SpokenWordTiming,
+  UnreadableBook,
   VoiceChoice,
   VoicePack,
 } from '../ports'

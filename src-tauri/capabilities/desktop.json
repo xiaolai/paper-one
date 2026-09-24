@@ -12,6 +12,7 @@
   ],
   "permissions": [
     "webhost:default",
-    "voices:default"
+    "voices:default",
+    "passages:default"
   ]
 }

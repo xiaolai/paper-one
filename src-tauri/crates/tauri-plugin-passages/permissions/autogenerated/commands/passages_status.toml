@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-passages-status"
+description = "Enables the passages_status command without any pre-configured scope."
+commands.allow = ["passages_status"]
+
+[[permission]]
+identifier = "deny-passages-status"
+description = "Denies the passages_status command without any pre-configured scope."
+commands.deny = ["passages_status"]

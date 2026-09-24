@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   GRANT_FAMILIES,
+  SERVICE_AUDIENCES,
   SERVICE_GRANTS,
   SERVICE_NAMES,
   SERVICE_NOUNS,
@@ -10,6 +11,7 @@ import {
   positionalFields,
   readServices,
   readingGrant,
+  servableToAnotherDevice,
   serviceClients,
   serviceDescriptor,
   servicesOn,
@@ -200,11 +202,83 @@ describe('the service table', () => {
         'cover.read',
         'device.list',
         'mark.list',
+        /* `passage.search` IS A READ, and it is the first row whose grant is
+         * not the only thing standing between a caller and the answer — see
+         * `audience`. Listing it here says it reads; the audience case below
+         * says who may ask. Two questions, two lists, neither derived from the
+         * other. */
+        'passage.search',
         'shelf.status',
         'tag.list',
         'trash.list',
       ].sort(),
     )
+  })
+
+  it('makes every row declare who may be served it', () => {
+    /* ⚠️ **DECLARED BY EVERY ROW, WITH NO DEFAULT** — `marks.ts`'s own rule in
+     * as many words: *"Membership, not exclusion … Adding a kind now means
+     * putting it in one of these two lists, which is a decision rather than an
+     * omission."* A default would make the next row's omission silent, and the
+     * silent direction is the permissive one.
+     *
+     * The type already refuses a row without the field; this is what refuses a
+     * row with a value that is not one of the two, which a widened union or a
+     * cast could otherwise let through. */
+    for (const row of SERVICE_TABLE) {
+      expect(SERVICE_AUDIENCES, row.name).toContain(row.audience)
+    }
+  })
+
+  it('withholds exactly the rows a paired device may not be served', () => {
+    /* WRITTEN OUT, for `readServices`' reason one case up: a row becomes
+     * reachable by a paired device the moment somebody types `paired-device`,
+     * and not noticing that is the failure. `passage.search` is the only one
+     * today — and it is the one that made the field necessary. */
+    const withheld = SERVICE_TABLE.filter((one) => one.audience !== 'paired-device')
+    expect(withheld.map((one) => one.name)).toEqual(['passage.search'])
+  })
+
+  it('filters a contributed set by the audience, by membership', () => {
+    const every = SERVICE_TABLE.map((one) => ({ name: one.name }))
+    const offered = servableToAnotherDevice(every)
+    expect(offered).toHaveLength(SERVICE_TABLE.length - 1)
+    expect(offered.map((one) => one.name)).not.toContain('passage.search')
+  })
+
+  it('refuses a name the table does not hold rather than passing it through', () => {
+    /* ⚠️ **THE PERMISSIVE DEFAULT THIS FIELD EXISTS TO REMOVE.** Every
+     * contribution reaching a host came from `buildServices`, which can only
+     * produce the table's own rows — so an unknown name means something built a
+     * contribution by hand, and serving it to another device on the strength of
+     * not recognising it is exactly the wrong way to fail. */
+    expect(servableToAnotherDevice([{ name: 'book.list' }, { name: 'book.destroy' }])).toEqual([
+      { name: 'book.list' },
+    ])
+  })
+
+  it('answers nothing for nothing', () => {
+    expect(servableToAnotherDevice([])).toEqual([])
+  })
+
+  it('names exactly two audiences, and they mean different things', () => {
+    expect([...SERVICE_AUDIENCES]).toEqual(['paired-device', 'this-shelf'])
+  })
+
+  it('does not let the grant stand in for the audience', () => {
+    /* ⚠️ **TWO INDEPENDENT REFUSALS, AND THIS IS WHAT KEEPS THEM TWO.**
+     * `passage.search` carries `blob:read` — the honest label for a row that
+     * returns book content — and `blob:read` is granted for SYNC, so a satchel
+     * receiving a library holds it. If the grant were doing the work, this row
+     * would be reachable by every such device. */
+    const row = serviceDescriptor('passage.search')
+    expect(row?.grant).toBe('blob:read')
+    expect(row?.audience).toBe('this-shelf')
+    const alsoBlobRead = SERVICE_TABLE.filter((one) => one.grant === 'blob:read')
+    expect(alsoBlobRead.map((one) => one.name).sort()).toEqual(['content.read', 'passage.search'])
+    /* And the other holder of that grant IS served to a paired device, so the
+       two rows differ by the audience alone. */
+    expect(serviceDescriptor('content.read')?.audience).toBe('paired-device')
   })
 
   it('answers for a name it holds and refuses one it does not', () => {

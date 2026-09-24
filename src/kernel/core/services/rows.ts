@@ -471,3 +471,11 @@ export interface ShelfStatus {
  * read them yet" from "there are none": the snapshot has a `ready` flag for
  * the OPEN book only. `paper mark list --json | wc -l` is the honest answer,
  * and it is honest precisely because the caller chose to pay for it. */
+
+/* `PassageHit` IS NOT HERE, and the reason is `DeviceRow`'s.
+ *
+ * A shape that is BOTH a port's vocabulary and a wire row lives in `ports.ts`
+ * and is imported by the table from there — which is exactly what `DeviceRow`
+ * does, for exactly the same reason: the port is the lower layer, and a row
+ * defined here and used by a port would make `ports.ts` import this file,
+ * inverting the direction every other port takes. */

@@ -1,0 +1,14 @@
+# What `tauri dev` must NOT watch.
+#
+# SwiftPM writes a uniquely-named lock file into its build directory on EVERY
+# invocation, and tauri-plugin-voices's build.rs runs `swift build` on every
+# build -- so watching that directory makes the dev server restart itself the
+# moment it starts, and then again, for ever.
+#
+# Measured 2026-09-24 on mbp16, first build of a fresh checkout: 1 595
+# "Rebuilding application..." lines in 87 minutes, every one naming a
+# .build/.lock.sb-* path, and the window never drew a frame. Nothing in the
+# output says why -- the progress bar sits at one number and the log keeps
+# growing, so every liveness check reports a healthy, slow compile. With this
+# file the same tree started in 32 seconds and looped zero times.
+crates/tauri-plugin-voices/swift/QwenKit/.build

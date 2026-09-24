@@ -17,6 +17,7 @@ import {
   type Diagnostics,
   type MutationRecorder,
   type MutationToken,
+  type PassagesPort,
   type RemovableBlobName,
   type SettingsStore,
   type ShelfPort,
@@ -208,6 +209,15 @@ export interface KernelServices {
    */
   bindSpeechEngines(port: SpeechEnginePort): Disposable
   speechEngines(): SpeechEnginePort | null
+  /**
+   * Bind the PASSAGES port — the library-wide text index, by the `passages`
+   * capability. The same slot rule again: a host without one leaves it null,
+   * and `passage.search` refuses `unsupported` BY NAME rather than answering an
+   * empty list of hits, which is the difference between *"this device cannot
+   * search the library"* and *"nothing in your library says that"*.
+   */
+  bindPassages(port: PassagesPort): Disposable
+  passages(): PassagesPort | null
   /** Bind the HASH port — BLAKE3 in Rust, by the peer capability. The same slot rule as the size port. */
   bindHashPort(port: HashPort): Disposable
   hashes(): HashPort | null
@@ -762,6 +772,7 @@ export function createKernelServices({
   const sizeSlot = exclusiveSlot<SizePort | null>('bindSizePort: the size port is already bound', null)
   const hashSlot = exclusiveSlot<HashPort | null>('bindHashPort: the hash port is already bound', null)
   const speechSlot = exclusiveSlot<SpeechEnginePort | null>('bindSpeechEngines: the speech engine port is already bound', null)
+  const passagesSlot = exclusiveSlot<PassagesPort | null>('bindPassages: the passages port is already bound', null)
 
   const writes = writeQueue()
   const library = createLibrary({ fs, queue: writes, initial: initialBooks, recorder: recorderPort, clock: clockPort, hashes: () => hashSlot.get() })
@@ -879,6 +890,8 @@ export function createKernelServices({
     bindSizePort: (next) => sizeSlot.bind(next),
     bindSpeechEngines: (next) => speechSlot.bind(next),
     speechEngines: () => speechSlot.get(),
+    bindPassages: (next) => passagesSlot.bind(next),
+    passages: () => passagesSlot.get(),
     sizes: () => sizeSlot.get(),
     bindHashPort: (next) => hashSlot.bind(next),
     hashes: () => hashSlot.get(),

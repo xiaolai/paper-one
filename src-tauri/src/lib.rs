@@ -555,6 +555,18 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_voices::init());
     }
 
+    /* The library-wide passage index. DESKTOP ONLY, and gated at the DEPENDENCY
+     * as well as here: tantivy is not a thing to compile into a phone bundle
+     * for a feature that has nowhere to put the index. Nothing leaves this
+     * machine — the text comes from books already here — and nothing is opened
+     * until the first command that needs it, so a reader who never searches
+     * pays no launch cost. Its commands are granted by `passages:default` in
+     * capabilities/desktop.json. */
+    #[cfg(feature = "desktop")]
+    {
+        builder = builder.plugin(tauri_plugin_passages::init());
+    }
+
     builder = builder
         // The peer transport, every platform. Its commands are granted by
         // `peer:default` in capabilities/default.json.

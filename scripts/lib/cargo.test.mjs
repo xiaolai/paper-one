@@ -168,9 +168,13 @@ ignored = "1"
        it, and the server crate under the webhost plugin declares it with the
        identical feature set. The fifth is phase 30's `tauri-plugin-voices`,
        desktop-only because it links ONNX Runtime for the English engine and
-       MLX for the Chinese one, neither of which compiles for a phone. */
+       MLX for the Chinese one, neither of which compiles for a phone. The
+       sixth is phase 31's `tauri-plugin-passages`, desktop-only because it
+       links tantivy — an mmap directory and merge threads, over a posting list
+       for a library a phone is RECEIVING rather than holding. */
     const pinned = new Set([
       'tauri-plugin-mcp-bridge',
+      'tauri-plugin-passages',
       'tauri-plugin-persisted-scope',
       'tauri-plugin-single-instance',
       'tauri-plugin-voices',

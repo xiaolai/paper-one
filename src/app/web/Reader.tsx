@@ -14,6 +14,7 @@ import {
   useAppPalette,
   usePrefersDark,
 } from '../../kernel/ui/browser'
+import type { PassageHit } from '../../kernel'
 import { WEB_SETTINGS, browserSettings } from './settings'
 import { useBookSource } from './useBookSource'
 import { useTapToTurn } from './useTapToTurn'
@@ -113,6 +114,19 @@ export interface ReaderProps {
    */
   readonly titleOf?: (bookId: string) => string | undefined
   /**
+   * Search every book the SHELF has indexed — WI-31.6's browser half.
+   *
+   * ⚠️ **ABSENT WHERE THE SHELF CANNOT ANSWER, NOT A STUB THAT ANSWERS
+   * NOTHING.** The `passages` capability is desktop-only, so a browser has no
+   * index of its own and reaches the shelf's over the envelope. Given a stub,
+   * the panel would tell a reader *"nothing in your library says that"*, which
+   * is a wrong answer rather than a missing one; given nothing, it draws no
+   * scope switch and is exactly what it was before phase 31.
+   */
+  readonly searchLibrary?: (query: string, limit?: number) => Promise<readonly PassageHit[]>
+  /** Open a hit in another book. Arrives with `searchLibrary` or not at all. */
+  readonly onOpenPassage?: (hit: PassageHit) => void
+  /**
    * Whether this session may write marks. A browser's grant is READ by
    * design — see `SelectionBar` — so this is false until the shelf decides
    * otherwise, and the selection bar draws Copy alone.
@@ -122,7 +136,19 @@ export interface ReaderProps {
 
 
 
-export function Reader({ content, bookId, name, onClose, positions, remote, marks = null, titleOf, canWrite = false }: ReaderProps) {
+export function Reader({
+  content,
+  bookId,
+  name,
+  onClose,
+  positions,
+  remote,
+  marks = null,
+  titleOf,
+  searchLibrary,
+  onOpenPassage,
+  canWrite = false,
+}: ReaderProps) {
   /* ONE STORE FOR THE LIFE OF THE COMPONENT. Built in a ref rather than on
    * every render, because `browserPositions` touches `localStorage`, which is a
    * getter that THROWS in some configurations. */
@@ -723,7 +749,14 @@ export function Reader({ content, bookId, name, onClose, positions, remote, mark
                 }}
               />
             )}
-            {tool === 'search' && <SearchPanel book={searchable} />}
+            {tool === 'search' && (
+              <SearchPanel
+                book={searchable}
+                titleOf={(id) => (id === bookId ? name : titleOf?.(id))}
+                {...(searchLibrary ? { searchLibrary } : {})}
+                {...(onOpenPassage ? { onOpenPassage } : {})}
+              />
+            )}
             {tool === 'notes' && marks !== null && (
               /* THE MUTATIONS RIDE ON `canWrite`, the switch this surface
                  already has — the same one `SelectionBar` uses to draw Copy
