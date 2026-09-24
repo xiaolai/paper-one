@@ -220,7 +220,14 @@ export function canonicalTextOf(root: Node): string {
  */
 export function canonicalOf(root: Node): { readonly text: string; readonly cut: boolean } {
   const index: TextIndex = indexText(bodyOf(root))
-  return index.text.length > MAX_SECTION_CHARS
-    ? { text: index.text.slice(0, MAX_SECTION_CHARS), cut: true }
-    : { text: index.text, cut: false }
+  if (index.text.length <= MAX_SECTION_CHARS) return { text: index.text, cut: false }
+  /* ⚠️ **NEVER BETWEEN A SURROGATE PAIR.** `slice` counts UTF-16 code units, so
+   * a cut that lands inside an astral character leaves a lone high surrogate —
+   * a string JavaScript tolerates and `JSON` carries as `\udXXX`, which serde
+   * refuses on the other side of the wire. The whole BOOK then comes back
+   * unreadable because one section ended on an emoji. One code unit back is the
+   * whole fix. Found by the second audit round. */
+  const at = index.text.charCodeAt(MAX_SECTION_CHARS - 1)
+  const splits = at >= 0xd800 && at <= 0xdbff
+  return { text: index.text.slice(0, splits ? MAX_SECTION_CHARS - 1 : MAX_SECTION_CHARS), cut: true }
 }

@@ -371,10 +371,28 @@ impl Store {
          * The POSTINGS are untouched: `put` replaces a book's sections when the
          * re-extraction lands, so search keeps answering from what is there
          * until there is something better. Only the claim of freshness goes. */
-        for book_id in self.state.notes.keys() {
+        /* ⚠️ **AND THE NOTE IS REPLACED, NOT DROPPED, OR THE BOOK IS ORPHANED.**
+         * Clearing both the checkpoint and the note takes the book out of
+         * `known()` — so if it is removed or evicted before the re-extraction
+         * lands, the removal diff never sees it and its postings answer for ever.
+         * An empty-generation marker keeps it visible to the diff while matching
+         * no generation, which is exactly "try this again". Found by the second
+         * audit round, looking at what the first round's fixes introduced. */
+        let retrying: Vec<String> = self.state.notes.keys().cloned().collect();
+        for book_id in &retrying {
             self.state.books.remove(book_id);
         }
         self.state.notes.clear();
+        for book_id in retrying {
+            self.state.notes.insert(
+                book_id,
+                Note {
+                    why: "waiting to be read again".to_owned(),
+                    at: 0,
+                    generation: String::new(),
+                },
+            );
+        }
         state::write(&self.layout.state_path, &self.state)?;
         Ok(cleared)
     }
@@ -520,6 +538,23 @@ impl Store {
             }
         }
         self.postings.commit()?;
+        /* ⚠️ **A PARTIAL WARNING SURVIVES A REBUILD, BECAUSE A REBUILD CANNOT
+         * REPAIR WHAT IT WARNS ABOUT.** `rebuilt.indexed()` clears a book's note
+         * as it checkpoints it — right for a book that has just been extracted
+         * afresh, wrong here: the retained text holds only the chapters that
+         * read, so rebuilding reproduces exactly the same gap while removing the
+         * sentence that named it and the control that retries it. Re-applied for
+         * the books whose generation still matches. Found by the second audit
+         * round. */
+        for (book_id, note) in &self.state.notes {
+            let still = rebuilt
+                .books
+                .get(book_id)
+                .is_some_and(|one| one.generation == note.generation);
+            if still && !rebuilt.notes.contains_key(book_id) {
+                rebuilt.notes.insert(book_id.clone(), note.clone());
+            }
+        }
         self.state = rebuilt;
         state::write(&self.layout.state_path, &self.state)
     }
@@ -594,7 +629,17 @@ impl Store {
              * fact somebody can read. */
             let text = match text::read(&path, &book_id) {
                 Ok(Some(text)) => text,
-                Ok(None) => continue,
+                /* ⚠️ **ABSENT IS DAMAGE HERE, AND ONLY HERE.** Everywhere else a
+                 * missing text file means a book that was never indexed — but
+                 * the POSTINGS just named this one, so its text must exist and
+                 * does not. Skipped silently it kept its checkpoint, showed no
+                 * warning, and every later sweep passed it over. The damage
+                 * handling covered an unreadable file and missed an absent one.
+                 * Found by the second audit round. */
+                Ok(None) => {
+                    damaged.push((book_id.clone(), "the file is not there".to_owned()));
+                    continue;
+                }
                 Err(cause) => {
                     damaged.push((book_id.clone(), cause.to_string()));
                     continue;
@@ -629,6 +674,13 @@ impl Store {
             /* `text` goes out of scope here — one book's worth, never more. */
         }
         if !damaged.is_empty() {
+            /* ⚠️ **THE PENDING ENTRY GOES TOO, OR THE NEXT FLUSH UNDOES THIS.**
+             * A book can have a replacement in `pending` when a search meets its
+             * damaged text; removing the checkpoint and writing the note is
+             * pointless if `flush` then calls `indexed()` for that same book and
+             * clears the warning. Found by the second audit round. */
+            self.pending
+                .retain(|(id, _)| !damaged.iter().any(|(damaged_id, _)| damaged_id == id));
             /* NOTED WITH AN EMPTY GENERATION, so the next sweep re-extracts it
              * rather than leaving it alone: what failed is the SAVED TEXT, and
              * nothing is known about whether the book's own bytes would read.
@@ -644,7 +696,15 @@ impl Store {
                     },
                 );
             }
-            state::write(&self.layout.state_path, &self.state)?;
+            /* ⚠️ **A FAILED WRITE MUST NOT THROW AWAY THE HITS THE READER
+             * ASKED FOR.** Propagating it turned one damaged book on a full disk
+             * into the failure of the whole query, healthy results included —
+             * which is a search that stops working because of bookkeeping. The
+             * state stays dirty in memory and the next write takes it; what the
+             * caller gets is what it asked for. Found by the second audit round. */
+            if let Err(cause) = state::write(&self.layout.state_path, &self.state) {
+                log::warn!("passages: the damage record could not be saved: {cause}");
+            }
         }
         Ok(out)
     }

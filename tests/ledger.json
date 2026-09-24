@@ -10006,6 +10006,7 @@
     "src/kernel/ui/reader/passageText.test.ts > the canonical text of a section > is exactly what the resolver searches, with no extra transform",
     "src/kernel/ui/reader/passageText.test.ts > the canonical text of a section > keeps case, because the resolver compares on it",
     "src/kernel/ui/reader/passageText.test.ts > the canonical text of a section > keeps ruby BASE text, which the reader’s own in-book search misses",
+    "src/kernel/ui/reader/passageText.test.ts > the canonical text of a section > never cuts between a surrogate pair",
     "src/kernel/ui/reader/passageText.test.ts > the canonical text of a section > puts a space at a paragraph break rather than running two words together",
     "src/kernel/ui/reader/passageText.test.ts > the canonical text of a section > walks a whole Document, which indexText alone answers empty for",
     "src/kernel/ui/reader/passageText.test.ts > what the index holds can be found again by the resolver > finds Chinese again",

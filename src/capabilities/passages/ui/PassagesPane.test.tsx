@@ -91,10 +91,14 @@ describe('the sentences', () => {
 
   it('names how many books could not be read, and gets the singular right', () => {
     const one = { bookId: 'book:b', why: 'no text', at: 1 }
-    expect(unreadableLine(status({ unreadable: [one] }))).toMatch(/^1 book could not be read/u)
-    expect(unreadableLine(status({ unreadable: [one, { ...one, bookId: 'c' }] }))).toMatch(
-      /^2 books could not be read/u,
+    expect(unreadableLine(status({ unreadable: [one] }))).toBe('1 book could not be read in full:')
+    expect(unreadableLine(status({ unreadable: [one, { ...one, bookId: 'c' }] }))).toBe(
+      '2 books could not be read in full:',
     )
+    /* ⚠️ **NOT "cannot be searched".** A book with three bad chapters and
+     * thirty-seven good ones is in this list AND answers queries; saying
+     * otherwise contradicts what the reader can see happening. */
+    expect(unreadableLine(status({ unreadable: [one] }))).not.toMatch(/cannot be searched/u)
   })
 })
 

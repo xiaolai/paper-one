@@ -103,7 +103,14 @@ export function passageIndexOver(wire: PassagesWire = passagesWire()): PassageIn
        * Answering the empty list locally is the difference between a debounce
        * and a stream of refusals. */
       if (query.trim() === '') return []
-      return hitsOf(await wire.search(query, limit ?? null))
+      /* ⚠️ **NFC HERE, BECAUSE THE INDEX IS NFC AND RUST CANNOT DO IT FOR
+       * FREE.** `indexText` composes each character before a word is indexed;
+       * the plugin's `fold_query` mirrors the quote and dash folds but has no
+       * normaliser without a new dependency. JavaScript has one built in, and
+       * the query is composed here — so a pasted `神社` in its decomposed form
+       * asks the same question as the book's composed one. Found by the second
+       * audit round. */
+      return hitsOf(await wire.search(query.normalize('NFC'), limit ?? null))
     },
 
     async status(): Promise<PassageIndexStatus> {

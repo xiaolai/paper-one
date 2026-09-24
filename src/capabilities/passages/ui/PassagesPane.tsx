@@ -84,9 +84,16 @@ export function coverageLine(status: PassageIndexStatus): string {
 export function unreadableLine(status: PassageIndexStatus): string | null {
   const count = status.unreadable.length
   if (count === 0) return null
+  /* ⚠️ **NOT "cannot be searched" ANY MORE, AND THAT BECAME A LIE THE MOMENT
+   * PARTIAL BOOKS JOINED THIS LIST.** A book with three bad chapters and
+   * thirty-seven good ones is in `unreadable` — it has a warning — and its good
+   * chapters answer queries perfectly well. Telling a reader it cannot be
+   * searched contradicts what they can see happening. Found by the second audit
+   * round, which is exactly the kind of thing only a fresh reading catches: the
+   * sentence was true when it was written. */
   return count === 1
-    ? '1 book could not be read, so it cannot be searched:'
-    : `${count} books could not be read, so they cannot be searched:`
+    ? '1 book could not be read in full:'
+    : `${count} books could not be read in full:`
 }
 
 export function PassagesPane({

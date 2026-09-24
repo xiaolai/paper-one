@@ -481,9 +481,19 @@ fn the_notes_can_be_cleared_so_a_transient_failure_is_not_permanent() {
         .expect("noted");
     store.note("book:b", "g", "no text", 1).expect("noted");
     assert_eq!(store.retry_unreadable().expect("cleared"), 2);
-    assert!(store.state().notes.is_empty());
-    /* And it survives a relaunch, so the next sweep really does try again. */
-    assert_eq!(store.retry_unreadable().expect("nothing to clear"), 0);
+    /* ⚠️ **A MARKER IS LEFT, NOT AN EMPTY MAP — AND THE SECOND AUDIT ROUND IS
+     * WHY.** Clearing both the checkpoint and the note takes a book out of
+     * `known()`, so a book removed before its re-extraction lands would never
+     * reach the removal diff and its postings would answer for ever. An
+     * empty-generation marker keeps it visible while matching nothing. */
+    assert_eq!(store.state().notes.len(), 2);
+    assert!(store
+        .state()
+        .notes
+        .values()
+        .all(|n| n.generation.is_empty()));
+    assert!(!store.current("book:a", "gen1"), "and it is pending again");
+    assert_eq!(store.known().len(), 2, "still visible to the removal diff");
 }
 
 #[test]

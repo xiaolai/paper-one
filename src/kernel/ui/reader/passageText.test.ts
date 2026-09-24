@@ -103,6 +103,21 @@ describe('the canonical text of a section', () => {
     const long = 'x'.repeat(MAX_SECTION_CHARS + 1000)
     expect(canonicalTextOf(parse(`<p>${long}</p>`))).toHaveLength(MAX_SECTION_CHARS)
   })
+
+  it('never cuts between a surrogate pair', () => {
+    /* ⚠️ **ONE EMOJI AT THE BOUND COST THE WHOLE BOOK.** `slice` counts UTF-16
+     * code units, so a cut inside an astral character leaves a lone high
+     * surrogate — which JavaScript tolerates, `JSON` carries as an escape, and
+     * serde refuses on the other side of the wire, making the entire book
+     * unreadable. Found by the second audit round. */
+    const text = canonicalTextOf(parse(`<p>${'x'.repeat(MAX_SECTION_CHARS - 1)}😀tail</p>`))
+    expect(text).toHaveLength(MAX_SECTION_CHARS - 1)
+    const last = text.charCodeAt(text.length - 1)
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false)
+    /* And it is still valid: every code point round-trips through JSON. */
+    expect(JSON.parse(JSON.stringify(text))).toBe(text)
+    expect(/\p{Surrogate}/u.test(text)).toBe(false)
+  })
 })
 
 describe('extracting a book', () => {

@@ -316,7 +316,22 @@ export function buildDeps(
          * clears the postings when what it records is partial, because there is
          * real coverage to keep; see `Store::note_partial`. */
         if (extracted.unreadable.length > 0 || extracted.truncated.length > 0) {
-          await port.notePartial(bookId, generation, whyPartial(extracted), at)
+          /* ⚠️ **OUTSIDE THE DESTRUCTIVE CATCH, OR A FAILED WARNING DELETES THE
+           * GOOD CHAPTERS.** A rejected `notePartial` fell into the extraction
+           * catch below, which calls `note` — and `note` takes the book OUT of
+           * search and records the generation as unreadable, so a disk that was
+           * briefly busy destroyed thirty-seven working chapters and suppressed
+           * the retry. The book IS indexed by this point; failing to write a
+           * warning about it cannot be allowed to undo that. Found by the second
+           * audit round. */
+          try {
+            await port.notePartial(bookId, generation, whyPartial(extracted), at)
+          } catch (cause) {
+            api.diagnostics.warn('passages.partial-note-failed', {
+              book: bookId,
+              error: messageOf(cause),
+            })
+          }
         }
         return 'indexed'
       } catch (cause) {
