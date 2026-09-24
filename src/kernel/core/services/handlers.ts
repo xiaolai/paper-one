@@ -6,6 +6,7 @@ import { contentEvict, contentLocate, contentRead, coverRead } from './content'
 import { deviceForget, deviceGrant, deviceList } from './device'
 import type { ServiceEnvironment } from './environment'
 import { markAdd, markList, markRemove, markSet } from './mark'
+import { passageSearch } from './passage'
 import { SERVICE_ERRORS, refuse } from './refusals'
 import { shelfStatus, shelfSync, shelfVerify } from './shelf'
 import { tagAdd, tagList, tagRemove, tagRename } from './tag'
@@ -71,6 +72,8 @@ const HANDLERS: Readonly<Record<ServiceName, HandlerFactory>> = {
   'content.read': contentRead,
   'cover.read': coverRead,
   'content.evict': contentEvict,
+
+  'passage.search': passageSearch,
 
   'device.list': deviceList,
   'device.grant': deviceGrant,

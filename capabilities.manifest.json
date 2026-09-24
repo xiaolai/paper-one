@@ -64,6 +64,19 @@
       ]
     },
     {
+      "id": "passages",
+      "requires": [],
+      "ts": "passages",
+      "platforms": [
+        "desktop"
+      ],
+      "crate": "tauri-plugin-passages",
+      "plugin": "passages",
+      "permissions": [
+        "passages:default"
+      ]
+    },
+    {
       "id": "webhost",
       "requires": [],
       "ts": "webhost",

@@ -1,7 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import { Search } from 'lucide-react'
 import { ICON } from '../../core/metrics'
+import type { PassageHit } from '../../core/ports'
 import type { Book, SearchHit } from '../hooks/useBook'
+import {
+  byBook,
+  countLine,
+  MAX_LIBRARY_HITS,
+  rejectedByQuery,
+  whyOf,
+  type LibraryResult,
+  type SearchScope,
+} from './librarySearch'
 import styles from './SidePane.module.css'
 
 /**
@@ -45,6 +55,28 @@ export interface SearchPanelProps {
    * move the reader. Absent, the book's own `goTo` is used.
    */
   onGoTo?: (cfi: string) => void
+  /**
+   * Search the whole library — absent where this device cannot.
+   *
+   * ⚠️ **ABSENT, NOT A FUNCTION THAT ANSWERS NOTHING.** A browser client, a
+   * phone and a build with the `passages` capability cut all lack an index, and
+   * a stub returning an empty list would tell a reader *"nothing in your library
+   * says that"* — a wrong answer rather than a missing one. Absent, the scope
+   * switch is not drawn at all and the pane is exactly what it was before phase
+   * 31, which is what makes `pnpm verify:without passages` pass.
+   */
+  searchLibrary?: (query: string, limit?: number) => Promise<readonly PassageHit[]>
+  /**
+   * Open a hit in another book.
+   *
+   * Separate from `onGoTo` because it is a different act: `onGoTo` moves within
+   * the open book, and this one CHANGES which book is open. A host that can
+   * search the library and not open a second book would draw results nothing
+   * can act on, so the two arrive together or not at all.
+   */
+  onOpenPassage?: (hit: PassageHit) => void
+  /** What a book is called, for the group headings. Falls back to the id. */
+  titleOf?: (bookId: string) => string | undefined
 }
 
 /** Long enough that typing does not start a full-book scan per keystroke. */
@@ -85,7 +117,13 @@ interface SearchResult {
  * index the handoff describes, and the pane's "instant results" assume that
  * index exists before the user types.
  */
-export function SearchPanel({ book, onGoTo }: SearchPanelProps) {
+export function SearchPanel({
+  book,
+  onGoTo,
+  searchLibrary,
+  onOpenPassage,
+  titleOf,
+}: SearchPanelProps) {
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<SearchResult>({
     needle: '',
@@ -93,6 +131,13 @@ export function SearchPanel({ book, onGoTo }: SearchPanelProps) {
     state: 'done',
   })
   const runId = useRef(0)
+  /* ⚠️ **DEFAULTS TO THE OPEN BOOK, ALWAYS.** A bare query silently meaning
+   * something different from what it meant yesterday is why the phase plan
+   * refused to put library search in the shelf field at all; the same argument
+   * applies to this field. The reader asks for the library. */
+  const [scope, setScope] = useState<SearchScope>('book')
+  const [library, setLibrary] = useState<LibraryResult>({ needle: '', state: { kind: 'idle' } })
+  const libraryRun = useRef(0)
 
   const needle = query.trim()
   /* Ready, not merely loaded. `source !== null` is true from the instant a file
@@ -112,7 +157,11 @@ export function SearchPanel({ book, onGoTo }: SearchPanelProps) {
   const { search, goTo } = book
 
   useEffect(() => {
-    if (!searchable || needle === '') {
+    /* ⚠️ **NOT WHILE THE LIBRARY IS THE SCOPE.** Its results are not on screen,
+     * and this is a walk of the whole SPINE per keystroke — the one expensive
+     * thing this panel does. Left running it burned a full book scan for every
+     * character typed into a field asking about a different question. */
+    if (!searchable || needle === '' || scope === 'library') {
       setResult({ needle, hits: [], state: 'done' })
       return
     }
@@ -157,7 +206,46 @@ export function SearchPanel({ book, onGoTo }: SearchPanelProps) {
       clearTimeout(timer)
       controller.abort()
     }
-  }, [needle, searchable, search])
+  }, [needle, searchable, search, scope])
+
+  /* ⚠️ **THE LIBRARY SEARCH IS ITS OWN EFFECT, not a branch inside the one
+   * above.** The two have different cancellation: foliate's spine walk takes an
+   * `AbortSignal` and stops mid-book, and a plugin call cannot be stopped at
+   * all — the guard there is the run id, which discards a slower answer rather
+   * than preventing it. Fused, the in-book search's `controller.abort()` would
+   * look as though it stopped the library query, and nothing would have. */
+  useEffect(() => {
+    if (!searchLibrary || scope !== 'library' || needle === '') {
+      setLibrary({ needle, state: { kind: 'idle' } })
+      return
+    }
+    const id = ++libraryRun.current
+    setLibrary({ needle, state: { kind: 'searching' } })
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          /* ONE PAST THE CAP, so the count can tell "exactly 100" from "at
+           * least 101" — the same reason the in-book loop stops one past. */
+          const found = await searchLibrary(needle, MAX_LIBRARY_HITS + 1)
+          if (libraryRun.current !== id) return
+          setLibrary({ needle, state: { kind: 'done', hits: found } })
+        } catch (cause) {
+          if (libraryRun.current !== id) return
+          /* ⚠️ **A QUERY THE INDEX REFUSED AND AN INDEX THAT WILL NOT OPEN ARE
+           * DIFFERENT SENTENCES.** The first is the reader's to fix. Reported
+           * as the second they stop trusting the feature; as the first they
+           * retype a perfectly good question for ever. */
+          setLibrary({
+            needle,
+            state: rejectedByQuery(cause)
+              ? { kind: 'rejected', why: whyOf(cause) }
+              : { kind: 'failed', why: whyOf(cause) },
+          })
+        }
+      })()
+    }, DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [needle, scope, searchLibrary])
 
   /* Nothing on screen may outlive the query it answers. A result for a
    * different needle is not a result — it is the previous question's answer,
@@ -165,6 +253,15 @@ export function SearchPanel({ book, onGoTo }: SearchPanelProps) {
   const answered = result.needle === needle
   const hits = answered ? result.hits : []
   const searching = !answered || result.state === 'searching'
+
+  /* ⚠️ **THE SCOPE IS OFFERED ONLY WHERE THE LIBRARY CAN ACTUALLY BE
+   * SEARCHED.** A switch that is there and does nothing is worse than no switch:
+   * a reader who chooses it is told their library holds nothing. This is also
+   * what makes the pane degrade to exactly what it was before phase 31 when the
+   * `passages` capability is not composed — a browser, a phone, or a tree with
+   * it cut — which is what `pnpm verify:without` proves. */
+  const canSearchLibrary = searchLibrary !== undefined
+  const inLibrary = canSearchLibrary && scope === 'library'
 
   return (
     <div className={styles.panel}>
@@ -177,15 +274,57 @@ export function SearchPanel({ book, onGoTo }: SearchPanelProps) {
         <Search size={ICON.control} strokeWidth={ICON.stroke} style={{ color: 'var(--muted)' }} />
         <input
           className={styles.searchInput}
-          placeholder={searchable ? 'Search this book…' : 'Open a book to search it'}
+          placeholder={
+            inLibrary
+              ? 'Search every book…'
+              : searchable
+                ? 'Search this book…'
+                : 'Open a book to search it'
+          }
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          disabled={!searchable}
-          aria-label="Search this book"
+          /* ⚠️ **NOT DISABLED IN LIBRARY SCOPE, WHATEVER THE OPEN BOOK IS
+           * DOING.** Searching the shelf does not need a book open — that is the
+           * whole point of it — and the field went dead on the library screen
+           * while the one feature that works there was selected. */
+          disabled={!searchable && !inLibrary}
+          aria-label={inLibrary ? 'Search every book' : 'Search this book'}
         />
       </div>
 
-      {!searchable ? (
+      {canSearchLibrary && (
+        <div className={styles.panelMeta}>
+          {/* A RADIO GROUP, NOT A `<select>`. Two mutually exclusive options
+              both worth seeing at once, and — the reason that decides it — a
+              `<select>` given a value no option carries reports the empty
+              string and shows its first row, so its state is unreadable from
+              the DOM. Phase 30 measured that and `librarySearch.ts` records it. */}
+          <span role="radiogroup" aria-label="What to search" style={{ display: 'flex', gap: 'var(--space-8)', flex: 1 }}>
+            {(['book', 'library'] as const).map((which) => (
+              <button
+                key={which}
+                type="button"
+                role="radio"
+                aria-checked={scope === which}
+                className={styles.scopeOption}
+                data-chosen={scope === which ? 'true' : undefined}
+                onClick={() => setScope(which)}
+              >
+                {which === 'book' ? 'This book' : 'Every book'}
+              </button>
+            ))}
+          </span>
+        </div>
+      )}
+
+      {inLibrary ? (
+        <LibraryResults
+          result={library}
+          needle={needle}
+          {...(titleOf ? { titleOf } : {})}
+          {...(onOpenPassage ? { onOpenPassage } : {})}
+        />
+      ) : !searchable ? (
         <div className={styles.empty}>
           <div className={styles.emptyBody}>
             {book.source === null
@@ -263,5 +402,120 @@ export function SearchPanel({ book, onGoTo }: SearchPanelProps) {
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * The library half of the panel.
+ *
+ * A component of its own rather than another arm of the ternary above: the
+ * in-book branch is already four states deep, and the two lists differ in what
+ * a row IS — an in-book hit is a CFI, a library hit is a book and a passage.
+ */
+function LibraryResults({
+  result,
+  needle,
+  titleOf,
+  onOpenPassage,
+}: {
+  readonly result: LibraryResult
+  readonly needle: string
+  readonly titleOf?: (bookId: string) => string | undefined
+  readonly onOpenPassage?: (hit: PassageHit) => void
+}) {
+  /* Nothing on screen may outlive the query it answers — the same rule the
+     in-book half states, and for the same reason: during the debounce the
+     previous question's answer was both displayed and clickable. */
+  const answered = result.needle === needle
+  const state = answered ? result.state : { kind: 'searching' as const }
+
+  if (needle === '') {
+    return (
+      <div className={styles.empty}>
+        <div className={styles.emptyBody}>
+          Type to search every book Paper has indexed.
+        </div>
+      </div>
+    )
+  }
+  /* `idle` reaches here only between a new needle and its effect — the empty
+     needle is answered above — so it is the same thing as searching and says
+     so, rather than being a fourth sentence nobody can reach. */
+  if (state.kind === 'searching' || state.kind === 'idle') {
+    return (
+      <div className={styles.empty}>
+        <div className={styles.emptyBody}>Searching your library…</div>
+      </div>
+    )
+  }
+  if (state.kind === 'rejected') {
+    /* ⚠️ **THE READER'S OWN QUERY, NAMED.** An unbalanced quotation mark and a
+       single Chinese character are both questions the index cannot ask, and both
+       have an obvious fix — which is why this says what the index said rather
+       than "no matches". */
+    return (
+      <div className={styles.empty}>
+        <div className={styles.emptyTitle}>That search cannot be run</div>
+        <div className={styles.emptyBody}>{state.why}</div>
+      </div>
+    )
+  }
+  if (state.kind === 'failed') {
+    return (
+      <div className={styles.empty}>
+        <div className={styles.emptyTitle}>Your library could not be searched</div>
+        <div className={styles.emptyBody}>{state.why}</div>
+      </div>
+    )
+  }
+  if (state.hits.length === 0) {
+    return (
+      <div className={styles.empty}>
+        <div className={styles.emptyTitle}>No matches for “{needle}”</div>
+        <div className={styles.emptyBody}>
+          Searched every book Paper has indexed so far. Settings → Library search
+          says how much that is.
+        </div>
+      </div>
+    )
+  }
+
+  const capped = state.hits.length > MAX_LIBRARY_HITS
+  const shown = state.hits.slice(0, MAX_LIBRARY_HITS)
+  return (
+    <>
+      <div className={styles.panelMeta}>
+        <span style={{ flex: 1 }}>{countLine(state.hits.length, capped, false)}</span>
+      </div>
+      {byBook(shown).map(([bookId, hits]) => (
+        <div key={bookId}>
+          <div className={styles.resultAt}>{titleOf?.(bookId) ?? bookId}</div>
+          {hits.map((hit, index) => (
+            <button
+              /* Keyed by position as well as anchor. Two passages in one
+                 section CAN share an offset only if they are the same passage,
+                 but a book id and a section number are not unique across the
+                 list, and React collapses duplicate keys to the last of them. */
+              key={`${hit.sectionIndex}:${hit.offset}:${index}`}
+              type="button"
+              className={styles.result}
+              onClick={() => onOpenPassage?.(hit)}
+              /* ⚠️ **A ROW NOTHING CAN ACT ON IS DISABLED RATHER THAN DRAWN AS
+                 A LIVE CONTROL.** A host that can search the library and not
+                 open a second book should not offer a click that does nothing —
+                 the whole class of defect the ledger calls "a link that opens
+                 nothing". */
+              disabled={onOpenPassage === undefined}
+            >
+              <div className={styles.resultSnippet}>
+                {hit.prefix}
+                <span className={styles.hit}>{hit.quote}</span>
+                {hit.suffix}
+              </div>
+            </button>
+          ))}
+        </div>
+      ))}
+    </>
   )
 }

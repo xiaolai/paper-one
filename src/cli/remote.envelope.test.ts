@@ -134,6 +134,40 @@ async function serveOverTheWire(
     storage: null,
     initialBooks: books,
   })
+  /* ⚠️ **A PASSAGE INDEX, BECAUSE `--shelf` REALLY DOES REACH ONE.**
+   * `passage.search` declares `audience: 'this-shelf'`, and the reader's own
+   * authenticated session over the webhost IS this shelf — the phase plan says
+   * so: *"The local CLI refuses by name when the app is not running … It works
+   * over `--shelf`."* Exempting the row from this harness would have left that
+   * sentence unproved, which is the shape `paper/share-notes/1` had when it
+   * went a whole phase with no client.
+   *
+   * A stub rather than the plugin: what crosses the envelope here is the ROW
+   * and its framing, and the plugin is not what this file is about. The hit's
+   * fields are the real ones, so the shape is checked on the way past. */
+  const passageBound = services.bindPassages({
+    search: async () => [
+      {
+        bookId: 'b0000',
+        sectionIndex: 2,
+        offset: 17,
+        quote: 'the whale',
+        prefix: 'and then we saw ',
+        suffix: ' rise beside the boat',
+        score: 1.5,
+      },
+    ],
+    status: async () => ({
+      books: 1,
+      sections: 3,
+      chars: 120,
+      indexBytes: 4096,
+      textBytes: 512,
+      analysis: 'paper/1',
+      unreadable: [],
+    }),
+  })
+  void passageBound
   /* WHAT THE HANDLER ACTUALLY PRODUCED. Cancellation is about work stopping on
    * the SHELF, and nothing here could see that: the assertions were all about
    * the client's own iterator, which a client that never sends `cancel`
@@ -242,6 +276,7 @@ describe('every command, over the envelope', () => {
       'content.read': ['content', 'read', 'b0000'],
       'cover.read': ['cover', 'read', 'b0000'],
       'shelf.status': ['shelf', 'status'],
+      'passage.search': ['passage', 'search', 'whale'],
     }
     /* Derived from the table, so a read service added without a case here
      * fails this test rather than sliding past it. `device.list` is the one

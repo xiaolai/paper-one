@@ -41,6 +41,7 @@ import { useReanchor } from './hooks/useReanchor'
 import { useJumps, type JumpTarget } from './hooks/useJumps'
 import { useResumeAt } from './hooks/useResumeAt'
 import { locationToOpen, overrideSpent, type Place } from '../core/jumpStack'
+import { useOpenPassage } from './hooks/useOpenPassage'
 import type { ExternalLinkDetail } from 'foliate-js/view.js'
 import type { FootnoteRender } from './reader/footnotes'
 import { extensionFor, isMissingFile, readOwnedBook, storedBookName } from '../core/bookVault'
@@ -1901,6 +1902,34 @@ export function App({
     [jumps, book.position.chapterLabel, placeHere, raiseReturnHint],
   )
 
+  /**
+   * Open a library search hit — WI-31.6.
+   *
+   * ⚠️ **THROUGH `jumpTo`, SO IT ENTERS THE STACK.** A hit is a jump like any
+   * other panel's, and the ledger names search hits among the panels that push
+   * onto it: called with `openStored` directly, the panel would move the reader
+   * with no way back and no "← Back to" line — exactly the defect
+   * `SearchPanel`'s `onGoTo` prop was added to fix for the in-book half.
+   *
+   * Declared AFTER `jumpTo` because it uses it, and given a stable identity
+   * because the Search panel's effect lists it: a fresh function every render
+   * would restart the library search whenever anything else in the app
+   * re-rendered.
+   */
+  /* ⚠️ **READ AT RENDER TIME, NOT CAPTURED AT BOOT.** The slot is bound during
+   * the `passages` capability's `start`, which runs after this component's
+   * module is loaded; a value read once would be null for ever on the very
+   * builds that have an index. It is a stable function reference either way —
+   * the port is made once by the capability. */
+  const passageIndex = services.passages()
+
+  const openPassage = useOpenPassage({
+    fs,
+    books: library.books,
+    jumpTo,
+    onProblem: setImportNotice,
+  })
+
   /* Spent by using it, so the line does not linger over a place the reader has
      already gone back to. */
   const goBackFromHint = useCallback(() => {
@@ -2601,6 +2630,16 @@ export function App({
             markControls={composition.markControls}
             narration={narration}
             books={library.books}
+            /* ⚠️ **ABSENT WHERE THE LIBRARY CANNOT BE SEARCHED, not a stub that
+               answers nothing.** The kernel's slot is null on a host with no
+               `passages` capability — a browser, a phone, a tree with it cut —
+               and a stub returning an empty list would tell the reader *"nothing
+               in your library says that"*, a wrong answer rather than a missing
+               one. Absent, the Search panel draws no scope switch and is exactly
+               what it was before phase 31. */
+            {...(passageIndex
+              ? { passages: { search: passageIndex.search, onOpen: openPassage } }
+              : {})}
             /* GROUPED BY THE PANEL THEY SERVE — see `SidePaneProps`. Eight of
                these were flat props on a component that reads none of them. */
             library={{

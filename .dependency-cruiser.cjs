@@ -342,6 +342,13 @@ const PLUGIN_WIRES = [
    * when the two disagree — and that test itself had to learn not to read a
    * doc comment mentioning `#[tauri::command]` as a seventh command. */
   '^src/capabilities/voices/lib/wire\\.ts$',
+  /* The fourth (phase 31): `tauri-plugin-passages`' commands — building the
+   * library-wide text index, asking it what is still to do, and querying it.
+   * Admitted on the same ground as the three above: a fourth capability with
+   * its own plugin, not a second file in one capability. The crate's `build.rs`
+   * carries the matching command list and `commands.rs`'s `lists_agree` fails
+   * the build when the two disagree. */
+  '^src/capabilities/passages/lib/wire\\.ts$',
 ]
 
 /** A capability's public entry — the only file under `src/capabilities/<id>/`
@@ -725,7 +732,8 @@ module.exports = {
       comment:
         'A capability may not import @tauri-apps/* directly — the platform is reached through the ' +
         "kernel's primitives, or through a capability's own plugin wire. The exceptions are the " +
-        'wires themselves (see PLUGIN_WIRES): peer/lib/wire.ts, webhost/lib/wire.ts and voices/lib/wire.ts, which are ' +
+        'wires themselves (see PLUGIN_WIRES): peer/lib/wire.ts, webhost/lib/wire.ts, voices/lib/wire.ts and '
+        + 'passages/lib/wire.ts, which are ' +
         'where invoke/listen for those plugins live (mirroring the fs-plugin allow-list above). ' +
         'One file per plugin, so the set of command names is auditable in one place. Matched on ' +
         'the package name wherever it resolves, like the fs rule. ⚠️ THE NAME SAID "peer" AND THE ' +

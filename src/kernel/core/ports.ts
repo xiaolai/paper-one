@@ -337,6 +337,99 @@ export interface SpeechEnginePort {
   release(): Promise<void>
 }
 
+/**
+ * One passage the library index found — `passage.search`'s row.
+ *
+ * ⚠️ **THE QUOTE IS RAW AND IS NEVER MARKED UP**, which is not a display
+ * preference. The reader's side takes this string back to the book and looks for
+ * it character for character through `reanchorIn`; a `<mark>` in it is a string
+ * that occurs nowhere, so every landing would fail. The pane draws the emphasis
+ * from the three plain fields. Tantivy's own snippet generator hands back marked
+ * HTML, which is the tempting and wrong value to put here.
+ *
+ * ⚠️ **AND `offset` IS IN UTF-16 CODE UNITS** — what a JavaScript string is
+ * sliced by, and the unit `tauri-plugin-voices`' `WordRow.start` already uses.
+ * The plugin converts once, in `Store::search`, where the string is. Bytes and
+ * `char`s are two other numbers for the same position, and picking either would
+ * shift every quote in a book by however many astral characters preceded it.
+ */
+export interface PassageHit {
+  readonly bookId: string
+  /** The spine index the passage is in — what the landing parses. */
+  readonly sectionIndex: number
+  /** Where the quote starts in that section's canonical text, in UTF-16 units. */
+  readonly offset: number
+  /** The passage itself, exactly as the book spells it. */
+  readonly quote: string
+  /** The text immediately before the quote, for disambiguation and for display. */
+  readonly prefix: string
+  readonly suffix: string
+  /** BM25, as the index scored the section. Higher is better; not a probability. */
+  readonly score: number
+}
+
+/** A book that could not be indexed, and why — in words a reader can read. */
+export interface UnreadableBook {
+  readonly bookId: string
+  readonly why: string
+  /** Epoch milliseconds. */
+  readonly at: number
+}
+
+/**
+ * How much of the shelf is searchable, and what it cost.
+ *
+ * ⚠️ **`unreadable` IS THE FIELD THIS SHAPE EXISTS FOR.** A search that quietly
+ * omits a fifth of the library is worse than one that says it is still working
+ * — the phase plan's own words — and a book absent from the index is otherwise
+ * indistinguishable from a book with no matches.
+ */
+export interface PassageIndexStatus {
+  /** Books with postings. */
+  readonly books: number
+  /** Sections, across all of them. */
+  readonly sections: number
+  /** Characters of canonical text held. */
+  readonly chars: number
+  /** Bytes of postings, and bytes of the retained text they are rebuildable from. */
+  readonly indexBytes: number
+  readonly textBytes: number
+  /** Which analysis built the postings — the tokenizer migration's handle. */
+  readonly analysis: string
+  /** Books that could not be read, newest news first. */
+  readonly unreadable: readonly UnreadableBook[]
+}
+
+/**
+ * Searching the text of every book on the shelf.
+ *
+ * ⚠️ **BOUND BY A CAPABILITY, ABSENT ON A HOST WITHOUT ONE**, like the size,
+ * hash and speech ports above. A browser client and a phone have no index, and
+ * every reader of this answers "the library cannot be searched here" rather than
+ * failing — which is exactly what makes the Search pane degrade to in-book-only
+ * with no capability, and what makes `pnpm verify:without` able to cut it.
+ *
+ * ⚠️ **NARROW ON PURPOSE: THIS IS WHAT THE KERNEL NEEDS, NOT WHAT THE INDEX
+ * DOES.** Building the index — putting a book in, noting one that would not
+ * read, flushing, forgetting, rekeying, rebuilding — is the `passages`
+ * capability's own business and is on its own wider port. Publishing the write
+ * half here would put a door to the index on the kernel's slot, where the
+ * service table could reach it; `passage.search` is a READ and there is no row
+ * in that table that writes to an index.
+ */
+export interface PassagesPort {
+  /**
+   * Passages answering this query, best first.
+   *
+   * A bare multi-word query is AND; quotation marks make a phrase. The query
+   * dialect is the plugin's `parse_query`, so the pane, the CLI and the schema
+   * answer the same way because they all reach the same function.
+   */
+  search(query: string, limit?: number): Promise<readonly PassageHit[]>
+  /** What is indexed, what it cost, and which books could not be read. */
+  status(): Promise<PassageIndexStatus>
+}
+
 export interface HashPort {
   /** BLAKE3, hex, and the byte count of `books/<folder>/<name>`; rejects when there is no such file. */
   hashFile(folder: string, name: string): Promise<{ readonly blake3: string; readonly size: number }>

@@ -79,6 +79,26 @@ export { messageOf } from './core/messageOf'
    Listen control's notice and the Voices pane both say a pack's size, and
    their two copies had already drifted apart at 1 023.6 MiB. */
 export { packArrived, packSize } from './ui/reader/engineVoice'
+/* THE EXTRACTOR, published because the `passages` capability is what drives it
+ * and a capability may import nothing of the kernel but this entry.
+ *
+ * ⚠️ **IT MUST BE THE KERNEL'S AND NOT THE CAPABILITY'S OWN, and that is the
+ * whole architecture of phase 31.** `extractSections` walks a section with
+ * `indexText` — the SAME function `reanchorIn` uses to land a hit — so both ends
+ * of library search are one implementation. A capability that grew its own walk
+ * would be a second copy of a rule whose asymmetry has already caused *"a
+ * silent, total loss of context"* once: `<p>done</p><p>Start</p>` indexed as
+ * `doneStart`.
+ *
+ * ⚠️ **AND IT COSTS THIS ENTRY ONE IMPORT OF `foliate-js/epubcfi.js`**, through
+ * `reanchor.ts`, which every consumer of the kernel entry now loads. Measured
+ * rather than assumed: `pnpm browser:check` still reports the entry unblocked —
+ * epubcfi is pure browser-safe JavaScript — and `assert-bundle` still passes.
+ * It is stated because a barrel's re-exports evaluate with the barrel, which is
+ * the cost `ui/browser.ts`'s header records paying 0.5 % of function coverage
+ * for. */
+export { bodyOf, canonicalTextOf, extractSections, MAX_SECTION_CHARS } from './ui/reader/passageText'
+export type { ExtractDeps, ExtractedSection, Extraction } from './ui/reader/passageText'
 export { createMarkStore } from './core/markStore'
 export type { MarkSnapshot, MarkStore, MarkStoreOptions } from './core/markStore'
 export type { UnplacedMark } from './core/marks'
@@ -130,6 +150,7 @@ export type { CapabilityErrorCode, Composition, CompositionOptions, Contribution
  * one declaration, and nothing holds the document. */
 export {
   GRANT_FAMILIES,
+  SERVICE_AUDIENCES,
   SERVICE_GRANTS,
   SERVICE_NAMES,
   SERVICE_NOUNS,
@@ -140,14 +161,15 @@ export {
   positionalFields,
   readServices,
   readingGrant,
+  servableToAnotherDevice,
   serviceClients,
   serviceDescriptor,
   servicesOn,
   writeServices,
 } from './core/serviceTable'
 export type {
-  FieldType,
   GrantFamily,
+  ServiceAudience,
   ServiceDescriptor,
   ServiceField,
   ServiceGrant,
@@ -157,6 +179,7 @@ export type {
   ServiceOutput,
   ServiceVerb,
   WithdrawnField,
+FieldType,
 } from './core/serviceTable'
 
 /* The table's HANDLERS, and the ports the three nouns the kernel cannot
@@ -169,6 +192,9 @@ export type {
   DeviceRow,
   HashPort,
   InstallProgress,
+  PassageHit,
+  PassageIndexStatus,
+  PassagesPort,
   ServiceEnvironment,
   ShelfFacts,
   ShelfPort,
@@ -177,6 +203,7 @@ export type {
   SpeechRequest,
   SpokenAudio,
   SpokenWordTiming,
+  UnreadableBook,
   VoiceChoice,
   VoicePack,
 } from './core/services/environment'

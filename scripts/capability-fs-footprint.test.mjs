@@ -313,6 +313,31 @@ const REVIEWED_FOOTPRINT = [
 
      Absent means empty; unreadable THROWS. Collapsing those two is how a
      reader's whole decision file gets overwritten with nothing. */
+  /* -- passages -- the library-wide text index. Phase 31.
+   *
+   * ⚠️ **THE REVIEW, and this one is unusual: it is a READ AND NOTHING ELSE.**
+   * `services.fs` in `index.ts` is reached once, by `extractBook`, to read a
+   * book's own bytes so they can be parsed and walked. There is no write here
+   * at all, and no raw handle — every path is `contentPathIn(bookId,
+   * storedBookName(book))`, which is the kernel's own pair, the same one
+   * `App.openStored` uses. Three things make it narrow enough to allow:
+   *
+   *  - **It reads what the reader already owns, by the app's own path helper.**
+   *    `storedBookName` handles a replicated record with no `ext` whose EPUB
+   *    bytes are stored as `.bin`; `contentPathIn` chooses the extension and
+   *    runs the id through `safeId`. A literal `books/<id>/content.epub` would
+   *    have been the thing to refuse — `bookVault.ts` records what that guess
+   *    cost once — and this capability cannot name a file outside a book's own
+   *    folder because it never builds a path itself.
+   *  - **THE INDEX IS NOT WRITTEN THROUGH THIS FILESYSTEM.** It lives under
+   *    `passages/` in the app data root, written by the Rust plugin, outside
+   *    the vault entirely. That is the whole reason this entry is one line: a
+   *    capability that wrote its index through `services.fs` would be writing
+   *    into the library's own tree, where sync and the journal would find it.
+   *  - **Nothing a stranger sends reaches it.** The only input is a book id
+   *    off the reader's own shelf snapshot.
+   */
+  'passages/index.ts services.fs',
   'public/lib/voicePort.ts atomicWrite(fs, VOICE_DECISIONS_PATH)',
   /* ⚠️ **THE FIRST CIRCLE FILES OUTSIDE A BOOK — WI-23.C1 and C3, and this
      entry is the review the plan says the gate exists for.** Three shapes,

@@ -3,7 +3,7 @@ import { CONTENT_EXTENSIONS } from './bookVault'
 import { CARD_KINDS, MAX_CARD_TEXT } from './cards'
 import { MARK_KINDS, MARK_TINTS, MAX_MARK_NOTE, MAX_MARK_TEXT } from './marks'
 import { TAG_MAX } from './tags'
-import type { DeviceRow } from './ports'
+import type { DeviceRow, PassageHit } from './ports'
 import type {
   BookDetail,
   BookRow,
@@ -154,6 +154,49 @@ export function grantCovers(grants: readonly string[], grant: string): boolean {
   return grants.includes(`${grant.slice(0, colon)}:*`)
 }
 
+/* ---------------------------------------------------------------- audience */
+
+/**
+ * WHO MAY BE SERVED A ROW — declared by every one of them, never defaulted.
+ *
+ * ⚠️ **`ServiceDescriptor` HAD NO FIELD FOR THIS, AND `grant` IS NOT ONE.** The
+ * interface declared `name`, `noun`, `verb`, `grant`, `kind`, `summary`, `input`
+ * and `output` and nothing that says which HOST may serve a row — so every row
+ * was servable to every principal holding its grant, a paired device included.
+ * For thirty-one rows that was right and unstated. For `passage.search` it is
+ * wrong, and the owner put it plainly: *why should a peer be able to read at
+ * all?*
+ *
+ * **Reading a book's bytes and interrogating the whole library are not the same
+ * capability.** `blob:read` is granted for SYNC — the Devices pane renders it
+ * *"book files — receive only"* — and a device granted that in order to RECEIVE
+ * a library has not been granted an oracle over it. Enough queries against
+ * `passage.search` enumerate books that were never shared and reconstruct prose
+ * from them, a passage at a time, and every one of those queries is a legitimate
+ * use of `blob:read` as the table understood it.
+ *
+ * ⚠️ **DECLARED BY EVERY ROW, WITH NO DEFAULT**, which is `marks.ts`'s own rule
+ * in as many words: *"Membership, not exclusion … Adding a kind now means
+ * putting it in one of these two lists, which is a decision rather than an
+ * omission."* A default would make the next row's omission silent — and the
+ * silent direction is the permissive one, which is the direction that cannot be
+ * allowed to be the quiet one.
+ */
+export const SERVICE_AUDIENCES = Object.freeze([
+  /**
+   * Any principal holding the grant, over any transport — including a device
+   * paired to this shelf. What all thirty-one original rows already did.
+   */
+  'paired-device',
+  /**
+   * THIS shelf only: the app's own window, and the reader's own authenticated
+   * browser session over the webhost — which is their device and not somebody
+   * else's. Never a paired peer, whatever grants it holds.
+   */
+  'this-shelf',
+] as const)
+export type ServiceAudience = (typeof SERVICE_AUDIENCES)[number]
+
 /* ------------------------------------------------------------- the shapes */
 
 /**
@@ -171,7 +214,18 @@ export function grantCovers(grants: readonly string[], grant: string): boolean {
  * the book cannot be opened. "Cover" is also not a verb, and `content.cover`
  * would have been the first row in this table whose second word was not one.
  */
-export const SERVICE_NOUNS = Object.freeze(['book', 'mark', 'card', 'tag', 'content', 'cover', 'device', 'shelf', 'trash'] as const)
+/* `passage` IS ITS OWN NOUN AND IS NOT A VERB ON `book`.
+ *
+ * ⚠️ **`book.search` ALREADY EXISTS AND IS NOT THIS.** It is the shelf field's
+ * query — title, author, `tag:`, `-tag:`, `is:` — over `index.json`: the library
+ * searching everything it knows ABOUT a book. `passage.search` is the text
+ * INSIDE one. Two meanings on one name is precisely what this file exists to
+ * prevent, and `book.search` is untouched by phase 31.
+ *
+ * It is also a real noun in the model rather than a name invented for a row:
+ * a passage is what a mark anchors to, what the circle publishes, and what
+ * `reanchorIn` resolves. */
+export const SERVICE_NOUNS = Object.freeze(['book', 'mark', 'card', 'tag', 'content', 'cover', 'passage', 'device', 'shelf', 'trash'] as const)
 export type ServiceNoun = (typeof SERVICE_NOUNS)[number]
 
 /**
@@ -349,6 +403,7 @@ export interface WireShapes {
   TagChange: TagChange
   ContentChunk: ContentChunk
   ContentLocation: ContentLocation
+  PassageHit: PassageHit
   PositionSet: PositionSetRow
   ShelfStatus: ShelfStatus
   DeviceRow: DeviceRow
@@ -418,6 +473,14 @@ export interface ServiceDescriptor {
   readonly noun: ServiceNoun
   readonly verb: ServiceVerb
   readonly grant: ServiceGrant
+  /**
+   * Which hosts may serve this row — see {@link SERVICE_AUDIENCES}.
+   *
+   * REQUIRED, and `serviceTable.test.ts` pins it as such. A row that forgets it
+   * does not compile, which is the whole mechanism: the permissive answer must
+   * never be the one you get by saying nothing.
+   */
+  readonly audience: ServiceAudience
   readonly kind: ServiceKind
   readonly summary: string
   readonly input: readonly ServiceField[]
@@ -484,6 +547,7 @@ const TABLE = [
     noun: 'book',
     verb: 'list',
     grant: 'book:read',
+    audience: 'paired-device',
     kind: 'stream',
     summary: 'Pages of index rows. `since` makes it a delta rather than a re-read.',
     input: [
@@ -501,6 +565,7 @@ const TABLE = [
     noun: 'book',
     verb: 'get',
     grant: 'book:read',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'One record by id, with its ledger registers — the position and finished stamps and the tag clock, which a shelf listing does not carry. (A listing carries the opinion stamps.)',
     input: [BOOK_ID],
@@ -511,6 +576,7 @@ const TABLE = [
     noun: 'book',
     verb: 'add',
     grant: 'book:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Create a record. Metadata only — bytes ride the blob path.',
     input: [
@@ -526,6 +592,7 @@ const TABLE = [
     noun: 'book',
     verb: 'set',
     grant: 'book:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Change fields on one record: finished, position, status, rating, review.',
     input: [
@@ -563,6 +630,7 @@ const TABLE = [
      * webhost pump binds it further, to the book the client opened.
      */
     grant: 'position:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Where the reader is in one book — the one write a reading device is granted.',
     input: [
@@ -577,6 +645,7 @@ const TABLE = [
     noun: 'book',
     verb: 'remove',
     grant: 'book:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Folder to the trash. Not away.',
     input: [BOOK_ID],
@@ -587,6 +656,7 @@ const TABLE = [
     noun: 'book',
     verb: 'restore',
     grant: 'book:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Back from the trash, row and all.',
     input: [BOOK_ID],
@@ -597,6 +667,7 @@ const TABLE = [
     noun: 'book',
     verb: 'search',
     grant: 'book:read',
+    audience: 'paired-device',
     kind: 'stream',
     summary: 'The index query the shelf search field already parses — `tag:`, `-tag:`, `is:`, text.',
     input: [
@@ -612,6 +683,7 @@ const TABLE = [
     noun: 'mark',
     verb: 'list',
     grant: 'mark:read',
+    audience: 'paired-device',
     kind: 'stream',
     summary: 'By book, or every mark on the shelf.',
     input: [
@@ -625,6 +697,7 @@ const TABLE = [
     noun: 'mark',
     verb: 'add',
     grant: 'mark:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Anchor a highlight, note or bookmark in a book.',
     input: [
@@ -660,6 +733,7 @@ const TABLE = [
     noun: 'mark',
     verb: 'set',
     grant: 'mark:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Note text, colour.',
     input: [
@@ -676,6 +750,7 @@ const TABLE = [
     noun: 'mark',
     verb: 'remove',
     grant: 'mark:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Tombstoned, so the removal replicates.',
     input: [
@@ -691,6 +766,7 @@ const TABLE = [
     noun: 'card',
     verb: 'list',
     grant: 'card:read',
+    audience: 'paired-device',
     kind: 'stream',
     summary: 'Every live card, newest first. Cross-book, in no folder.',
     input: [{ name: 'limit', type: 'number', integer: true, min: 0, doc: 'Stop after this many rows.' }],
@@ -701,6 +777,7 @@ const TABLE = [
     noun: 'card',
     verb: 'add',
     grant: 'card:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Make a card.',
     input: [
@@ -715,6 +792,7 @@ const TABLE = [
     noun: 'card',
     verb: 'remove',
     grant: 'card:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Tombstoned, so the removal replicates.',
     input: [{ name: 'card', type: 'string', required: true, nonEmpty: true, maxLength: MAX_RECORD_FIELD, doc: 'The card id.', positional: 0 }],
@@ -729,6 +807,7 @@ const TABLE = [
     noun: 'tag',
     verb: 'list',
     grant: 'book:read',
+    audience: 'paired-device',
     /* A STREAM, and it was `req` on the assumption that a shelf has few tags.
      *
      * The RECORD permits 4 096 tags per book at up to `TAG_MAX` characters
@@ -747,6 +826,7 @@ const TABLE = [
     noun: 'tag',
     verb: 'add',
     grant: 'book:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Apply one or many tags to one or many books.',
     input: [
@@ -760,6 +840,7 @@ const TABLE = [
     noun: 'tag',
     verb: 'remove',
     grant: 'book:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Take a tag off named books, or off the whole shelf when none are named.',
     input: [
@@ -773,6 +854,7 @@ const TABLE = [
     noun: 'tag',
     verb: 'rename',
     grant: 'book:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Everywhere at once. Renaming onto an existing name merges, because tags fold by key.',
     input: [
@@ -788,6 +870,7 @@ const TABLE = [
     noun: 'content',
     verb: 'locate',
     grant: 'book:read',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Hash, size, and whether this shelf holds the bytes — what a caller needs BEFORE opening a blob stream.',
     input: [BOOK_ID],
@@ -820,6 +903,7 @@ const TABLE = [
      * artwork the shelf derived, not the file the reader imported.
      */
     grant: 'blob:read',
+    audience: 'paired-device',
     kind: 'stream',
     summary: "A slice of a book's bytes, base64, in chunks — what a browser reads a book through.",
     input: [
@@ -861,6 +945,7 @@ const TABLE = [
     noun: 'content',
     verb: 'evict',
     grant: 'book:write',
+    audience: 'paired-device',
     kind: 'req',
     summary: "Delete this device's copy of the bytes. Replicates nothing, by construction.",
     input: [BOOK_ID],
@@ -876,6 +961,7 @@ const TABLE = [
     noun: 'cover',
     verb: 'read',
     grant: 'book:read',
+    audience: 'paired-device',
     kind: 'stream',
     summary: "A book's jacket, base64, in chunks — what a browser draws a shelf with.",
     /* NO `offset`/`length`, unlike `content.read`. A cover is tens of kilobytes
@@ -886,12 +972,56 @@ const TABLE = [
     output: { many: true, of: 'ContentChunk', columns: ['bookId', 'offset', 'bytes'] },
   },
 
+  /* ---- passage ---- */
+  {
+    name: 'passage.search',
+    noun: 'passage',
+    verb: 'search',
+    /**
+     * ⚠️ `blob:read`, NOT `book:read`, for `content.read`'s reason: **a snippet
+     * is book content.** That row's note records what the distinction is worth
+     * — `describeGrants` renders `blob:read` as "book files" and `book:read`
+     * without it as "Books, highlights, reading position", so a peer given the
+     * second and denied the first is TOLD it cannot have the files. Handing it
+     * the prose of those files a passage at a time would make that sentence
+     * false by a different door.
+     *
+     * A browser client is unaffected: its single grant is `readingGrant`, a
+     * `:read` suffix test, which covers `blob:read` exactly as it covers
+     * `book:read`.
+     */
+    grant: 'blob:read',
+    /**
+     * ⚠️ **AND THE GRANT IS NOT WHAT KEEPS A PEER OUT — THE AUDIENCE IS.**
+     * `blob:read` is granted for SYNC, so a satchel receiving a library holds
+     * it; the owner's question was *why should a peer be able to read at all?*,
+     * and the honest answer is that a device trusted to RECEIVE books has not
+     * been trusted with an oracle over them. Enough queries here enumerate books
+     * that were never shared and reconstruct prose from them.
+     *
+     * ⚠️ **THE GRANT STAYS `blob:read` AS WELL.** With the audience enforced it
+     * is no longer the thing standing between a peer and the prose, but it is
+     * still the honest label for a row that returns book content — and two
+     * independent refusals is the right number for a boundary this repository
+     * has already had to implement twice.
+     */
+    audience: 'this-shelf',
+    kind: 'stream',
+    summary: 'Passages from the text of every indexed book. A bare multi-word query is AND; quotation marks make a phrase. Served to this device only — never to a paired one.',
+    input: [
+      { name: 'query', type: 'string', required: true, nonEmpty: true, maxLength: MAX_QUERY, doc: 'What to look for. Several words means all of them; put quotation marks round a phrase.', positional: 0 },
+      { name: 'limit', type: 'number', integer: true, min: 0, doc: 'Stop after this many passages.' },
+    ],
+    output: { many: true, of: 'PassageHit', columns: ['bookId', 'sectionIndex', 'quote'] },
+  },
+
   /* ---- device ---- */
   {
     name: 'device.list',
     noun: 'device',
     verb: 'list',
     grant: 'device:read',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Paired peers with role, grants and last seen.',
     input: [],
@@ -902,6 +1032,7 @@ const TABLE = [
     noun: 'device',
     verb: 'grant',
     grant: 'device:manage',
+    audience: 'paired-device',
     kind: 'req',
     summary: "Set a peer's grants, replacing the list it had.",
     input: [
@@ -915,6 +1046,7 @@ const TABLE = [
     noun: 'device',
     verb: 'forget',
     grant: 'device:manage',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Revoke a pairing. Closes any open session.',
     input: [{ name: 'device', type: 'string', required: true, nonEmpty: true, maxLength: MAX_RECORD_FIELD, doc: 'The peer id.', positional: 0 }],
@@ -927,6 +1059,7 @@ const TABLE = [
     noun: 'shelf',
     verb: 'status',
     grant: 'shelf:read',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Role, endpoint id, book count, journal seq, epoch, bytes on disk.',
     input: [],
@@ -937,6 +1070,7 @@ const TABLE = [
     noun: 'shelf',
     verb: 'sync',
     grant: 'shelf:admin',
+    audience: 'paired-device',
     kind: 'req',
     summary:
       'Sync now, on a SATCHEL. A shelf answers satchels and does not dial them, so on one this answers started: false with the reason — it is not a no-op dressed as a success.',
@@ -948,6 +1082,7 @@ const TABLE = [
     noun: 'shelf',
     verb: 'verify',
     grant: 'shelf:admin',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'Integrity pass over the index and the journal.',
     input: [],
@@ -960,6 +1095,7 @@ const TABLE = [
     noun: 'trash',
     verb: 'list',
     grant: 'book:read',
+    audience: 'paired-device',
     kind: 'stream',
     summary: 'Removed books, with how long is left before they age out.',
     input: [{ name: 'limit', type: 'number', integer: true, min: 0, doc: 'Stop after this many rows.' }],
@@ -976,6 +1112,7 @@ const TABLE = [
      * under the old grant every such peer could, which put the recovery
      * boundary inside the same permission as ordinary editing. */
     grant: 'shelf:admin',
+    audience: 'paired-device',
     kind: 'req',
     summary: 'The one irreversible verb in the table. Takes the count it expects to delete, and refuses any other.',
     input: [
@@ -1070,6 +1207,41 @@ export const writeServices = (): readonly ServiceDescriptor[] => SERVICE_TABLE.f
  */
 export function serviceClients(): readonly ClientContribution[] {
   return SERVICE_TABLE.map((one) => ({ name: one.name }))
+}
+
+/**
+ * The rows a host that reaches ANOTHER DEVICE may serve.
+ *
+ * ⚠️ **THE FILTER IS BY MEMBERSHIP AND NOT BY EXCLUSION**, which is the whole
+ * point of `audience` being required: this asks which rows say `paired-device`
+ * rather than which rows are not on a deny list. A row added without an
+ * audience does not compile; a row added with the wrong one is still refused
+ * here by default rather than served by default.
+ *
+ * The peer capability is the caller — `serveWhenShelf` — and it is the only
+ * transport in this tree that reaches somebody else's machine. The webhost does
+ * not filter, deliberately: a browser session over it is the READER'S own,
+ * authenticated to this shelf, which is what `this-shelf` means.
+ */
+/* GENERIC, so a caller keeps its own row type and no cast is needed at either
+ * call site. It was `readonly { name: string }[]` in and out, which meant both
+ * the peer host and its testkit widened a `ServiceContribution[]` on the way in
+ * and cast it back on the way out — and `reanchor.source.test.ts` scans the
+ * modules that carry a branded cfi for exactly that habit. A filter has no
+ * business narrowing what it was handed. */
+export function servableToAnotherDevice<T extends { readonly name: string }>(
+  services: readonly T[],
+): readonly T[] {
+  return services.filter((one) => {
+    const descriptor = serviceDescriptor(one.name)
+    /* ⚠️ **A NAME THE TABLE DOES NOT HOLD IS REFUSED, NOT PASSED THROUGH.**
+     * Every contribution reaching a host came from `buildServices`, which can
+     * only produce the table's own rows — so an unknown name here means
+     * something built a contribution by hand, and serving it to another device
+     * on the strength of not recognising it is the permissive default this
+     * field exists to remove. */
+    return descriptor?.audience === 'paired-device'
+  })
 }
 
 /** The positional fields of a service, in command-line order. */

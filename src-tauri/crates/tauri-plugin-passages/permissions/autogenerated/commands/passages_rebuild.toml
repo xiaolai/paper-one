@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-passages-rebuild"
+description = "Enables the passages_rebuild command without any pre-configured scope."
+commands.allow = ["passages_rebuild"]
+
+[[permission]]
+identifier = "deny-passages-rebuild"
+description = "Denies the passages_rebuild command without any pre-configured scope."
+commands.deny = ["passages_rebuild"]

@@ -98,7 +98,10 @@ describe('the registries it evaluates', () => {
     expect(surfaces.kernelSettings).toContain('sentenceGapMs')
     expect(surfaces.kernelSettings).toContain('paragraphGapMs')
     expect(surfaces.kernelSettings).toContain('readingNotesAloud')
-    expect(surfaces.services).toHaveLength(31)
+    /* 32 since phase 31 added `passage.search` — the text INSIDE a book,
+       which is a different question from `book.search`'s query over the
+       index. See `SERVICE_NOUNS`, which says why it is its own noun. */
+    expect(surfaces.services).toHaveLength(32)
     expect(surfaces.readingSteps).toHaveLength(14)
     expect(surfaces.spacingAxes).toEqual(['letter', 'word', 'line', 'paragraph'])
     expect(surfaces.acceptFormats).toEqual(['.epub', '.pdf', '.mobi', '.azw3', '.cbz', '.fb2', '.fbz'])

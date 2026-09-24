@@ -9,6 +9,7 @@ import {
   Wrench,
 } from 'lucide-react'
 import type { IndexedBook } from '../../core/bookIndex'
+import type { PassageHit } from '../../core/ports'
 import type { JumpTarget } from '../hooks/useJumps'
 import type { MarkControl, PaneContribution } from '../../core/capability'
 import { ICON, type Platform } from '../../core/metrics'
@@ -171,6 +172,24 @@ export interface SidePaneProps {
   /** The shelf: the Library panel's counts and scopes, and Marginalia's titles. */
   books: readonly IndexedBook[]
   /**
+   * Everything the Search panel needs to reach BEYOND the open book — WI-31.6.
+   *
+   * ⚠️ **ONE OPTIONAL PROP, ABSENT WHERE THE LIBRARY CANNOT BE SEARCHED.** A
+   * browser client, a phone and any build without the `passages` capability
+   * have no index; given a stub that answered an empty list, the panel would
+   * tell a reader *"nothing in your library says that"*, which is a wrong
+   * answer rather than a missing one. Absent, the scope switch is not drawn and
+   * the panel is exactly what it was before phase 31 — which is what makes
+   * `pnpm verify:without passages` pass rather than needing a second code path.
+   *
+   * Grouped for `library`'s reason: the two members belong together and a host
+   * that can do one and not the other would draw results nothing can act on.
+   */
+  passages?: {
+    readonly search: (query: string, limit?: number) => Promise<readonly PassageHit[]>
+    readonly onOpen: (hit: PassageHit) => void
+  }
+  /**
    * Everything the Settings panel needs from its host rather than from the app
    * state, as one prop — same reason as `library`, and picked from
    * `SettingsProps` for the same reason: `offered`, the contributed `sections`
@@ -230,6 +249,7 @@ export function SidePane({
   markFocus,
   onMarkFocusDone,
   books,
+  passages,
   library,
   settings,
   contributed,
@@ -372,7 +392,15 @@ export function SidePane({
         {/* A hit is a jump like any other panel's — through `onGoTo`, so it
             enters the stack and raises "← Back to". Mounted without it, the
             panel navigated on its own and the ledger's promise was a row. */}
-        {pane === 'search' && <SearchPanel book={book} {...goToProps} />}
+        {pane === 'search' && (
+          <SearchPanel
+            book={book}
+            {...goToProps}
+            {...(passages
+              ? { searchLibrary: passages.search, onOpenPassage: passages.onOpen, titleOf }
+              : {})}
+          />
+        )}
 
         {/* NO `developer &&` GUARD. The pane can only be `dev` when `paneFits`
             said so, and that reads `state.developer` — the same one answer the

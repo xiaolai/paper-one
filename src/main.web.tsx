@@ -31,6 +31,8 @@ import './kernel/ui/styles/capability.css'
 import './app/web/entry.css'
 
 import { PairScreen } from './app/web/PairScreen'
+import { searchPassages } from './app/web/passages'
+import type { PassageHit } from './kernel'
 import { checkSession, type SessionState } from './app/web/session'
 import { connect, socketUrl } from './app/web/channel'
 import { openLink, type LinkState, type ShelfLink } from './app/web/reconnect'
@@ -329,6 +331,48 @@ function ShelfList({
     })
   }, [])
 
+  /**
+   * Search every book the shelf has indexed — WI-31.6's browser half.
+   *
+   * ⚠️ **NOT OFFERED WHILE THE LINK IS DOWN.** `searchPassages` over a link with
+   * no socket refuses every query, and a scope switch that is drawn and answers
+   * *"Your library could not be searched"* on the first keystroke is worse than
+   * one that is not drawn: a reader learns the feature is broken rather than
+   * that the shelf is not connected. The switch comes back when the link does —
+   * this is a `useMemo` on the link's own state, which is the same signal the
+   * screen's status line reads.
+   */
+  const searchLibrary = useMemo(
+    () => (linkState.kind === 'open' ? searchPassages(link) : undefined),
+    [linkState.kind, link],
+  )
+
+  /**
+   * Open a library hit in the browser — the cross-book jump.
+   *
+   * ⚠️ **IT OPENS THE BOOK AND DOES NOT LAND ON THE PASSAGE, AND THAT IS SAID
+   * RATHER THAN LEFT TO BE DISCOVERED.** Landing means parsing ONE section with
+   * `section.createDocument()` and running the canonical walk over it — which
+   * the desktop does, because it has the book's bytes on disk. A browser reads a
+   * book through `content.read` a slice at a time, so the same landing means
+   * streaming enough of somebody else's file over a socket to parse it, for a
+   * jump the reader may not take. That is a real piece of work and it is not
+   * this phase's: the hit still opens the right book at the reader's own place,
+   * which is what every other cross-book row in this client does.
+   *
+   * The passage is NOT silently dropped — the panel's snippet is what the reader
+   * clicked, and the book opens. What is missing is the scroll.
+   */
+  const openPassage = useCallback(
+    (hit: PassageHit) => {
+      const entry = shelf.find((row) => row.bookId === hit.bookId)
+      /* THE BOOK LEFT THE SHELF BETWEEN THE ROW BEING DRAWN AND CLICKED — the
+       * same refusal every other cross-book row here makes. */
+      if (entry) open(entry)
+    },
+    [shelf, open],
+  )
+
   /* THE SHELF'S MUTATIONS ARE NOT COMPOSED HERE, and five of them used to be.
    *
    * `setFinished`, `tagBooks`, `untagBooks`, `removeBook` and `undoRemoveTag`
@@ -390,6 +434,7 @@ function ShelfList({
         remote={remote}
         marks={marks}
         titleOf={titleOf}
+        {...(searchLibrary ? { searchLibrary, onOpenPassage: openPassage } : {})}
       />
     )
   }

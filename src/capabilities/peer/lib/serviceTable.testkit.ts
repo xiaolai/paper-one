@@ -1,5 +1,6 @@
 import {
   buildServices,
+  servableToAnotherDevice,
   createKernelServices,
   grantCovers,
   recordPath,
@@ -197,8 +198,18 @@ export function serveTable(options: {
    * way, for the same reason.
    */
   const pages = new Map<string, number>()
-  const built = options.services ?? buildServices({ services })
-  const contributions = built.map((one) => ({
+  /* ⚠️ **THE AUDIENCE FILTER, BECAUSE THIS HARNESS IS A PEER WIRE.**
+   * `serveWhenShelf` applies it in production and this testkit stands in for
+   * that transport — so without it the harness would serve a row no real peer
+   * can reach, and every case written against it would be measuring something
+   * the app does not do. That is the shape AGENTS.md names: *a guard whose
+   * tests all stand in for the path it sits on is a guard nobody has seen
+   * work*.
+   *
+   * A caller that supplies its own `services` is filtered too: the question
+   * this harness answers is what a PEER gets, whoever built the list. */
+  const offered = servableToAnotherDevice(options.services ?? buildServices({ services }))
+  const contributions = offered.map((one) => ({
     ...one,
     handler: (req: unknown, ctx: Parameters<ServiceContribution['handler']>[1]) => {
       ran.push(one.name)
