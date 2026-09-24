@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { MAX_HITS, SearchPanel, type SearchableBook } from './SearchPanel'
+import { DEBOUNCE_MS, MAX_HITS, SearchPanel, type SearchableBook } from './SearchPanel'
 import { MAX_LIBRARY_HITS } from './librarySearch'
 import type { PassageHit } from '../../core/ports'
 import type { SearchHit } from '../hooks/useBook'
@@ -332,7 +332,7 @@ describe('the in-book field and its empty states', () => {
      * failed is the only way to reach this sentence — a fixture with no source
      * gets the shelf's sentence instead, and the case would pass for the wrong
      * reason while asserting nothing about the failure. */
-    render(<SearchPanel book={quiet({ meta: null, error: new Error('nope') })} />)
+    render(<SearchPanel book={quiet({ meta: null, error: 'nope' })} />)
     expect(screen.getByText('This book did not open, so there is nothing to search.')).toBeTruthy()
   })
 
@@ -460,7 +460,11 @@ describe('what the library half says, and what it refuses to say', () => {
     await screen.findByRole('button', { name: /the whale/u })
     searchLibrary.mockClear()
     ask('')
-    await new Promise((r) => setTimeout(r, 120))
+    /* ⚠️ **PAST THE DEBOUNCE, OR THIS PASSES FOR THE WRONG REASON.** At 120 ms
+     * against a 250 ms debounce the call had not been made YET, so the case
+     * could not tell "never asked" from "not asked yet" — the mutation sweep
+     * priced it: both guards survived. `DEBOUNCE_MS` is read, not copied. */
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS * 2))
     expect(searchLibrary).not.toHaveBeenCalled()
   })
 
@@ -473,7 +477,11 @@ describe('what the library half says, and what it refuses to say', () => {
     searchLibrary.mockClear()
     choose('This book')
     ask('harpoon')
-    await new Promise((r) => setTimeout(r, 120))
+    /* ⚠️ **PAST THE DEBOUNCE, OR THIS PASSES FOR THE WRONG REASON.** At 120 ms
+     * against a 250 ms debounce the call had not been made YET, so the case
+     * could not tell "never asked" from "not asked yet" — the mutation sweep
+     * priced it: both guards survived. `DEBOUNCE_MS` is read, not copied. */
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS * 2))
     expect(searchLibrary).not.toHaveBeenCalled()
   })
 
@@ -578,5 +586,120 @@ describe('what the library half says, and what it refuses to say', () => {
     answer = []
     ask('harpoon')
     expect(screen.queryByRole('button', { name: /the whale 0/u })).toBeNull()
+  })
+})
+
+describe('a run that is no longer the one on screen', () => {
+  it('cannot put its answer on the panel after a newer query started', async () => {
+    /* ⚠️ **THE RACE, AND THE GUARD IS AN IDENTITY RATHER THAN A COUNTER.**
+     * A slow first query resolving after a fast second one would otherwise
+     * paint the first one's hits under the second one's needle. */
+    const gate: Array<(hits: PassageHit[]) => void> = []
+    const searchLibrary = vi.fn(
+      (needle: string) =>
+        new Promise<readonly PassageHit[]>((resolve) => {
+          gate.push(resolve as (hits: PassageHit[]) => void)
+          if (needle === 'harpoon') resolve([{ ...PASSAGE, quote: 'the harpoon' }])
+        }),
+    )
+    render(<SearchPanel book={quiet()} searchLibrary={searchLibrary} />)
+    choose('Every book')
+    ask('whale')
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS * 2))
+    ask('harpoon')
+    await screen.findByRole('button', { name: /the harpoon/u })
+    /* Now let the FIRST query answer, late. */
+    gate[0]?.([{ ...PASSAGE, quote: 'the stale whale' }])
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.queryByRole('button', { name: /the stale whale/u })).toBeNull()
+    expect(screen.getByRole('button', { name: /the harpoon/u })).toBeTruthy()
+  })
+
+  it('cannot put its FAILURE on the panel either', async () => {
+    /* The same guard sits on the catch, and a late failure would replace a
+     * perfectly good newer answer with an error about an older question. */
+    const gate: Array<(why: Error) => void> = []
+    const searchLibrary = vi.fn(
+      (needle: string) =>
+        new Promise<readonly PassageHit[]>((resolve, reject) => {
+          gate.push(reject as (why: Error) => void)
+          if (needle === 'harpoon') resolve([{ ...PASSAGE, quote: 'the harpoon' }])
+        }),
+    )
+    render(<SearchPanel book={quiet()} searchLibrary={searchLibrary} />)
+    choose('Every book')
+    ask('whale')
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS * 2))
+    ask('harpoon')
+    await screen.findByRole('button', { name: /the harpoon/u })
+    gate[0]?.(new Error('the stale index would not open'))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.queryByText(/stale index/u)).toBeNull()
+    expect(screen.getByRole('button', { name: /the harpoon/u })).toBeTruthy()
+  })
+})
+
+describe('the in-book walk is not started for nothing', () => {
+  it('walks no spine at all while the field is empty', async () => {
+    let walks = 0
+    render(
+      <SearchPanel
+        book={quiet({
+          search: async function* () {
+            walks += 1
+            yield HIT
+          },
+        })}
+      />,
+    )
+    ask('Ishmael')
+    await screen.findByRole('button', { name: /Ishmael/u })
+    const after = walks
+    expect(after).toBeGreaterThan(0)
+    ask('')
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS * 2))
+    expect(walks).toBe(after)
+    expect(screen.getByText('Type to search this book.')).toBeTruthy()
+  })
+
+  it('walks no spine for a book that cannot be searched', async () => {
+    let walks = 0
+    render(
+      <SearchPanel
+        book={quiet({
+          meta: null,
+          search: async function* () {
+            walks += 1
+            yield HIT
+          },
+        })}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText('Search this book'), { target: { value: 'Ishmael' } })
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS * 2))
+    expect(walks).toBe(0)
+  })
+
+  it('says it is still searching beside the count, and stops saying it', async () => {
+    /* A BOX, because TypeScript narrows a `let` to its initialiser and does not
+     * account for an assignment made inside a closure — `release?.()` then
+     * reads as `never`. */
+    const gate: { release: (() => void) | null } = { release: null }
+    render(
+      <SearchPanel
+        book={quiet({
+          search: async function* () {
+            yield HIT
+            await new Promise<void>((r) => {
+              gate.release = r
+            })
+          },
+        })}
+      />,
+    )
+    ask('Ishmael')
+    expect(await screen.findByText(/1 in this book · searching…/u)).toBeTruthy()
+    gate.release?.()
+    await screen.findByText(/^1 in this book$/u)
   })
 })

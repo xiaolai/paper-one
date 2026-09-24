@@ -80,7 +80,14 @@ export interface SearchPanelProps {
 }
 
 /** Long enough that typing does not start a full-book scan per keystroke. */
-const DEBOUNCE_MS = 250
+/**
+ * How long the field settles before either search is asked.
+ *
+ * EXPORTED for the same reason as `MAX_HITS`: a case that waits a number typed
+ * into the test file cannot tell *never asked* from *not asked yet*, and two
+ * guards survived the sweep on exactly that.
+ */
+export const DEBOUNCE_MS = 250
 
 /** Bounded so a common word cannot stream thousands of rows into the pane. */
 /**
@@ -145,7 +152,14 @@ export function SearchPanel({
    * applies to this field. The reader asks for the library. */
   const [scope, setScope] = useState<SearchScope>('book')
   const [library, setLibrary] = useState<LibraryResult>({ needle: '', state: { kind: 'idle' } })
-  const libraryRun = useRef(0)
+  /* ⚠️ **AN IDENTITY, NOT A COUNTER.** This only ever answers *is this still
+   * the run on screen*, and `++` mutated to `--` answers it just as well — a
+   * survivor no test can kill, because whether two steps could bring the number
+   * back to one an in-flight run still holds is an argument rather than a fact.
+   * An empty object cannot collide by construction, leaves no arithmetic to be
+   * wrong about, and has no `ObjectLiteral` mutant of its own. Phase 30 records
+   * the same fix for `EngineSpeaker`'s generation and `VoicesPane`'s `asked`. */
+  const libraryRun = useRef<object>({})
 
   const needle = query.trim()
   /* Ready, not merely loaded. `source !== null` is true from the instant a file
@@ -227,7 +241,8 @@ export function SearchPanel({
       setLibrary({ needle, state: { kind: 'idle' } })
       return
     }
-    const id = ++libraryRun.current
+    const mine = {}
+    libraryRun.current = mine
     setLibrary({ needle, state: { kind: 'searching' } })
     const timer = setTimeout(() => {
       void (async () => {
@@ -235,10 +250,10 @@ export function SearchPanel({
           /* ONE PAST THE CAP, so the count can tell "exactly 100" from "at
            * least 101" — the same reason the in-book loop stops one past. */
           const found = await searchLibrary(needle, MAX_LIBRARY_HITS + 1)
-          if (libraryRun.current !== id) return
+          if (libraryRun.current !== mine) return
           setLibrary({ needle, state: { kind: 'done', hits: found } })
         } catch (cause) {
-          if (libraryRun.current !== id) return
+          if (libraryRun.current !== mine) return
           /* ⚠️ **A QUERY THE INDEX REFUSED AND AN INDEX THAT WILL NOT OPEN ARE
            * DIFFERENT SENTENCES.** The first is the reader's to fix. Reported
            * as the second they stop trusting the feature; as the first they
