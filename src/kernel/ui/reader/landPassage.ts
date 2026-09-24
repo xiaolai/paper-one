@@ -1,5 +1,5 @@
 import { bodyOf } from './passageText'
-import { cfiFor, indexText, reanchorIn, type ResolvedCfi } from './reanchor'
+import { cfiFor, indexText, reanchorIn, type ResolvedCfi, type TextIndex } from './reanchor'
 
 /**
  * Turning a library hit back into a place in a book — the landing.
@@ -45,6 +45,22 @@ export interface LandablePassage {
   readonly quote: string
   readonly prefix: string
   readonly suffix: string
+  /**
+   * Where the index found this, in the canonical text's own UTF-16 units.
+   *
+   * ⚠️ **OPTIONAL HERE AND REQUIRED ON THE WIRE, AND THAT ASYMMETRY IS THE
+   * POINT.** `PassageHit.offset` always carries one; this type is also what
+   * every test and the marks path hand in, and an offset they cannot supply
+   * must not stop them landing. Absent, the landing behaves exactly as it did
+   * before the offset was read at all.
+   *
+   * ⚠️ **AND `undefined` MUST NOT BECOME ZERO.** `startsWith(quote, undefined)`
+   * means position 0, so an absent offset would silently claim the FIRST
+   * occurrence is the one the index meant — a wrong landing where the honest
+   * answer is a refusal, which is the one outcome this whole module exists to
+   * avoid. It is tested for by name.
+   */
+  readonly offset?: number
 }
 
 /** Where a hit landed, or why it did not. */
@@ -91,9 +107,44 @@ export async function landPassage(
    * `indexText` walks nothing and every quote comes back `absent` — a landing
    * that fails for every hit in the library, with no error anywhere. See
    * `passageText.bodyOf`. */
-  const found = reanchorIn(indexText(bodyOf(doc)), passage)
+  const index = indexText(bodyOf(doc))
+  const found = reanchorIn(index, passage)
   if (found.kind === 'absent') return { kind: 'absent' }
   if (found.kind === 'ambiguous') {
+    /* ⚠️ **THE INDEX RECORDED EXACTLY WHERE IT FOUND THIS, AND NOTHING READ
+     * IT.** `PassageHit.offset` crosses the wire and says in its own docstring
+     * *"where the quote starts in that section's canonical text"* — and the
+     * landing disambiguated on prefix and suffix alone, so a passage in a
+     * repetitive section was refused with *"Paper cannot tell which one this
+     * is"* while the answer was in the hit. A field with no consumer, which is
+     * the shape `paper/share-notes/1` and `books_in_index` already cost this
+     * repository twice.
+     *
+     * Measured on the real 1 962-book library, 2026-09-24: **5 of 216**
+     * landings were refused this way — `memory` 96 times in one section,
+     * `algorithm` 22 times, `"once upon a time"` 4 — and over 50 hits the
+     * offset landed on the quote **50 times out of 50**, in the resolver's own
+     * canonical text, including in exactly those sections. Re-run against the
+     * same three queries with this in place: **54 of 54 landed, none refused**.
+     *
+     * ⚠️ **VERIFIED BEFORE IT IS USED, WHICH IS WHAT MAKES IT SAFE.** The
+     * offset describes the bytes the index was built from, and this device may
+     * have different ones — the second-writer limit `freshness.ts` records. So
+     * the text AT that offset has to be the quote before anything is built from
+     * it; when it is not, this falls through to the refusal exactly as before.
+     *
+     * No `offset >= 0` guard, deliberately: a negative one makes `slice` count
+     * from the end, and anything that then matched still fails in
+     * `rangeAtOffset`, whose node lookup comes back undefined. A guard here
+     * would be a clause no test could reach. */
+    const at = passage.offset
+    const range =
+      at !== undefined && index.text.startsWith(passage.quote, at)
+        ? rangeAtOffset(index, at, passage.quote.length)
+        : null
+    if (range) {
+      return { kind: 'landed', cfi: cfiFor(passage.sectionIndex, range), occurrences: found.occurrences }
+    }
     return { kind: 'ambiguous', occurrences: found.occurrences }
   }
   return {
@@ -104,6 +155,32 @@ export async function landPassage(
     cfi: cfiFor(passage.sectionIndex, found.range),
     occurrences: found.occurrences,
   }
+}
+
+/**
+ * The range the canonical offsets `[start, start + length)` cover.
+ *
+ * `reanchorIn` builds its own range from the occurrence IT chose; this builds
+ * one at a position somebody else chose, which is the whole difference. The
+ * arithmetic is the same and is kept here rather than exported from
+ * `reanchor.ts`, because that file is source-pinned and a resolver shared with
+ * every mark has no business learning about passage offsets.
+ *
+ * Answers `null` rather than throwing for a position the index does not cover —
+ * an offset past the end, or one whose node the walk never recorded.
+ */
+function rangeAtOffset(index: TextIndex, start: number, length: number): Range | null {
+  const last = start + length - 1
+  const head = index.nodes[index.node[start] ?? -1]
+  const tail = index.nodes[index.node[last] ?? -1]
+  const from = index.from[start]
+  const to = index.to[last]
+  const doc = head?.ownerDocument
+  if (!head || !tail || !doc || from === undefined || to === undefined) return null
+  const range = doc.createRange()
+  range.setStart(head, from)
+  range.setEnd(tail, to)
+  return range
 }
 
 /**

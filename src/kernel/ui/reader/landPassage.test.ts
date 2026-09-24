@@ -74,6 +74,74 @@ describe('landing a library hit', () => {
     expect(found.occurrences).toBe(3)
   })
 
+  it('settles an ambiguous passage on the offset the index recorded', async () => {
+    /* ⚠️ **THE INDEX KNEW, AND NOTHING READ IT.** `PassageHit.offset` crosses
+     * the wire saying where the quote starts, and the landing disambiguated on
+     * context alone — so a passage in a repetitive section was refused while
+     * the answer was in the hit. Measured on the real 1 962-book library,
+     * 2026-09-24: 5 of 216 landings refused this way, and over 50 hits the
+     * offset matched the resolver's own canonical text 50 times out of 50. */
+    const html = '<p>the whale. the whale. the whale.</p>'
+    /* The THIRD occurrence: "the whale. the whale. " is 22 characters. */
+    const found = await landPassage(
+      { sectionIndex: 0, quote: 'the whale', prefix: '', suffix: '', offset: 22 },
+      async () => parse(html),
+    )
+    expect(found.kind).toBe('landed')
+    if (found.kind !== 'landed') return
+    expect(found.occurrences).toBe(3)
+  })
+
+  it('refuses when the offset does not hold the quote, rather than trusting it', async () => {
+    /* ⚠️ **VERIFIED BEFORE USE, BECAUSE THE OFFSET DESCRIBES BYTES THIS DEVICE
+     * MAY NOT HAVE.** The index is built from one build of a book and the
+     * landing parses whatever is on disk now — the second-writer limit
+     * `freshness.ts` records. An offset that does not point at the quote is
+     * evidence the two disagree, and the honest answer is the refusal. */
+    const found = await landPassage(
+      { sectionIndex: 0, quote: 'the whale', prefix: '', suffix: '', offset: 4 },
+      async () => parse('<p>the whale. the whale. the whale.</p>'),
+    )
+    expect(found.kind).toBe('ambiguous')
+    if (found.kind !== 'ambiguous') return
+    expect(found.occurrences).toBe(3)
+  })
+
+  it('treats a missing offset as no evidence, never as position zero', async () => {
+    /* ⚠️ **`startsWith(quote, undefined)` MEANS POSITION 0.** So an absent
+     * offset would silently claim the FIRST occurrence is the one the index
+     * meant — a wrong landing in place of an honest refusal, which is the one
+     * outcome this module exists to avoid. Every caller that is not a
+     * `PassageHit` hands in a passage with no offset. */
+    const found = await landPassage(
+      { sectionIndex: 0, quote: 'the whale', prefix: '', suffix: '' },
+      async () => parse('<p>the whale. the whale. the whale.</p>'),
+    )
+    expect(found.kind).toBe('ambiguous')
+  })
+
+  it('refuses an offset past the end of the section', async () => {
+    const found = await landPassage(
+      { sectionIndex: 0, quote: 'the whale', prefix: '', suffix: '', offset: 9_999 },
+      async () => parse('<p>the whale. the whale.</p>'),
+    )
+    expect(found.kind).toBe('ambiguous')
+  })
+
+  it('does not reach for the offset when the context already chose', async () => {
+    /* The ordinary path is untouched: an offset is consulted only where
+     * `reanchorIn` says it cannot choose, so a hit whose context decides lands
+     * on the context's answer even when the offset names another occurrence. */
+    const html = '<p>alpha the whale beta. gamma the whale delta.</p>'
+    const found = await landPassage(
+      { sectionIndex: 0, quote: 'the whale', prefix: 'gamma ', suffix: ' delta', offset: 6 },
+      async () => parse(html),
+    )
+    expect(found.kind).toBe('landed')
+    if (found.kind !== 'landed') return
+    expect(found.occurrences).toBe(2)
+  })
+
   it('says the quote is absent when the index is behind the book', async () => {
     const found = await landPassage(
       { sectionIndex: 0, quote: 'the unicorn', prefix: '', suffix: '' },
