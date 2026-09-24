@@ -28,6 +28,7 @@ fn indexing_a_book_clears_the_note_against_it() {
         Note {
             why: "it would not parse".to_owned(),
             at: 1,
+            generation: "g".to_owned(),
         },
     );
     state.indexed("book:a", indexed("hash1"));
@@ -44,6 +45,7 @@ fn noting_a_book_clears_a_stale_index_entry() {
         Note {
             why: "the file went away".to_owned(),
             at: 2,
+            generation: "g".to_owned(),
         },
     );
     assert!(!state.current("book:a", "hash1"));
@@ -59,6 +61,7 @@ fn forgetting_takes_both_halves() {
         Note {
             why: "empty".to_owned(),
             at: 1,
+            generation: "g".to_owned(),
         },
     );
     state.forget("book:a");
@@ -84,6 +87,7 @@ fn a_rekey_carries_a_note_too() {
         Note {
             why: "no text".to_owned(),
             at: 1,
+            generation: "g".to_owned(),
         },
     );
     state.rekey("book:old", "book:new");
@@ -111,6 +115,7 @@ fn it_reads_back_as_it_was_written() {
         Note {
             why: "it yielded no text at all".to_owned(),
             at: 7,
+            generation: "g".to_owned(),
         },
     );
     write(&path, &state).expect("written");

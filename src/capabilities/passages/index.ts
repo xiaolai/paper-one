@@ -3,6 +3,7 @@ import {
   contentPathIn,
   extractSections,
   readOwnedBook,
+  refuseBookScripts,
   storedBookName,
   type Capability,
   type CapabilityContext,
@@ -191,8 +192,19 @@ export const passages: Capability = {
         /* ⚠️ **A FAILED SWEEP IS REPORTED AND DOES NOT STOP THE NEXT ONE.** The
          * commonest cause is a disk that is momentarily busy, and a backfill
          * that gives up for the session on one of those is a library that
-         * silently stops becoming searchable. */
+         * silently stops becoming searchable.
+         *
+         * ⚠️ **AND IT USED TO STOP THE NEXT ONE ANYWAY, BY DOING NOTHING.** The
+         * reschedule lived on the success path, so a sweep that threw left no
+         * timer — including when a library change had arrived DURING it, which
+         * is exactly when there is most to do. Found by an independent audit.
+         * Rescheduled here; `schedule` waits out the settle window, so a disk
+         * that keeps failing retries every few seconds rather than spinning. */
         api.diagnostics.warn('passages.sweep-failed', { error: messageOf(cause) })
+        if (!held.stopped) {
+          held.running = false
+          schedule()
+        }
       } finally {
         held.running = false
         theProgress.set({
@@ -214,6 +226,11 @@ export const passages: Capability = {
      * "the snapshot changed" — there is no per-transition event to listen for —
      * so freshness is a DIFF taken at each settle, which also means a removal
      * that happened while the app was closed is noticed at the next launch. */
+    /* ⚠️ **SO "TRY THESE AGAIN" ACTUALLY TRIES.** Clearing a note changes no
+     * library, so nothing would have scheduled a sweep — see
+     * `ProgressHolder.sweepNow`. */
+    theProgress.bindSweep(schedule)
+
     const unsubscribe = api.services.library.subscribe(schedule)
     api.onCleanup(unsubscribe)
     schedule()
@@ -261,38 +278,68 @@ export function buildDeps(
        * will forget it. */
       if (!book) return 'skipped'
       const at = Date.now()
+      const generation = generationOf(book)
       try {
         const extracted = await extractBook(api, book, live)
         if (extracted === null) return 'skipped'
         if (extracted.sections.length === 0) {
           /* ⚠️ **RECORDED, NEVER SKIPPED.** Skipped, it comes back in
            * `pending()` every sweep and is re-parsed for ever without ever
-           * making progress. Recorded, the reader is told (WI-31.7) and it is
-           * tried again when its bytes change. */
-          await port.note(bookId, whyEmpty(extracted.unreadable.length), at)
+           * making progress. Recorded WITH THE GENERATION, it is tried again
+           * when its bytes change and left alone until then — which is what the
+           * note claimed to do before it carried one. */
+          await port.note(bookId, generation, whyEmpty(extracted.unreadable), at)
           return 'unreadable'
         }
         const accepted = await port.put(
           bookId,
-          generationOf(book),
+          generation,
           extracted.sections.map((one) => ({ index: one.index, text: one.text })),
           at,
         )
         /* THE RACE WI-31.3 NAMES: the book was forgotten while it was being
          * extracted. The plugin refused it, which is right, and the sweep must
          * not count it as done. */
-        return accepted ? 'indexed' : 'skipped'
+        if (!accepted) return 'skipped'
+        /* ⚠️ **A BOOK THAT LOST SOME OF ITS CHAPTERS IS NOT A BOOK THAT WAS
+         * INDEXED, AND THIS THREW THAT AWAY.** `extracted.unreadable` was read
+         * only when the book yielded NOTHING — so a book with thirty-seven good
+         * chapters and three that would not parse was checkpointed as complete,
+         * with no warning anywhere, and those three stayed unsearchable at that
+         * generation for ever. That is the exact failure WI-31.7 exists to
+         * prevent (*"a search that quietly omits a fifth of the library"*),
+         * inside one book instead of across the shelf. Found by an independent
+         * audit.
+         *
+         * The book IS indexed — the chapters that read are searchable and that
+         * is worth having — and the gap is NAMED beside it. `note` no longer
+         * clears the postings when what it records is partial, because there is
+         * real coverage to keep; see `Store::note_partial`. */
+        if (extracted.unreadable.length > 0 || extracted.truncated.length > 0) {
+          await port.notePartial(bookId, generation, whyPartial(extracted), at)
+        }
+        return 'indexed'
       } catch (cause) {
         /* ⚠️ **A BOOK THAT WILL NOT PARSE IS A FACT ABOUT THE BOOK, and a disk
          * that is busy is not.** Both arrive here, and only the first is worth
          * recording — but telling them apart is not possible from a thrown
          * value, so the honest thing is to record it WITH the message, which
-         * `passages_note` shows to the reader verbatim. A book recorded in
-         * error is re-tried the moment its bytes change; a book skipped in
-         * error is re-parsed on every launch for ever. */
-        await port
-          .note(bookId, `it could not be read: ${messageOf(cause)}`, at)
-          .catch(() => {})
+         * `passages_note` shows to the reader verbatim. */
+        try {
+          await port.note(bookId, generation, `it could not be read: ${messageOf(cause)}`, at)
+        } catch (noteFailed) {
+          /* ⚠️ **A SWALLOWED NOTE FAILURE REPORTED A TERMINAL OUTCOME FOR WORK
+           * NOTHING HAD RECORDED.** `.catch(() => {})` meant a disk that could
+           * not be written left the sweep saying `unreadable` with no warning
+           * persisted — so the book was neither searchable nor named, and the
+           * next sweep would try it again and fail to record it again. Reported
+           * as a SKIP instead: nothing was established, so nothing is claimed. */
+          api.diagnostics.warn('passages.note-failed', {
+            book: bookId,
+            error: messageOf(noteFailed),
+          })
+          return 'skipped'
+        }
         return 'unreadable'
       }
     },
@@ -310,7 +357,11 @@ async function extractBook(
   api: CapabilityContext,
   book: IndexedBook,
   live: () => boolean,
-): Promise<{ sections: readonly { index: number; text: string }[]; unreadable: readonly number[] } | null> {
+): Promise<{
+  sections: readonly { index: number; text: string }[]
+  unreadable: readonly number[]
+  truncated: readonly number[]
+} | null> {
   const fs = api.services.fs
   /* NO FILESYSTEM IS NOT A BOOK THAT CANNOT BE READ. A host with no vault —
    * which a test composition is — has nothing to extract from, and recording
@@ -330,9 +381,15 @@ async function extractBook(
    * and is tiny. */
   const { makeBook } = await import('foliate-js/view.js')
   const parsed = await makeBook(file)
+  /* ⚠️ **THE SAME STRIP THE READER APPLIES, AND THE INDEX IS THE OTHER HALF OF
+   * THE PAIR.** The text indexed here has to be the text the landing searches,
+   * and the landing searches a STRIPPED document — so an unstripped extraction
+   * indexes script source as prose and shifts nothing the resolver can then
+   * find. One walk at both ends means one document at both ends too. */
+  refuseBookScripts(parsed as object)
   try {
     const sections = (parsed as { sections?: readonly unknown[] }).sections
-    if (!Array.isArray(sections)) return { sections: [], unreadable: [] }
+    if (!Array.isArray(sections)) return { sections: [], unreadable: [], truncated: [] }
     const walked = await extractSections({
       sections: sections.length,
       documentFor: async (index) => {
@@ -348,7 +405,11 @@ async function extractBook(
      * index as though it were whole is a book whose later chapters are
      * permanently unsearchable with the state file saying it is done. */
     if (!walked.complete) return null
-    return { sections: walked.sections.map((one) => ({ ...one })), unreadable: walked.unreadable }
+    return {
+      sections: walked.sections.map((one) => ({ ...one })),
+      unreadable: walked.unreadable,
+      truncated: walked.truncated,
+    }
   } finally {
     /* ⚠️ **ALWAYS.** `epub.js`, `fb2.js` and `comic-book.js` all define
      * `destroy()` — FB2 creates an object URL PER SECTION — and a pass over two
@@ -359,10 +420,36 @@ async function extractBook(
 }
 
 /** Why a book yielded nothing, in words the reader is shown verbatim. */
-function whyEmpty(unreadable: number): string {
-  return unreadable > 0
-    ? `${unreadable} ${unreadable === 1 ? 'chapter' : 'chapters'} could not be read, and the rest hold no text`
+function whyEmpty(unreadable: readonly number[]): string {
+  return unreadable.length > 0
+    ? `${unreadable.length} ${unreadable.length === 1 ? 'chapter' : 'chapters'} could not be read, and the rest hold no text`
     : 'it holds no text this build could read'
+}
+
+/**
+ * Why a book is only PARTLY searchable, in words the reader is shown verbatim.
+ *
+ * Both halves are named because they are different facts with different
+ * remedies: a chapter that would not parse may read after a re-import, and a
+ * chapter past the size bound never will.
+ */
+function whyPartial(extracted: {
+  readonly unreadable: readonly number[]
+  readonly truncated: readonly number[]
+}): string {
+  const said: string[] = []
+  const { unreadable, truncated } = extracted
+  if (unreadable.length > 0) {
+    said.push(
+      `${unreadable.length} ${unreadable.length === 1 ? 'chapter' : 'chapters'} could not be read`,
+    )
+  }
+  if (truncated.length > 0) {
+    said.push(
+      `${truncated.length} ${truncated.length === 1 ? 'chapter was' : 'chapters were'} too long to index in full`,
+    )
+  }
+  return `${said.join(', and ')} — the rest of the book is searchable`
 }
 
 function messageOf(cause: unknown): string {

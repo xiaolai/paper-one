@@ -98,6 +98,13 @@ export { packArrived, packSize } from './ui/reader/engineVoice'
  * the cost `ui/browser.ts`'s header records paying 0.5 % of function coverage
  * for. */
 export { bodyOf, canonicalTextOf, extractSections, MAX_SECTION_CHARS } from './ui/reader/passageText'
+/* ⚠️ **THE SCRIPT STRIP, PUBLISHED BECAUSE ANY HOST THAT PARSES A BOOK A SECOND
+ * TIME MUST APPLY IT.** A CFI is a path of CHILD INDICES, and a `<script>` the
+ * reader's iframe never receives is a child the reader's document does not have
+ * — so a path derived from an unstripped parse addresses a different node in the
+ * rendered one. `bookScripts.test.ts`'s *"address the same passage by the same
+ * path"* is that assertion, and it exists because WI-21.P1 paid for it. */
+export { refuseBookScripts } from './ui/reader/bookScripts'
 export type { ExtractDeps, ExtractedSection, Extraction } from './ui/reader/passageText'
 export { createMarkStore } from './core/markStore'
 export type { MarkSnapshot, MarkStore, MarkStoreOptions } from './core/markStore'

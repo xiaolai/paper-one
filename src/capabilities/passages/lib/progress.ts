@@ -76,13 +76,33 @@ export interface ProgressHolder {
   titleOf: TitleOf
   /** Bind the shelf's lookup. Called once, from the capability's `start`. */
   bindTitles(lookup: TitleOf): void
+  /**
+   * Ask for a sweep.
+   *
+   * ⚠️ **"TRY THESE AGAIN" CLEARED THE WARNING AND DID NOTHING ELSE.** The sweep
+   * is scheduled by a library CHANGE, and clearing a note changes no library —
+   * so on an idle shelf the books vanished from the panel and were never
+   * re-extracted, which is worse than the warning it removed: the reader is now
+   * told nothing is wrong. Found by an independent audit.
+   *
+   * A no-op until the capability binds one, so a pane drawn after a teardown
+   * asks nobody rather than throwing.
+   */
+  sweepNow(): void
+  /** Bind the sweep. Called once, from the capability's `start`. */
+  bindSweep(run: () => void): void
 }
 
 export function makeProgress(): ProgressHolder {
   let held = NOTHING
   let titles: TitleOf = () => undefined
+  let sweep: () => void = () => {}
   const listeners = new Set<() => void>()
   return {
+    sweepNow: () => sweep(),
+    bindSweep: (run) => {
+      sweep = run
+    },
     /* READ THROUGH, not captured: the lookup is bound after this object is
      * made, and a captured one would answer `undefined` for ever. */
     titleOf: (bookId) => titles(bookId),

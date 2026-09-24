@@ -105,14 +105,18 @@ pub fn file_stem(book_id: &str) -> Result<String> {
     if book_id.is_empty() || book_id.len() > MAX_ID {
         return Err(Error::BadPath(book_id.to_owned()));
     }
-    let mut slug: String = book_id
+    /* ⚠️ **NO EMPTY-SLUG FALLBACK, BECAUSE THERE IS NO EMPTY SLUG.** An empty id
+     * is refused above and every character maps to exactly one output
+     * character, so a `if slug.is_empty()` branch here could never be taken —
+     * an unkillable mutant and a promise about a state that does not exist.
+     * `an_id_with_no_ascii_at_all_still_gets_a_name` is the case that shows
+     * why: it comes back `______-…`, not empty. Found by an independent
+     * audit. */
+    let slug: String = book_id
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .take(SLUG)
         .collect();
-    if slug.is_empty() {
-        slug.push_str("book");
-    }
     Ok(format!("{slug}-{:016x}", fnv1a64(book_id.as_bytes())))
 }
 

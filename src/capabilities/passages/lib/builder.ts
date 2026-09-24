@@ -1,4 +1,4 @@
-import type { Wanted } from './freshness'
+import { unwanted, type Wanted } from './freshness'
 
 /**
  * The backfill: one book at a time, resumable, and never on the reading path.
@@ -87,8 +87,13 @@ export async function sweep(deps: BuildDeps): Promise<SweepOutcome> {
   const wanted = deps.wanted()
   let forgotten = 0
   const held = await deps.indexed()
-  const keep = new Set(wanted.map(([bookId]) => bookId))
-  const drop = held.filter((bookId) => !keep.has(bookId))
+  /* ⚠️ **`unwanted`, NOT A SECOND COPY OF IT — AND THIS WAS A SECOND COPY.**
+   * `freshness.unwanted` defines the rule and had cases; this re-implemented it
+   * inline, so the named helper could be changed without changing what the app
+   * actually forgets. That is *a rule written twice and applied nowhere*, one of
+   * the shapes this phase went looking for and then committed. Found by an
+   * independent audit. */
+  const drop = unwanted(held, wanted)
   if (drop.length > 0) {
     await deps.forget(drop)
     forgotten = drop.length
@@ -126,5 +131,12 @@ export async function sweep(deps: BuildDeps): Promise<SweepOutcome> {
    * Without it, `complete: true` is a claim about books the index has not yet
    * made durable — and the next launch's `pending()` would disagree with it. */
   await deps.flush()
-  return { indexed, unreadable, skipped, forgotten, complete: true }
+  /* ⚠️ **A SKIP IS WORK STILL TO DO, AND THIS REPORTED IT AS DONE.** A book the
+   * vault was busy with, or one that went away between the list and the work,
+   * comes back `skipped` — and the sweep answered `complete: true` anyway, which
+   * told the caller there was nothing left and told the reader the shelf was
+   * fully covered. Found by an independent audit. The distinction is the one
+   * `reanchorPass` already draws: *walked and found nothing* is not *never
+   * walked*. */
+  return { indexed, unreadable, skipped, forgotten, complete: skipped === 0 }
 }

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-passages-note-partial"
+description = "Enables the passages_note_partial command without any pre-configured scope."
+commands.allow = ["passages_note_partial"]
+
+[[permission]]
+identifier = "deny-passages-note-partial"
+description = "Denies the passages_note_partial command without any pre-configured scope."
+commands.deny = ["passages_note_partial"]

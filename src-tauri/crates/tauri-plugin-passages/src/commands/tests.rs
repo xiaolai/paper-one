@@ -164,8 +164,10 @@ fn a_status_row_lists_the_unreadable_books_newest_first() {
     use crate::store::Store;
     let dir = tempfile::tempdir().expect("scratch");
     let mut store = Store::open(dir.path()).expect("opened");
-    store.note("book:old", "no text", 1).expect("noted");
-    store.note("book:new", "would not parse", 9).expect("noted");
+    store.note("book:old", "g", "no text", 1).expect("noted");
+    store
+        .note("book:new", "g", "would not parse", 9)
+        .expect("noted");
     let held = store.state();
     let mut rows: Vec<UnreadableRow> = held
         .notes

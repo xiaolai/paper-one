@@ -97,3 +97,33 @@ describe('what a book is called', () => {
     expect(Object.keys(held.get()).sort()).toEqual(['sweeping', 'swept', 'wanted'])
   })
 })
+
+describe('asking for a sweep', () => {
+  it('does nothing until the capability has bound one', () => {
+    /* A pane drawn after a teardown asks nobody rather than throwing. */
+    expect(() => makeProgress().sweepNow()).not.toThrow()
+  })
+
+  it('runs the bound sweep', () => {
+    /* ⚠️ **"TRY THESE AGAIN" CLEARED THE WARNING AND DID NOTHING ELSE.** A sweep
+     * is scheduled by a library CHANGE, and clearing a note changes no library —
+     * so on an idle shelf the books vanished from the panel and were never
+     * re-extracted, which is worse than the warning it removed. */
+    const held = makeProgress()
+    const run = vi.fn()
+    held.bindSweep(run)
+    held.sweepNow()
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads the binding THROUGH, so a later one is the one that runs', () => {
+    const held = makeProgress()
+    const first = vi.fn()
+    const second = vi.fn()
+    held.bindSweep(first)
+    held.bindSweep(second)
+    held.sweepNow()
+    expect(first).not.toHaveBeenCalled()
+    expect(second).toHaveBeenCalledTimes(1)
+  })
+})

@@ -64,6 +64,17 @@ export interface Extraction {
   readonly complete: boolean
   /** Sections whose document would not parse. Reported, never silently skipped. */
   readonly unreadable: readonly number[]
+  /**
+   * Sections cut at {@link MAX_SECTION_CHARS}.
+   *
+   * ⚠️ **THE BOUND SAID IT REPORTED THIS AND IT DID NOT.** `canonicalTextOf`
+   * returned the sliced string and nothing else, so a two-million-character
+   * section came back as a complete walk with an empty `unreadable` — the end
+   * of that chapter permanently unsearchable, with the comment above the bound
+   * claiming the opposite. A silent truncation is the same defect as a silent
+   * skip, one level down. Found by an independent audit.
+   */
+  readonly truncated: readonly number[]
 }
 
 export interface ExtractDeps {
@@ -74,7 +85,16 @@ export interface ExtractDeps {
    *
    * The same contract `reanchorPass.PassDeps` states: a CFI is a PATH, so this
    * does not need the section rendered — `section.createDocument()` parses an
-   * unopened one, and `refuseBookScripts` wraps every one of them.
+   * unopened one.
+   *
+   * ⚠️ **AND THE CALLER MUST HAVE APPLIED `refuseBookScripts` TO THE BOOK.**
+   * This said it *"wraps every one of them"*, which is true of the READER's book
+   * and was false of every caller of this function — they call `makeBook`
+   * themselves. A `<script>` the reader's iframe never receives is a child the
+   * reader's document does not have, so text extracted from an unstripped parse
+   * belongs to a different tree from the one a hit is landed in. Found by an
+   * independent audit; both callers now strip, and this sentence says whose job
+   * it is rather than asserting it is already done.
    */
   readonly documentFor: (index: number) => Promise<Node | null>
   /** False the moment this extraction stops being wanted. Asked before every section. */
@@ -93,9 +113,11 @@ export interface ExtractDeps {
  * one unusual book; not bounding it makes the whole backfill's memory a number
  * a publisher chose.
  *
- * ⚠️ **AND IT IS TRUNCATED, NOT DROPPED, AND THE TRUNCATION IS REPORTED.**
- * A section silently cut is a search that quietly does not cover the end of a
- * book — see `Extraction.unreadable`, which is the same rule one level up.
+ * ⚠️ **AND IT IS TRUNCATED, NOT DROPPED, AND THE TRUNCATION IS REPORTED** —
+ * in `Extraction.truncated`, which is where it was NOT reported until an
+ * independent audit found this sentence asserting something the code did not
+ * do. A section silently cut is a search that quietly does not cover the end of
+ * a book, which is the same defect as a silent skip one level up.
  */
 export const MAX_SECTION_CHARS = 2_000_000
 
@@ -111,16 +133,17 @@ export const MAX_SECTION_CHARS = 2_000_000
  */
 export async function extractSections(deps: ExtractDeps): Promise<Extraction> {
   if (!Number.isInteger(deps.sections) || deps.sections <= 0) {
-    return { sections: [], complete: false, unreadable: [] }
+    return { sections: [], complete: false, unreadable: [], truncated: [] }
   }
   const sections: ExtractedSection[] = []
   const unreadable: number[] = []
+  const truncated: number[] = []
   for (let index = 0; index < deps.sections; index += 1) {
     /* ASKED BEFORE THE WORK, not after: checking afterwards still pays for the
      * section nobody is waiting for any more. */
-    if (!deps.live()) return { sections, complete: false, unreadable }
+    if (!deps.live()) return { sections, complete: false, unreadable, truncated }
     if (index > 0) await deps.breathe()
-    if (!deps.live()) return { sections, complete: false, unreadable }
+    if (!deps.live()) return { sections, complete: false, unreadable, truncated }
 
     let doc: Node | null = null
     try {
@@ -139,20 +162,21 @@ export async function extractSections(deps: ExtractDeps): Promise<Extraction> {
     /* ⚠️ **CHECKED AFTER THE AWAIT TOO.** `documentFor` is the slow step, and
      * there is no next iteration to catch a walk abandoned during the last
      * section's parse. */
-    if (!deps.live()) return { sections, complete: false, unreadable }
+    if (!deps.live()) return { sections, complete: false, unreadable, truncated }
     /* A spine item a backend does not build — an unstyled cover, a nav document
      * — has nothing to index and says so by answering null rather than
      * throwing. That is not an unreadable section. */
     if (!doc) continue
 
-    const text = canonicalTextOf(doc)
+    const { text, cut } = canonicalOf(doc)
     /* AN EMPTY SECTION IS LEFT OUT rather than stored as a document with no
      * words: an empty posting list is a document every `num_docs` counts and no
      * query can ever reach. */
     if (text === '') continue
+    if (cut) truncated.push(index)
     sections.push({ index, text })
   }
-  return { sections, complete: true, unreadable }
+  return { sections, complete: true, unreadable, truncated }
 }
 
 /**
@@ -184,8 +208,19 @@ export function bodyOf(root: Node): Node {
  * walked, the other a decision about size. Neither touches the content.
  */
 export function canonicalTextOf(root: Node): string {
+  return canonicalOf(root).text
+}
+
+/**
+ * The canonical text, AND whether it had to be cut.
+ *
+ * Two values because the caller needs both and a string cannot carry the
+ * second. `canonicalTextOf` stays as the one-value wrapper for every caller
+ * that is only asking what the text is.
+ */
+export function canonicalOf(root: Node): { readonly text: string; readonly cut: boolean } {
   const index: TextIndex = indexText(bodyOf(root))
   return index.text.length > MAX_SECTION_CHARS
-    ? index.text.slice(0, MAX_SECTION_CHARS)
-    : index.text
+    ? { text: index.text.slice(0, MAX_SECTION_CHARS), cut: true }
+    : { text: index.text, cut: false }
 }

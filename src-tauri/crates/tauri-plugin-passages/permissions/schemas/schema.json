@@ -343,6 +343,18 @@
           "markdownDescription": "Denies the passages_note command without any pre-configured scope."
         },
         {
+          "description": "Enables the passages_note_partial command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-passages-note-partial",
+          "markdownDescription": "Enables the passages_note_partial command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the passages_note_partial command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-passages-note-partial",
+          "markdownDescription": "Denies the passages_note_partial command without any pre-configured scope."
+        },
+        {
           "description": "Enables the passages_pending command without any pre-configured scope.",
           "type": "string",
           "const": "allow-passages-pending",
@@ -427,10 +439,10 @@
           "markdownDescription": "Denies the passages_status command without any pre-configured scope."
         },
         {
-          "description": "Paper's own window may build and query the passage index.\n\nEvery command here is local: the index is built from books already on this\ndevice and nothing is sent anywhere. The commands that WRITE are reachable only\nfrom Paper's own window — a web session reaches the index through the service\ntable's `passage.search` row, which is a different door with its own audience\nand its own grant.\n\n#### This default permission set includes:\n\n- `allow-passages-put`\n- `allow-passages-note`\n- `allow-passages-flush`\n- `allow-passages-forget`\n- `allow-passages-rekey`\n- `allow-passages-pending`\n- `allow-passages-indexed`\n- `allow-passages-rebuild`\n- `allow-passages-retry`\n- `allow-passages-status`\n- `allow-passages-search`",
+          "description": "Paper's own window may build and query the passage index.\n\nEvery command here is local: the index is built from books already on this\ndevice and nothing is sent anywhere. The commands that WRITE are reachable only\nfrom Paper's own window — a web session reaches the index through the service\ntable's `passage.search` row, which is a different door with its own audience\nand its own grant.\n\n#### This default permission set includes:\n\n- `allow-passages-put`\n- `allow-passages-note`\n- `allow-passages-note-partial`\n- `allow-passages-flush`\n- `allow-passages-forget`\n- `allow-passages-rekey`\n- `allow-passages-pending`\n- `allow-passages-indexed`\n- `allow-passages-rebuild`\n- `allow-passages-retry`\n- `allow-passages-status`\n- `allow-passages-search`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Paper's own window may build and query the passage index.\n\nEvery command here is local: the index is built from books already on this\ndevice and nothing is sent anywhere. The commands that WRITE are reachable only\nfrom Paper's own window — a web session reaches the index through the service\ntable's `passage.search` row, which is a different door with its own audience\nand its own grant.\n\n#### This default permission set includes:\n\n- `allow-passages-put`\n- `allow-passages-note`\n- `allow-passages-flush`\n- `allow-passages-forget`\n- `allow-passages-rekey`\n- `allow-passages-pending`\n- `allow-passages-indexed`\n- `allow-passages-rebuild`\n- `allow-passages-retry`\n- `allow-passages-status`\n- `allow-passages-search`"
+          "markdownDescription": "Paper's own window may build and query the passage index.\n\nEvery command here is local: the index is built from books already on this\ndevice and nothing is sent anywhere. The commands that WRITE are reachable only\nfrom Paper's own window — a web session reaches the index through the service\ntable's `passage.search` row, which is a different door with its own audience\nand its own grant.\n\n#### This default permission set includes:\n\n- `allow-passages-put`\n- `allow-passages-note`\n- `allow-passages-note-partial`\n- `allow-passages-flush`\n- `allow-passages-forget`\n- `allow-passages-rekey`\n- `allow-passages-pending`\n- `allow-passages-indexed`\n- `allow-passages-rebuild`\n- `allow-passages-retry`\n- `allow-passages-status`\n- `allow-passages-search`"
         }
       ]
     }

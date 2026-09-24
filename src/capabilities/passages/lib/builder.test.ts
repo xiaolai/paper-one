@@ -92,7 +92,11 @@ describe('a sweep', () => {
           id === 'a' ? 'indexed' : id === 'b' ? 'unreadable' : 'skipped',
       }),
     )
-    expect(outcome).toMatchObject({ indexed: 1, unreadable: 1, skipped: 1, complete: true })
+    /* ⚠️ **A SKIP IS WORK STILL TO DO.** `complete` is false while any book was
+     * skipped — it means "there is nothing left", and a skipped book is
+     * something left. Reported `true`, the caller stops and the reader is told
+     * the shelf is covered. */
+    expect(outcome).toMatchObject({ indexed: 1, unreadable: 1, skipped: 1, complete: false })
   })
 
   it('stops the moment it is no longer wanted, and says so', async () => {

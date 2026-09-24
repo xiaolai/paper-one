@@ -146,9 +146,15 @@ export function PassagesPane({
     setRetrying(true)
     try {
       await port.retry()
+      /* ⚠️ **AND ASK FOR A SWEEP, OR THE BUTTON ONLY HIDES THE PROBLEM.**
+       * Clearing a note changes no library, and a sweep is scheduled by a
+       * library change — so on an idle shelf this emptied the list and
+       * re-extracted nothing, leaving a reader told that nothing is wrong about
+       * books that are still unsearchable. Found by an independent audit. */
+      progress.sweepNow()
       /* READ BACK, so the list empties on screen rather than waiting out the
-       * poll. The books are not re-extracted here — that is the next sweep's —
-       * and the list emptying is the honest report of what this button did. */
+       * poll. The books are not re-extracted by the time this returns — that is
+       * the sweep's, and it has just been asked for. */
       await read()
     } catch (cause) {
       setFailed(messageOf(cause))

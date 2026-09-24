@@ -68,6 +68,13 @@ pub struct Passage {
 /// it at all — which is a question nothing can answer and must not be reported
 /// as "no matches".
 pub fn parse_query(raw: &str) -> Result<Vec<Clause>> {
+    /* ⚠️ **FOLDED FIRST, OR THE BOOK'S OWN SPELLING FINDS NOTHING.** The index
+     * holds canonical text — curly quotes straightened, soft hyphens gone — and
+     * a query that has not been through the same fold asks for characters the
+     * index does not contain. See `tokenize::fold_query`. Done here rather than
+     * per clause so the quotation marks that make a PHRASE are counted after
+     * the fold, which is what makes a curly `"` open one. */
+    let raw = &crate::tokenize::fold_query(raw);
     let quotes = raw.chars().filter(|c| *c == '"').count();
     if quotes % 2 != 0 {
         return Err(Error::BadQuery(
@@ -225,7 +232,19 @@ pub fn passages(text: &str, clauses: &[Clause], limit: usize) -> Vec<Passage> {
         }
         counted[which] += 1;
         while covered == clauses.len() {
-            windows.push((all[left].0, all[right].1));
+            /* ⚠️ **THE FURTHEST ENDPOINT IN THE WINDOW, NOT THE LAST SPAN'S.**
+             * `all` is sorted by START, so the span that starts last need not
+             * end last: over `alpha beta gamma`, the query
+             * `"alpha beta gamma" beta` has the phrase starting FIRST and
+             * ending last, and taking `all[right].1` cut the quote at
+             * `alpha beta` — a passage that does not contain the phrase it
+             * matched. Found by an independent audit. */
+            let end = all[left..=right]
+                .iter()
+                .map(|(_, to, _)| *to)
+                .max()
+                .unwrap_or(all[right].1);
+            windows.push((all[left].0, end));
             let (_, _, leaving) = all[left];
             counted[leaving] -= 1;
             if counted[leaving] == 0 {
@@ -269,10 +288,24 @@ pub fn passages(text: &str, clauses: &[Clause], limit: usize) -> Vec<Passage> {
                 .min_by_key(|(_, _, which)| common[*which])?;
             let token = tokens.get(anchor.0)?;
             let last_token = tokens.get(anchor.1)?;
-            Some(Passage {
-                start: token.start,
-                end: last_token.end,
-            })
+            /* ⚠️ **THE BOUND APPLIES HERE TOO, AND THE FALLBACK WALKED ROUND
+             * IT.** The anchor is a whole clause — a long quoted phrase, or a
+             * token whose TERM was truncated while its source span kept the
+             * original run — so returning it unbounded could hand the resolver
+             * a quote of any length, which is the thing `MAX_QUOTE_BYTES`
+             * exists to prevent. Cut on a character boundary, because a book is
+             * not obliged to be ASCII. Found by an independent audit. */
+            let (start, mut end) = (token.start, last_token.end);
+            if end - start > MAX_QUOTE_BYTES {
+                end = start;
+                for (offset, ch) in text[start..].char_indices() {
+                    if offset + ch.len_utf8() > MAX_QUOTE_BYTES {
+                        break;
+                    }
+                    end = start + offset + ch.len_utf8();
+                }
+            }
+            Some(Passage { start, end })
         })
         .collect();
 

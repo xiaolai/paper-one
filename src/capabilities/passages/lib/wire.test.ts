@@ -31,6 +31,7 @@ describe('the passages wire', () => {
       'forget',
       'indexed',
       'note',
+      'notePartial',
       'pending',
       'put',
       'rebuild',
@@ -53,9 +54,13 @@ describe('the passages wire', () => {
       'plugin:passages|passages_put',
       { book: 'book:a', generation: 'gen1', sections: [{ index: 0, text: 'x' }], at: 7 },
     ])
-    expect(await called(() => wire.note('book:a', 'no text', 7))).toEqual([
+    expect(await called(() => wire.note('book:a', 'gen1', 'no text', 7))).toEqual([
       'plugin:passages|passages_note',
-      { book: 'book:a', why: 'no text', at: 7 },
+      { book: 'book:a', generation: 'gen1', why: 'no text', at: 7 },
+    ])
+    expect(await called(() => wire.notePartial('book:a', 'gen1', '1 chapter', 7))).toEqual([
+      'plugin:passages|passages_note_partial',
+      { book: 'book:a', generation: 'gen1', why: '1 chapter', at: 7 },
     ])
     expect(await called(() => wire.flush())).toEqual(['plugin:passages|passages_flush'])
     expect(await called(() => wire.forget('book:a', 7))).toEqual([

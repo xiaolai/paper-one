@@ -263,7 +263,7 @@ fn a_book_that_yielded_nothing_is_recorded_rather_than_skipped() {
      * one that omits a fifth of it without saying. */
     let (_dir, mut store) = opened();
     store
-        .note("book:a", "it holds no text this build could read", 5)
+        .note("book:a", "g", "it holds no text this build could read", 5)
         .expect("noted");
     let note = store.state().notes.get("book:a").expect("recorded");
     assert!(note.why.contains("no text"));
@@ -275,7 +275,7 @@ fn a_note_survives_a_relaunch() {
     let dir = tempfile::tempdir().expect("scratch");
     {
         let mut store = Store::open(dir.path()).expect("opened");
-        store.note("book:a", "no text", 5).expect("noted");
+        store.note("book:a", "g", "no text", 5).expect("noted");
     }
     let store = Store::open(dir.path()).expect("reopened");
     assert!(store.state().notes.contains_key("book:a"));
@@ -340,7 +340,7 @@ fn a_rebuild_keeps_the_notes_it_had() {
      * EXTRACTED. Dropping the notes would quietly turn "these books could not be
      * read" into "the shelf is fully covered". */
     let (_dir, mut store) = opened();
-    store.note("book:bad", "no text", 5).expect("noted");
+    store.note("book:bad", "g", "no text", 5).expect("noted");
     store.rebuild().expect("rebuilt");
     assert!(store.state().notes.contains_key("book:bad"));
 }
@@ -476,8 +476,10 @@ fn the_notes_can_be_cleared_so_a_transient_failure_is_not_permanent() {
      * thrown value. Recorded, that book is never looked at again until its
      * bytes change, which for a book nobody is editing is never. */
     let (_dir, mut store) = opened();
-    store.note("book:a", "the disk was busy", 1).expect("noted");
-    store.note("book:b", "no text", 1).expect("noted");
+    store
+        .note("book:a", "g", "the disk was busy", 1)
+        .expect("noted");
+    store.note("book:b", "g", "no text", 1).expect("noted");
     assert_eq!(store.retry_unreadable().expect("cleared"), 2);
     assert!(store.state().notes.is_empty());
     /* And it survives a relaunch, so the next sweep really does try again. */
@@ -491,7 +493,7 @@ fn clearing_the_notes_leaves_the_index_alone() {
         .put("book:a", "gen1", sections(&["the whale"]), 1)
         .expect("indexed");
     store.flush().expect("flushed");
-    store.note("book:b", "no text", 1).expect("noted");
+    store.note("book:b", "g", "no text", 1).expect("noted");
     store.retry_unreadable().expect("cleared");
     assert_eq!(find(&store, "whale").len(), 1);
     assert!(store.current("book:a", "gen1"));
@@ -547,4 +549,114 @@ fn a_book_whose_text_will_not_read_costs_that_book_and_not_the_query() {
     let found = find(&store, "whale");
     assert_eq!(found.len(), 1, "the other book still answers");
     assert_eq!(found[0].book_id, "book:b");
+}
+
+#[test]
+fn a_noted_book_is_left_alone_until_its_bytes_change() {
+    /* ⚠️ **THE NOTE STOPPED NOTHING, WHILE ITS OWN DOCSTRING SAID IT DID.**
+     * Freshness asked `books` alone and a noted book is not in `books`, so every
+     * unreadable book was re-parsed on every sweep — at twenty-odd picture books
+     * that is a whole extraction pass per sweep, for ever, for nothing. Found by
+     * an independent audit; the sweep reported `unreadable` each time and looked
+     * like it was working. */
+    let (_dir, mut store) = opened();
+    store
+        .note("book:a", "gen1", "it holds no text", 1)
+        .expect("noted");
+    assert!(store.current("book:a", "gen1"), "settled at these bytes");
+    assert!(
+        !store.current("book:a", "gen2"),
+        "new bytes are worth a try"
+    );
+}
+
+#[test]
+fn a_note_from_before_the_generation_existed_costs_one_retry_rather_than_a_refusal() {
+    let (_dir, mut store) = opened();
+    store
+        .note("book:a", "", "it holds no text", 1)
+        .expect("noted");
+    assert!(
+        !store.current("book:a", "gen1"),
+        "an empty generation matches nothing, so it is tried once and settles"
+    );
+}
+
+#[test]
+fn noting_a_replacement_that_will_not_read_takes_the_old_answers_with_it() {
+    /* ⚠️ **THE PANEL AND THE SEARCH DISAGREED, AND THE CONVINCING ONE WAS
+     * WRONG.** A book whose replacement bytes cannot be read was noted while
+     * the PREVIOUS generation went on answering queries — so Settings said
+     * "could not be read" and search returned its old contents. Found by an
+     * independent audit. */
+    let (dir, mut store) = opened();
+    store
+        .put("book:a", "gen1", sections(&["the whale"]), 1)
+        .expect("indexed");
+    store.flush().expect("flushed");
+    assert_eq!(find(&store, "whale").len(), 1);
+
+    store
+        .note("book:a", "gen2", "the replacement would not parse", 2)
+        .expect("noted");
+    assert!(find(&store, "whale").is_empty(), "the stale answers go too");
+    let text = Layout::under(dir.path())
+        .text_path("book:a")
+        .expect("a legal id");
+    assert!(!text.exists(), "and so does the text a rebuild would read");
+}
+
+#[test]
+fn a_partly_readable_book_keeps_the_chapters_that_read() {
+    /* ⚠️ **`note` WOULD HAVE DELETED THIRTY-SEVEN GOOD CHAPTERS TO REPORT
+     * THREE BAD ONES.** A book that is mostly readable is worth having; the gap
+     * is a warning BESIDE real coverage, not a replacement for it. */
+    let (_dir, mut store) = opened();
+    store
+        .put("book:a", "gen1", sections(&["the whale", "the ship"]), 1)
+        .expect("indexed");
+    store.flush().expect("flushed");
+
+    store
+        .note_partial("book:a", "gen1", "1 chapter could not be read", 2)
+        .expect("noted");
+
+    assert_eq!(find(&store, "whale").len(), 1, "still searchable");
+    assert!(store.current("book:a", "gen1"), "still checkpointed");
+    assert_eq!(
+        store.state().notes.get("book:a").map(|n| n.why.as_str()),
+        Some("1 chapter could not be read"),
+        "and the gap is named"
+    );
+}
+
+#[test]
+fn a_noted_book_reaches_the_removal_diff() {
+    /* ⚠️ **A BOOK THAT YIELDS NO TEXT AND IS THEN TRASHED KEPT ITS WARNING FOR
+     * EVER**, because the inventory the sweep compares against the shelf was
+     * `books` alone and a noted book is not in it. Found by an independent
+     * audit. */
+    let (_dir, mut store) = opened();
+    store
+        .put("book:a", "gen1", sections(&["the whale"]), 1)
+        .expect("indexed");
+    store.flush().expect("flushed");
+    store.note("book:b", "gen1", "no text", 1).expect("noted");
+    assert_eq!(
+        store.known(),
+        vec!["book:a".to_owned(), "book:b".to_owned()]
+    );
+}
+
+#[test]
+fn a_book_that_is_both_indexed_and_noted_is_listed_once() {
+    let (_dir, mut store) = opened();
+    store
+        .put("book:a", "gen1", sections(&["the whale"]), 1)
+        .expect("indexed");
+    store.flush().expect("flushed");
+    store
+        .note_partial("book:a", "gen1", "1 chapter could not be read", 2)
+        .expect("noted");
+    assert_eq!(store.known(), vec!["book:a".to_owned()]);
 }

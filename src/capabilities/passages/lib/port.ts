@@ -31,8 +31,23 @@ export interface PassageIndex extends PassagesPort {
     sections: readonly SectionIn[],
     at: number,
   ): Promise<boolean>
-  /** Record a book that yielded nothing, with the reason a reader can read. */
-  note(bookId: string, why: string, at: number): Promise<void>
+  /**
+   * Record a book that yielded nothing, with the reason a reader can read.
+   *
+   * `generation` is WHAT IT FAILED AT, and it is not bookkeeping: without it a
+   * note stops nothing, and every unreadable book is re-parsed on every sweep
+   * for ever while the panel and the sweep both look like they are working.
+   */
+  note(bookId: string, generation: string, why: string, at: number): Promise<void>
+  /**
+   * Record that a book is only PARTLY searchable, keeping what was indexed.
+   *
+   * ⚠️ **NOT `note`, BECAUSE `note` TAKES THE BOOK OUT OF SEARCH.** A book whose
+   * chapters mostly read is worth having — the gap is a warning beside real
+   * coverage, not a replacement for it. Recording one through `note` would
+   * delete thirty-seven good chapters to report three bad ones.
+   */
+  notePartial(bookId: string, generation: string, why: string, at: number): Promise<void>
   /** Commit everything pending and write the checkpoint. */
   flush(): Promise<void>
   /**
@@ -99,8 +114,12 @@ export function passageIndexOver(wire: PassagesWire = passagesWire()): PassageIn
       return wire.put(bookId, generation, sections, at)
     },
 
-    async note(bookId, why, at): Promise<void> {
-      await wire.note(bookId, why, at)
+    async note(bookId, generation, why, at): Promise<void> {
+      await wire.note(bookId, generation, why, at)
+    },
+
+    async notePartial(bookId, generation, why, at): Promise<void> {
+      await wire.notePartial(bookId, generation, why, at)
     },
 
     async flush(): Promise<void> {

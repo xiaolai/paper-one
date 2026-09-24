@@ -172,10 +172,24 @@ pub async fn passages_note<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: State<'_, PassagesState>,
     book: String,
+    generation: String,
     why: String,
     at: u64,
 ) -> Result<()> {
-    state.with(|store| store.note(&book, &why, at))
+    state.with(|store| store.note(&book, &generation, &why, at))
+}
+
+/// Record that a book is only PARTLY searchable, keeping what was indexed.
+#[tauri::command]
+pub async fn passages_note_partial<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: State<'_, PassagesState>,
+    book: String,
+    generation: String,
+    why: String,
+    at: u64,
+) -> Result<()> {
+    state.with(|store| store.note_partial(&book, &generation, &why, at))
 }
 
 /// Commit everything pending and write the checkpoint.
@@ -245,7 +259,10 @@ pub async fn passages_indexed<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: State<'_, PassagesState>,
 ) -> Result<Vec<String>> {
-    state.with(|store| Ok(store.state().books.keys().cloned().collect()))
+    /* ⚠️ **EVERYTHING THIS STORE KNOWS, NOT ONLY WHAT IT INDEXED.** A book
+     * recorded as unreadable and then trashed kept its warning for ever, because
+     * the removal diff never saw it. */
+    state.with(|store| Ok(store.known()))
 }
 
 /// Build the postings again from the retained text.

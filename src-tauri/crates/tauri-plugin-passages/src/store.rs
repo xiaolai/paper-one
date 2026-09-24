@@ -262,13 +262,58 @@ impl Store {
     ///
     /// # Errors
     /// The underlying I/O failure from the checkpoint write.
-    pub fn note(&mut self, book_id: &str, why: &str, at: u64) -> Result<()> {
+    pub fn note(&mut self, book_id: &str, generation: &str, why: &str, at: u64) -> Result<()> {
         self.flush()?;
+        /* ⚠️ **THE OLD POSTINGS AND TEXT GO, AND LEAVING THEM MEANT THE PANEL
+         * AND THE SEARCH DISAGREED.** A book whose REPLACEMENT bytes cannot be
+         * read was noted while the previous generation went on answering
+         * queries — so Settings said *"could not be read"* and search returned
+         * its old contents, and a rebuild could clear the warning by re-indexing
+         * that stale text. Found by an independent audit. */
+        self.postings.forget(book_id)?;
+        self.postings.commit()?;
+        text::remove(&self.layout.text_path(book_id)?)?;
         self.state.noted(
             book_id,
             Note {
                 why: why.to_owned(),
                 at,
+                /* WHAT IT FAILED AT, so freshness can leave it alone until the
+                 * bytes change — see `Note::generation`. */
+                generation: generation.to_owned(),
+            },
+        );
+        state::write(&self.layout.state_path, &self.state)
+    }
+
+    /// Record that a book is only PARTLY searchable, keeping what was indexed.
+    ///
+    /// ⚠️ **THE DIFFERENCE FROM [`Self::note`] IS THE POSTINGS, AND IT IS THE
+    /// WHOLE POINT.** `note` takes a book OUT of search, because there was
+    /// nothing to keep. Here there is: thirty-seven chapters read and three did
+    /// not, and deleting the thirty-seven to report the three would be the
+    /// worse answer by far. The checkpoint stays — the book IS indexed at this
+    /// generation — and the warning sits beside it.
+    ///
+    /// # Errors
+    /// The underlying I/O failure from the checkpoint write.
+    pub fn note_partial(
+        &mut self,
+        book_id: &str,
+        generation: &str,
+        why: &str,
+        at: u64,
+    ) -> Result<()> {
+        self.flush()?;
+        /* INSERTED DIRECTLY, NOT THROUGH `noted`, which removes the checkpoint.
+         * The book is indexed; what is recorded is that it is indexed in
+         * PART. */
+        self.state.notes.insert(
+            book_id.to_owned(),
+            Note {
+                why: why.to_owned(),
+                at,
+                generation: generation.to_owned(),
             },
         );
         state::write(&self.layout.state_path, &self.state)
@@ -291,6 +336,25 @@ impl Store {
     ///
     /// # Errors
     /// The underlying I/O failure from the checkpoint write.
+    /// Every book this store holds ANYTHING about — indexed or noted.
+    ///
+    /// ⚠️ **THE REMOVAL DIFF ASKED FOR `books` ALONE, SO A NOTED BOOK COULD
+    /// NEVER BE FORGOTTEN.** A book that yields no text and is then trashed kept
+    /// its warning in Settings for ever: it was never in the list the sweep
+    /// compares against the shelf, so it never entered the set to drop. Found by
+    /// an independent audit.
+    #[must_use]
+    pub fn known(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.state.books.keys().cloned().collect();
+        for id in self.state.notes.keys() {
+            if !self.state.books.contains_key(id) {
+                out.push(id.clone());
+            }
+        }
+        out.sort();
+        out
+    }
+
     pub fn retry_unreadable(&mut self) -> Result<usize> {
         let cleared = self.state.notes.len();
         if cleared == 0 {
@@ -412,6 +476,13 @@ impl Store {
                             Note {
                                 why: format!("its saved text could not be read: {cause}"),
                                 at: 0,
+                                /* EMPTY, so this never pins a generation: a
+                                 * rebuild reads `text/` and has no idea what
+                                 * bytes produced it. An empty generation
+                                 * matches nothing, so the book is re-extracted
+                                 * rather than left alone on the strength of a
+                                 * guess. */
+                                generation: String::new(),
                             },
                         );
                     }

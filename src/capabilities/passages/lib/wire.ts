@@ -27,7 +27,9 @@ export interface SectionIn {
 export interface PassagesWire {
   /** Answers `false` when the book was forgotten while it was being extracted. */
   put(book: string, generation: string, sections: readonly SectionIn[], at: number): Promise<boolean>
-  note(book: string, why: string, at: number): Promise<void>
+  note(book: string, generation: string, why: string, at: number): Promise<void>
+  /** Record a PARTLY readable book, keeping the chapters that did read. */
+  notePartial(book: string, generation: string, why: string, at: number): Promise<void>
   flush(): Promise<void>
   forget(book: string, at: number): Promise<void>
   rekey(from: string, to: string): Promise<boolean>
@@ -47,7 +49,10 @@ export function passagesWire(): PassagesWire {
   return {
     put: (book, generation, sections, at) =>
       invoke<boolean>('plugin:passages|passages_put', { book, generation, sections, at }),
-    note: (book, why, at) => invoke('plugin:passages|passages_note', { book, why, at }),
+    note: (book, generation, why, at) =>
+      invoke('plugin:passages|passages_note', { book, generation, why, at }),
+    notePartial: (book, generation, why, at) =>
+      invoke('plugin:passages|passages_note_partial', { book, generation, why, at }),
     flush: () => invoke('plugin:passages|passages_flush'),
     forget: (book, at) => invoke('plugin:passages|passages_forget', { book, at }),
     rekey: (from, to) => invoke<boolean>('plugin:passages|passages_rekey', { from, to }),

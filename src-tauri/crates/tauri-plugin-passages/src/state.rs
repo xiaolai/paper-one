@@ -57,6 +57,22 @@ pub struct Indexed {
 pub struct Note {
     pub why: String,
     pub at: u64,
+    /// The bytes it failed at — see [`State::current`].
+    ///
+    /// ⚠️ **WITHOUT THIS THE NOTE STOPPED NOTHING, WHILE ITS OWN DOCSTRING SAID
+    /// IT DID.** The point of recording a book that yields no text is that it is
+    /// *"tried again only when its bytes change"* — but freshness asked
+    /// `books` alone, and a noted book is not in `books`, so every unreadable
+    /// book was re-parsed on every sweep. At twenty-odd picture books
+    /// that is a whole extraction pass per sweep, for ever, for nothing. Found by an
+    /// independent audit, which is the only thing that could have: the sweep
+    /// reported `unreadable` each time and looked like it was working.
+    ///
+    /// `#[serde(default)]` so a state file written before this field is read
+    /// rather than refused — an empty generation matches nothing, so those
+    /// books are retried once and then settle.
+    #[serde(default)]
+    pub generation: String,
 }
 
 /// The whole file.
@@ -85,12 +101,27 @@ impl Default for State {
 }
 
 impl State {
-    /// Whether this book's index is current for these bytes.
+    /// Whether this book needs no further work at these bytes.
+    ///
+    /// TWO WAYS TO BE SETTLED, and only one of them is being indexed: a book
+    /// whose postings are current, and a book that was already found to hold no
+    /// text AT THESE BYTES. Asking only the first is what made every unreadable
+    /// book a permanent item of work — see [`Note::generation`].
+    ///
+    /// An empty note generation never matches, so a note written before that
+    /// field existed costs one retry rather than a refusal.
     #[must_use]
     pub fn current(&self, book_id: &str, generation: &str) -> bool {
-        self.books
+        if self
+            .books
             .get(book_id)
             .is_some_and(|one| one.generation == generation)
+        {
+            return true;
+        }
+        self.notes
+            .get(book_id)
+            .is_some_and(|note| !note.generation.is_empty() && note.generation == generation)
     }
 
     /// Record a book as indexed, clearing any note against it.
@@ -106,6 +137,12 @@ impl State {
 
     /// Record that a book could not be indexed. Clears any stale index entry
     /// for the same reason the line above clears a note.
+    ///
+    /// ⚠️ **THE POSTINGS AND THE TEXT GO WITH IT — the CALLER's job, and
+    /// [`crate::store::Store::note`] does it.** Removing only the checkpoint
+    /// leaves the previous generation's postings answering searches while the
+    /// panel says the book could not be read, which is two answers to one
+    /// question and the more convincing one is wrong.
     pub fn noted(&mut self, book_id: &str, note: Note) {
         self.books.remove(book_id);
         self.notes.insert(book_id.to_owned(), note);

@@ -35,6 +35,7 @@ function portOver(over: Partial<PassageIndex> = {}): PassageIndex {
     status: async () => status(),
     put: async () => true,
     note: async () => {},
+    notePartial: async () => {},
     flush: async () => {},
     forget: async () => {},
     rekey: async () => true,
@@ -302,6 +303,31 @@ describe('the pane', () => {
     })
     expect(retry).toHaveBeenCalledTimes(1)
     expect(read.mock.calls.length).toBeGreaterThan(before)
+  })
+
+  it('asks for a sweep, or the button only hides the problem', async () => {
+    /* ⚠️ **IT CLEARED THE WARNING AND RE-EXTRACTED NOTHING.** A sweep is
+     * scheduled by a library CHANGE, and clearing a note changes no library —
+     * so on an idle shelf a reader was told nothing was wrong about books that
+     * were still unsearchable. Found by an independent audit. */
+    const progress = makeProgress()
+    const sweep = vi.fn()
+    progress.bindSweep(sweep)
+    await act(async () => {
+      render(
+        <PassagesPane
+          progress={progress}
+          port={portOver({
+            status: async () =>
+              status({ unreadable: [{ bookId: 'book:b', why: 'the disk was busy', at: 1 }] }),
+          })}
+        />,
+      )
+    })
+    await act(async () => {
+      screen.getByRole('button', { name: 'Try these again' }).click()
+    })
+    expect(sweep).toHaveBeenCalledTimes(1)
   })
 
   it('offers no way back when nothing could not be read', () => {

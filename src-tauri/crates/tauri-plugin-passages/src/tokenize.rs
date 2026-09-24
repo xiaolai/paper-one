@@ -61,6 +61,40 @@
 //! this plugin hands back is a slice of the ORIGINAL canonical text — case and
 //! all — so the resolver still gets what it needs.
 
+/// The typography the canonical form folds, applied to a QUERY.
+///
+/// ⚠️ **THE INDEX HOLDS CANONICAL TEXT AND THE QUERY ARRIVED RAW, SO A READER
+/// WHO PASTED THE BOOK'S OWN SPELLING FOUND NOTHING.** `reanchor.ts` folds
+/// curly quotes to straight and drops soft hyphens before a word is ever
+/// indexed — so `don't` with a curly apostrophe is indexed as `don't` with a
+/// straight one, ONE token. Tokenizing the raw query splits the curly form into
+/// `don` and `t`, two terms, neither of which the index has in that
+/// arrangement. Copying a phrase out of the book and searching for it is the
+/// most natural thing a reader does, and it silently failed. Found by an
+/// independent audit.
+///
+/// ⚠️ **AND IT IS A SUBSET OF THE CANONICAL FOLD, NOT A COPY OF IT.** The full
+/// walk is `indexText`'s and lives in TypeScript; what a QUERY needs is only the
+/// character-level part — the quote and dash folds and the soft hyphen — because
+/// whitespace and block edges are already separators to this tokenizer. Spelled
+/// here rather than shared because the other half of that walk is a DOM walk,
+/// and a Rust copy of it is the third implementation this phase exists to
+/// refuse.
+#[must_use]
+pub fn fold_query(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| match c {
+            /* Dropped outright — a hyphenation point is a fact about a line
+             * break, and `indexText` drops it before indexing. */
+            '\u{00ad}' => None,
+            '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' => Some('\''),
+            '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}' => Some('"'),
+            '\u{2013}' | '\u{2012}' | '\u{2015}' => Some('\u{2014}'),
+            _ => Some(c),
+        })
+        .collect()
+}
+
 /// A word, and where it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {

@@ -1,8 +1,9 @@
-import { useCallback } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import type { IndexedBook } from '../../core/bookIndex'
 import { contentPathIn } from '../../core/bookFolder'
 import { isMissingFile, readOwnedBook, storedBookName, type VaultFs } from '../../core/bookVault'
 import type { PassageHit } from '../../core/ports'
+import { refuseBookScripts } from '../reader/bookScripts'
 import { landPassage, whyNotLanded, type Landing } from '../reader/landPassage'
 import type { Place } from '../../core/jumpStack'
 
@@ -97,6 +98,14 @@ export async function openPassage(
   let parsed: { sections?: readonly unknown[]; destroy?: () => void }
   try {
     parsed = (await makeBook(file)) as typeof parsed
+    /* ⚠️ **THE SCRIPT STRIP, AND WITHOUT IT THE LANDING ADDRESSES THE WRONG
+     * WORDS.** A CFI is a path of CHILD INDICES. The reader's iframe never
+     * receives a `<script>` — `refuseBookScripts` wraps `createDocument` at open
+     * — so a path derived HERE from an unstripped parse is off by however many
+     * scripts precede the passage, and lands on a different sentence with no
+     * error anywhere. `reanchor.ts`'s header says exactly this and this file
+     * did not do it; found by an independent audit. */
+    refuseBookScripts(parsed)
   } catch {
     return { kind: 'refused', why: UNREADABLE }
   }
@@ -125,12 +134,40 @@ export async function openPassage(
 /** The hook the reader's shell mounts. */
 export function useOpenPassage(deps: OpenPassageDeps): (hit: PassageHit) => void {
   const { fs, books, jumpTo, onProblem } = deps
+  /* ⚠️ **WHICH CLICK IS THE CURRENT ONE, AND THERE WAS NO SUCH THING.** Opening
+   * a hit reads a file and parses a book, so two clicks race — and every result
+   * was applied. Reproduced by an independent audit: click A, click B, land on
+   * B, then land back on A when A finishes last. An identity rather than a
+   * counter, for the reason phase 30 records: an empty object cannot collide by
+   * construction and leaves no arithmetic to be wrong about. */
+  const current = useRef<object>({})
+  useEffect(
+    () => () => {
+      /* TEARDOWN INVALIDATES WHATEVER IS IN FLIGHT. A landing that resolves
+       * after the reader closed the book must not move them. */
+      current.current = {}
+    },
+    [],
+  )
   return useCallback(
     (hit: PassageHit) => {
-      void openPassage(hit, { fs, books, jumpTo, onProblem }).then((outcome) => {
-        if (outcome.kind === 'jumped') jumpTo(outcome.place)
-        else onProblem(outcome.why)
-      })
+      const mine = {}
+      current.current = mine
+      void openPassage(hit, { fs, books, jumpTo, onProblem })
+        .then((outcome) => {
+          if (current.current !== mine) return
+          if (outcome.kind === 'jumped') jumpTo(outcome.place)
+          else onProblem(outcome.why)
+        })
+        .catch((cause: unknown) => {
+          /* ⚠️ **AN UNHANDLED REJECTION AND AN INERT CLICK.** `openPassage`
+           * guards the file read and the parse, and the dynamic `import()` of
+           * foliate sits outside both — so a failed chunk load rejected with
+           * nobody listening and the row simply did nothing. Found by an
+           * independent audit. */
+          if (current.current !== mine) return
+          onProblem(cause instanceof Error ? cause.message : String(cause))
+        })
     },
     [fs, books, jumpTo, onProblem],
   )

@@ -33,6 +33,7 @@ function fakeWire(over: Partial<PassagesWire> = {}): PassagesWire {
   return {
     put: vi.fn(async () => true),
     note: vi.fn(async () => {}),
+    notePartial: vi.fn(async () => {}),
     flush: vi.fn(async () => {}),
     forget: vi.fn(async () => {}),
     rekey: vi.fn(async () => true),
@@ -161,11 +162,11 @@ describe('building the index', () => {
   it('forwards the rest of the write half unchanged', async () => {
     const wire = fakeWire()
     const port = passageIndexOver(wire)
-    await port.note('book:a', 'no text', 7)
+    await port.note('book:a', 'gen1', 'no text', 7)
     await port.flush()
     await port.forget('book:a', 7)
     await port.rebuild()
-    expect(wire.note).toHaveBeenCalledWith('book:a', 'no text', 7)
+    expect(wire.note).toHaveBeenCalledWith('book:a', 'gen1', 'no text', 7)
     expect(wire.flush).toHaveBeenCalledTimes(1)
     expect(wire.forget).toHaveBeenCalledWith('book:a', 7)
     expect(wire.rebuild).toHaveBeenCalledTimes(1)

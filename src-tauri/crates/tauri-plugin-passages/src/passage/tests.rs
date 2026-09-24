@@ -260,3 +260,91 @@ fn a_one_letter_latin_query_is_not_refused() {
      * queries: `a` is an ordinary term with an ordinary posting list. */
     assert!(parse_query("a").is_ok());
 }
+
+#[test]
+fn the_book_s_own_spelling_finds_the_book() {
+    /* ⚠️ **COPYING A PHRASE OUT OF THE BOOK AND SEARCHING FOR IT IS THE MOST
+     * NATURAL THING A READER DOES, AND IT SILENTLY FAILED.** The index holds
+     * canonical text — curly apostrophes straightened — so `don't` with a curly
+     * one is ONE token there; tokenizing the raw query split it into `don` and
+     * `t`. Found by an independent audit. */
+    let canonical = "he said don't go";
+    let curly = "don\u{2019}t";
+    assert_eq!(
+        quotes(canonical, curly),
+        ["don't"],
+        "the curly form must ask the same question as the straight one"
+    );
+    assert_eq!(quotes(canonical, "don't"), ["don't"]);
+}
+
+#[test]
+fn a_curly_quotation_mark_opens_a_phrase() {
+    /* The fold runs BEFORE the quotes are counted, so a reader pasting a
+     * smart-quoted phrase gets a phrase rather than an unbalanced-quote
+     * refusal. */
+    let text = "the ship saw a whale. the whale was large.";
+    let found = quotes(text, "\u{201c}the whale\u{201d}");
+    assert_eq!(found, ["the whale"]);
+}
+
+#[test]
+fn a_soft_hyphen_in_a_query_is_dropped_as_the_index_dropped_it() {
+    let soft = format!(
+        "hyphen{}ation",
+        char::from_u32(0x00ad).expect("a soft hyphen")
+    );
+    assert_eq!(quotes("the hyphenation rule", &soft), ["hyphenation"]);
+}
+
+#[test]
+fn a_dash_variant_asks_the_question_the_index_holds() {
+    /* `indexText` folds en and horizontal bars to an em dash before indexing. */
+    assert_eq!(
+        parse_query("a \u{2013} b").expect("a legal query"),
+        parse_query("a \u{2014} b").expect("a legal query")
+    );
+}
+
+#[test]
+fn a_window_ends_at_its_furthest_span_not_its_last_one() {
+    /* ⚠️ **`all` IS SORTED BY START, SO THE SPAN THAT STARTS LAST NEED NOT END
+     * LAST.** Over `alpha beta gamma`, the phrase starts FIRST and ends last —
+     * and taking the last span's endpoint cut the quote at `alpha beta`, a
+     * passage that does not contain the phrase it matched. Found by an
+     * independent audit. */
+    let found = quotes("alpha beta gamma", "\"alpha beta gamma\" beta");
+    assert_eq!(found, ["alpha beta gamma"]);
+}
+
+#[test]
+fn the_quote_bound_holds_on_the_fallback_too() {
+    /* The anchor is a whole clause, so a long quoted phrase could walk round
+     * `MAX_QUOTE_BYTES` entirely. */
+    let long: Vec<String> = (0..200).map(|n| format!("word{n}")).collect();
+    let phrase = long.join(" ");
+    let text = format!("{phrase} and then much later the whale");
+    let query = format!("\"{phrase}\" whale");
+    for quote in quotes(&text, &query) {
+        assert!(
+            quote.len() <= MAX_QUOTE_BYTES,
+            "a {}-byte quote is no anchor at all",
+            quote.len()
+        );
+        assert!(text.contains(&quote), "and it is still real text");
+    }
+}
+
+#[test]
+fn a_bounded_fallback_never_splits_a_character() {
+    let long = "春".repeat(400);
+    let text = format!("{long} whale");
+    let query = format!("\"{}\" whale", "春".repeat(400));
+    for quote in quotes(&text, &query) {
+        assert!(
+            quote.chars().all(|c| c == '春' || c.is_ascii()),
+            "valid UTF-8"
+        );
+        assert!(quote.len() <= MAX_QUOTE_BYTES);
+    }
+}
