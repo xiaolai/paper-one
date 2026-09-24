@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { bodyOf, canonicalTextOf, extractSections, MAX_SECTION_CHARS } from './passageText'
+import {
+  bodyOf,
+  canonicalTextOf,
+  extractSections,
+  MAX_SECTION_CHARS,
+  parseFailed,
+} from './passageText'
 import { indexText, reanchorIn } from './reanchor'
 
 /**
@@ -238,4 +244,56 @@ describe('what the index holds can be found again by the resolver', () => {
       expect(found.kind).toBe('found')
     })
   }
+})
+
+describe('a failed parse is a failed section, not a chapter of error text', () => {
+  /* ⚠️ **`DOMParser` HANDS BACK A DOCUMENT FOR MALFORMED XHTML RATHER THAN
+   * THROWING**, so the `catch` around `documentFor` never sees it. EPUB content
+   * is XHTML, and an XML parse fails on anything a publisher's toolchain got
+   * slightly wrong — at 1 959 books that is not rare. Indexed, the browser's
+   * error message BECOMES the chapter: searching for `error` or `line` returns
+   * true-looking hits into a page that does not exist, and the real text is
+   * unreachable for ever at that generation with the book checkpointed as
+   * complete. Found by an independent audit. */
+  function failedParse(): Document {
+    return new DOMParser().parseFromString('<p>unclosed & bare ampersand', 'application/xhtml+xml')
+  }
+
+  it('is what a real malformed XHTML parse produces', () => {
+    /* The known positive. A detector nobody has seen fire on the real thing is
+     * a detector that finds nothing and looks clean — the lesson
+     * `check-browser-safe.mjs` paid for twice. */
+    const doc = failedParse()
+    expect(doc.getElementsByTagName('parsererror').length).toBeGreaterThan(0)
+    expect(parseFailed(bodyOf(doc))).toBe(true)
+  })
+
+  it('leaves an ordinary chapter alone', () => {
+    const doc = new DOMParser().parseFromString(
+      '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Call me Ishmael.</p></body></html>',
+      'application/xhtml+xml',
+    )
+    expect(parseFailed(bodyOf(doc))).toBe(false)
+  })
+
+  it('is recorded as unreadable rather than indexed', async () => {
+    const broken = failedParse()
+    const fine = new DOMParser().parseFromString(
+      '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>The whale was large.</p></body></html>',
+      'application/xhtml+xml',
+    )
+    const walked = await extractSections({
+      sections: 2,
+      documentFor: async (index) => (index === 0 ? bodyOf(broken) : bodyOf(fine)),
+      live: () => true,
+      breathe: async () => {},
+    })
+    expect(walked.unreadable).toEqual([0])
+    expect(walked.sections.map((one) => one.index)).toEqual([1])
+    expect(walked.sections[0]?.text).toContain('whale')
+    for (const one of walked.sections) {
+      expect(one.text).not.toContain('parsererror')
+      expect(one.text.toLowerCase()).not.toContain('this page contains')
+    }
+  })
 })

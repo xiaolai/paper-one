@@ -142,6 +142,41 @@ fn a_window_wider_than_a_quote_may_be_is_anchored_on_its_rarest_clause() {
 }
 
 #[test]
+fn a_section_full_of_one_common_word_is_still_answered_quickly() {
+    /* ⚠️ **THE WIDE-WINDOW CASE IS ALSO THE SLOW ONE, AND IT USED TO BE
+     * QUADRATIC.** The query the anchoring rule exists for — one rare word and
+     * hundreds of a common one — is exactly the query that makes the span list
+     * long, so the two scans it used to do (`all[left..=right]` per shrink, the
+     * whole of `all` per wide window) cost most precisely where they were most
+     * needed. Measured on this machine over a synthetic span list, both
+     * implementations agreeing on every answer:
+     *
+     * | spans | scanning | deques |
+     * |---|---|---|
+     * | 2 000 | 1.88 ms | 0.012 ms |
+     * | 10 000 | 45.2 ms | 0.056 ms |
+     * | 40 000 | 753 ms | 0.197 ms |
+     *
+     * Four times the spans is sixteen times the work, which is the shape rather
+     * than the constant — and it is per SECTION, over every section of every
+     * book a query matches. Found by an independent audit.
+     *
+     * This case asserts the ANSWER at that scale rather than the clock: a
+     * timing assertion on a machine other agents are also using measures the
+     * machine, which this repository has paid for more than once. What it does
+     * prove is that the deques survive ten thousand evictions and still anchor
+     * where the scan did. */
+    let filler = "the word ".repeat(10_000);
+    let text = format!("the opening {filler} whale");
+    let found = quotes(&text, "the whale");
+    assert_eq!(
+        found,
+        ["whale"],
+        "still the rare word, ten thousand windows in"
+    );
+}
+
+#[test]
 fn a_wide_window_still_answers_when_every_clause_is_equally_rare() {
     /* With nothing to choose between, the first is as good as any — what must
      * not happen is a page-long quote or no hit at all. */

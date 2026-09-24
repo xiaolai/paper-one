@@ -20,7 +20,7 @@
 //! `tests::an_offset_is_what_the_front_end_counts` is the assertion, with emoji
 //! and with CJK.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -88,8 +88,10 @@ pub struct PassagesState {
     /// `None` until `setup` has said where the data root is, and until the first
     /// call that needs it — opening a tantivy index costs a directory scan, and
     /// a reader who never searches should not pay for one at launch.
-    store: Mutex<Option<Store>>,
-    root: Mutex<Option<std::path::PathBuf>>,
+    /// `Arc`, so the whole operation can be moved onto a blocking thread —
+    /// see [`PassagesState::with`].
+    store: Arc<Mutex<Option<Store>>>,
+    root: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 impl std::fmt::Debug for PassagesState {
@@ -111,26 +113,53 @@ impl PassagesState {
         }
     }
 
-    /// Run `work` against the open store, opening it if this is the first call.
+    /// Run `work` against the open store, opening it if this is the first call,
+    /// ON A BLOCKING THREAD.
+    ///
+    /// ⚠️ **EVERYTHING THIS PLUGIN DOES BLOCKS, AND IT WAS DOING IT ON THE
+    /// ASYNC RUNTIME'S OWN WORKERS.** Each command here is an `async fn`, so
+    /// Tauri runs it on the shared async runtime — and every one of them took a
+    /// blocking `Mutex` and then did real work behind it: a `commit()` that
+    /// fsyncs, a `search` that decompresses postings, an `open` that scans a
+    /// directory. During a backfill that is a worker held, continuously, for as
+    /// long as 1 959 books take; and the workers are not this plugin's, they
+    /// are the whole app's, shared with the peer plugin, sync and voices. Found
+    /// by an independent audit.
+    ///
+    /// `spawn_blocking` is the runtime's own answer for exactly this. The store
+    /// stays serial — one mutex, as before — but the thread it serialises is
+    /// one the runtime keeps for work that blocks.
+    ///
+    /// ⚠️ **AND `State<'_, _>` CANNOT CROSS INTO THE CLOSURE**, which is why
+    /// the fields are `Arc`: the handles are cloned out first and the borrow
+    /// ends at the call.
     ///
     /// # Errors
-    /// [`Error::NoRoot`] before `setup`; whatever opening or `work` returns.
-    fn with<T>(&self, work: impl FnOnce(&mut Store) -> Result<T>) -> Result<T> {
-        let mut held = self
-            .store
-            .lock()
-            .map_err(|_| Error::Index("the passage index is poisoned".to_owned()))?;
-        if held.is_none() {
-            let root = self
-                .root
+    /// [`Error::NoRoot`] before `setup`; whatever opening or `work` returns;
+    /// [`Error::Index`] if the blocking thread itself fails.
+    async fn with<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut Store) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let store = Arc::clone(&self.store);
+        let root = Arc::clone(&self.root);
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut held = store
                 .lock()
-                .map_err(|_| Error::NoRoot)?
-                .clone()
-                .ok_or(Error::NoRoot)?;
-            *held = Some(Store::open(&root)?);
-        }
-        let store = held.as_mut().ok_or(Error::NoRoot)?;
-        work(store)
+                .map_err(|_| Error::Index("the passage index is poisoned".to_owned()))?;
+            if held.is_none() {
+                let root = root
+                    .lock()
+                    .map_err(|_| Error::NoRoot)?
+                    .clone()
+                    .ok_or(Error::NoRoot)?;
+                *held = Some(Store::open(&root)?);
+            }
+            let store = held.as_mut().ok_or(Error::NoRoot)?;
+            work(store)
+        })
+        .await
+        .map_err(|cause| Error::Index(format!("the index thread would not run: {cause}")))?
     }
 }
 
@@ -155,6 +184,10 @@ pub async fn passages_put<R: tauri::Runtime>(
     generation: String,
     sections: Vec<SectionIn>,
     at: u64,
+    // The gap, when this book's coverage is PARTIAL — in the same command as
+    // the sections, because it has to land in the same write. See
+    // `crate::store::Store::put`.
+    partial: Option<String>,
 ) -> Result<bool> {
     let sections = sections
         .into_iter()
@@ -163,7 +196,9 @@ pub async fn passages_put<R: tauri::Runtime>(
             text: one.text,
         })
         .collect();
-    state.with(|store| store.put(&book, &generation, sections, at))
+    state
+        .with(move |store| store.put(&book, &generation, sections, at, partial.as_deref()))
+        .await
 }
 
 /// Record a book that yielded no text, with the reason a reader can read.
@@ -176,20 +211,9 @@ pub async fn passages_note<R: tauri::Runtime>(
     why: String,
     at: u64,
 ) -> Result<()> {
-    state.with(|store| store.note(&book, &generation, &why, at))
-}
-
-/// Record that a book is only PARTLY searchable, keeping what was indexed.
-#[tauri::command]
-pub async fn passages_note_partial<R: tauri::Runtime>(
-    _app: tauri::AppHandle<R>,
-    state: State<'_, PassagesState>,
-    book: String,
-    generation: String,
-    why: String,
-    at: u64,
-) -> Result<()> {
-    state.with(|store| store.note_partial(&book, &generation, &why, at))
+    state
+        .with(move |store| store.note(&book, &generation, &why, at))
+        .await
 }
 
 /// Commit everything pending and write the checkpoint.
@@ -198,7 +222,7 @@ pub async fn passages_flush<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: State<'_, PassagesState>,
 ) -> Result<()> {
-    state.with(Store::flush)
+    state.with(Store::flush).await
 }
 
 /// Take a book out of the index.
@@ -209,7 +233,7 @@ pub async fn passages_forget<R: tauri::Runtime>(
     book: String,
     at: u64,
 ) -> Result<()> {
-    state.with(|store| store.forget(&book, at))
+    state.with(move |store| store.forget(&book, at)).await
 }
 
 /// Move a book's index to a new id, keeping the work.
@@ -220,7 +244,7 @@ pub async fn passages_rekey<R: tauri::Runtime>(
     from: String,
     to: String,
 ) -> Result<bool> {
-    state.with(|store| store.rekey(&from, &to))
+    state.with(move |store| store.rekey(&from, &to)).await
 }
 
 /// Which of these books need indexing at these generations.
@@ -234,13 +258,15 @@ pub async fn passages_pending<R: tauri::Runtime>(
     state: State<'_, PassagesState>,
     books: Vec<(String, String)>,
 ) -> Result<Vec<String>> {
-    state.with(|store| {
-        Ok(books
-            .into_iter()
-            .filter(|(id, generation)| !store.current(id, generation))
-            .map(|(id, _)| id)
-            .collect())
-    })
+    state
+        .with(move |store| {
+            Ok(books
+                .into_iter()
+                .filter(|(id, generation)| !store.current(id, generation))
+                .map(|(id, _)| id)
+                .collect())
+        })
+        .await
 }
 
 /// Every book the index holds, by id.
@@ -262,7 +288,7 @@ pub async fn passages_indexed<R: tauri::Runtime>(
     /* ⚠️ **EVERYTHING THIS STORE KNOWS, NOT ONLY WHAT IT INDEXED.** A book
      * recorded as unreadable and then trashed kept its warning for ever, because
      * the removal diff never saw it. */
-    state.with(|store| Ok(store.known()))
+    state.with(|store| Ok(store.known())).await
 }
 
 /// Build the postings again from the retained text.
@@ -271,7 +297,7 @@ pub async fn passages_rebuild<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: State<'_, PassagesState>,
 ) -> Result<()> {
-    state.with(Store::rebuild)
+    state.with(Store::rebuild).await
 }
 
 /// Forget every note, so the next sweep tries those books again.
@@ -283,7 +309,9 @@ pub async fn passages_retry<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: State<'_, PassagesState>,
 ) -> Result<u32> {
-    state.with(|store| Ok(u32::try_from(store.retry_unreadable()?).unwrap_or(u32::MAX)))
+    state
+        .with(|store| Ok(u32::try_from(store.retry_unreadable()?).unwrap_or(u32::MAX)))
+        .await
 }
 
 /// What is indexed, what it costs, and what could not be read.
@@ -292,31 +320,33 @@ pub async fn passages_status<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: State<'_, PassagesState>,
 ) -> Result<StatusRow> {
-    state.with(|store| {
-        let held = store.state();
-        let (index_bytes, text_bytes) = store.bytes();
-        let mut unreadable: Vec<UnreadableRow> = held
-            .notes
-            .iter()
-            .map(|(book_id, note)| UnreadableRow {
-                book_id: book_id.clone(),
-                why: note.why.clone(),
-                at: note.at,
+    state
+        .with(|store| {
+            let held = store.state();
+            let (index_bytes, text_bytes) = store.bytes();
+            let mut unreadable: Vec<UnreadableRow> = held
+                .notes
+                .iter()
+                .map(|(book_id, note)| UnreadableRow {
+                    book_id: book_id.clone(),
+                    why: note.why.clone(),
+                    at: note.at,
+                })
+                .collect();
+            /* NEWEST FIRST, so a reader looking at the list sees what just failed
+             * rather than what failed a month ago. */
+            unreadable.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.book_id.cmp(&b.book_id)));
+            Ok(StatusRow {
+                books: u32::try_from(held.books.len()).unwrap_or(u32::MAX),
+                sections: store.sections(),
+                chars: held.books.values().map(|one| one.chars).sum(),
+                index_bytes,
+                text_bytes,
+                analysis: held.analysis.clone(),
+                unreadable,
             })
-            .collect();
-        /* NEWEST FIRST, so a reader looking at the list sees what just failed
-         * rather than what failed a month ago. */
-        unreadable.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.book_id.cmp(&b.book_id)));
-        Ok(StatusRow {
-            books: u32::try_from(held.books.len()).unwrap_or(u32::MAX),
-            sections: store.sections(),
-            chars: held.books.values().map(|one| one.chars).sum(),
-            index_bytes,
-            text_bytes,
-            analysis: held.analysis.clone(),
-            unreadable,
         })
-    })
+        .await
 }
 
 /// Answer a query with passages.
@@ -336,7 +366,9 @@ pub async fn passages_search<R: tauri::Runtime>(
         per_section: MAX_PER_SECTION,
         total,
     };
-    let hits = state.with(|store| store.search(&clauses, limits))?;
+    let hits = state
+        .with(move |store| store.search(&clauses, limits))
+        .await?;
     Ok(hits.into_iter().map(row_of).collect())
 }
 

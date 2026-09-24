@@ -35,7 +35,6 @@ function portOver(over: Partial<PassageIndex> = {}): PassageIndex {
     status: async () => status(),
     put: async () => true,
     note: async () => {},
-    notePartial: async () => {},
     flush: async () => {},
     forget: async () => {},
     rekey: async () => true,

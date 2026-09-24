@@ -15,7 +15,7 @@ import type { IndexedBook } from '../../../kernel'
  * |---|---|
  * | metadata arrives, no bytes | nothing — there is no text to extract |
  * | bytes arrive (`keepContent`) | extract and index |
- * | bytes replaced (`refreshContent`, a re-import) | the generation moves, so re-extract |
+ * | bytes replaced (sync, a public fetch) | the hash moves, so the generation does, so re-extract |
  * | bytes evicted (`evictContent`) | FORGET — the book is still on the shelf and its text is not on this device |
  * | book trashed (`book.remove`) | forget |
  * | book restored | extract again, from whatever bytes came back |
@@ -38,12 +38,42 @@ import type { IndexedBook } from '../../../kernel'
  * mean a library that becomes searchable only after sync has walked it.
  *
  * The fallback names what this device can see about the file: its extension and
- * its format. ⚠️ **THAT IS DELIBERATELY WEAK AND IT IS SAID SO HERE**: two
- * different files of the same format under one book id produce the same
- * generation, so a re-import that does not move the hash is not noticed. What
- * makes that acceptable is that `refreshContent` is the path a re-import takes
- * and the freshness driver re-extracts on it REGARDLESS of the generation — the
- * generation is the *steady-state* check, not the only one.
+ * its format. ⚠️ **THAT IS DELIBERATELY WEAK**: two different files of the same
+ * format under one book id produce the same generation, so a replacement that
+ * does not move the hash is invisible to this function.
+ *
+ * ⚠️ **AND WHAT USED TO STAND HERE — *"`refreshContent` is the path a re-import
+ * takes and the freshness driver re-extracts on it REGARDLESS of the
+ * generation"* — WAS NOT TRUE OF ANY LINE OF CODE.** `refreshContent` re-reads
+ * whether the folder holds a file and publishes only when `hasContent` CHANGES,
+ * so a replacement under a book that already had content publishes nothing at
+ * all; there was no such regardless, and nothing anywhere forced an extraction.
+ * Found by an independent audit — a comment claiming behaviour the code lacked,
+ * which is the shape this phase went looking for and then committed.
+ *
+ * ⚠️ **WHAT IS ACTUALLY TRUE IS NARROWER AND IS ENOUGH**, and it is a property
+ * of the paths rather than of this function. Every way the kernel replaces a
+ * live book's bytes either carries a content hash or passes through an
+ * eviction:
+ *
+ * | path | what moves |
+ * |---|---|
+ * | sync (`ledger.ts`) | `fetchBlob` is BY HASH and the merged record carries it, so `b3:` moves |
+ * | a public fetch (`publicPort.ts`) | by hash, and only for a book with no content — `hasContent` false→true publishes |
+ * | `removeDownload`, `evictContent` | `hasContent` true→false publishes; the driver forgets the book, and the next arrival extracts afresh |
+ * | a local re-import | writes nothing — an import treats an existing file as a duplicate |
+ *
+ * So a book whose bytes change either becomes hashed in the same breath or is
+ * seen to lose its content first. `freshness.test.ts` holds both.
+ *
+ * ⚠️ **THE RESIDUAL IS A SECOND WRITER, AND IT IS THE SAME ONE THE JOURNAL
+ * HAS.** A file swapped under the app by something that is not the kernel — a
+ * restore from backup, another tool, an editor — moves neither the hash nor
+ * `hasContent`, so the index goes on answering from the old text.
+ * `sync/lib/secondWriter.test.ts` records exactly this limit for the sync
+ * journal; it is not narrower here, and pretending otherwise in a comment is
+ * how this paragraph came to be wrong in the first place. The reader's lever is
+ * the Passages panel's rebuild.
  *
  * ⚠️ **AND IT IS PREFIXED, SO THE TWO CANNOT BE CONFUSED.** A bare hash and a
  * bare description could in principle collide; `b3:` and `file:` make the answer

@@ -45,7 +45,6 @@ function fakeIndex(over: Partial<PassageIndex> = {}): PassageIndex {
     })),
     put: vi.fn(async () => true),
     note: vi.fn(async () => {}),
-    notePartial: vi.fn(async () => {}),
     flush: vi.fn(async () => {}),
     forget: vi.fn(async () => {}),
     rekey: vi.fn(async () => true),

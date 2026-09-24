@@ -12,7 +12,6 @@ and its own grant.
 
 - `allow-passages-put`
 - `allow-passages-note`
-- `allow-passages-note-partial`
 - `allow-passages-flush`
 - `allow-passages-forget`
 - `allow-passages-rekey`
@@ -132,32 +131,6 @@ Enables the passages_note command without any pre-configured scope.
 <td>
 
 Denies the passages_note command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`passages:allow-passages-note-partial`
-
-</td>
-<td>
-
-Enables the passages_note_partial command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`passages:deny-passages-note-partial`
-
-</td>
-<td>
-
-Denies the passages_note_partial command without any pre-configured scope.
 
 </td>
 </tr>

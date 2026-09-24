@@ -291,16 +291,6 @@ export function buildDeps(
           await port.note(bookId, generation, whyEmpty(extracted.unreadable), at)
           return 'unreadable'
         }
-        const accepted = await port.put(
-          bookId,
-          generation,
-          extracted.sections.map((one) => ({ index: one.index, text: one.text })),
-          at,
-        )
-        /* THE RACE WI-31.3 NAMES: the book was forgotten while it was being
-         * extracted. The plugin refused it, which is right, and the sweep must
-         * not count it as done. */
-        if (!accepted) return 'skipped'
         /* ⚠️ **A BOOK THAT LOST SOME OF ITS CHAPTERS IS NOT A BOOK THAT WAS
          * INDEXED, AND THIS THREW THAT AWAY.** `extracted.unreadable` was read
          * only when the book yielded NOTHING — so a book with thirty-seven good
@@ -312,27 +302,33 @@ export function buildDeps(
          * audit.
          *
          * The book IS indexed — the chapters that read are searchable and that
-         * is worth having — and the gap is NAMED beside it. `note` no longer
-         * clears the postings when what it records is partial, because there is
-         * real coverage to keep; see `Store::note_partial`. */
-        if (extracted.unreadable.length > 0 || extracted.truncated.length > 0) {
-          /* ⚠️ **OUTSIDE THE DESTRUCTIVE CATCH, OR A FAILED WARNING DELETES THE
-           * GOOD CHAPTERS.** A rejected `notePartial` fell into the extraction
-           * catch below, which calls `note` — and `note` takes the book OUT of
-           * search and records the generation as unreadable, so a disk that was
-           * briefly busy destroyed thirty-seven working chapters and suppressed
-           * the retry. The book IS indexed by this point; failing to write a
-           * warning about it cannot be allowed to undo that. Found by the second
-           * audit round. */
-          try {
-            await port.notePartial(bookId, generation, whyPartial(extracted), at)
-          } catch (cause) {
-            api.diagnostics.warn('passages.partial-note-failed', {
-              book: bookId,
-              error: messageOf(cause),
-            })
-          }
-        }
+         * is worth having — and the gap is NAMED beside it.
+         *
+         * ⚠️ **AND IT TRAVELS WITH THE SECTIONS, BECAUSE A SECOND CALL COULD
+         * NOT BE MADE TO ARRIVE IN TIME.** It was `notePartial`, immediately
+         * after the `put` — and a `put` that fills the plugin's batch commits
+         * and writes the checkpoint BEFORE it returns, so a crash in the gap
+         * left the book recorded as complete and the warning nowhere. There was
+         * no ordering available on this side that closed it: the write had
+         * already happened. Passing the gap as an argument makes the checkpoint
+         * and the warning one write, which also removes the whole question of
+         * what a failed second call should undo. Found by an independent audit.
+         */
+        const partial =
+          extracted.unreadable.length > 0 || extracted.truncated.length > 0
+            ? whyPartial(extracted)
+            : null
+        const accepted = await port.put(
+          bookId,
+          generation,
+          extracted.sections.map((one) => ({ index: one.index, text: one.text })),
+          at,
+          partial,
+        )
+        /* THE RACE WI-31.3 NAMES: the book was forgotten while it was being
+         * extracted. The plugin refused it, which is right, and the sweep must
+         * not count it as done. */
+        if (!accepted) return 'skipped'
         return 'indexed'
       } catch (cause) {
         /* ⚠️ **A BOOK THAT WILL NOT PARSE IS A FACT ABOUT THE BOOK, and a disk
@@ -438,7 +434,15 @@ async function extractBook(
 function whyEmpty(unreadable: readonly number[]): string {
   return unreadable.length > 0
     ? `${unreadable.length} ${unreadable.length === 1 ? 'chapter' : 'chapters'} could not be read, and the rest hold no text`
-    : 'it holds no text this build could read'
+    /* ⚠️ **"this build could read" BLAMED PAPER FOR A BOOK MADE OF PICTURES.**
+     * A fixed-layout or scanned EPUB is spine items of one `<svg><image/></svg>`
+     * each: every section parses perfectly and holds no words, which
+     * `extractSections` reports as no unreadable sections and no text. Telling
+     * the reader it "could not be read" sends them looking for damage in a file
+     * that is exactly as it should be — and the Settings panel lists it among
+     * the books that failed. The two cases are already distinguishable here;
+     * only the sentence was not. Found by an independent audit. */
+    : 'it holds pictures but no text, so there is nothing to search'
 }
 
 /**

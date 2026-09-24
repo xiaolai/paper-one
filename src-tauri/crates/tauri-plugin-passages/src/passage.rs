@@ -17,6 +17,8 @@
 //! plain strings, so the string the resolver searches for can never carry a
 //! `<b>`.
 
+use std::collections::VecDeque;
+
 use crate::error::{Error, Result};
 use crate::tokenize::{tokenize, Token};
 
@@ -220,17 +222,57 @@ pub fn passages(text: &str, clauses: &[Clause], limit: usize) -> Vec<Passage> {
 
     /* THE SLIDING WINDOW: walk the spans in order, keeping a count per clause,
      * and shrink from the left whenever every clause is covered. Each minimal
-     * covering window is one passage. */
+     * covering window is one passage.
+     *
+     * ⚠️ **THE TWO ANSWERS A WINDOW NEEDS ARE CARRIED IN DEQUES, AND SCANNING
+     * FOR THEM MADE THIS QUADRATIC.** A window is asked for its furthest
+     * ENDPOINT (just below) and, when it is too wide to quote, its RAREST span
+     * (the fallback further down). The first version re-scanned for each:
+     * `all[left..=right]` per shrink, and the whole of `all` per wide window.
+     * Both are O(n²) in the number of spans, and the number of spans is exactly
+     * what a common word makes large — the `the whale` case the fallback exists
+     * for is a section with one `whale` and hundreds of `the`, and it pays the
+     * worst price of any query. Found by an independent audit.
+     *
+     * A monotonic deque holds INDICES whose values never cross, so its front is
+     * always the answer for the current window: evict every tail the new value
+     * beats, push, and drop the front once it falls behind `left`. Both ends
+     * only ever advance, so the whole walk is amortised O(n).
+     *
+     * ⚠️ **AND THE RAREST SPAN IS NOW TAKEN FROM INSIDE THE WINDOW, WHICH THE
+     * SCAN WAS NOT.** The scan matched on token POSITION, and `all` is sorted by
+     * start, so a span at an index BEFORE `left` sharing `all[left]`'s start
+     * qualified — a span that had already left the window. The minimum VALUE
+     * cannot change, because a covering window holds a span of every clause and
+     * therefore of the rarest one; only which occurrence is picked can, and the
+     * one inside the window is the defensible answer. */
     let mut counted = vec![0usize; clauses.len()];
     let mut covered = 0usize;
     let mut left = 0usize;
-    let mut windows: Vec<(usize, usize)> = Vec::new();
+    /* (first token, last token, the index in `all` of the window's rarest span) */
+    let mut windows: Vec<(usize, usize, usize)> = Vec::new();
+    /* Decreasing by end token, so the front is the window's furthest endpoint. */
+    let mut furthest: VecDeque<usize> = VecDeque::new();
+    /* Non-decreasing by clause frequency — `>` rather than `>=` keeps the
+     * EARLIEST span among equals, which is what `min_by_key` answered. */
+    let mut rarest: VecDeque<usize> = VecDeque::new();
     for right in 0..all.len() {
         let (_, _, which) = all[right];
         if counted[which] == 0 {
             covered += 1;
         }
         counted[which] += 1;
+        while furthest.back().is_some_and(|&at| all[at].1 <= all[right].1) {
+            furthest.pop_back();
+        }
+        furthest.push_back(right);
+        while rarest
+            .back()
+            .is_some_and(|&at| common[all[at].2] > common[which])
+        {
+            rarest.pop_back();
+        }
+        rarest.push_back(right);
         while covered == clauses.len() {
             /* ⚠️ **THE FURTHEST ENDPOINT IN THE WINDOW, NOT THE LAST SPAN'S.**
              * `all` is sorted by START, so the span that starts last need not
@@ -239,16 +281,19 @@ pub fn passages(text: &str, clauses: &[Clause], limit: usize) -> Vec<Passage> {
              * ending last, and taking `all[right].1` cut the quote at
              * `alpha beta` — a passage that does not contain the phrase it
              * matched. Found by an independent audit. */
-            let end = all[left..=right]
-                .iter()
-                .map(|(_, to, _)| *to)
-                .max()
-                .unwrap_or(all[right].1);
-            windows.push((all[left].0, end));
+            let end = furthest.front().map_or(all[right].1, |&at| all[at].1);
+            let anchor = rarest.front().copied().unwrap_or(right);
+            windows.push((all[left].0, end, anchor));
             let (_, _, leaving) = all[left];
             counted[leaving] -= 1;
             if counted[leaving] == 0 {
                 covered -= 1;
+            }
+            if furthest.front() == Some(&left) {
+                furthest.pop_front();
+            }
+            if rarest.front() == Some(&left) {
+                rarest.pop_front();
             }
             left += 1;
         }
@@ -256,7 +301,7 @@ pub fn passages(text: &str, clauses: &[Clause], limit: usize) -> Vec<Passage> {
 
     let mut spans: Vec<Passage> = windows
         .into_iter()
-        .filter_map(|(from_token, to_token)| {
+        .filter_map(|(from_token, to_token, anchor)| {
             let first = tokens.get(from_token)?;
             let last = tokens.get(to_token)?;
             let (start, end) = (first.start, last.end);
@@ -282,12 +327,9 @@ pub fn passages(text: &str, clauses: &[Clause], limit: usize) -> Vec<Passage> {
              * gives *"Chapter 12: The Whale"*, which is short, true, and
              * recognisably an answer.
              */
-            let anchor = all[..]
-                .iter()
-                .filter(|(from, _, _)| *from >= from_token && *from <= to_token)
-                .min_by_key(|(_, _, which)| common[*which])?;
-            let token = tokens.get(anchor.0)?;
-            let last_token = tokens.get(anchor.1)?;
+            let (anchor_from, anchor_to, _) = *all.get(anchor)?;
+            let token = tokens.get(anchor_from)?;
+            let last_token = tokens.get(anchor_to)?;
             /* ⚠️ **THE BOUND APPLIES HERE TOO, AND THE FALLBACK WALKED ROUND
              * IT.** The anchor is a whole clause — a long quoted phrase, or a
              * token whose TERM was truncated while its source span kept the

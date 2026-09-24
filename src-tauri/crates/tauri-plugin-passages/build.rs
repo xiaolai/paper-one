@@ -11,7 +11,6 @@
 const COMMANDS: &[&str] = &[
     "passages_put",
     "passages_note",
-    "passages_note_partial",
     "passages_flush",
     "passages_forget",
     "passages_rekey",

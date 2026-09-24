@@ -118,7 +118,11 @@ pub struct Store {
     state: State,
     /// Books indexed into the writer but not yet committed. Empty after every
     /// commit; the checkpoint is written from it.
-    pending: Vec<(String, Indexed)>,
+    /// Committed-but-uncheckpointed books, with the warning each carries.
+    ///
+    /// ⚠️ **THE WARNING TRAVELS WITH THE CHECKPOINT BECAUSE IT HAS TO LAND IN
+    /// THE SAME WRITE.** See [`Store::put`].
+    pending: Vec<(String, Indexed, Option<Note>)>,
     /// When each book was forgotten, by the caller's clock — see the module
     /// header. Not persisted, deliberately: after a restart nothing is in
     /// flight, and a durable list of removed books would be a second record of
@@ -158,8 +162,16 @@ impl Store {
         /* ⚠️ **AN ANALYSIS CHANGE IS A REBUILD, NOT A RE-EXTRACTION**, and this
          * is the moment that decision is taken. The text on disk is unaffected
          * by what a tokenizer does with it, so every EPUB stays shut. */
-        if store.state.analysis != tokenize::ANALYSIS {
+        /* ⚠️ **AND SO IS A REBUILD THAT WAS NEVER SEEN TO FINISH.** The
+         * analysis test above catches an interrupted rebuild that was CAUSED by
+         * an analysis change, because the old analysis is still on disk — it
+         * says nothing about the same-analysis rebuild a reader asks for, where
+         * the postings have been cleared and the checkpoint still describes
+         * them. See [`State::rebuilding`]. */
+        if store.state.analysis != tokenize::ANALYSIS || store.state.rebuilding {
             store.rebuild()?;
+        } else {
+            store.reconcile()?;
         }
         Ok(store)
     }
@@ -206,12 +218,29 @@ impl Store {
     /// # Errors
     /// [`Error::BadPath`] for an id that cannot be filed; [`Error::Index`] from
     /// the writer; the underlying I/O failure from the text write.
+    /// A book's sections, and — in the same operation — whether its coverage is
+    /// PARTIAL.
+    ///
+    /// ⚠️ **`partial` IS AN ARGUMENT RATHER THAN A SECOND CALL, AND THAT IS THE
+    /// WHOLE OF WHY IT IS HERE.** It was `note_partial`, called by the front end
+    /// immediately after this — and a `put` that fills the batch COMMITS and
+    /// writes the checkpoint before returning, so a crash in the gap between the
+    /// two calls left the book checkpointed as complete with nothing recording
+    /// the chapters that would not read. `current()` then answers true at that
+    /// generation for ever: the gap is permanent, silent, and looks exactly like
+    /// a book with no matches there. One-in-`BATCH` books were exposed, and the
+    /// front end could not close it from its side at any cost. Found by an
+    /// independent audit.
+    ///
+    /// Carried alongside the checkpoint in `pending`, the two land in the single
+    /// `state::write` [`Store::flush`] performs, so there is no gap to crash in.
     pub fn put(
         &mut self,
         book_id: &str,
         generation: &str,
         sections: Vec<Section>,
         at: u64,
+        partial: Option<&str>,
     ) -> Result<bool> {
         /* THE RACE, REFUSED — and ONLY the race. `at` is when the extraction
          * BEGAN, so an extraction older than the removal is one that read bytes
@@ -246,6 +275,11 @@ impl Store {
                 chars: book.chars(),
                 at,
             },
+            partial.map(|why| Note {
+                why: why.to_owned(),
+                at,
+                generation: generation.to_owned(),
+            }),
         ));
         if self.pending.len() >= BATCH {
             self.flush()?;
@@ -280,39 +314,6 @@ impl Store {
                 at,
                 /* WHAT IT FAILED AT, so freshness can leave it alone until the
                  * bytes change — see `Note::generation`. */
-                generation: generation.to_owned(),
-            },
-        );
-        state::write(&self.layout.state_path, &self.state)
-    }
-
-    /// Record that a book is only PARTLY searchable, keeping what was indexed.
-    ///
-    /// ⚠️ **THE DIFFERENCE FROM [`Self::note`] IS THE POSTINGS, AND IT IS THE
-    /// WHOLE POINT.** `note` takes a book OUT of search, because there was
-    /// nothing to keep. Here there is: thirty-seven chapters read and three did
-    /// not, and deleting the thirty-seven to report the three would be the
-    /// worse answer by far. The checkpoint stays — the book IS indexed at this
-    /// generation — and the warning sits beside it.
-    ///
-    /// # Errors
-    /// The underlying I/O failure from the checkpoint write.
-    pub fn note_partial(
-        &mut self,
-        book_id: &str,
-        generation: &str,
-        why: &str,
-        at: u64,
-    ) -> Result<()> {
-        self.flush()?;
-        /* INSERTED DIRECTLY, NOT THROUGH `noted`, which removes the checkpoint.
-         * The book is indexed; what is recorded is that it is indexed in
-         * PART. */
-        self.state.notes.insert(
-            book_id.to_owned(),
-            Note {
-                why: why.to_owned(),
-                at,
                 generation: generation.to_owned(),
             },
         );
@@ -410,8 +411,16 @@ impl Store {
          * not. A failure here leaves `state.json` naming none of it, which the
          * next launch reads as "re-index these" — the safe direction. */
         self.postings.commit()?;
-        for (book_id, one) in std::mem::take(&mut self.pending) {
+        for (book_id, one, partial) in std::mem::take(&mut self.pending) {
             self.state.indexed(&book_id, one);
+            /* AFTER `indexed`, WHICH CLEARS ANY NOTE — and inserted directly
+             * rather than through `noted`, which would remove the checkpoint
+             * just written. The book IS indexed; what this records is that it
+             * is indexed in PART, so the coverage stays and the gap is named
+             * beside it. */
+            if let Some(note) = partial {
+                self.state.notes.insert(book_id, note);
+            }
         }
         state::write(&self.layout.state_path, &self.state)
     }
@@ -427,7 +436,7 @@ impl Store {
         /* PENDING WORK FOR THIS BOOK IS DROPPED, not committed and then
          * deleted. Left in, it would be checkpointed as indexed by the flush
          * below and the state would claim a removed book is searchable. */
-        self.pending.retain(|(id, _)| id != book_id);
+        self.pending.retain(|(id, _, _)| id != book_id);
         self.postings.forget(book_id)?;
         self.postings.commit()?;
         text::remove(&self.layout.text_path(book_id)?)?;
@@ -481,6 +490,17 @@ impl Store {
     /// file must not cost a library.
     pub fn rebuild(&mut self) -> Result<()> {
         self.pending.clear();
+        /* ⚠️ **THE MARKER GOES DOWN BEFORE THE CLEAR, AND THAT ORDER IS THE
+         * WHOLE OF IT.** `clear()` commits, so from the next line the postings
+         * are gone while `state.json` still names every book as searchable.
+         * Marking first makes an interruption anywhere after this point a state
+         * the next `open` recognises and repairs; marking afterwards would leave
+         * the same hole one line further down. It stays set on `self.state` for
+         * the whole walk, so an intermediate write carries it too, and an error
+         * return leaves a store whose every later write still asks for the
+         * repair. Found by an independent audit. */
+        self.state.rebuilding = true;
+        state::write(&self.layout.state_path, &self.state)?;
         self.postings.clear()?;
         let mut rebuilt = State {
             format: state::FORMAT,
@@ -491,7 +511,30 @@ impl Store {
              * that — dropping them would quietly turn "these 40 books could not
              * be read" into "the shelf is fully covered". */
             notes: self.state.notes.clone(),
+            /* CLEARED ONLY HERE, on the value that is about to become the
+             * checkpoint — so the marker is lifted by the same write that makes
+             * the new postings' description durable, and by nothing else. */
+            rebuilding: false,
         };
+        /* ⚠️ **WHICH BOOK A DAMAGED FILE BELONGS TO IS ANSWERED BY THE NAMING
+         * FUNCTION, NEVER BY READING THE NAME BACK.** `file_stem` folds every
+         * non-alphanumeric character to `_`, so `book:a` is stored as
+         * `book_a-<digest>` and a recovered "id" of `book_a` names a book that
+         * does not exist — while the real `book:a` keeps whatever note it
+         * already had, generation and all, so `current()` answered true and
+         * freshness skipped it for ever. A book with no postings, never
+         * re-extracted, indistinguishable from a book with no matches. Found by
+         * an independent audit.
+         *
+         * The fold is many-to-one, so it cannot be inverted; it CAN be applied
+         * forwards to every id this store knows, which is exact. Built once
+         * rather than per damaged file. */
+        let mut belongs: HashMap<std::path::PathBuf, String> = HashMap::new();
+        for book_id in self.state.books.keys().chain(self.state.notes.keys()) {
+            if let Ok(path) = self.layout.text_path(book_id) {
+                belongs.insert(path, book_id.clone());
+            }
+        }
         let mut since_commit = 0usize;
         for path in text::files_in(&self.layout.text_dir)? {
             let held = match text::read_any(&path) {
@@ -502,9 +545,9 @@ impl Store {
                      * must not be silent either. The book is noted, so the
                      * reader is told which books are missing and why, and the
                      * next backfill re-extracts it. */
-                    if let Some(book_id) = book_id_of(&path) {
-                        rebuilt.noted(
-                            &book_id,
+                    match belongs.get(&path) {
+                        Some(book_id) => rebuilt.noted(
+                            book_id,
                             Note {
                                 why: format!("its saved text could not be read: {cause}"),
                                 at: 0,
@@ -513,10 +556,25 @@ impl Store {
                                  * bytes produced it. An empty generation
                                  * matches nothing, so the book is re-extracted
                                  * rather than left alone on the strength of a
-                                 * guess. */
+                                 * guess — and `noted` drops the book from
+                                 * `books` too, so nothing claims it is
+                                 * searchable. */
                                 generation: String::new(),
                             },
-                        );
+                        ),
+                        /* ⚠️ **A FILE NO KNOWN ID PRODUCES IS LOGGED AND LEFT,
+                         * NEVER NOTED UNDER A GUESS.** It is text written for a
+                         * book whose checkpoint never landed, so nothing claims
+                         * it is current and the ordinary backfill will
+                         * re-extract that book under its real id. A note under
+                         * an invented id would put a book the reader does not
+                         * have in the panel's list of books that could not be
+                         * read, and would be the one thing able to collide with
+                         * a real id. */
+                        None => log::warn!(
+                            "passages: {} will not read and belongs to no known book: {cause}",
+                            path.display()
+                        ),
                     }
                     continue;
                 }
@@ -680,7 +738,7 @@ impl Store {
              * pointless if `flush` then calls `indexed()` for that same book and
              * clears the warning. Found by the second audit round. */
             self.pending
-                .retain(|(id, _)| !damaged.iter().any(|(damaged_id, _)| damaged_id == id));
+                .retain(|(id, _, _)| !damaged.iter().any(|(damaged_id, _)| damaged_id == id));
             /* NOTED WITH AN EMPTY GENERATION, so the next sweep re-extracts it
              * rather than leaving it alone: what failed is the SAVED TEXT, and
              * nothing is known about whether the book's own bytes would read.
@@ -709,6 +767,68 @@ impl Store {
         Ok(out)
     }
 
+    /// Make the checkpoint agree with the postings that are actually there.
+    ///
+    /// ⚠️ **`books_in_index` WAS WRITTEN FOR THIS AND HAD NO PRODUCTION CALLER,
+    /// WHICH IS THIS REPOSITORY'S OWN WORST SHAPE.** `paper/share-notes/1`
+    /// answered a protocol nothing asked, `measuredIn` dropped a list only its
+    /// stubs ever read; a capability with no caller is a capability nobody has
+    /// seen work. Found by an independent audit.
+    ///
+    /// A checkpoint that outlives its postings is silent in the worst way:
+    /// `current()` answers true, freshness never offers the book again, and the
+    /// book simply has no matches for ever. [`State::rebuilding`] closes the way
+    /// this crate can cause it; what is left is damage from outside — a segment
+    /// file lost to a failed disk, a restore that brought back half of
+    /// `passages/`, anything that is not us.
+    ///
+    /// ⚠️ **THE CHEAP QUESTION FIRST, AND THAT IS WHAT MAKES IT AFFORDABLE AT
+    /// ALL.** The per-book count walks the document store — about 78 000
+    /// documents on this shelf — and doing that at every launch to find nothing
+    /// would be a cost every reader pays for a case almost none of them meet.
+    /// `num_docs()` against the sum the checkpoint claims is O(1) and answers
+    /// the same question for every state except one where two errors cancel
+    /// exactly: a book losing N sections while another gains N. `replace`
+    /// writes exactly the sections it is handed and the checkpoint records
+    /// exactly that number, so there is no ordinary road to that coincidence,
+    /// and the honest reading is that this is a very good check rather than a
+    /// proof.
+    fn reconcile(&mut self) -> Result<()> {
+        let claimed: u64 = self
+            .state
+            .books
+            .values()
+            .map(|one| u64::from(one.sections))
+            .sum();
+        if claimed == self.postings.sections() {
+            return Ok(());
+        }
+        let held = index::books_in(&self.postings)?;
+        let lost: Vec<String> = self
+            .state
+            .books
+            .iter()
+            .filter(|(book_id, one)| held.get(*book_id).copied().unwrap_or(0) != one.sections)
+            .map(|(book_id, _)| book_id.clone())
+            .collect();
+        if lost.is_empty() {
+            return Ok(());
+        }
+        log::warn!(
+            "passages: {} book(s) are checkpointed with postings that are not there; they will be indexed again",
+            lost.len()
+        );
+        for book_id in &lost {
+            /* ⚠️ **`forget`, NOT A `books.remove`.** Dropping the checkpoint
+             * alone leaves any note against the book standing — and `current()`
+             * accepts a note whose generation matches, so a book with a PARTIAL
+             * warning would go on being skipped with no postings at all. The
+             * same trap the damaged-text path had. */
+            self.state.forget(book_id);
+        }
+        state::write(&self.layout.state_path, &self.state)
+    }
+
     /// How many sections the index answers for.
     #[must_use]
     pub fn sections(&self) -> u64 {
@@ -731,18 +851,6 @@ impl Store {
     pub fn books_in_index(&self) -> Result<HashMap<String, u32>> {
         index::books_in(&self.postings)
     }
-}
-
-/// Recover a book id from a text file whose header would not parse.
-///
-/// Best effort, and it says so: the id is inside the file, which is the thing
-/// that will not read. The slug in the filename is what is left, and it is
-/// enough to name the book in a note.
-fn book_id_of(path: &Path) -> Option<String> {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .and_then(|stem| stem.rsplit_once('-'))
-        .map(|(slug, _)| slug.to_owned())
 }
 
 #[cfg(test)]

@@ -112,7 +112,9 @@ fn main() {
 
     /* ---- 1. time to the FIRST searchable book ---- */
     let began = Instant::now();
-    store.put("book:0", "gen", book(0), 0).expect("indexed");
+    store
+        .put("book:0", "gen", book(0), 0, None)
+        .expect("indexed");
     store.flush().expect("flushed");
     let first = began.elapsed();
     let answered = store
@@ -135,7 +137,7 @@ fn main() {
     let began = Instant::now();
     for seed in 1..books {
         store
-            .put(&format!("book:{seed}"), "gen", book(seed), seed)
+            .put(&format!("book:{seed}"), "gen", book(seed), seed, None)
             .expect("indexed");
     }
     store.flush().expect("flushed");
@@ -234,7 +236,7 @@ fn main() {
     /* ---- 6. an incremental add ---- */
     let began = Instant::now();
     store
-        .put("book:new", "gen", book(999_999), 1)
+        .put("book:new", "gen", book(999_999), 1, None)
         .expect("indexed");
     store.flush().expect("flushed");
     println!();

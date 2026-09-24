@@ -31,7 +31,6 @@ describe('the passages wire', () => {
       'forget',
       'indexed',
       'note',
-      'notePartial',
       'pending',
       'put',
       'rebuild',
@@ -50,17 +49,31 @@ describe('the passages wire', () => {
       expect(seam.invoke).toHaveBeenCalledTimes(1)
       return seam.invoke.mock.calls[0] as unknown[]
     }
-    expect(await called(() => wire.put('book:a', 'gen1', [{ index: 0, text: 'x' }], 7))).toEqual([
+    /* ⚠️ **`partial` RIDES ON `put`, AND IT USED TO BE A COMMAND OF ITS
+     * OWN.** A `put` that fills the plugin's batch commits and writes the
+     * checkpoint before it returns, so a crash between the two calls left a
+     * book recorded as complete with nothing saying which chapters were
+     * missing. Asserting the ARGUMENT here is what stops it becoming two calls
+     * again. Found by an independent audit. */
+    expect(
+      await called(() => wire.put('book:a', 'gen1', [{ index: 0, text: 'x' }], 7, null)),
+    ).toEqual([
       'plugin:passages|passages_put',
-      { book: 'book:a', generation: 'gen1', sections: [{ index: 0, text: 'x' }], at: 7 },
+      {
+        book: 'book:a',
+        generation: 'gen1',
+        sections: [{ index: 0, text: 'x' }],
+        at: 7,
+        partial: null,
+      },
+    ])
+    expect(await called(() => wire.put('book:a', 'gen1', [], 7, '1 chapter'))).toEqual([
+      'plugin:passages|passages_put',
+      { book: 'book:a', generation: 'gen1', sections: [], at: 7, partial: '1 chapter' },
     ])
     expect(await called(() => wire.note('book:a', 'gen1', 'no text', 7))).toEqual([
       'plugin:passages|passages_note',
       { book: 'book:a', generation: 'gen1', why: 'no text', at: 7 },
-    ])
-    expect(await called(() => wire.notePartial('book:a', 'gen1', '1 chapter', 7))).toEqual([
-      'plugin:passages|passages_note_partial',
-      { book: 'book:a', generation: 'gen1', why: '1 chapter', at: 7 },
     ])
     expect(await called(() => wire.flush())).toEqual(['plugin:passages|passages_flush'])
     expect(await called(() => wire.forget('book:a', 7))).toEqual([

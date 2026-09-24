@@ -170,3 +170,44 @@ describe('what the index should not be holding', () => {
     expect(unwanted(['a'], [['a', 'a-different-generation']])).toEqual([])
   })
 })
+
+describe('the generation moves exactly when the bytes can have', () => {
+  /* ⚠️ **THE CLAIM THIS REPLACED WAS A COMMENT, AND IT WAS FALSE.**
+   * `generationOf`'s header used to say the driver re-extracts on
+   * `refreshContent` regardless of the generation. Nothing did — that call
+   * publishes only when `hasContent` CHANGES, so a replacement under a book
+   * that already had content published nothing and forced nothing. What holds
+   * the line is a property of the kernel's paths rather than of this function,
+   * and a property nothing asserts is a property that leaves. Found by an
+   * independent audit. */
+  it('re-extracts when a replacement carries a new hash, which sync always does', () => {
+    const before = generationOf(book({ bookId: 'b', contentHash: 'aaa' }))
+    const after = generationOf(book({ bookId: 'b', contentHash: 'bbb' }))
+    expect(before).not.toBe(after)
+  })
+
+  it('sees an eviction as a removal, so what arrives after it is extracted afresh', () => {
+    /* The other road bytes take. `evictContent` and `removeDownload` flip
+     * `hasContent` true→false, which publishes; the book leaves `wanted`, the
+     * sweep's diff forgets it, and the arrival that follows is an ordinary
+     * first indexing. Neither half needs a generation to have moved. */
+    const live = book({ bookId: 'b', hasContent: true })
+    const evicted = book({ bookId: 'b', hasContent: false })
+    expect(wantedFrom([live]).map(([id]) => id)).toEqual(['b'])
+    expect(wantedFrom([evicted])).toEqual([])
+    expect(unwanted(['b'], wantedFrom([evicted]))).toEqual(['b'])
+  })
+
+  it('cannot see a file swapped under it by something that is not the kernel', () => {
+    /* ⚠️ **STATED AS A LIMIT RATHER THAN LEFT AS A SURPRISE**, and it is the
+     * same second-writer limit `sync/lib/secondWriter.test.ts` records for the
+     * journal. A book with no hash whose bytes are replaced in place moves
+     * nothing this function can read, so the index answers from the old text
+     * until a rebuild or a hash arrives. Asserting it is what stops the next
+     * reader assuming otherwise — which is how the comment above came to be
+     * wrong. */
+    const before = generationOf(book({ bookId: 'b', ext: 'epub', format: 'epub' }))
+    const after = generationOf(book({ bookId: 'b', ext: 'epub', format: 'epub' }))
+    expect(after).toBe(before)
+  })
+})

@@ -167,6 +167,18 @@ export async function extractSections(deps: ExtractDeps): Promise<Extraction> {
      * — has nothing to index and says so by answering null rather than
      * throwing. That is not an unreadable section. */
     if (!doc) continue
+    /* ⚠️ **A FAILED XHTML PARSE ARRIVES HERE AS A DOCUMENT, NOT AS A THROW.**
+     * The catch above only sees what `createDocument` rejects with; a malformed
+     * chapter resolves perfectly well with the browser's error message as its
+     * content. Indexed, that is a chapter of `This page contains the following
+     * errors` — true-looking hits that land nowhere, and the real chapter gone
+     * with nothing said. It belongs in the same list as a section that threw,
+     * because it is the same fact about the book. Found by an independent
+     * audit. */
+    if (parseFailed(doc)) {
+      unreadable.push(index)
+      continue
+    }
 
     const { text, cut } = canonicalOf(doc)
     /* AN EMPTY SECTION IS LEFT OUT rather than stored as a document with no
@@ -218,6 +230,40 @@ export function canonicalTextOf(root: Node): string {
  * second. `canonicalTextOf` stays as the one-value wrapper for every caller
  * that is only asking what the text is.
  */
+/**
+ * Whether this node is a PARSE FAILURE dressed as a document.
+ *
+ * ⚠️ **`DOMParser` DOES NOT THROW FOR MALFORMED XHTML — IT HANDS BACK A
+ * DOCUMENT WHOSE CONTENT IS THE ERROR MESSAGE.** So a chapter with an unescaped
+ * `&` was indexed as *"This page contains the following errors… error on line 4
+ * at column 12"*, the book was checkpointed COMPLETE with nothing recorded, and
+ * the chapter's real text was unreachable for ever at that generation. Worse,
+ * the text that WAS indexed is searchable: a reader looking for `error` or
+ * `line` gets true-looking hits into a page that does not exist, and clicking
+ * one lands nowhere. Found by an independent audit.
+ *
+ * ⚠️ **EPUB IS XHTML, SO THIS IS THE ORDINARY CASE RATHER THAN A CURIOSITY.**
+ * An HTML parse cannot fail; an XML one fails on anything a publisher's toolchain
+ * got slightly wrong, which at 1 959 books is not a rare event.
+ *
+ * Every engine spells it `<parsererror>` and each uses a namespace of its own —
+ * WebKit and Chromium the XHTML one, Firefox a namespace of its own — so the
+ * NAME is what can be matched. A book that genuinely contains an element by
+ * that name would be read as damaged, which is the safe direction: it is
+ * recorded and named to the reader rather than silently indexed as prose.
+ */
+export function parseFailed(root: Node): boolean {
+  const element = root as Partial<Element> & Partial<Document>
+  if (typeof element.localName === 'string' && element.localName.toLowerCase() === 'parsererror') {
+    return true
+  }
+  /* The engines disagree about WHERE it sits: documentElement for one, inside
+   * `<body>` for another — and `bodyOf` has already chosen between those by the
+   * time this is asked, so both have to be looked for. */
+  const found = element.getElementsByTagName?.('parsererror')
+  return found !== undefined && found.length > 0
+}
+
 export function canonicalOf(root: Node): { readonly text: string; readonly cut: boolean } {
   const index: TextIndex = indexText(bodyOf(root))
   if (index.text.length <= MAX_SECTION_CHARS) return { text: index.text, cut: false }

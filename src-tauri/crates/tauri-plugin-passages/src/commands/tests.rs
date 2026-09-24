@@ -139,6 +139,7 @@ fn the_offset_on_the_wire_is_the_one_the_store_computed() {
                 text: text.to_owned(),
             }],
             1,
+            None,
         )
         .expect("indexed");
     store.flush().expect("flushed");

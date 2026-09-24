@@ -87,6 +87,28 @@ pub struct State {
     /// every write a diff and every comparison in a test a sort.
     pub books: BTreeMap<String, Indexed>,
     pub notes: BTreeMap<String, Note>,
+    /// A rebuild started and has not been seen to finish.
+    ///
+    /// ⚠️ **WITHOUT THIS, AN INTERRUPTED REBUILD IS INDISTINGUISHABLE FROM A
+    /// FINISHED ONE, AND THE CHECKPOINT DESCRIBES POSTINGS THAT ARE GONE.**
+    /// [`crate::store::Store::rebuild`] clears the index in one committed
+    /// operation and writes the replacement checkpoint only at the end, which is
+    /// the right order — the opposite one claims books are searchable before
+    /// they are. What it leaves open is the gap between: a crash there, or a
+    /// failure reading `text/`, leaves `state.json` naming books whose postings
+    /// were just deleted. **An ANALYSIS change is already covered**, because the
+    /// old analysis is still on disk and reopening rebuilds on that alone — so
+    /// the hole is exactly the SAME-analysis rebuild, the one a reader asks for
+    /// from the Settings panel, where nothing else says anything is amiss and
+    /// freshness then skips every book as current. Found by an independent
+    /// audit.
+    ///
+    /// Written `true` BEFORE the clear and `false` only with the replacement, so
+    /// every intermediate write carries it. `#[serde(default)]` reads a file
+    /// written before the field existed as *not rebuilding*, which is what those
+    /// files meant.
+    #[serde(default)]
+    pub rebuilding: bool,
 }
 
 impl Default for State {
@@ -96,6 +118,7 @@ impl Default for State {
             analysis: crate::tokenize::ANALYSIS.to_owned(),
             books: BTreeMap::new(),
             notes: BTreeMap::new(),
+            rebuilding: false,
         }
     }
 }

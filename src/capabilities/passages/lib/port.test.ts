@@ -33,7 +33,6 @@ function fakeWire(over: Partial<PassagesWire> = {}): PassagesWire {
   return {
     put: vi.fn(async () => true),
     note: vi.fn(async () => {}),
-    notePartial: vi.fn(async () => {}),
     flush: vi.fn(async () => {}),
     forget: vi.fn(async () => {}),
     rekey: vi.fn(async () => true),
@@ -106,8 +105,20 @@ describe('the status', () => {
 describe('building the index', () => {
   it('passes a book’s sections through whole', async () => {
     const wire = fakeWire()
-    await passageIndexOver(wire).put('book:a', 'gen1', [{ index: 0, text: 'x' }], 7)
-    expect(wire.put).toHaveBeenCalledWith('book:a', 'gen1', [{ index: 0, text: 'x' }], 7)
+    await passageIndexOver(wire).put('book:a', 'gen1', [{ index: 0, text: 'x' }], 7, null)
+    expect(wire.put).toHaveBeenCalledWith('book:a', 'gen1', [{ index: 0, text: 'x' }], 7, null)
+  })
+
+  it('carries a partial book’s gap on the same call as its sections', async () => {
+    /* ⚠️ **NOT A SECOND CALL, AND THAT IS THE FIX RATHER THAN A TIDY-UP.** A
+     * `put` that fills the plugin's batch commits and checkpoints before it
+     * returns, so a crash before a following `notePartial` left the book
+     * recorded as complete and the gap nowhere — permanent at that generation,
+     * and indistinguishable from a book with no matches in those chapters.
+     * Found by an independent audit. */
+    const wire = fakeWire()
+    await passageIndexOver(wire).put('book:a', 'gen1', [], 7, '3 chapters could not be read')
+    expect(wire.put).toHaveBeenCalledWith('book:a', 'gen1', [], 7, '3 chapters could not be read')
   })
 
   it('reports a refused put, which is the removal race', async () => {
@@ -115,7 +126,7 @@ describe('building the index', () => {
      * spend a second extracting a book that is evicted while it works. The
      * plugin refuses it, and the sweep must be able to tell that from success. */
     const port = passageIndexOver(fakeWire({ put: async () => false }))
-    await expect(port.put('book:a', 'gen1', [], 7)).resolves.toBe(false)
+    await expect(port.put('book:a', 'gen1', [], 7, null)).resolves.toBe(false)
   })
 
   it('asks nothing when nothing is pending', async () => {

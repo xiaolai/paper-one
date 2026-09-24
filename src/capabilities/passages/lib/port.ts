@@ -30,6 +30,19 @@ export interface PassageIndex extends PassagesPort {
     generation: string,
     sections: readonly SectionIn[],
     at: number,
+    /**
+     * The gap when this book's coverage is PARTIAL — the chapters that would
+     * not read — or `null` when it is whole.
+     *
+     * ⚠️ **AN ARGUMENT RATHER THAN A SECOND CALL, AND THE ORDERING IS WHY.** It
+     * was `notePartial`, made immediately after this one; a `put` that fills the
+     * plugin's batch COMMITS and writes the checkpoint before it returns, so a
+     * crash in the gap left the book checkpointed as complete with nothing
+     * recording what was missing — permanent at that generation, silent, and
+     * indistinguishable from a book with no matches in those chapters. No
+     * ordering on this side could close it. Found by an independent audit.
+     */
+    partial: string | null,
   ): Promise<boolean>
   /**
    * Record a book that yielded nothing, with the reason a reader can read.
@@ -39,15 +52,6 @@ export interface PassageIndex extends PassagesPort {
    * for ever while the panel and the sweep both look like they are working.
    */
   note(bookId: string, generation: string, why: string, at: number): Promise<void>
-  /**
-   * Record that a book is only PARTLY searchable, keeping what was indexed.
-   *
-   * ⚠️ **NOT `note`, BECAUSE `note` TAKES THE BOOK OUT OF SEARCH.** A book whose
-   * chapters mostly read is worth having — the gap is a warning beside real
-   * coverage, not a replacement for it. Recording one through `note` would
-   * delete thirty-seven good chapters to report three bad ones.
-   */
-  notePartial(bookId: string, generation: string, why: string, at: number): Promise<void>
   /** Commit everything pending and write the checkpoint. */
   flush(): Promise<void>
   /**
@@ -117,16 +121,12 @@ export function passageIndexOver(wire: PassagesWire = passagesWire()): PassageIn
       return statusOf(await wire.status())
     },
 
-    async put(bookId, generation, sections, at): Promise<boolean> {
-      return wire.put(bookId, generation, sections, at)
+    async put(bookId, generation, sections, at, partial): Promise<boolean> {
+      return wire.put(bookId, generation, sections, at, partial)
     },
 
     async note(bookId, generation, why, at): Promise<void> {
       await wire.note(bookId, generation, why, at)
-    },
-
-    async notePartial(bookId, generation, why, at): Promise<void> {
-      await wire.notePartial(bookId, generation, why, at)
     },
 
     async flush(): Promise<void> {

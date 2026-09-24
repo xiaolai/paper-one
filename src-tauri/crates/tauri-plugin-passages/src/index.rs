@@ -360,7 +360,14 @@ pub fn books_in(postings: &Postings) -> Result<HashMap<String, u32>> {
     let mut out: HashMap<String, u32> = HashMap::new();
     for segment in searcher.segment_readers() {
         let store = segment.get_store_reader(1)?;
-        for doc in store.iter::<TantivyDocument>(None) {
+        /* ⚠️ **`None` COUNTED DELETED DOCUMENTS, AND `replace` DELETES BEFORE IT
+         * INSERTS.** So every book that had been re-indexed since the last
+         * segment merge was counted twice — which is exactly the population a
+         * reconciliation is about, and it made the answer disagree with the
+         * checkpoint for books that were perfectly well indexed. Found by an
+         * independent audit. The alive bitset is the segment's own record of
+         * which documents survive its deletes. */
+        for doc in store.iter::<TantivyDocument>(segment.alive_bitset()) {
             let doc = doc?;
             if let Some(book_id) = doc
                 .get_first(postings.fields.book_id)

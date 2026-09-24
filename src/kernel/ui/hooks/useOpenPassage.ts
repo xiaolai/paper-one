@@ -133,7 +133,31 @@ export async function openPassage(
 
 /** The hook the reader's shell mounts. */
 export function useOpenPassage(deps: OpenPassageDeps): (hit: PassageHit) => void {
-  const { fs, books, jumpTo, onProblem } = deps
+  /* ⚠️ **RESOLVED AGAINST THE CURRENT SHELL, NEVER THE ONE THAT WAS THERE WHEN
+   * THE ROW WAS CLICKED.** Opening a hit reads a file and parses a book, which
+   * takes long enough for the reader to turn several pages — and `App`'s
+   * `jumpTo` is rebuilt whenever `book.position.chapterLabel` moves, which a
+   * page turn does. Captured in the callback's dependency list, the landing
+   * called the `jumpTo` from the moment of the CLICK: a closure over the old
+   * chapter, so the "← Back to …" line named a chapter the reader had already
+   * left, and `books` was the shelf as it was rather than as it is. `App` does
+   * not unmount when a book is closed, so the teardown below could never reach
+   * any of it. Found by an independent audit.
+   *
+   * A ref updated after every commit, which is the ordinary shape for this: the
+   * value read at resolution is the latest one that has rendered, and there is
+   * no dependency list left to go stale. It also gives the returned callback a
+   * genuinely stable identity, which is what the call site's comment already
+   * claimed and did not have — `books` alone changes on every library publish.
+   *
+   * ⚠️ **AND A PAGE TURN MUST NOT CANCEL THE OPEN.** Invalidating on these
+   * changes instead of reading through them would abandon the reader's own
+   * request every time a timer published a snapshot. What supersedes a request
+   * is another request, which is the identity below. */
+  const latest = useRef(deps)
+  useEffect(() => {
+    latest.current = deps
+  })
   /* ⚠️ **WHICH CLICK IS THE CURRENT ONE, AND THERE WAS NO SUCH THING.** Opening
    * a hit reads a file and parses a book, so two clicks race — and every result
    * was applied. Reproduced by an independent audit: click A, click B, land on
@@ -144,33 +168,31 @@ export function useOpenPassage(deps: OpenPassageDeps): (hit: PassageHit) => void
   useEffect(
     () => () => {
       /* TEARDOWN INVALIDATES WHATEVER IS IN FLIGHT. A landing that resolves
-       * after the reader closed the book must not move them. */
+       * after the whole shell has gone must not try to move anybody. */
       current.current = {}
     },
     [],
   )
-  return useCallback(
-    (hit: PassageHit) => {
-      const mine = {}
-      current.current = mine
-      void openPassage(hit, { fs, books, jumpTo, onProblem })
-        .then((outcome) => {
-          if (current.current !== mine) return
-          if (outcome.kind === 'jumped') jumpTo(outcome.place)
-          else onProblem(outcome.why)
-        })
-        .catch((cause: unknown) => {
-          /* ⚠️ **AN UNHANDLED REJECTION AND AN INERT CLICK.** `openPassage`
-           * guards the file read and the parse, and the dynamic `import()` of
-           * foliate sits outside both — so a failed chunk load rejected with
-           * nobody listening and the row simply did nothing. Found by an
-           * independent audit. */
-          if (current.current !== mine) return
-          onProblem(cause instanceof Error ? cause.message : String(cause))
-        })
-    },
-    [fs, books, jumpTo, onProblem],
-  )
+  return useCallback((hit: PassageHit) => {
+    const mine = {}
+    current.current = mine
+    void openPassage(hit, latest.current)
+      .then((outcome) => {
+        if (current.current !== mine) return
+        const now = latest.current
+        if (outcome.kind === 'jumped') now.jumpTo(outcome.place)
+        else now.onProblem(outcome.why)
+      })
+      .catch((cause: unknown) => {
+        /* ⚠️ **AN UNHANDLED REJECTION AND AN INERT CLICK.** `openPassage`
+         * guards the file read and the parse, and the dynamic `import()` of
+         * foliate sits outside both — so a failed chunk load rejected with
+         * nobody listening and the row simply did nothing. Found by an
+         * independent audit. */
+        if (current.current !== mine) return
+        latest.current.onProblem(cause instanceof Error ? cause.message : String(cause))
+      })
+  }, [])
 }
 
 /* Re-exported so a caller reading this module finds the four landing sentences

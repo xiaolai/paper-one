@@ -19,7 +19,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .invoke_handler(tauri::generate_handler![
             commands::passages_put,
             commands::passages_note,
-            commands::passages_note_partial,
             commands::passages_flush,
             commands::passages_forget,
             commands::passages_rekey,

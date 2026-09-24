@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 import type { IndexedBook } from '../../core/bookIndex'
 import type { PassageHit } from '../../core/ports'
 import type { VaultFs } from '../../core/bookVault'
-import { openPassage } from './useOpenPassage'
+import { renderHook, act } from '@testing-library/react'
+import { openPassage, useOpenPassage } from './useOpenPassage'
 
 /**
  * Turning a library hit into a jump, and every way it can decline to.
@@ -210,5 +211,62 @@ describe('refusing, by cause', () => {
     foliate.makeBook.mockResolvedValueOnce({ sections: undefined, destroy: () => {} })
     const found = await openPassage(hit(), deps())
     expect(found).toEqual({ kind: 'refused', why: expect.stringContaining('could not be opened') })
+  })
+})
+
+describe('the hook, over a shell that keeps moving', () => {
+  /* ⚠️ **A LANDING TOOK TWO SECONDS AND `jumpTo` WAS REBUILT ON EVERY PAGE
+   * TURN.** `App`'s `jumpTo` closes over `book.position.chapterLabel`, so
+   * turning a page replaces it — and the callback captured the one that existed
+   * when the row was CLICKED. The reader was then moved by a closure over the
+   * chapter they had already left, with the shelf as it was rather than as it
+   * is. `App` never unmounts while a book is closed, so the teardown could not
+   * reach any of it. Found by an independent audit. */
+  function shell(jumpTo: (place: { bookId: string; cfi: string }) => void) {
+    return {
+      fs: null as VaultFs | null,
+      books: [book()],
+      jumpTo,
+      onProblem: vi.fn(),
+    }
+  }
+
+  it('reports through the shell that is current when it resolves, not the one that was clicked', async () => {
+    const stale = vi.fn()
+    const staleProblem = vi.fn()
+    const first = { ...shell(stale), onProblem: staleProblem }
+    const { result, rerender } = renderHook((deps: typeof first) => useOpenPassage(deps), {
+      initialProps: first,
+    })
+    const open = result.current
+    act(() => {
+      open(hit())
+    })
+    /* The page turn: a new `jumpTo` and a new `onProblem`, while the read is in
+     * flight. Nothing unmounts. */
+    const freshProblem = vi.fn()
+    rerender({ ...shell(vi.fn()), onProblem: freshProblem })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    /* No vault, so this refuses — which is the cheapest outcome to drive and
+     * says exactly what is being asserted: WHOSE callback was used. */
+    expect(freshProblem).toHaveBeenCalledWith('This device cannot open books from the library index.')
+    expect(staleProblem).not.toHaveBeenCalled()
+  })
+
+  it('keeps one identity across renders, so a page turn is not a new callback', () => {
+    /* The call site's own comment asks for this and the dependency list did not
+     * give it: `books` alone is a fresh array on every library publish. A
+     * caller listing it in an effect would have restarted its work each time. */
+    const props = shell(vi.fn())
+    const { result, rerender } = renderHook((deps: typeof props) => useOpenPassage(deps), {
+      initialProps: props,
+    })
+    const first = result.current
+    rerender(shell(vi.fn()))
+    rerender(shell(vi.fn()))
+    expect(result.current).toBe(first)
   })
 })

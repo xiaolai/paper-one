@@ -13,7 +13,6 @@ and its own grant.
 permissions = [
   "allow-passages-put",
   "allow-passages-note",
-  "allow-passages-note-partial",
   "allow-passages-flush",
   "allow-passages-forget",
   "allow-passages-rekey",
