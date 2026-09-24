@@ -1437,3 +1437,86 @@ describe('the selection bar, and what a read-only host may do with a selection',
     expect(bar.querySelector('[data-count]')?.getAttribute('data-count')).toBe('3')
   })
 })
+
+describe('the chrome, the progress footer and the Notes tab', () => {
+  function marksWith(all: unknown[] = []) {
+    return {
+      all,
+      allBookmarks: [],
+      allUnplaced: [],
+      persistent: true,
+      remove: vi.fn(),
+      setNote: async () => {},
+      loadAll: () => {},
+      subscribe: () => () => {},
+      refresh: () => {},
+      dispose: () => {},
+    } as never
+  }
+
+  async function reading(extra: Record<string, unknown> = {}) {
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} {...extra} />,
+    )
+    await waitFor(() => expect(captured['onSelection']).toBeTypeOf('function'))
+    return captured
+  }
+
+  /** Hand the view a live selection. */
+  function select(captured: Record<string, unknown>) {
+    act(() => {
+      ;(captured['onSelection'] as (s: unknown) => void)({
+        cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:15)',
+        sectionIndex: 0,
+        text: 'Call me Ishmael',
+        prefix: '',
+        suffix: '.',
+      })
+    })
+  }
+
+  /* ⚠️ **THE CHROME ITSELF IS NOT DRIVEN HERE, AND THAT IS SAID RATHER THAN
+   * FAKED.** `hideChrome` lives inside `useTapToTurn` and is reached only by a
+   * tap on the BOOK's own document, which this suite's view does not provide.
+   * Two mutants on `inert={!chrome}` and on the `chrome &&` half of the
+   * footer's condition therefore survive; a case that rendered with the chrome
+   * already down would assert the markup without ever exercising the toggle,
+   * which is the shape this file already refuses elsewhere. */
+
+  it('hides the progress footer behind a selection, and shows it again after', async () => {
+    /* Both halves matter: the footer sits where the selection bar goes, so a
+     * selection takes the row and the footer must give it up. */
+    const captured = await reading()
+    const foot = () => document.querySelector('[role="progressbar"]')?.closest('[data-visible]')
+    await waitFor(() => expect(foot()?.getAttribute('data-visible')).toBe('true'))
+    select(captured)
+    await waitFor(() => expect(foot()?.getAttribute('data-visible')).toBe('false'))
+    act(() => {
+      ;(captured['onSelection'] as (s: unknown) => void)(null)
+    })
+    await waitFor(() => expect(foot()?.getAttribute('data-visible')).toBe('true'))
+  })
+
+  it('draws the Notes panel for the Notes tab, and nothing else', async () => {
+    const captured = await reading({ marks: marksWith() })
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'c1.xhtml' }])
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    const notes = screen.getByRole('button', { name: 'Notes' })
+    expect(notes.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(notes)
+    expect(screen.getByRole('button', { name: 'Notes' }).getAttribute('aria-pressed')).toBe('true')
+    /* ⚠️ **THE PANEL ITSELF, NOT MERELY THE TAB.** An earlier version of this
+     * assertion fell back to the tab button with `??`, so it could not fail —
+     * the mutant that stops the panel rendering left it green. Marginalia says
+     * "Nothing kept yet" over an empty store, and that sentence comes from the
+     * panel and nowhere else. */
+    expect(await screen.findByText(/Nothing kept yet/u)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'One' })).toBeNull()
+  })
+})
