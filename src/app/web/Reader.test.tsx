@@ -1179,3 +1179,94 @@ describe('Reader and the shelf’s copy of the position', () => {
     expect(remote.write).toHaveBeenCalledTimes(1)
   })
 })
+
+/* --------------------------------------------- the library, from a browser */
+
+describe('searching the whole library from the browser reader', () => {
+  const HIT = {
+    bookId: 'two',
+    sectionIndex: 3,
+    offset: 17,
+    quote: 'the whale',
+    prefix: 'and then we saw ',
+    suffix: ' rise beside the boat',
+    score: 1.5,
+  }
+
+  /** Open the reader, wait for its chrome, and put the Search tab on screen. */
+  async function toSearchTab(extra: Record<string, unknown> = {}) {
+    const { content } = shelf({ ext: 'epub' })
+    render(
+      <Reader
+        content={content}
+        bookId="one"
+        name="Moby-Dick"
+        onClose={vi.fn()}
+        positions={fakePositions()}
+        {...extra}
+      />,
+    )
+    await waitFor(() => expect(screen.queryByRole('button', { name: '‹ Shelf' })).not.toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Search' }))
+  }
+
+  it('offers no scope switch when the shelf link cannot search', async () => {
+    /* ⚠️ **THE DEGRADED SHAPE IS THE DEFAULT HERE.** A browser gets library
+     * search only while the link is open; with none, the panel is exactly what
+     * it was before phase 31. */
+    await toSearchTab()
+    expect(screen.queryByRole('radiogroup')).toBeNull()
+  })
+
+  it('offers it, and asks the shelf, once the link can', async () => {
+    const searchLibrary = vi.fn(async () => [HIT])
+    await toSearchTab({ searchLibrary })
+    fireEvent.click(screen.getByRole('radio', { name: 'Every book' }))
+    fireEvent.change(screen.getByLabelText('Search every book'), { target: { value: 'whale' } })
+    await waitFor(() => expect(searchLibrary).toHaveBeenCalled(), { timeout: 4000 })
+    expect(await screen.findByRole('button', { name: /the whale/u })).toBeTruthy()
+  })
+
+  it('hands a hit in another book to the host, whole', async () => {
+    /* The offset travels: the landing needs it to settle an ambiguous passage,
+     * which is measured on the real library in `landPassage.ts`. */
+    const onOpenPassage = vi.fn()
+    await toSearchTab({ searchLibrary: async () => [HIT], onOpenPassage })
+    fireEvent.click(screen.getByRole('radio', { name: 'Every book' }))
+    fireEvent.change(screen.getByLabelText('Search every book'), { target: { value: 'whale' } })
+    const row = await screen.findByRole('button', { name: /the whale/u })
+    fireEvent.click(row)
+    expect(onOpenPassage).toHaveBeenCalledWith(expect.objectContaining({ bookId: 'two', offset: 17 }))
+  })
+
+  it('names the open book from what it was opened AS, and others from the host', async () => {
+    /* ⚠️ **THE OPEN BOOK IS NOT IN THIS CLIENT'S SHELF LOOKUP.** It is the one
+     * the reader is already in, so its title is the `name` it was opened with;
+     * every other id goes to the host. Without the wrapper a hit in the open
+     * book was headed with its raw id. */
+    await toSearchTab({
+      searchLibrary: async () => [
+        { ...HIT, bookId: 'one', quote: 'this whale' },
+        { ...HIT, bookId: 'two', quote: 'that whale' },
+      ],
+      titleOf: (id: string) => (id === 'two' ? 'Endurance' : undefined),
+    })
+    fireEvent.click(screen.getByRole('radio', { name: 'Every book' }))
+    fireEvent.change(screen.getByLabelText('Search every book'), { target: { value: 'whale' } })
+    await screen.findByRole('button', { name: /this whale/u })
+    /* ⚠️ **ASSERTED ON THE RAW ID, NOT ON THE TITLE.** "Moby-Dick" is also in
+     * the chrome, so finding it proves nothing; what the wrapper prevents is
+     * the group being headed with `one`. */
+    expect(screen.queryByText('one')).toBeNull()
+    expect(screen.getByText('Endurance')).toBeTruthy()
+  })
+
+  it('falls back to the id when the host names no book at all', async () => {
+    await toSearchTab({ searchLibrary: async () => [HIT] })
+    fireEvent.click(screen.getByRole('radio', { name: 'Every book' }))
+    fireEvent.change(screen.getByLabelText('Search every book'), { target: { value: 'whale' } })
+    await screen.findByRole('button', { name: /the whale/u })
+    expect(screen.getByText('two')).toBeTruthy()
+  })
+})
