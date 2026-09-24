@@ -6,8 +6,12 @@ import type { Book, SearchHit } from '../hooks/useBook'
 import {
   byBook,
   countLine,
+  idleAt,
   MAX_LIBRARY_HITS,
+  NOTHING_ASKED,
   rejectedByQuery,
+  searchingAt,
+  shownState,
   whyOf,
   type LibraryResult,
   type SearchScope,
@@ -151,7 +155,7 @@ export function SearchPanel({
    * refused to put library search in the shelf field at all; the same argument
    * applies to this field. The reader asks for the library. */
   const [scope, setScope] = useState<SearchScope>('book')
-  const [library, setLibrary] = useState<LibraryResult>({ needle: '', state: { kind: 'idle' } })
+  const [library, setLibrary] = useState<LibraryResult>(NOTHING_ASKED)
   /* ⚠️ **AN IDENTITY, NOT A COUNTER.** This only ever answers *is this still
    * the run on screen*, and `++` mutated to `--` answers it just as well — a
    * survivor no test can kill, because whether two steps could bring the number
@@ -184,6 +188,13 @@ export function SearchPanel({
      * thing this panel does. Left running it burned a full book scan for every
      * character typed into a field asking about a different question. */
     if (!searchable || needle === '' || scope === 'library') {
+      /* Stryker disable next-line StringLiteral: nothing reads this value. Two
+         places ask about `state` and both ask for a DIFFERENT one — `searching`
+         asks whether it is 'searching', the empty body asks whether it is
+         'failed' — so any third string renders identically. Verified by hand:
+         the mutant applied at this line leaves all 53 cases green. It is 'done'
+         because that is what it means, and 'done' is the only StringLiteral on
+         this line, so the directive covers it and nothing else. */
       setResult({ needle, hits: [], state: 'done' })
       return
     }
@@ -238,12 +249,12 @@ export function SearchPanel({
    * look as though it stopped the library query, and nothing would have. */
   useEffect(() => {
     if (!searchLibrary || scope !== 'library' || needle === '') {
-      setLibrary({ needle, state: { kind: 'idle' } })
+      setLibrary(idleAt(needle))
       return
     }
     const mine = {}
     libraryRun.current = mine
-    setLibrary({ needle, state: { kind: 'searching' } })
+    setLibrary(searchingAt(needle))
     const timer = setTimeout(() => {
       void (async () => {
         try {
@@ -448,9 +459,10 @@ function LibraryResults({
 }) {
   /* Nothing on screen may outlive the query it answers — the same rule the
      in-book half states, and for the same reason: during the debounce the
-     previous question's answer was both displayed and clickable. */
-  const answered = result.needle === needle
-  const state = answered ? result.state : { kind: 'searching' as const }
+     previous question's answer was both displayed and clickable. The decision
+     is `shownState`'s, in `librarySearch.ts`, because its window is one render
+     and no test that drives this component can see it. */
+  const state = shownState(result, needle)
 
   if (needle === '') {
     return (
@@ -515,10 +527,25 @@ function LibraryResults({
           <div className={styles.resultAt}>{titleOf?.(bookId) ?? bookId}</div>
           {hits.map((hit, index) => (
             <button
-              /* Keyed by position as well as anchor. Two passages in one
-                 section CAN share an offset only if they are the same passage,
-                 but a book id and a section number are not unique across the
-                 list, and React collapses duplicate keys to the last of them. */
+              /* Keyed by position as well as anchor. Within a group the book
+                 is fixed and two passages in one section can share an offset
+                 only if they ARE the same passage, so the anchor alone would
+                 do; the position is what makes that true by construction
+                 rather than by argument.
+
+                 ⚠️ **AND THE CLAIM THAT USED TO STAND HERE — "React collapses
+                 duplicate keys to the last of them" — IS NOT WHAT REACT DOES.**
+                 Measured 2026-09-25: with every key in a group replaced by the
+                 same constant, three rows still drew, still updated when the
+                 answer changed, and still disappeared when it did. React warns
+                 about duplicate keys and calls the result undefined; it does
+                 not drop them here.
+
+                 Stryker disable next-line StringLiteral: that measurement is
+                 why. The mutant makes every key in a group identical and no
+                 observable behaviour changes, so no test can kill it — it is
+                 kept because "undefined behaviour happens to work today" is
+                 not a thing to build on, not because anything can see it. */
               key={`${hit.sectionIndex}:${hit.offset}:${index}`}
               type="button"
               className={styles.result}

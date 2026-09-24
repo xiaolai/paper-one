@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import type { PassageHit } from '../../core/ports'
-import { byBook, countLine, MAX_LIBRARY_HITS, rejectedByQuery, whyOf } from './librarySearch'
+import {
+  byBook,
+  countLine,
+  idleAt,
+  IDLE,
+  MAX_LIBRARY_HITS,
+  NOTHING_ASKED,
+  rejectedByQuery,
+  SEARCHING,
+  searchingAt,
+  shownState,
+  whyOf,
+} from './librarySearch'
 
 /**
  * The decidable half of library search, asked directly.
@@ -113,5 +125,60 @@ describe('grouping by book', () => {
 
   it('answers one group for one book', () => {
     expect(byBook([hit(), hit()]).map(([bookId]) => bookId)).toEqual(['book:a'])
+  })
+})
+
+describe('the states with nothing in them', () => {
+  /* ⚠️ **THESE WERE OBJECT LITERALS INSIDE THE COMPONENT, AND UNKILLABLE
+   * THERE.** The first one is set at mount, when the scope is still the open
+   * book and nothing renders the library half — so no case that drives the
+   * pane could ever see it, and six mutants lived on those lines. Asked
+   * directly, each is one assertion. */
+  it('starts having asked nothing, at no needle', () => {
+    expect(NOTHING_ASKED).toEqual({ needle: '', state: { kind: 'idle' } })
+  })
+
+  it('is idle for a needle the library is not being asked about', () => {
+    expect(idleAt('whale')).toEqual({ needle: 'whale', state: { kind: 'idle' } })
+  })
+
+  it('is searching for a needle that has been asked and not answered', () => {
+    expect(searchingAt('whale')).toEqual({ needle: 'whale', state: { kind: 'searching' } })
+  })
+
+  it('names the two empty states by their own kind', () => {
+    expect(IDLE.kind).toBe('idle')
+    expect(SEARCHING.kind).toBe('searching')
+  })
+})
+
+describe('what to draw for a needle, given what is held', () => {
+  /* ⚠️ **ITS WINDOW IS ONE RENDER**, between the keystroke that changes the
+   * needle and the effect that starts the new search — which a component test
+   * flushes past, so the guard survived every case that drove the pane. This
+   * is the same lesson `voicePickerValue` records: when a pure function's
+   * answers are flattened by what draws them, ask the function. */
+  const done = { kind: 'done' as const, hits: [] as readonly PassageHit[] }
+
+  it('draws what was found when the answer is about this needle', () => {
+    expect(shownState({ needle: 'whale', state: done }, 'whale')).toBe(done)
+  })
+
+  it('draws SEARCHING when the answer on hand is about an older needle', () => {
+    /* The previous question's hits were both displayed and CLICKABLE during
+     * the debounce, which is how a reader opened a passage they had not asked
+     * for. */
+    expect(shownState({ needle: 'whale', state: done }, 'harpoon')).toEqual({ kind: 'searching' })
+  })
+
+  it('draws SEARCHING for a failure that belongs to an older needle', () => {
+    const failed = { kind: 'failed' as const, why: 'the index would not open' }
+    expect(shownState({ needle: 'whale', state: failed }, 'harpoon')).toEqual({ kind: 'searching' })
+    expect(shownState({ needle: 'whale', state: failed }, 'whale')).toBe(failed)
+  })
+
+  it('treats the empty needle like any other, rather than as a special case', () => {
+    expect(shownState({ needle: '', state: IDLE }, '')).toBe(IDLE)
+    expect(shownState({ needle: 'whale', state: IDLE }, '')).toEqual({ kind: 'searching' })
   })
 })

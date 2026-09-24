@@ -855,3 +855,33 @@ describe('the states the panel passes through, and the styling hook it sets', ()
     expect(screen.getByRole('radio', { name: 'This book' }).getAttribute('data-chosen')).toBeNull()
   })
 })
+
+describe('rows that share a book and a section survive a re-render', () => {
+  it('replaces every one of them when the answer changes', async () => {
+    /* Three rows that share a book, a section AND an offset — which the index
+     * never produces, since that would be one passage — driven through a
+     * re-render so the list changes under them.
+     *
+     * ⚠️ **THIS DOES NOT TEST THE KEY, AND IT WAS WRITTEN BELIEVING IT DID.**
+     * Measured by applying the mutant: with every key replaced by one constant
+     * this case still passes, because React warns about duplicate keys and
+     * renders them anyway. What it does test is that a whole answer is
+     * replaced, which is worth having on its own. The key's mutant is disabled
+     * beside the code with that measurement. */
+    const same = (mark: string) =>
+      Array.from({ length: 3 }, () => ({ ...PASSAGE, quote: `the whale ${mark}` }))
+    let answer = same('one')
+    const searchLibrary = async () => answer
+    render(<SearchPanel book={quiet()} searchLibrary={searchLibrary} />)
+    choose('Every book')
+    ask('whale')
+    await screen.findByText(/in your library/u)
+    expect(screen.getAllByRole('button', { name: /the whale one/u }).length).toBe(3)
+    answer = same('two')
+    ask('whales')
+    await vi.waitFor(() =>
+      expect(screen.getAllByRole('button', { name: /the whale two/u }).length).toBe(3),
+    )
+    expect(screen.queryByRole('button', { name: /the whale one/u })).toBeNull()
+  })
+})

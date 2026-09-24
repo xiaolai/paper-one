@@ -49,6 +49,48 @@ export interface LibraryResult {
   readonly state: LibraryState
 }
 
+/**
+ * The two states with nothing in them, and the results that carry them.
+ *
+ * ⚠️ **NAMED HERE BECAUSE AN OBJECT LITERAL INSIDE A COMPONENT IS A SURVIVOR NO
+ * TEST CAN REACH.** `useState<LibraryResult>({ needle: '', state: { kind:
+ * 'idle' } })` is unobservable at mount — the scope starts on the open book, so
+ * nothing renders the library half, and the effect overwrites it before
+ * anything could. Six mutants sat on those two lines and on the `setLibrary`
+ * calls beside them. Moved here, each is a value a unit test asks about
+ * directly.
+ */
+export const IDLE: LibraryState = { kind: 'idle' }
+export const SEARCHING: LibraryState = { kind: 'searching' }
+
+/** Nothing has been asked yet — the panel's first state. */
+export const NOTHING_ASKED: LibraryResult = { needle: '', state: IDLE }
+
+/** This needle is not one the library is being asked about. */
+export function idleAt(needle: string): LibraryResult {
+  return { needle, state: IDLE }
+}
+
+/** This needle has been asked and has not answered. */
+export function searchingAt(needle: string): LibraryResult {
+  return { needle, state: SEARCHING }
+}
+
+/**
+ * What to DRAW for `needle`, given the result the panel is holding.
+ *
+ * ⚠️ **NOTHING ON SCREEN MAY OUTLIVE THE QUERY IT ANSWERS**, and the window
+ * where that matters is a SINGLE render — between the keystroke that changes
+ * the needle and the effect that starts the new search. A component test
+ * flushes past it, so the guard survived every case that drove the pane.
+ * Exported so it can be asked directly, which is the rule phase 30 states for
+ * `voicePickerValue`: when a pure function's answers are flattened by what
+ * draws them, ask the function.
+ */
+export function shownState(result: LibraryResult, needle: string): LibraryState {
+  return result.needle === needle ? result.state : SEARCHING
+}
+
 /** How many library hits are drawn. */
 export const MAX_LIBRARY_HITS = 100
 
