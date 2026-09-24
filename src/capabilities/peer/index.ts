@@ -650,7 +650,12 @@ export function serveWhenShelf(options: {
     const held = options.port
     if (!held || options.stopped()) return NOTHING_SERVED
     const role = await readRole(held, options.stopped, options.diagnostics)
-    if (options.stopped() || role !== 'shelf' || services.length === 0) return NOTHING_SERVED
+    /* ⚠️ **`services.length === 0` USED TO BE TESTED HERE TOO, AND THE FILTER
+     * BELOW ALREADY ANSWERS IT.** `offered` is a subset of `services`, so an
+     * empty list in makes an empty list out and the second guard returns the
+     * same thing — two pieces of code giving one answer, which is why neither
+     * could be killed. Removing this one makes the one that decides reachable. */
+    if (options.stopped() || role !== 'shelf') return NOTHING_SERVED
     /* ⚠️ **THE AUDIENCE FILTER, AND THIS IS THE ONLY TRANSPORT THAT NEEDS
      * ONE.** This host reaches ANOTHER DEVICE; the webhost reaches the reader's
      * own authenticated browser session, which is theirs and not somebody

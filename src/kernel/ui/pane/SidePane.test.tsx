@@ -378,3 +378,41 @@ describe('what the Voice group is handed', () => {
     expect(screen.queryByRole('button', { name: 'Voice' })).toBeNull()
   })
 })
+
+describe('the Search pane and the library', () => {
+  /* ⚠️ **THE WHOLE OF PHASE 31 REACHES `SearchPanel` THROUGH ONE SPREAD**, and
+   * nothing asserted it arrived. A mutant emptying that object leaves the pane
+   * exactly as it was before the phase — no scope switch, no library — and
+   * every test still passed, because none of them looked. */
+  it('offers the scope switch when the host can search the library', () => {
+    draw({
+      pane: 'search',
+      passages: {
+        search: async () => [],
+        onOpen: vi.fn(),
+      },
+      titleOf: () => 'Moby-Dick',
+    } as unknown as Partial<SidePaneProps> & { pane: 'search' })
+    expect(screen.getByRole('radio', { name: 'Every book' })).toBeTruthy()
+    expect(screen.getByRole('radio', { name: 'This book' })).toBeTruthy()
+  })
+
+  it('draws no scope switch when it cannot', () => {
+    /* The degraded shape `verify:without` proves: cut the capability and the
+     * pane is exactly what it was before. */
+    draw({ pane: 'search' })
+    expect(screen.queryByRole('radiogroup')).toBeNull()
+  })
+
+  it('hands the library search itself through, not merely the switch', async () => {
+    const search = vi.fn(async () => [])
+    draw({
+      pane: 'search',
+      passages: { search, onOpen: vi.fn() },
+      titleOf: () => 'Moby-Dick',
+    } as unknown as Partial<SidePaneProps> & { pane: 'search' })
+    fireEvent.click(screen.getByRole('radio', { name: 'Every book' }))
+    fireEvent.change(screen.getByLabelText('Search every book'), { target: { value: 'whale' } })
+    await vi.waitFor(() => expect(search).toHaveBeenCalled(), { timeout: 3000 })
+  })
+})

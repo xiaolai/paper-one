@@ -513,6 +513,48 @@ describe('serveWhenShelf', () => {
     expect(world.state.served).toBe(0)
   })
 
+  it('serves nothing when every service is withheld from a paired device', async () => {
+    /* ⚠️ **THE AUDIENCE FILTER IS THE ONLY THING DECIDING HERE**, and without
+     * this case a mutant that skips it hands `serve` an EMPTY list — the
+     * listener registered, the transport told it has an empty surface, and
+     * nothing anywhere saying the library search was withheld. `passage.search`
+     * declares `this-shelf`: a device granted `blob:read` to RECEIVE a library
+     * has not thereby been granted an oracle over it. */
+    const world = port('shelf')
+    const withheld = [{ name: 'passage.search', grant: 'blob:read', handler: () => [] }] as never
+    const answer = await serveWhenShelf({ port: world.port, stopped: () => false, diagnostics: quiet })(withheld)
+    expect(world.state.served).toBe(0)
+    expect(() => answer.dispose()).not.toThrow()
+  })
+
+  it('serves only the rows a paired device may have, out of a mixed list', async () => {
+    const world = port('shelf')
+    let given: readonly { name: string }[] = []
+    const seeing = {
+      localRole: async () => 'shelf',
+      serve: async (rows: readonly { name: string }[]) => {
+        given = rows
+        world.state.served += 1
+        return () => void (world.state.unserved += 1)
+      },
+    } as never
+    const mixed = [
+      { name: 'passage.search', grant: 'blob:read', handler: () => [] },
+      { name: 'book.list', grant: 'book:read', handler: () => [] },
+    ] as never
+    await serveWhenShelf({ port: seeing, stopped: () => false, diagnostics: quiet })(mixed)
+    expect(world.state.served).toBe(1)
+    expect(given.map((row) => row.name)).toEqual(['book.list'])
+  })
+
+  it('serves nothing when there is nothing to serve', async () => {
+    /* An empty list in is an empty list out, and the filter is what says so —
+     * there is no separate length check ahead of it any more. */
+    const world = port('shelf')
+    await serveWhenShelf({ port: world.port, stopped: () => false, diagnostics: quiet })([] as never)
+    expect(world.state.served).toBe(0)
+  })
+
   it('serves nothing with no plugin at all', async () => {
     const answer = await serveWhenShelf({ port: null, stopped: () => false, diagnostics: quiet })(SERVICES)
     expect(() => answer.dispose()).not.toThrow()
