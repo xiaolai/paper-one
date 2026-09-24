@@ -780,3 +780,78 @@ describe('the stopped-early notice', () => {
     expect(screen.queryByText(/Search stopped early/u)).toBeNull()
   })
 })
+
+describe('the states the panel passes through, and the styling hook it sets', () => {
+  it('says it is searching the library before the answer arrives', async () => {
+    /* The `searching` state between the keystroke and the answer is a state a
+     * reader sees, so it is one a case has to see too. */
+    const gate: { resolve: ((hits: PassageHit[]) => void) | null } = { resolve: null }
+    /* ⚠️ **ONE IDENTITY, HOISTED.** An inline arrow is a new function on every
+     * render, and the library effect lists `searchLibrary` among its
+     * dependencies — so it re-subscribes each time, and a promise resolved
+     * from outside lands on a run that is no longer the current one. Every
+     * host supplies a stable one (`main.web.tsx` memoises it); a case that
+     * does not is testing something the app never does. */
+    const searchLibrary = () =>
+      new Promise<readonly PassageHit[]>((r) => {
+        gate.resolve = r as (hits: PassageHit[]) => void
+      })
+    render(<SearchPanel book={quiet()} searchLibrary={searchLibrary} />)
+    choose('Every book')
+    ask('whale')
+    /* The searching state is set the moment the keystroke lands — BEFORE the
+     * debounce fires and therefore before `searchLibrary` has been called at
+     * all, which is the whole point of showing it. So the answer cannot be
+     * released until the call has actually been made. */
+    expect(await screen.findByText(/Searching/u)).toBeTruthy()
+    expect(gate.resolve).toBeNull()
+    await vi.waitFor(() => expect(gate.resolve).not.toBeNull(), { timeout: DEBOUNCE_MS * 8 })
+    gate.resolve?.([PASSAGE])
+    await screen.findByRole('button', { name: /the whale/u })
+    /* AND THE DONE LINE DOES NOT STILL SAY SO. `countLine`'s third argument is
+     * `false` here, and a `true` would leave "· searching…" beside a finished
+     * count for ever. */
+    expect(screen.getByText(/in your library/u).textContent).not.toContain('searching')
+  })
+
+  it('goes back to inviting a query when the field is cleared', async () => {
+    render(<SearchPanel book={quiet()} searchLibrary={async () => [PASSAGE]} />)
+    choose('Every book')
+    ask('whale')
+    await screen.findByRole('button', { name: /the whale/u })
+    ask('')
+    expect(await screen.findByText(/Type to search/u)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /the whale/u })).toBeNull()
+  })
+
+  it('asks once for a query typed in pieces, not once per keystroke', async () => {
+    /* ⚠️ **THE DEBOUNCE'S CLEANUP IS WHAT MAKES THAT TRUE**, and without it
+     * every intermediate needle would reach the index — which at library scale
+     * is a BM25 query per character. */
+    const searchLibrary = vi.fn(async () => [PASSAGE])
+    render(<SearchPanel book={quiet()} searchLibrary={searchLibrary} />)
+    choose('Every book')
+    ask('w')
+    ask('wh')
+    ask('wha')
+    ask('whale')
+    await screen.findByRole('button', { name: /the whale/u })
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS * 2))
+    expect(searchLibrary).toHaveBeenCalledTimes(1)
+    expect(searchLibrary).toHaveBeenCalledWith('whale', MAX_LIBRARY_HITS + 1)
+  })
+
+  it('marks the chosen scope with the attribute its styling keys on', () => {
+    /* ⚠️ **AN ATTRIBUTE A SELECTOR READS IS BEHAVIOUR.** `check-dead-css`
+     * cannot see a rule whose attribute nothing writes — the phase-30 section
+     * records three such rules shipping — so the value is pinned here. */
+    render(<SearchPanel book={quiet()} searchLibrary={async () => [PASSAGE]} />)
+    const inBook = screen.getByRole('radio', { name: 'This book' })
+    const everyBook = screen.getByRole('radio', { name: 'Every book' })
+    expect(inBook.getAttribute('data-chosen')).toBe('true')
+    expect(everyBook.getAttribute('data-chosen')).toBeNull()
+    choose('Every book')
+    expect(screen.getByRole('radio', { name: 'Every book' }).getAttribute('data-chosen')).toBe('true')
+    expect(screen.getByRole('radio', { name: 'This book' }).getAttribute('data-chosen')).toBeNull()
+  })
+})
