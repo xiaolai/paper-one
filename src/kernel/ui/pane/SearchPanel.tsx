@@ -294,7 +294,7 @@ export function SearchPanel({
             two of them. `control` is the rung whose stated role is an icon
             inside a control, and a search field is one; it is the same 15 the
             rest of the app's field and button glyphs take. */}
-        <Search size={ICON.control} strokeWidth={ICON.stroke} style={{ color: 'var(--muted)' }} />
+        <Search size={ICON.control} strokeWidth={ICON.stroke} className={styles.searchGlyph} />
         <input
           className={styles.searchInput}
           placeholder={
@@ -322,7 +322,7 @@ export function SearchPanel({
               `<select>` given a value no option carries reports the empty
               string and shows its first row, so its state is unreadable from
               the DOM. Phase 30 measured that and `librarySearch.ts` records it. */}
-          <span role="radiogroup" aria-label="What to search" style={{ display: 'flex', gap: 'var(--space-8)', flex: 1 }}>
+          <span role="radiogroup" aria-label="What to search" className={styles.scopeGroup}>
             {(['book', 'library'] as const).map((which) => (
               <button
                 key={which}
@@ -394,7 +394,7 @@ export function SearchPanel({
             </div>
           )}
           <div className={styles.panelMeta}>
-            <span style={{ flex: 1 }}>
+            <span className={styles.metaGrow}>
               {Math.min(hits.length, MAX_HITS)}
               {hits.length > MAX_HITS ? '+' : ''} in this book
               {searching ? ' · searching…' : ''}
@@ -508,7 +508,7 @@ function LibraryResults({
   return (
     <>
       <div className={styles.panelMeta}>
-        <span style={{ flex: 1 }}>{countLine(state.hits.length, capped, false)}</span>
+        <span className={styles.metaGrow}>{countLine(state.hits.length, capped, false)}</span>
       </div>
       {byBook(shown).map(([bookId, hits]) => (
         <div key={bookId}>
@@ -522,7 +522,13 @@ function LibraryResults({
               key={`${hit.sectionIndex}:${hit.offset}:${index}`}
               type="button"
               className={styles.result}
-              onClick={() => onOpenPassage?.(hit)}
+              /* ⚠️ **ATTACHED ONLY WHEN THERE IS ONE, RATHER THAN CALLED
+                 OPTIONALLY.** The row below is `disabled` exactly when this is
+                 absent, so `onOpenPassage?.(…)` could never find it missing —
+                 an optional call no test can reach, which the sweep reports as
+                 a survivor for ever. Two pieces of code giving one answer; the
+                 fix is to remove one. */
+              {...(onOpenPassage ? { onClick: () => onOpenPassage(hit) } : {})}
               /* ⚠️ **A ROW NOTHING CAN ACT ON IS DISABLED RATHER THAN DRAWN AS
                  A LIVE CONTROL.** A host that can search the library and not
                  open a second book should not offer a click that does nothing —

@@ -703,3 +703,80 @@ describe('the in-book walk is not started for nothing', () => {
     await screen.findByText(/^1 in this book$/u)
   })
 })
+
+describe('the caps, at the exact boundary', () => {
+  /* ⚠️ **`>` AND `>=` ANSWER THE SAME ABOVE AND BELOW A BOUND — ONLY THE BOUND
+   * ITSELF TELLS THEM APART.** A case built on "the cap plus five" cannot see
+   * the difference, and four mutants survived the sweep on exactly that. */
+  it('says exactly the cap, with no plus, for an in-book search that hit it', async () => {
+    render(
+      <SearchPanel
+        book={quiet({
+          search: async function* () {
+            for (let i = 0; i < MAX_HITS; i += 1) yield { ...HIT, cfi: `c${i}`, match: `Ishmael${i}` }
+          },
+        })}
+      />,
+    )
+    ask('Ishmael')
+    expect(await screen.findByText(`${MAX_HITS} in this book`)).toBeTruthy()
+    expect(screen.queryByText(`${MAX_HITS}+ in this book`)).toBeNull()
+  })
+
+  it('says exactly the cap, with no plus, for a library search that hit it', async () => {
+    const exact = Array.from({ length: MAX_LIBRARY_HITS }, (_, i) => ({
+      ...PASSAGE,
+      sectionIndex: i,
+      quote: `the whale ${i}`,
+    }))
+    render(<SearchPanel book={quiet()} searchLibrary={async () => exact} />)
+    choose('Every book')
+    ask('whale')
+    const line = await screen.findByText(/in your library/u)
+    expect(line.textContent).toContain(String(MAX_LIBRARY_HITS))
+    expect(line.textContent).not.toContain('+')
+  })
+
+  it('marks the library count as a floor one past the cap', async () => {
+    const over = Array.from({ length: MAX_LIBRARY_HITS + 1 }, (_, i) => ({
+      ...PASSAGE,
+      sectionIndex: i,
+      quote: `the whale ${i}`,
+    }))
+    render(<SearchPanel book={quiet()} searchLibrary={async () => over} />)
+    choose('Every book')
+    ask('whale')
+    const line = await screen.findByText(/in your library/u)
+    expect(line.textContent).toContain('+')
+  })
+})
+
+describe('the stopped-early notice', () => {
+  it('is absent when the search finished', async () => {
+    /* ⚠️ **A NOTICE THAT IS ALWAYS THERE SAYS NOTHING.** Without this the
+     * condition could be replaced with `true` and no case would notice. */
+    render(<SearchPanel book={searchable()} />)
+    ask('Ishmael')
+    await screen.findByRole('button', { name: /Ishmael/u })
+    expect(screen.queryByText(/Search stopped early/u)).toBeNull()
+  })
+
+  it('is absent while the answer on screen belongs to an older question', async () => {
+    /* `answered` is the second half of the condition, and it is what stops a
+     * PREVIOUS query's failure being reported under the current needle. */
+    render(
+      <SearchPanel
+        book={quiet({
+          search: async function* () {
+            yield HIT
+            throw new Error('the spine gave out')
+          },
+        })}
+      />,
+    )
+    ask('Ishmael')
+    await screen.findByText(/Search stopped early/u)
+    ask('Ahab')
+    expect(screen.queryByText(/Search stopped early/u)).toBeNull()
+  })
+})

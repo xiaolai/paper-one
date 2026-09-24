@@ -1529,3 +1529,27 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* ⚠️ THESE FOUR WERE INLINE `style={{…}}` ON THE SEARCH PANEL, WHICH IS WHAT
+   THE TOKEN GUARD EXISTS TO PREVENT — a value in a style object is invisible to
+   `tokens.test.ts`, so `var(--space-8)` and `var(--muted)` were scattered where
+   nothing could check them. The mutation sweep priced it separately: an inline
+   object is an `ObjectLiteral` mutant and each of its values a `StringLiteral`
+   one, none of which any test can reach, so seven survivors sat here for ever. */
+
+/* The scope switch: two radios that share the row with nothing else. */
+.scopeGroup {
+  display: flex;
+  gap: var(--space-8);
+  flex: 1;
+}
+
+/* A count that takes the row it is on. */
+.metaGrow {
+  flex: 1;
+}
+
+/* The field's own glyph, which is secondary to the text beside it. */
+.searchGlyph {
+  color: var(--muted);
+}
