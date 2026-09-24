@@ -793,6 +793,15 @@ impl Store {
     /// exactly that number, so there is no ordinary road to that coincidence,
     /// and the honest reading is that this is a very good check rather than a
     /// proof.
+    ///
+    /// ⚠️ **AND THE CHEAP CHECK CAN DISAGREE WITHOUT ANYTHING BEING WRONG.**
+    /// A crash between a book's commit and its checkpoint — the case the module
+    /// header calls self-healing — leaves postings no checkpoint names, so
+    /// `claimed` is SHORT of what the index holds and the per-book walk runs
+    /// once, finds every checkpointed book intact, and repairs nothing. That is
+    /// the correct outcome at the cost of one walk on one launch, and it is
+    /// written down rather than optimised away: telling that state from real
+    /// damage needs exactly the walk it would be skipping.
     fn reconcile(&mut self) -> Result<()> {
         let claimed: u64 = self
             .state

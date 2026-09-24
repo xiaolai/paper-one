@@ -268,6 +268,22 @@ describe('a failed parse is a failed section, not a chapter of error text', () =
     expect(parseFailed(bodyOf(doc))).toBe(true)
   })
 
+  it('is caught when the error element is the root it is handed', () => {
+    /* ⚠️ **THE OTHER ENGINE SHAPE, AND WITHOUT THIS CASE THAT BRANCH IS
+     * UNREACHABLE.** Measured in Paper's own WebKit on mbp16, 2026-09-24: a
+     * failed XHTML parse leaves `documentElement` as the partial content's own
+     * element (`p`), `doc.body` NULL — so `bodyOf` falls through to the
+     * Document — and `getElementsByTagName` is what finds the error. Firefox
+     * makes the error the document element instead, which is the shape this
+     * covers. Without it the `localName` test is a branch no production caller
+     * can reach and no test can kill, which this repository has a long list of.
+     */
+    const doc = failedParse()
+    const error = doc.getElementsByTagName('parsererror')[0]
+    expect(error).toBeDefined()
+    expect(parseFailed(error as Node)).toBe(true)
+  })
+
   it('leaves an ordinary chapter alone', () => {
     const doc = new DOMParser().parseFromString(
       '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Call me Ishmael.</p></body></html>',
