@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SearchPanel, type SearchableBook } from './SearchPanel'
+import { MAX_HITS, SearchPanel, type SearchableBook } from './SearchPanel'
 import { MAX_LIBRARY_HITS } from './librarySearch'
 import type { PassageHit } from '../../core/ports'
 import type { SearchHit } from '../hooks/useBook'
@@ -297,5 +297,286 @@ describe('what a library search says when it cannot answer', () => {
     ask('something else')
     expect(screen.queryByRole('button', { name: /the whale/u })).toBeNull()
     expect(screen.getByText('Searching your library…')).toBeTruthy()
+  })
+})
+
+/* ------------------------------------------- what the panel says, and when
+ *
+ * ⚠️ **THE HEADER USED TO SAY THIS WAS "a separate subject and is not asserted
+ * here".** It was, and the mutation sweep on 2026-09-24 priced it: 72 mutants
+ * this phase ADDED survived in this file, most of them in the sentences a
+ * reader is shown and the caps that decide how many rows they get. A panel's
+ * whole job is what it says, so leaving that unasserted leaves the job
+ * unasserted. */
+
+/** A book that yields nothing, so the empty and failure states are reachable. */
+function quiet(over: Partial<SearchableBook> = {}): SearchableBook {
+  return {
+    source: 'book.epub',
+    meta: { title: 'Moby-Dick' } as unknown as SearchableBook['meta'],
+    error: null,
+    search: async function* () {},
+    goTo: vi.fn(),
+    ...over,
+  } as SearchableBook
+}
+
+describe('the in-book field and its empty states', () => {
+  it('tells an unopened shelf to open a book, not that the book failed', () => {
+    render(<SearchPanel book={quiet({ source: null, meta: null })} />)
+    expect(screen.getByText('Search covers the book you are reading. Open one first.')).toBeTruthy()
+  })
+
+  it('tells a book that would not open apart from one still opening', () => {
+    /* ⚠️ **`source === null` IS TESTED FIRST**, so a book that HAS bytes and
+     * failed is the only way to reach this sentence — a fixture with no source
+     * gets the shelf's sentence instead, and the case would pass for the wrong
+     * reason while asserting nothing about the failure. */
+    render(<SearchPanel book={quiet({ meta: null, error: new Error('nope') })} />)
+    expect(screen.getByText('This book did not open, so there is nothing to search.')).toBeTruthy()
+  })
+
+  it('says a book is still opening when it has bytes and no metadata yet', () => {
+    render(<SearchPanel book={quiet({ meta: null })} />)
+    expect(screen.getByText('This book is still opening.')).toBeTruthy()
+  })
+
+  it('invites a query before one is typed', () => {
+    render(<SearchPanel book={quiet()} />)
+    expect(screen.getByText('Type to search this book.')).toBeTruthy()
+  })
+
+  it('labels and places the field by scope, and never disables it in the library', () => {
+    render(<SearchPanel book={quiet({ source: null, meta: null })} searchLibrary={async () => []} />)
+    const inBook = screen.getByLabelText('Search this book') as HTMLInputElement
+    expect(inBook.placeholder).toBe('Open a book to search it')
+    expect(inBook.disabled).toBe(true)
+    choose('Every book')
+    const inLibrary = screen.getByLabelText('Search every book') as HTMLInputElement
+    expect(inLibrary.placeholder).toBe('Search every book…')
+    expect(inLibrary.disabled).toBe(false)
+  })
+
+  it('offers the open book’s own placeholder when there is one', () => {
+    render(<SearchPanel book={quiet()} />)
+    expect((screen.getByLabelText('Search this book') as HTMLInputElement).placeholder).toBe(
+      'Search this book…',
+    )
+  })
+})
+
+describe('the in-book count, its cap and its failures', () => {
+  /** A book answering `n` hits, each with its own anchor unless `sameCfi`. */
+  function answering(n: number, sameCfi = false): SearchableBook {
+    return quiet({
+      search: async function* () {
+        for (let i = 0; i < n; i += 1) {
+          yield { ...HIT, cfi: sameCfi ? HIT.cfi : `${HIT.cfi}:${i}`, match: `Ishmael${i}` }
+        }
+      },
+    })
+  }
+
+  it('counts what it found, with no plus below the cap', async () => {
+    render(<SearchPanel book={answering(3)} />)
+    ask('Ishmael')
+    expect(await screen.findByText(/^3 in this book$/u)).toBeTruthy()
+  })
+
+  it('caps the rows and marks the count with a plus above it', async () => {
+    render(<SearchPanel book={answering(MAX_HITS + 5)} />)
+    ask('Ishmael')
+    expect(await screen.findByText(`${MAX_HITS}+ in this book`)).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: /Ishmael/u }).length).toBe(MAX_HITS)
+  })
+
+  it('draws every hit that shares an anchor, rather than collapsing them', async () => {
+    /* ⚠️ **A PDF's ANCHOR IS ITS PAGE NUMBER**, so several matches on one page
+     * share it — and React collapses duplicate keys to the last of them, which
+     * is why the key carries the position too. */
+    render(<SearchPanel book={answering(4, true)} />)
+    ask('Ishmael')
+    await screen.findByText(/in this book/u)
+    expect(screen.getAllByRole('button', { name: /Ishmael/u }).length).toBe(4)
+  })
+
+  it('says a search stopped early rather than presenting it as complete', async () => {
+    /* A failure partway through still has hits, and the count alone would
+     * present a truncated search as a whole one. */
+    render(
+      <SearchPanel
+        book={quiet({
+          search: async function* () {
+            yield HIT
+            throw new Error('the spine gave out')
+          },
+        })}
+      />,
+    )
+    ask('Ishmael')
+    expect(
+      await screen.findByText('Search stopped early — these are the matches found so far.'),
+    ).toBeTruthy()
+  })
+
+  it('says a book could not be searched when it failed with nothing to show', async () => {
+    render(
+      <SearchPanel
+        book={quiet({
+          search: async function* () {
+            throw new Error('the spine gave out')
+          },
+        })}
+      />,
+    )
+    ask('Ishmael')
+    expect(await screen.findByText('This book could not be searched')).toBeTruthy()
+  })
+})
+
+describe('what the library half says, and what it refuses to say', () => {
+  /** `n` passages, spread over `books` different books. */
+  function passages(n: number, books = 1): PassageHit[] {
+    return Array.from({ length: n }, (_, i) => ({
+      ...PASSAGE,
+      bookId: `book:${i % books}`,
+      sectionIndex: i,
+      offset: i * 10,
+      quote: `the whale ${i}`,
+    }))
+  }
+
+  it('invites a query before one is typed, in the library’s own words', () => {
+    render(<SearchPanel book={quiet()} searchLibrary={async () => []} />)
+    choose('Every book')
+    expect(screen.getByText(/Type to search/u)).toBeTruthy()
+  })
+
+  it('asks nothing at all while the needle is empty', async () => {
+    const searchLibrary = vi.fn(async () => passages(1))
+    render(<SearchPanel book={quiet()} searchLibrary={searchLibrary} />)
+    choose('Every book')
+    ask('whale')
+    await screen.findByRole('button', { name: /the whale/u })
+    searchLibrary.mockClear()
+    ask('')
+    await new Promise((r) => setTimeout(r, 120))
+    expect(searchLibrary).not.toHaveBeenCalled()
+  })
+
+  it('stops asking the library the moment the scope goes back to the book', async () => {
+    const searchLibrary = vi.fn(async () => passages(1))
+    render(<SearchPanel book={quiet()} searchLibrary={searchLibrary} />)
+    choose('Every book')
+    ask('whale')
+    await screen.findByRole('button', { name: /the whale/u })
+    searchLibrary.mockClear()
+    choose('This book')
+    ask('harpoon')
+    await new Promise((r) => setTimeout(r, 120))
+    expect(searchLibrary).not.toHaveBeenCalled()
+  })
+
+  it('reports a query the index refused as the reader’s to fix', async () => {
+    /* ⚠️ **TWO DIFFERENT SENTENCES.** Told the index is broken, a reader stops
+     * trusting the feature; told their query is, they retype a perfectly good
+     * question for ever. */
+    const refused = Object.assign(new Error('「树」 is a single character'), { kind: 'badQuery' })
+    render(<SearchPanel book={quiet()} searchLibrary={async () => { throw refused }} />)
+    choose('Every book')
+    ask('树')
+    expect(await screen.findByText(/single character/u)).toBeTruthy()
+    expect(screen.queryByText(/could not be searched/u)).toBeNull()
+  })
+
+  it('reports an index that would not answer as a failure, not as a bad query', async () => {
+    render(
+      <SearchPanel
+        book={quiet()}
+        searchLibrary={async () => { throw new Error('the index would not open') }}
+      />,
+    )
+    choose('Every book')
+    ask('whale')
+    expect(await screen.findByText(/would not open/u)).toBeTruthy()
+  })
+
+  it('caps the rows it draws and says the count is a floor', async () => {
+    render(<SearchPanel book={quiet()} searchLibrary={async () => passages(MAX_LIBRARY_HITS + 3)} />)
+    choose('Every book')
+    ask('whale')
+    await screen.findByText(new RegExp(`${MAX_LIBRARY_HITS}`, 'u'))
+    expect(screen.getAllByRole('button', { name: /the whale/u }).length).toBe(MAX_LIBRARY_HITS)
+  })
+
+  it('draws every passage that shares a book and a section, rather than collapsing them', async () => {
+    /* A book id and a section number are not unique across the list, and React
+     * collapses duplicate keys to the last of them — which is why the key
+     * carries the position too. */
+    const same = Array.from({ length: 3 }, () => ({ ...PASSAGE }))
+    render(<SearchPanel book={quiet()} searchLibrary={async () => same} />)
+    choose('Every book')
+    ask('whale')
+    await screen.findByText(/in your library/u)
+    expect(screen.getAllByRole('button', { name: /the whale/u }).length).toBe(3)
+  })
+
+  it('groups the rows under the book they came from', async () => {
+    render(
+      <SearchPanel
+        book={quiet()}
+        searchLibrary={async () => passages(4, 2)}
+        titleOf={(id) => (id === 'book:0' ? 'Moby-Dick' : 'Endurance')}
+      />,
+    )
+    choose('Every book')
+    ask('whale')
+    expect(await screen.findByText('Moby-Dick')).toBeTruthy()
+    expect(screen.getByText('Endurance')).toBeTruthy()
+  })
+
+  it('falls back to the book id when the host cannot name the book', async () => {
+    render(<SearchPanel book={quiet()} searchLibrary={async () => passages(1)} />)
+    choose('Every book')
+    ask('whale')
+    expect(await screen.findByText('book:0')).toBeTruthy()
+  })
+
+  it('disables a row a host cannot act on rather than drawing a dead control', async () => {
+    /* ⚠️ **A HOST THAT CAN SEARCH AND NOT OPEN** should not offer a click that
+     * does nothing. */
+    render(<SearchPanel book={quiet()} searchLibrary={async () => passages(1)} />)
+    choose('Every book')
+    ask('whale')
+    const row = await screen.findByRole('button', { name: /the whale/u })
+    expect((row as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('hands the whole hit to the host when it can open one', async () => {
+    const onOpenPassage = vi.fn()
+    render(
+      <SearchPanel book={quiet()} searchLibrary={async () => passages(1)} onOpenPassage={onOpenPassage} />,
+    )
+    choose('Every book')
+    ask('whale')
+    const row = await screen.findByRole('button', { name: /the whale/u })
+    expect((row as HTMLButtonElement).disabled).toBe(false)
+    row.click()
+    /* THE WHOLE HIT, offset included — the landing needs it to settle an
+     * ambiguous passage, which `landPassage` measured on the real library. */
+    expect(onOpenPassage).toHaveBeenCalledWith(expect.objectContaining({ bookId: 'book:0', offset: 0 }))
+  })
+
+  it('shows nothing from the previous question while the next one is in flight', async () => {
+    /* ⚠️ **NOTHING ON SCREEN MAY OUTLIVE THE QUERY IT ANSWERS.** During the
+     * debounce the previous answer was both displayed and clickable. */
+    let answer: PassageHit[] = passages(1)
+    render(<SearchPanel book={quiet()} searchLibrary={async () => answer} />)
+    choose('Every book')
+    ask('whale')
+    await screen.findByRole('button', { name: /the whale 0/u })
+    answer = []
+    ask('harpoon')
+    expect(screen.queryByRole('button', { name: /the whale 0/u })).toBeNull()
   })
 })

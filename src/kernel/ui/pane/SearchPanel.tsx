@@ -83,7 +83,15 @@ export interface SearchPanelProps {
 const DEBOUNCE_MS = 250
 
 /** Bounded so a common word cannot stream thousands of rows into the pane. */
-const MAX_HITS = 200
+/**
+ * How many in-book hits are drawn, and counted before the `+`.
+ *
+ * EXPORTED so a test reads the real bound rather than a copy of it — the rule
+ * `palette.test.ts` is the cautionary tale for, where two ratios were pinned
+ * against hexes typed into the test file under a comment claiming they came
+ * from `tokens.css`, so editing a theme could not fail it.
+ */
+export const MAX_HITS = 200
 
 /**
  * The results, and the query they belong to, as ONE value.
