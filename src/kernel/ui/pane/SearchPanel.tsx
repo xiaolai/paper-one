@@ -491,10 +491,18 @@ function LibraryResults({
       </div>
     )
   }
-  /* `idle` reaches here only between a new needle and its effect — the empty
-     needle is answered above — so it is the same thing as searching and says
-     so, rather than being a fourth sentence nobody can reach. */
-  if (state.kind === 'searching' || state.kind === 'idle') {
+  /* ⚠️ **`idle` USED TO BE TESTED HERE TOO, AND IT CANNOT ARRIVE.** The only
+     idle result this panel ever holds is `NOTHING_ASKED`, whose needle is
+     empty — and an empty needle is answered above. `shownState` hands back
+     SEARCHING for every result whose needle does not match, so by this line the
+     state is searching, rejected, failed or done, never idle.
+
+     It was reachable until the `setLibrary(idleAt(…))` on the guard path went;
+     removing that redundancy is what made this branch dead, which is the shape
+     worth noticing — **taking one of two overlapping guards away can leave the
+     code that read the state it produced stranded.** The sweep found it
+     immediately: two survivors on this line and nowhere else. */
+  if (state.kind === 'searching') {
     return (
       <div className={styles.empty}>
         <div className={styles.emptyBody}>Searching your library…</div>

@@ -172,8 +172,18 @@ describe('what to draw for a needle, given what is held', () => {
     expect(shownState({ needle: 'whale', state: failed }, 'whale')).toBe(failed)
   })
 
+  it('answers SEARCHING for an idle result, so nothing downstream has to know', () => {
+    /* ⚠️ **IDLE CANNOT REACH THE PANEL, AND THE PANEL USED TO TEST FOR IT
+     * ANYWAY.** The only idle result held is `NOTHING_ASKED`, whose needle is
+     * empty, and an empty needle is answered before any state is read. The
+     * branch there was dead code TypeScript could not see was dead — two
+     * survivors sat on it. Collapsed here, `ShownState` makes it unsayable. */
+    expect(shownState({ needle: 'whale', state: IDLE }, 'whale')).toEqual({ kind: 'searching' })
+    expect(shownState(NOTHING_ASKED, '')).toEqual({ kind: 'searching' })
+  })
+
   it('treats the empty needle like any other, rather than as a special case', () => {
-    expect(shownState({ needle: '', state: IDLE }, '')).toBe(IDLE)
+    expect(shownState({ needle: '', state: IDLE }, '')).toEqual({ kind: 'searching' })
     expect(shownState({ needle: 'whale', state: IDLE }, '')).toEqual({ kind: 'searching' })
   })
 })

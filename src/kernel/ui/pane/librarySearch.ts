@@ -61,7 +61,15 @@ export interface LibraryResult {
  * directly.
  */
 export const IDLE: LibraryState = { kind: 'idle' }
-export const SEARCHING: LibraryState = { kind: 'searching' }
+
+/**
+ * What the panel can actually be asked to draw.
+ *
+ * Idle is not among them: see [`shownState`], which is the only thing that
+ * decides what is drawn and never answers it.
+ */
+export type ShownState = Exclude<LibraryState, { readonly kind: 'idle' }>
+export const SEARCHING: ShownState = { kind: 'searching' }
 
 /** Nothing has been asked yet — the panel's first state. */
 export const NOTHING_ASKED: LibraryResult = { needle: '', state: IDLE }
@@ -82,8 +90,18 @@ export function searchingAt(needle: string): LibraryResult {
  * `voicePickerValue`: when a pure function's answers are flattened by what
  * draws them, ask the function.
  */
-export function shownState(result: LibraryResult, needle: string): LibraryState {
-  return result.needle === needle ? result.state : SEARCHING
+export function shownState(result: LibraryResult, needle: string): ShownState {
+  if (result.needle !== needle) return SEARCHING
+  /* ⚠️ **IDLE IS ANSWERED HERE RATHER THAN WHERE IT IS DRAWN.** The only idle
+   * result the panel holds is `NOTHING_ASKED`, whose needle is empty, and an
+   * empty needle is answered before anything reads a state at all — so idle
+   * cannot reach the panel, and the branch that used to test for it there was
+   * dead code TypeScript could not see was dead. Collapsing it here makes the
+   * type say so, and turns two survivors into one assertion. */
+  /* A local, so the discriminant narrows — a property access on a parameter
+   * does not always. */
+  const held = result.state
+  return held.kind === 'idle' ? SEARCHING : held
 }
 
 /** How many library hits are drawn. */
