@@ -2367,3 +2367,73 @@ describe('the Settings panel, as the window hands it over', () => {
     ).toBeTruthy()
   })
 })
+
+describe('the library search the window wires up', () => {
+  /* ⚠️ **THE WHOLE OF PHASE 31 REACHES THE SIDE PANE THROUGH TWO SPREADS AND
+   * ONE HOOK CALL**, and nothing asserted any of them arrived. Emptying either
+   * object leaves the app exactly as it was before the phase — a Search pane
+   * with no scope switch — and every test still passed, because none looked. */
+  const HIT = {
+    bookId: 'book:gone',
+    sectionIndex: 3,
+    offset: 17,
+    quote: 'the whale',
+    prefix: 'and then we saw ',
+    suffix: ' rise beside the boat',
+    score: 1.5,
+  }
+
+  /** A capability that binds nothing but a passage index. */
+  function indexing(search: (q: string, limit?: number) => Promise<readonly unknown[]>) {
+    return {
+      id: 'passages',
+      start: (api: { services: { bindPassages: (port: unknown) => { dispose: () => void } } }) => {
+        const bound = api.services.bindPassages({
+          search,
+          status: async () => ({
+            books: 1, sections: 1, chars: 1, indexBytes: 1, textBytes: 1,
+            analysis: 'paper/1', unreadable: [],
+          }),
+        })
+        return { dispose: () => bound.dispose() }
+      },
+    } as unknown as Parameters<typeof composeCapabilities>[0][number]
+  }
+
+  /** Open Moby-Dick and put the Search pane on screen beside it. */
+  async function readingWith(search: (q: string, limit?: number) => Promise<readonly unknown[]>) {
+    const { fs, moby } = await shelfWithMoby()
+    await mount(fs, { books: [moby], capability: indexing(search) })
+    fireEvent.click(screen.getByTitle('Open Moby-Dick'))
+    expect(await screen.findByText(WILL_NOT_PARSE)).toBeTruthy()
+    /* The digits map to the OFFERED panes, and `cards` is unfinished, so which
+     * one Search is cannot be written down — it is found by asking. */
+    for (const digit of ['1', '2', '3', '4', '5', '6']) {
+      accel(digit)
+      await settle()
+      if (screen.queryByLabelText(/^Search (this book|every book)$/u)) return
+    }
+    throw new Error('no digit opened the Search pane')
+  }
+
+  it('offers the scope switch once a passage index is bound', async () => {
+    await readingWith(async () => [])
+    expect(screen.queryByRole('radio', { name: 'Every book' })).not.toBeNull()
+  })
+
+  it('reports a hit whose book left the shelf by CAUSE, which needs the real shelf', async () => {
+    /* ⚠️ **THIS IS WHAT PINS THE HOOK'S ARGUMENT OBJECT.** Emptied, the hook
+     * gets no filesystem and every hit is refused with "this device cannot open
+     * books from the library index" — a sentence about the DEVICE, for a
+     * problem that is about one book. With the real arguments the same click
+     * says the book is no longer on the shelf, which is true and actionable. */
+    await readingWith(async () => [HIT])
+    fireEvent.click(screen.getByRole('radio', { name: 'Every book' }))
+    fireEvent.change(screen.getByLabelText('Search every book'), { target: { value: 'whale' } })
+    const row = await screen.findByRole('button', { name: /the whale/u }, { timeout: 4000 })
+    fireEvent.click(row)
+    await settle()
+    expect(screen.queryByText(/no longer on your shelf/u)).not.toBeNull()
+    expect(screen.queryByText(/cannot open books from the library index/u)).toBeNull()
+  })
+})
