@@ -93,6 +93,13 @@ export { presentFaces } from './fontProbe'
  * inside light chrome — the setting half-applied, which reads as broken rather
  * than as a choice. */
 export { useAppPalette } from './hooks/useAppPalette'
+/* Mounted by `app/web/Reader.tsx` in this same change — the rule this barrel
+   states for itself. The browser client had NO jump stack at all: it recorded
+   zero departures, so a Contents click, a search hit and a passage landing all
+   moved the reader with no way back. A seek made that worse, because a seek
+   can move a thousand pages at once. */
+export { useJumps, type JumpTarget, type JumpsView } from './hooks/useJumps'
+export type { Place } from '../core/jumpStack'
 
 /* THE SHEET PRIMITIVE. A browser sheet needs exactly the two behaviours this
  * gets right — focus in and back out, in the right order, and inert siblings —
@@ -111,6 +118,10 @@ export { Cards } from './pane/Cards'
  * says where, and it is the desktop's own: a second one would be a second set
  * of the four measurements its header spends a page getting right. */
 export { FootnotePopover } from './reader/FootnotePopover'
+/* Mounted by `app/web/Reader.tsx` in this same change — the rule this barrel
+   states for itself, since a re-export evaluates with the barrel. */
+export { PlateViewer } from './reader/PlateViewer'
+export type { PlateDetail } from './reader/plate'
 export type { FootnoteRender } from './reader/footnotes'
 
 /* A jacket, or its tint. Takes its source as a prop — see the component. */

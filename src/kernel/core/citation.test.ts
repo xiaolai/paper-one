@@ -6,6 +6,7 @@ const SOURCE: Source = {
   author: 'Henry Kissinger',
   chapter: 'Preface',
   page: 0,
+  printPage: '',
   fraction: 0.02,
 }
 
@@ -122,5 +123,47 @@ describe('what is missing', () => {
     expect(citation('A passage.', source({ author: '   ', chapter: '  ' }))).toBe(
       '“A passage.”\n\n— On China, 2%',
     )
+  })
+})
+
+describe('the print edition’s page', () => {
+  /* ⚠️ **THE LOCATOR THAT WAS ON THE WIRE AND READ BY NOTHING.** foliate has
+     reported `pageItem.label` on every relocate since the fork was adopted;
+     nothing consumed it, and this module's own comment argued that an EPUB
+     could not have a page at all — true of a REFLOWED page and false of a
+     `page-list`, which is the paper edition's own pagination. 10 of 150 books
+     on this shelf carry one. */
+
+  it('leads the locator, because it is exact for a reader holding the hardback', () => {
+    const quoted = citation('A passage.', { ...SOURCE, printPage: '213', chapter: 'Preface' })
+    expect(quoted).toContain('p. 213')
+    expect(quoted).not.toContain('Preface')
+  })
+
+  it('outranks a PDF’s own page, which is only exact for the same file', () => {
+    expect(citation('A passage.', { ...SOURCE, printPage: '213', page: 7 })).toContain('p. 213')
+  })
+
+  it('falls back to the chapter when the book carries no page-list', () => {
+    /* The 93 %. Empty must not become "p. " with nothing after it. */
+    const quoted = citation('A passage.', { ...SOURCE, printPage: '', chapter: 'Preface' })
+    expect(quoted).toContain('Preface')
+    expect(quoted).not.toContain('p. ')
+  })
+
+  it('treats a whitespace-only page as no page at all', () => {
+    const quoted = citation('A passage.', { ...SOURCE, printPage: '   ', chapter: 'Preface' })
+    expect(quoted).toContain('Preface')
+    expect(quoted).not.toContain('p. ')
+  })
+
+  it('keeps a page the publisher did not spell as a number', () => {
+    /* `xiv` and `A-3` are real pages. Parsing to a number would lose them. */
+    expect(citation('A passage.', { ...SOURCE, printPage: 'xiv' })).toContain('p. xiv')
+    expect(citation('A passage.', { ...SOURCE, printPage: 'A-3' })).toContain('p. A-3')
+  })
+
+  it('trims what the book spelled loosely', () => {
+    expect(citation('A passage.', { ...SOURCE, printPage: '  213  ' })).toContain('p. 213')
   })
 })

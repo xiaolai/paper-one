@@ -27,26 +27,42 @@
 
 .pct {
   flex: 0 0 auto;
+  /* Same reason as `.left`: "100%" is a character wider than "9%". */
+  min-width: var(--col-percent);
 }
 
+/* The print edition's page, beside the percentage. Only drawn when the book
+   carries a `page-list` — about 7 % of them — so the row is unchanged for
+   almost every book. */
+.page {
+  flex: 0 0 auto;
+}
+
+/* ⚠️ **THE LANE ONLY. EVERYTHING THE TRACK LOOKS LIKE BELONGS TO `SeekTrack`.**
+   This rule kept its height, radius, background and `overflow: hidden` after
+   the control was extracted, and the overflow won: `SeekTrack` sets
+   `overflow: visible` so its 12px thumb can stand proud of a 3px rail, and a
+   caller's stale `hidden` clipped the thumb to a thin strip. A caller styles
+   where a shared control SITS, never what it is. */
 .track {
   flex: 1 1 auto;
-  /* `--track-w`, the reader's own progress rule — 3, not the mockup's 2.
-     One quantity, one thickness, wherever it is drawn. */
-  height: var(--track-w);
-  border-radius: var(--radius-pill);
-  background: var(--line);
-  position: relative;
-  overflow: hidden;
+  /* THE FOOTER IS `pointer-events: none` SO THE PAGE BENEATH STAYS READABLE.
+     The seek control is the one thing in it a reader aims at, so it takes its
+     events back — and only it. */
+  pointer-events: auto;
 }
 
-.fill {
-  position: absolute;
-  background: var(--line-3);
-}
-
+/* THE READOUT LANES ARE RESERVED, so the track cannot change width mid-drag.
+   ⚠️ **AN EARLIER PASS CALLED THIS UNFIXABLE AND IT WAS NOT.** The reasoning
+   was that reserving needs a raw `ch` width, which `tokens.test.ts` rightly
+   refuses, and that no token fitted — which was true of `--space-*` and false
+   of the list's own column widths. `--col-when` IS a time readout's lane and
+   `--col-percent` IS a percentage's; the library list uses them for exactly
+   these two quantities. Without them the time label's arrival at 1 % narrowed
+   a `flex: 1` track under the reader's own thumb. */
 .left {
   flex: 0 0 auto;
+  min-width: var(--col-when);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -54,3 +70,17 @@
     transition: none;
   }
 }
+
+/* A seek in progress. The thumb is only drawn while the reader is moving it:
+   at rest this is a progress bar and a permanent knob would say otherwise. */
+.thumb {
+  position: absolute;
+  top: 50%;
+  width: var(--space-12);
+  height: var(--space-12);
+  margin-top: calc(var(--space-12) / -2);
+  margin-inline-start: calc(var(--space-12) / -2);
+  border-radius: var(--radius-pill);
+  background: var(--ink);
+}
+

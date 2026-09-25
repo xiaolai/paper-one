@@ -53,9 +53,12 @@ export interface SearchPanelProps {
    * other panels reach the host's `jumpTo` through a prop of this shape; now
    * this one does too. A bare CFI is a `JumpTarget`'s string arm.
    *
-   * OPTIONAL, because the browser client mounts this over a navigator and
-   * nothing else — it has no stack to push onto, and a hit there still has to
-   * move the reader. Absent, the book's own `goTo` is used.
+   * OPTIONAL, and ⚠️ **THE REASON GIVEN HERE STOPPED BEING TRUE ON
+   * 2026-09-25.** It read: *"the browser client mounts this over a navigator
+   * and nothing else — it has no stack to push onto"*. That client has one
+   * now, and passes this. The prop stays optional for a host that genuinely
+   * has no stack; absent, the book's own `goTo` is used and the hit still
+   * moves the reader.
    */
   onGoTo?: (cfi: string) => void
   /**

@@ -9,6 +9,7 @@ import { applyBookVars, bookSheets, markPalette, noteSheets } from './bookCss'
 import { balanceRects } from './markGeometry'
 import { ReaderSession, type SelectionSnapshot } from './session'
 import type { FootnoteRender } from './footnotes'
+import type { PlateDetail } from './plate'
 import type { ForeignAnchor, MarkAnchor } from './markPaint'
 import type { PasswordReason } from './makePdf'
 import { protectionOf } from './protection'
@@ -104,6 +105,8 @@ export interface FoliateViewProps {
   onExternalLink: (detail: ExternalLinkDetail, event: Event) => void
   /** A footnote was followed and rendered, or the note should close. */
   onFootnote: (note: FootnoteRender | null) => void
+  /** A plate to show large, or null to close it — see `PlateDetail`. */
+  onPlate: (plate: PlateDetail | null) => void
   /**
    * A book was dropped onto the book itself.
    *
@@ -450,6 +453,7 @@ export function FoliateView({
   onLink,
   onExternalLink,
   onFootnote,
+  onPlate,
   onFileDropped,
   onPageIntent,
   onFixedLayout,
@@ -500,6 +504,7 @@ export function FoliateView({
     onLink,
     onExternalLink,
     onFootnote,
+    onPlate,
     onFileDropped,
     onPageIntent,
     onFixedLayout,
@@ -567,6 +572,7 @@ export function FoliateView({
       onLink: (detail, event) => handlers.current.onLink(detail, event),
       onExternalLink: (detail, event) => handlers.current.onExternalLink(detail, event),
       onFootnote: (note) => handlers.current.onFootnote(note),
+      onPlate: (plate) => handlers.current.onPlate(plate),
       onFileDropped: (file) => handlers.current.onFileDropped(file),
       onPageIntent: (intent) => handlers.current.onPageIntent(intent),
       onFixedLayout: (fixed) => handlers.current.onFixedLayout(gen, fixed),

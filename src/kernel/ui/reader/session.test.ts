@@ -247,6 +247,7 @@ function callbacks(
     onLink: rec('onLink'),
     onExternalLink: rec('onExternalLink'),
     onFootnote: rec('onFootnote'),
+    onPlate: vi.fn(),
     onToc: rec('onToc'),
     onRelocate: rec('onRelocate'),
     onDocument: rec('onDocument'),
@@ -800,6 +801,10 @@ describe('ReaderSession restore', () => {
     expect(cb.calls['onRelocate']?.at(-1)?.[0]).toEqual({
       fraction: 0.5,
       chapterLabel: 'One',
+      /* Empty: this relocation carries no `pageItem`, which is what 93 % of
+         books report. `printPage` is measured against a real one in the app,
+         and the carrying is pinned by the case below. */
+      printPage: '',
       chapterHref: 'a',
       cfi: AT,
       /* Null because this relocation carries no range and no section has
@@ -810,6 +815,28 @@ describe('ReaderSession restore', () => {
          reason rather than working it out from a null. */
       sectionExact: false,
     })
+  })
+
+  it('carries the print edition’s page from the relocation that reports it', async () => {
+    /* ⚠️ **THE LOCATOR THAT WAS ON THE WIRE AND READ BY NOTHING.** foliate has
+       reported `pageItem.label` on every relocate since this fork was adopted
+       and the handler dropped it, three lines from where it was needed —
+       exactly as it once dropped the CFI. Measured in the running app: a book
+       with a `page-list` nav answers `46`, `111`, `174` across its length; one
+       with `pagebreak` markers and no nav answers null, which is why this is
+       carried rather than synthesised. */
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+
+    view.emit('relocate', {
+      fraction: 0.5,
+      tocItem: { label: 'One', href: 'a' },
+      cfi: AT,
+      pageItem: { label: '213' },
+    })
+    expect(cb.calls['onRelocate']?.at(-1)?.[0]).toMatchObject({ printPage: '213' })
   })
 
   it('reports a null cfi for a renderer that publishes none', async () => {
@@ -1849,6 +1876,10 @@ describe('ReaderSession gesture provenance', () => {
     keyup: 1,
     // The trackpad swipe — one per document, passive, torn down with the rest.
     wheel: 1,
+    // Opening a plate — see `#watchPlates`. One per document, and it is this
+    // assertion that proves a section reload does not leave a second one
+    // behind to open two viewers for one click.
+    click: 1,
     selectionchange: 2,
     dragenter: 1,
     dragover: 1,

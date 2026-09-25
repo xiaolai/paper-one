@@ -747,3 +747,21 @@
 .text foliate-view::part(filter) {
   filter: var(--paper-page-filter, none);
 }
+
+/* The seek's lane in the footer. The track is a shared component and has no
+   width of its own — the footer is a centred row, so this is what gives it
+   something to fill. */
+.seek {
+  /* `--col-progress` is this design system's own width for a progress track —
+     the library list uses it for the same thing. The footer is a centred row,
+     so a fixed basis keeps the chapter and the percentage where they were
+     rather than letting the track push them to the edges. */
+  flex: 0 0 var(--col-progress);
+}
+
+/* The percentage in the footer. Figures that do not jog as the number counts:
+   without this the readout jitters on every page turn, because proportional
+   digits are different widths. */
+.percent {
+  font-variant-numeric: tabular-nums;
+}

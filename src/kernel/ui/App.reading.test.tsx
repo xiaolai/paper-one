@@ -198,6 +198,7 @@ vi.mock('./reader/session', async (importActual) => {
       return {
         fraction: 0.25,
         chapterLabel: reader.chapter,
+        printPage: '',
         chapterHref: reader.chapterHref,
         cfi,
         sectionIndex: 0,

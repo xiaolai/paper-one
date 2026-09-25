@@ -16,6 +16,21 @@ export interface OverlaySheetProps {
   onDismiss: () => void
   children: ReactNode
   /**
+   * How much of the window the sheet may take.
+   *
+   * `card` is the default and is every existing caller: a centred panel sized
+   * for a list or a field. `plate` is for showing a thing rather than offering
+   * controls — it fills the window, because the whole reason the reader opened
+   * it is that the thing was too small.
+   *
+   * A VARIANT ON THE SHARED COMPONENT RATHER THAN A SECOND ONE. What is hard
+   * here is the modal contract — the focus trap, `aria-modal`, Esc, and making
+   * the page behind genuinely inert — and all of it is the same for both. A
+   * plate viewer with its own copy would be a second answer to that question,
+   * which is the shape this repository keeps having to delete.
+   */
+  variant?: 'card' | 'plate'
+  /**
    * The element whose SIBLINGS are the page behind this dialog.
    *
    * ⚠️ **DEFAULTS TO THE SHEET'S OWN PARENT, WHICH IS NOT ALWAYS THE PAGE.**
@@ -52,7 +67,7 @@ function visibleFocusable(root: HTMLElement, selector: string): HTMLElement | nu
   return null
 }
 
-export function OverlaySheet({ label, onDismiss, children, boundary }: OverlaySheetProps) {
+export function OverlaySheet({ label, onDismiss, children, boundary, variant = 'card' }: OverlaySheetProps) {
   const sheetRef = useRef<HTMLDivElement>(null)
 
   /**
@@ -185,6 +200,11 @@ export function OverlaySheet({ label, onDismiss, children, boundary }: OverlaySh
       />
       <div
         className={styles.sheet}
+        /* ⚠️ `check-dead-css` ASKS WHETHER A CLASS IS NAMED, NEVER WHETHER AN
+           ATTRIBUTE IS WRITTEN, so `.sheet[data-variant='plate']` is invisible
+           to it and would survive this line being deleted. `OverlaySheet`'s own
+           test asserts the attribute reaches the DOM for exactly that reason. */
+        data-variant={variant}
         ref={sheetRef}
         role="dialog"
         aria-modal="true"

@@ -1,0 +1,78 @@
+/* The plate, shown large.
+   Layout only — every value here is a token, and the one thing that is not a
+   token is the zoom transform, which `PlateViewer.tsx` writes inline and
+   explains there. */
+
+.stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  /* The gesture is a drag to pan, so the browser must not also scroll or
+     zoom the page under it. */
+  touch-action: none;
+}
+
+.image {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  /* The transform's origin has to be the centre, or zooming walks the image
+     towards the top-left as it grows. */
+  transform-origin: center center;
+  /* A plate is artwork: `matteFigures` gives it a page-coloured backing so it
+     does not read as a bright slab on a dark page, and that repair belongs to
+     the PAGE. Here the reader is inspecting the thing itself, so it is shown
+     as it is, against the scrim. */
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.image[data-zoomed='true'] {
+  cursor: grab;
+}
+
+.image[data-dragging='true'] {
+  cursor: grabbing;
+}
+
+.close {
+  position: absolute;
+  top: var(--space-8);
+  inset-inline-end: var(--space-8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background var(--motion-popover);
+}
+
+.close:hover {
+  background: var(--wash);
+}
+
+.caption {
+  position: absolute;
+  inset-inline: 0;
+  bottom: var(--space-8);
+  margin: 0 auto;
+  width: fit-content;
+  padding: var(--space-6) var(--space-12);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-family: var(--font-sans);
+  font-size: var(--text-small);
+  line-height: var(--leading-ui);
+  text-align: center;
+}

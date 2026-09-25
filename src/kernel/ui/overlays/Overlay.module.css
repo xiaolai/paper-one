@@ -216,3 +216,21 @@
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* --- the plate variant ------------------------------------------------ */
+
+/* Showing a thing, not offering controls. It fills the window because the
+   reason the reader opened it is that the thing was too small on the page.
+   The surface, border and shadow of a card would all be furniture around an
+   image, so they go; the scrim behind is what separates it from the page. */
+.sheet[data-variant='plate'] {
+  top: var(--space-16);
+  width: calc(100% - 2 * var(--space-16));
+  max-width: none;
+  max-height: calc(100% - 2 * var(--space-16));
+  height: calc(100% - 2 * var(--space-16));
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}

@@ -84,6 +84,12 @@ const book = (): Book =>
     position: {
       fraction: 0,
       chapterLabel: 'Loomings',
+      /* ⚠️ **A CAST HID THIS FROM `tsc` AND THE COPY SILENTLY DID NOTHING.**
+         `citation`'s `printPage` is required, but this fixture reaches the
+         component through a cast, so omitting it type-checked and threw at
+         run time inside `locator`. Four cases went red at once. The same trap
+         `AGENTS.md` records for `SidePaneProps['contributed']`. */
+      printPage: '',
       chapterHref: 'ch1.xhtml',
       cfi: null,
       sectionIndex: 0,
@@ -174,6 +180,8 @@ interface Over {
   platform?: 'macos' | 'windows'
   onOpenLibrary?: () => void
   onAddBooks?: () => void
+  /* Absent draws a readout; present draws the slider — see `SeekTrack`. */
+  onSeek?: (fraction: number) => void
 }
 
 /** The screen as a host hands it over — apart from `render`, so a case can `rerender`. */
@@ -211,6 +219,7 @@ function reader(over: Over = {}) {
       onLink={vi.fn()}
       onExternalLink={vi.fn()}
       onFootnote={vi.fn()}
+      onPlate={vi.fn()}
       {...props}
     />
   )
@@ -576,10 +585,17 @@ describe('the footer under the page', () => {
   })
 
   it('sets the percentage in figures that do not jog as it counts', () => {
+    /* ⚠️ **THIS USED TO READ `querySelector('span[style]')`**, which found the
+       first span carrying ANY inline style — and stopped being the percentage
+       the moment the seek track was added beside it, since the track's fill
+       positions itself inline. The rule is a class now, which is where a
+       design value belongs: `tokens.test.ts` can read a stylesheet and cannot
+       read a style attribute. */
     mount()
 
-    const percent = footer().querySelector('span[style]')
-    expect((percent as HTMLElement).style.fontVariantNumeric).toBe('tabular-nums')
+    const percent = footer().querySelector('[class*="percent"]')
+    expect(percent).not.toBeNull()
+    expect(percent?.textContent).toMatch(/^\d+%$/u)
   })
 
   it.each([
@@ -1327,5 +1343,57 @@ describe('a notice at the foot of the column', () => {
 
     expect(screen.getByText('Added 3 marks and 0 cards across 1 book.')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Dismiss' })).toBeNull()
+  })
+})
+
+describe('the desktop seek', () => {
+  /* ⚠️ **THE DESKTOP HAD NO SEEK CONTROL AT ALL**, and the progress RULE at the
+     page's edge could not become one: it is `aria-hidden` and `progressLineOn`
+     is false by default, so seeking would have sat behind a preference a
+     reader has to find first. The footer is already chrome — it fades with
+     `chromeShown` and goes `inert` with it, which a focusable control
+     requires — so the track went there. */
+
+  const footer = () => {
+    const found = document.querySelector(`.${styles.footer}`)
+    if (!(found instanceof HTMLElement)) throw new Error('the reader drew no footer')
+    return found
+  }
+
+  it('draws a slider in the footer when the host can seek', () => {
+    mount({ onSeek: vi.fn() })
+    expect(footer().querySelector('[role="slider"]')).not.toBeNull()
+  })
+
+  it('draws a readout, not a slider, when the host cannot', () => {
+    /* Announcing a slider a reader cannot operate is worse than announcing a
+       progress bar honestly. */
+    mount()
+    expect(footer().querySelector('[role="slider"]')).toBeNull()
+    expect(footer().querySelector('[role="progressbar"]')).not.toBeNull()
+  })
+
+  it('is the SAME control the phone and the browser draw', () => {
+    /* Two implementations of the control whose failure mode is losing the
+       reader's place is the shape this repository keeps having to delete, so
+       the track is `kernel/ui/reader/SeekTrack` and this is one of its two
+       callers. Its name is the component's, not this screen's. */
+    mount({ onSeek: vi.fn() })
+    expect(footer().querySelector('[role="slider"]')?.getAttribute('aria-label')).toBe(
+      'How far through the book',
+    )
+  })
+
+  it('reports the place being dragged TO, not the place the book is at', () => {
+    const onSeek = vi.fn()
+    mount({ onSeek, bookOver: { position: { ...book().position, fraction: 0.3 } } })
+    const track = footer().querySelector('[role="slider"]') as HTMLElement
+    track.setPointerCapture = vi.fn()
+    track.getBoundingClientRect = vi.fn(
+      () => ({ left: 0, width: 100, top: 0, height: 3, right: 100, bottom: 3, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect,
+    )
+    expect(footer().querySelector('[class*="percent"]')?.textContent).toBe('30%')
+    fireEvent.pointerDown(track, { isPrimary: true, button: 0, clientX: 75, pointerId: 1 })
+    expect(footer().querySelector('[class*="percent"]')?.textContent).toBe('75%')
   })
 })

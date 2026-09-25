@@ -44,6 +44,7 @@ import { locationToOpen, overrideSpent, type Place } from '../core/jumpStack'
 import { useOpenPassage } from './hooks/useOpenPassage'
 import type { ExternalLinkDetail } from 'foliate-js/view.js'
 import type { FootnoteRender } from './reader/footnotes'
+import type { PlateDetail } from './reader/plate'
 import { extensionFor, isMissingFile, readOwnedBook, storedBookName } from '../core/bookVault'
 import type { IndexedBook } from '../core/bookIndex'
 import type { IndexFs } from '../core/bookIndex'
@@ -1885,6 +1886,9 @@ export function App({
    * it would leave an iframe alive behind the page.
    */
   const [footnote, setFootnote] = useState<FootnoteRender | null>(null)
+  /* Beside the footnote, and held here for the same reason: the session
+     publishes it and the screen draws it, so the value belongs to neither. */
+  const [plate, setPlate] = useState<PlateDetail | null>(null)
 
   const jumpTo = useCallback(
     (target: JumpTarget) => {
@@ -1900,6 +1904,27 @@ export function App({
       if (jumps.jumpTo(target) && leaving && recorded) raiseReturnHint(leaving)
     },
     [jumps, book.position.chapterLabel, placeHere, raiseReturnHint],
+  )
+
+  /**
+   * Go to a place in the open book, as a fraction.
+   *
+   * ⚠️ **`record()` AND NOT `jumpTo`, AND THE DIFFERENCE IS THE WHOLE POINT.**
+   * `jumpTo` takes a CFI or an href and performs the navigation itself; a seek
+   * has neither — it has a proportion, which only the renderer can resolve.
+   * So this records the departure and then moves, which is exactly the case
+   * `record` exists for (a link the book navigates itself is the other one).
+   * Going through `jumpTo` would navigate twice.
+   *
+   * WITHOUT THIS A SLIPPED THUMB IS PERMANENT. A seek can move a reader a
+   * thousand pages, and `⌘[` is what brings them back.
+   */
+  const seekTo = useCallback(
+    (fraction: number) => {
+      jumps.record()
+      book.goToFraction(fraction)
+    },
+    [jumps, book],
   )
 
   /**
@@ -2719,6 +2744,9 @@ export function App({
              parsing. It is null for the first few milliseconds of an open —
              `bookId` is derived from the file's content — which is why the
              reader takes it through a ref rather than at mount. */
+          plate={plate}
+          onPlate={setPlate}
+          onSeek={seekTo}
           footnote={footnote}
           onFootnote={setFootnote}
           onDismissFootnote={book.closeFootnote}

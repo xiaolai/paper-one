@@ -80,6 +80,8 @@ export interface Book extends BookState {
   close: () => void
   /** Navigate the open book. No-op until the renderer publishes a navigator. */
   goTo: (target: string) => void
+  /** Go to a place, 0…1 through the book — see `SessionNavigator.goToFraction`. */
+  goToFraction: (fraction: number) => void
   /** Search the open book. Yields nothing until a book is parsed. */
   search: (query: string, signal: AbortSignal) => AsyncGenerator<SearchHit>
   /** Draw a mark in the open book. No-op before the renderer is up. */
@@ -150,6 +152,7 @@ export interface Book extends BookState {
 const NOWHERE: ReaderPosition = {
   fraction: 0,
   chapterLabel: '',
+  printPage: '',
   chapterHref: '',
   cfi: null,
   /* Null, not 0 — the name of this constant is the argument. Nowhere is not
@@ -358,6 +361,7 @@ export function useBook(): Book {
    * of its own results. Everything below reads through `navigatorRef`, so
    * stable identity costs nothing in correctness. */
   const goTo = useCallback((target: string) => navigatorRef.current?.goTo(target), [])
+  const goToFraction = useCallback((fraction: number) => navigatorRef.current?.goToFraction(fraction), [])
   const search = useCallback(async function* (query: string, signal: AbortSignal) {
     const nav = navigatorRef.current
     if (!nav) return
@@ -521,6 +525,7 @@ export function useBook(): Book {
     open,
     close,
     goTo,
+    goToFraction,
     search,
     drawMark,
     eraseMark,

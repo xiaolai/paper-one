@@ -23,13 +23,35 @@ export interface Source {
   /**
    * The page the passage is on, for a book that has pages, or 0.
    *
-   * A PDF has pages and an EPUB does not: reflowable text has no page to be on,
-   * because the page is a property of the window it is being shown in, and a
+   * A reflowed page is a property of the window it is being shown in, and a
    * number derived from one reader's font size is a citation nobody else can
-   * follow. So this is 0 for an EPUB and the reader gets the chapter instead —
-   * which is the locator that IS stable across every copy of the work.
+   * follow. So this is never counted from the layout. A PDF has real pages
+   * and `makePdf` builds one section per page, which is where this comes from
+   * for that format.
+   *
+   * ⚠️ **AND THIS COMMENT USED TO END "SO THIS IS 0 FOR AN EPUB", WHICH WAS
+   * WRONG.** It argued from the reflowed page to the conclusion that an EPUB
+   * has no page at all, and an EPUB may carry the PRINT edition's own
+   * pagination — a `page-list` nav, which is exactly the stable, cross-copy
+   * locator the argument says cannot exist. See `printPage`, which is where
+   * that arrives, and which 10 of 150 books on this shelf have.
    */
   readonly page: number
+  /**
+   * The PRINT edition's page, as the book spells it, or empty.
+   *
+   * REQUIRED, with no default, and that is deliberate. An optional field is
+   * how a value arrives that nothing ever fills — this repository has now
+   * shipped that three times (`paper/share-notes/1` with no client,
+   * `books_in_index` with no caller, `PassageHit.offset` with no reader), and
+   * the third was found last week. Required means the compiler names every
+   * call site.
+   *
+   * A STRING, because a page is what the publisher printed: `xiv`, `A-3` and
+   * `212` are all real, and parsing them to a number would lose two of the
+   * three.
+   */
+  readonly printPage: string
   /**
    * How far through the book, 0…1.
    *
@@ -80,13 +102,18 @@ function quote(text: string): string {
 /**
  * Where in the book, in the most specific terms the book supports.
  *
- * PAGE, THEN CHAPTER, THEN PROPORTION — most useful first, and each one only
- * when the format actually has it. A page is exact and universal for anyone
+ * PRINT PAGE, THEN PAGE, THEN CHAPTER, THEN PROPORTION — most useful first,
+ * and each one only when the format actually has it.
+ *
+ * The print page leads because it is the best locator there is: it names a
+ * place in the PAPER edition, so it is exact for a reader holding the
+ * hardback, the paperback or this file. A PDF's page is exact for anyone
  * holding the same PDF; a chapter is exact for anyone holding any copy of the
- * work; a percentage is neither, and is offered only when there is nothing
- * else to say.
+ * work; a percentage is none of those, and is offered only when there is
+ * nothing else to say.
  */
 function locator(source: Source): string {
+  if (source.printPage.trim() !== '') return `p. ${source.printPage.trim()}`
   if (source.page > 0) return `p. ${source.page}`
   if (source.chapter.trim() !== '') return source.chapter.trim()
   const percent = Math.round(clamp(source.fraction) * 100)

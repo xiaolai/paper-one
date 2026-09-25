@@ -9,11 +9,14 @@ import {
   Contents,
   FoliateView,
   FootnotePopover,
+  PlateViewer,
   Marginalia,
   SearchPanel,
   useAppPalette,
+  useJumps,
   usePrefersDark,
 } from '../../kernel/ui/browser'
+import type { PlateDetail } from '../../kernel/ui/browser'
 import type { PassageHit } from '../../kernel'
 import { WEB_SETTINGS, browserSettings } from './settings'
 import { useBookSource } from './useBookSource'
@@ -265,6 +268,11 @@ export function Reader({
    * the same box — and every one of them was got wrong once already.
    */
   const [footnote, setFootnote] = useState<FootnoteRender | null>(null)
+  /* ⚠️ **WIRED HERE IN THE SAME COMMIT AS THE DESKTOP, DELIBERATELY.** This
+     file already passes `onFixedLayout={ignore}` — an explicit stub where the
+     desktop passes the real handler — which is how a feature ends up invisible
+     in the browser and on a phone with nothing failing. */
+  const [plate, setPlate] = useState<PlateDetail | null>(null)
   /**
    * ⚠️ **THE STAGE HAS TO BE STATE, NOT A REF READ DURING RENDER.**
    *
@@ -397,6 +405,38 @@ export function Reader({
    */
   const [chrome, setChrome] = useState(true)
   const [fraction, setFraction] = useState(0)
+  /* The print edition's page here, when the book carries a `page-list`. */
+  const [printPage, setPrintPage] = useState('')
+  /* The last CFI a relocation reported, which is what a departure is made of.
+     A ref rather than state: it is read when a jump is recorded and must not
+     make the reader re-render on every page turn. */
+  const lastCfi = useRef<string | null>(null)
+
+  /**
+   * Somewhere to come back to.
+   *
+   * ⚠️ **THIS CLIENT RECORDED NO DEPARTURES AT ALL.** Measured 2026-09-25: a
+   * Contents click, a search hit and a passage landing each moved the reader
+   * with nothing to return to — and then a seek was added, which can move a
+   * thousand pages on one slipped thumb. The desktop has had this since phase
+   * 12; the browser simply never got it.
+   */
+  const jumps = useJumps({
+    placeHere: () =>
+      /* NULL WHERE IT CANNOT BE PINNED DOWN, which the stack requires: a
+         section still rendering has no CFI, and recording an origin the
+         reader never left is what puts a dead ⌘[ behind a live button. */
+      lastCfi.current === null || lastCfi.current === '' ? null : { bookId, cfi: lastCfi.current },
+    navigate: (target) => {
+      const nav = navigator.current
+      if (!nav) return false
+      /* One book on this screen, so a Place naming another is refused rather
+         than silently resolved against this one. */
+      if (typeof target !== 'string' && target.bookId !== bookId) return false
+      nav.goTo(typeof target === 'string' ? target : target.cfi)
+      return true
+    },
+  })
   const takeToc = useCallback((_generation: number, next: readonly TocItem[]) => setToc(next), [])
   /* The stage's width decides the measure, and a phone rotates. */
   const [stage, setStage] = useState(() => Math.min(window.innerWidth, 1200))
@@ -481,6 +521,9 @@ export function Reader({
     goLeft: () => void
     goRight: () => void
     goTo: (target: string) => void
+    /* Read by the footer's seek. Declared here because this surface now uses
+       it — the rule the comment above states. */
+    goToFraction: (fraction: number) => void
     search: (query: string, signal: AbortSignal) => AsyncGenerator<SearchHit>
     deselect?: () => void
     /* THE NOTE'S OWN VIEW, which the session builds and parks until a host says
@@ -562,13 +605,15 @@ export function Reader({
    * on the same CFI costs nothing — and a null cfi never overwrites a good
    * position, which the fixed-layout renderer would otherwise do. */
   const remember = useCallback(
-    (_generation: number, position: { cfi: string | null; chapterHref?: string; fraction?: number }) => {
+    (_generation: number, position: { cfi: string | null; chapterHref?: string; fraction?: number; printPage?: string }) => {
       store.current?.set(bookId, position.cfi)
       /* AND THE SHELF, debounced there: a run of turns is one write, after
          the reader has settled — the desktop's own tick. */
       if (position.cfi !== null && position.cfi !== '') remote?.write(bookId, position.cfi, position.fraction)
       if (typeof position.chapterHref === 'string') setHere(position.chapterHref)
       if (typeof position.fraction === 'number') setFraction(position.fraction)
+      if (typeof position.printPage === 'string') setPrintPage(position.printPage)
+      lastCfi.current = position.cfi
     },
     [bookId, remote],
   )
@@ -607,6 +652,9 @@ export function Reader({
         if (nav === undefined || nav === null) return
         yield* nav.search(query, signal)
       },
+      /* PLAIN, because a search hit reaches the stack through `onGoTo` below
+         rather than through here — recording in both would push twice for one
+         jump. See `SearchPanel.onGoTo`. */
       goTo: (target: string) => navigator.current?.goTo(target),
     }),
     [opening, meta, problem],
@@ -643,6 +691,24 @@ export function Reader({
         <button className="paper-cap-button" type="button" onClick={onClose}>
           ‹ Shelf
         </button>
+        {/* ⚠️ **A JUMP STACK WITH NO CONTROL IS A CAPABILITY WITH NO CALLER**,
+            which is the shape this repository keeps having to find by audit —
+            `paper/share-notes/1` answered a protocol nothing asked, and
+            `PassageHit.offset` crossed the wire unread. The stack exists so a
+            seek can be undone, so the undo has to be reachable.
+            SHOWN ONLY WHEN THERE IS SOMEWHERE TO GO: a permanently disabled
+            control teaches a reader the app cannot do this. */}
+        {jumps.canBack && (
+          <button
+            className="paper-cap-button"
+            type="button"
+            onClick={() => jumps.back()}
+            title="Back to where you were"
+            aria-label="Back to where you were"
+          >
+            ↩
+          </button>
+        )}
         {/* THE TITLE AS THE SHELF SENT IT.
              This was `name.replace(/\.[^.]+$/, '')` — strip everything after
              the last dot — which was written when the header showed a FILENAME.
@@ -681,7 +747,19 @@ export function Reader({
         </div>
       )}
 
-      <ProgressFooter fraction={fraction} visible={chrome && selection === null} />
+      <ProgressFooter
+        fraction={fraction}
+        printPage={printPage}
+        visible={chrome && selection === null}
+        /* ⚠️ **RECORD, THEN MOVE.** `jumpTo` performs the navigation itself
+           and takes a CFI; a seek has only a proportion, which the renderer
+           alone can resolve — so the departure is recorded and this moves.
+           Without it a slipped thumb in a long book is permanent. */
+        onSeek={(at) => {
+          jumps.record()
+          navigator.current?.goToFraction(at)
+        }}
+      />
 
       {/* THE BAR NEEDS A SELECTION, NOT A MARKS STORE. Gated on both, a
           reconnect gap (stores are null between channels) took COPY away —
@@ -744,6 +822,7 @@ export function Reader({
                 toc={toc}
                 currentHref={here}
                 onGoTo={(href) => {
+                  jumps.record()
                   navigator.current?.goTo(href)
                   setTool(null)
                 }}
@@ -752,6 +831,13 @@ export function Reader({
             {tool === 'search' && (
               <SearchPanel
                 book={searchable}
+                /* ⚠️ **THE PANEL HAS HAD THIS PROP ALL ALONG AND THIS CLIENT
+                   NEVER PASSED IT**, because until today there was no stack
+                   here to push onto — which is what the prop's own doc says.
+                   A hit is the jump that moves a reader furthest, so leaving
+                   it out made Back absent after a search or, worse, returned
+                   to an older unrelated departure. */
+                onGoTo={jumps.jumpTo}
                 titleOf={(id) => (id === bookId ? name : titleOf?.(id))}
                 {...(searchLibrary ? { searchLibrary } : {})}
                 {...(onOpenPassage ? { onOpenPassage } : {})}
@@ -784,6 +870,7 @@ export function Reader({
                 titleOf={(id) => (id === bookId ? name : titleOf?.(id))}
                 onShelf={(id) => id === bookId}
                 onGoTo={(target) => {
+                  jumps.record()
                   navigator.current?.goTo(typeof target === 'string' ? target : target.cfi)
                   setTool(null)
                 }}
@@ -822,9 +909,17 @@ export function Reader({
           marks={drawn}
           onSelection={setSelection}
           onMarkDrawn={ignore}
-          onLink={ignore}
+          /* ⚠️ **AN INTERNAL LINK NAVIGATES ITSELF, SO RECORD AND STAND ASIDE.**
+             foliate calls `goTo` unless the event is cancelled; going through
+             `jumpTo` here would navigate a second time to the same place — a
+             page turn nobody asked for and a duplicate entry in the stack.
+             `record` is exactly this case, and it is the one the desktop has
+             always used for a link. Left uncancelled, so the fork still
+             performs the navigation. */
+          onLink={() => jumps.record()}
           onExternalLink={followExternalLink}
           onFootnote={setFootnote}
+          onPlate={setPlate}
           onFileDropped={ignore}
           onPageIntent={turn}
           onFixedLayout={ignore}
@@ -836,6 +931,8 @@ export function Reader({
             two boxes are different and that deriving one from the other is what
             broke it. `column` is null here: this client draws no margin notes,
             so there is nothing beside the measure for a note to hang over. */}
+        <PlateViewer plate={plate} onClose={() => setPlate(null)} />
+
         <FootnotePopover
           note={footnote}
           stage={stageBox}

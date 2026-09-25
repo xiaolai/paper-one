@@ -3,6 +3,9 @@ import { Bookmark, ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react
 import type { ExternalLinkDetail, LinkDetail } from 'foliate-js/view.js'
 import { comboFor } from '../panes'
 import { FootnotePopover } from '../reader/FootnotePopover'
+import { PlateViewer } from '../reader/PlateViewer'
+import { SeekTrack, shownFraction } from '../reader/SeekTrack'
+import type { PlateDetail } from '../reader/plate'
 import type { FootnoteRender } from '../reader/footnotes'
 import type { Platform } from '../../core/metrics'
 import {
@@ -178,6 +181,19 @@ export interface ReaderProps {
   onLink: (detail: LinkDetail, event: Event) => void
   /** A link whose scheme leaves the book. See `ExternalLinkDetail`. */
   onExternalLink: (detail: ExternalLinkDetail, event: Event) => void
+  /**
+   * Go to a place, 0–1 through the book — the footer's seek. Absent draws a
+   * readout.
+   *
+   * ⚠️ **THE HOST RECORDS A DEPARTURE BEFORE MOVING.** A seek is the one
+   * control that can move a reader a thousand pages by accident, so `App`
+   * calls `jumps.record()` and then `goToFraction`, which puts ⌘[ behind it.
+   */
+  onSeek?: ((fraction: number) => void) | undefined
+  /** The plate to show large, or null. See `PlateViewer`. */
+  plate?: PlateDetail | null
+  /** The session's own publisher — it owns any URL the plate had to mint. */
+  onPlate: (plate: PlateDetail | null) => void
   /** The note to show in place, or null. See `FootnotePopover`. */
   footnote?: FootnoteRender | null
   /** The session's own close — it holds the view the note was rendered in. */
@@ -272,6 +288,9 @@ export function Reader({
   onReturnDone,
   footnote = null,
   onFootnote,
+  plate = null,
+  onPlate,
+  onSeek,
   onDismissFootnote,
   onLink,
   onExternalLink,
@@ -289,6 +308,10 @@ export function Reader({
    * render does not re-render them. They would measure against null once and
    * never again. */
   const [stage, setStage] = useState<HTMLDivElement | null>(null)
+  /* Where the seek's thumb is while it is being dragged, so the percentage
+     beside it reports the place being dragged TO rather than the place the
+     book is still at. Null at rest — see `SeekTrack.onPreview`. */
+  const [seekPreview, setSeekPreview] = useState<number | null>(null)
 
   /**
    * A passing message about an action that did not work.
@@ -561,15 +584,26 @@ export function Reader({
    *
    * THE PAGE IS THE SECTION INDEX PLUS ONE, and only for a book that has pages:
    * `makePdf` builds one section per PDF page, so for a PDF the two are the
-   * same number counted from different places. Reflowable text has no page at
-   * all — `pageCount` is 0 there and `citation` falls back to the chapter,
-   * which is the locator that survives being read at somebody else's font size.
+   * same number counted from different places. Reflowable text has no page of
+   * its own — `pageCount` is 0 there.
+   *
+   * ⚠️ **BUT IT MAY CARRY THE PRINT EDITION'S, AND THIS USED TO SAY IT COULD
+   * NOT.** `printPage` comes from the book's own `page-list` nav, which is the
+   * paper edition's pagination rather than a count of this window — so where a
+   * book has one, the citation names a page a reader holding the hardback can
+   * turn to. Measured on this shelf: 10 books of 150. Where there is none it
+   * is empty and `citation` falls back to the chapter, which is the locator
+   * that survives being read at somebody else's font size.
    */
   const sourceFor = useCallback(
     (sectionIndex: number): Source => ({
       title: book.meta?.title ?? '',
       author: book.meta?.author ?? '',
       chapter: book.position.chapterLabel,
+      /* The PRINT edition's own page, when the book carries a `page-list`.
+         It leads the locator because it is the only one that is exact for a
+         reader holding the paperback rather than this file. */
+      printPage: book.position.printPage,
       page: (book.meta?.pageCount ?? 0) > 0 ? sectionIndex + 1 : 0,
       fraction: book.position.fraction,
     }),
@@ -834,6 +868,7 @@ export function Reader({
                       onLink={onLink}
                       onExternalLink={onExternalLink}
                       onFootnote={onFootnote}
+                      onPlate={onPlate}
                       onFileDropped={book.open}
                       onPageIntent={onPageIntent}
                       onFixedLayout={book.setFixedLayout}
@@ -954,6 +989,13 @@ export function Reader({
                       popover's offset parent, which is the space the session
                       measures the reference in and the space `proseColumn`
                       reports. */}
+                  {/* A PLATE IS NOT ANCHORED TO THE PAGE, which is what makes
+                      it a sheet rather than a popover. A note belongs beside
+                      its reference and is bounded by the words; a figure the
+                      reader asked to see large belongs over everything, and
+                      `OverlaySheet` is what makes the page behind it inert. */}
+                  <PlateViewer plate={plate} onClose={() => onPlate(null)} />
+
                   <FootnotePopover
                     note={footnote}
                     stage={stage}
@@ -1100,13 +1142,37 @@ export function Reader({
                   </button>
                   <span>{book.position.chapterLabel}</span>
                   {book.position.chapterLabel && <span>·</span>}
-                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                  {/* ⚠️ **THE SEEK LIVES HERE, NOT ON THE PROGRESS RULE.** The
+                      rule at the page's edge is `aria-hidden` and
+                      `progressLineOn` is false by default, so making THAT the
+                      control would put seeking behind a preference a reader
+                      has to find first. This footer is already the chrome —
+                      it fades with `chromeShown` and is `inert` when hidden,
+                      which a focusable control requires — and it is where the
+                      place is already reported. Same component as the phone
+                      and the browser draw: `kernel/ui/reader/SeekTrack`. */}
+                  <SeekTrack
+                    fraction={progress}
+                    className={styles.seek}
+                    {...(onSeek ? { onSeek } : {})}
+                    onPreview={setSeekPreview}
+                  />
+                  {/* NO SEPARATOR AFTER THE TRACK. The row's own `gap` already
+                      spaces it from the percentage, and a second `·` put two
+                      dots in the readout with a text-less element between
+                      them — which is what the footer's text assertions read. */}
+                  {/* ⚠️ **`font-variant-numeric` WAS AN INLINE STYLE HERE**, which
+                      is a design value in a place `tokens.test.ts` cannot read
+                      and the mutation gate cannot kill — the `SearchPanel`
+                      lesson, where four such objects became classes. It is a
+                      rule in the stylesheet now. */}
+                  <span className={styles.percent}>
                     {/* CLAMPED, like the track beside it — by the SAME clamp.
                         A relocation event with a malformed fraction drew "-3%"
                         or "NaN%" under a bar that had already pinned itself to
                         the end; and the two copies had diverged, the track
                         letting `NaN` through where this one caught it. */}
-                    {Math.round(progress * 100)}%
+                    {Math.round(shownFraction(progress, seekPreview) * 100)}%
                   </span>
                 </div>
               </>

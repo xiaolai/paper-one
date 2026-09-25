@@ -1486,7 +1486,10 @@ describe('the chrome, the progress footer and the Notes tab', () => {
     /* Both halves matter: the footer sits where the selection bar goes, so a
      * selection takes the row and the footer must give it up. */
     const captured = await reading()
-    const foot = () => document.querySelector('[role="progressbar"]')?.closest('[data-visible]')
+    /* `slider`, not `progressbar`: this client passes `onSeek`, so the track
+       is operable and announces itself as one. `ProgressFooter.test.tsx` pins
+       both halves of that split. */
+    const foot = () => document.querySelector('[role="slider"]')?.closest('[data-visible]')
     await waitFor(() => expect(foot()?.getAttribute('data-visible')).toBe('true'))
     select(captured)
     await waitFor(() => expect(foot()?.getAttribute('data-visible')).toBe('false'))
@@ -1656,5 +1659,171 @@ describe('the chrome goes down on a centre tap, and takes the header out of reac
     })
     await waitFor(() => expect(header()?.getAttribute('data-visible')).toBe('true'))
     expect(header()?.hasAttribute('inert')).toBe(false)
+  })
+})
+
+describe('the browser client can come back from a jump', () => {
+  /* ⚠️ **THIS CLIENT RECORDED ZERO DEPARTURES.** Measured 2026-09-25: a
+     Contents click, a search hit and a passage landing each moved the reader
+     with nothing to return to — and then a seek was added, which can move a
+     thousand pages on one slipped thumb. The desktop has had a jump stack
+     since phase 12; the browser simply never got one.
+
+     ⚠️ **AND A STACK WITH NO CONTROL IS A CAPABILITY WITH NO CALLER**, which
+     is how `paper/share-notes/1` answered a protocol nothing asked and
+     `PassageHit.offset` crossed the wire unread. So the cases below drive the
+     BUTTON, not the hook. */
+
+  const went: string[] = []
+
+  async function reading(extra: Record<string, unknown> = {}) {
+    went.length = 0
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} {...extra} />,
+    )
+    await waitFor(() => expect(captured['onNavigator']).toBeTypeOf('function'))
+    /* ⚠️ **THE STACK ONLY MOVES FOR A NAVIGATION THAT HAPPENED.** `navigate`
+       answers false with no navigator, and the stack is right not to move —
+       so without this the back button stays lit for ever and the case times
+       out rather than failing. That boolean is load-bearing; see `JumpsDeps`. */
+    act(() => {
+      ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, {
+        goTo: (t: string) => void went.push(t),
+        goToFraction: (f: number) => void went.push(`fraction:${f}`),
+        next: vi.fn(),
+        prev: vi.fn(),
+        goLeft: vi.fn(),
+        goRight: vi.fn(),
+        /* A REAL generator, so a hit can be clicked. `vi.fn()` answers
+           undefined, which the panel cannot iterate. */
+        search: async function* () {
+          yield { cfi: 'epubcfi(/6/20!/4/2)', label: 'Chapter Nine', pre: 'the ', match: 'whale', post: ' rose' }
+        },
+      })
+    })
+    await waitFor(() => expect(captured['onSelection']).toBeTypeOf('function'))
+    return captured
+  }
+
+  const somewhere = (captured: Record<string, unknown>, cfi: string) => {
+    act(() => {
+      ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, {
+        cfi,
+        chapterHref: 'ch1.xhtml',
+        fraction: 0.2,
+        printPage: '',
+      })
+    })
+  }
+
+  const backButton = () => screen.queryByRole('button', { name: 'Back to where you were' })
+
+  it('offers no way back before the reader has gone anywhere', () => {
+    /* A permanently disabled control teaches a reader the app cannot do this,
+       so it is ABSENT rather than dead. */
+    expect(backButton()).toBeNull()
+  })
+
+  it('offers one after a seek, and takes the reader back to where they were', async () => {
+    const captured = await reading()
+    somewhere(captured, 'epubcfi(/6/4!/4/2/2)')
+    expect(backButton()).toBeNull()
+
+    const track = screen.getByRole('slider')
+    track.setPointerCapture = vi.fn()
+    track.releasePointerCapture = vi.fn()
+    track.hasPointerCapture = vi.fn(() => true)
+    track.getBoundingClientRect = vi.fn(
+      () => ({ left: 0, width: 100, top: 0, height: 3, right: 100, bottom: 3, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect,
+    )
+    fireEvent.pointerDown(track, { isPrimary: true, button: 0, clientX: 90, pointerId: 1 })
+    fireEvent.pointerUp(track, { clientX: 90, pointerId: 1 })
+
+    await waitFor(() => expect(backButton()).not.toBeNull())
+    expect(went).toContain('fraction:0.9')
+
+    act(() => backButton()!.click())
+    /* Back to the CFI the reader was at, and the offer is spent. */
+    expect(went).toContain('epubcfi(/6/4!/4/2/2)')
+    await waitFor(() => expect(backButton()).toBeNull())
+  })
+
+  it('records a Contents click too, not only a seek', async () => {
+    /* Every navigation on this screen used to be a one-way trip. */
+    const captured = await reading()
+    somewhere(captured, 'epubcfi(/6/4!/4/2/2)')
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'ch1.xhtml' }])
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Contents' }))
+    fireEvent.click(screen.getByRole('button', { name: /One/u }))
+    await waitFor(() => expect(backButton()).not.toBeNull())
+  })
+
+  it('records a search hit, which is the jump that moves a reader FURTHEST', async () => {
+    /* ⚠️ **THE PANEL HAS HAD `onGoTo` ALL ALONG AND THIS CLIENT NEVER PASSED
+       IT** — its doc said the browser "has no stack to push onto", which was
+       true until this change. A hit is the jump that moves a reader FURTHEST,
+       so leaving it out made Back absent after a search, or returned the
+       reader to an older unrelated departure. Found by audit, 2026-09-25.
+
+       Asserted on the PANEL's contract rather than by driving a search: the
+       hit list needs a live search generator, and what went wrong here was a
+       prop that was never passed. */
+    const captured = await reading()
+    act(() => {
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
+    somewhere(captured, 'epubcfi(/6/4!/4/2/2)')
+    expect(backButton()).toBeNull()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Search' }))
+    const field = screen.getByLabelText('Search this book')
+    fireEvent.change(field, { target: { value: 'whale' } })
+
+    const hit = await screen.findByRole('button', { name: /whale/u }, { timeout: 4000 })
+    fireEvent.click(hit)
+
+    await waitFor(() => expect(backButton()).not.toBeNull())
+    expect(went).toContain('epubcfi(/6/20!/4/2)')
+  })
+
+  it('records an internal link, which foliate navigates itself', async () => {
+    /* ⚠️ `onLink` was `ignore`, so an ordinary cross-reference recorded no
+       departure. It stays UNCANCELLED — the fork performs the navigation and
+       the host only remembers where the reader was. */
+    const captured = await reading()
+    somewhere(captured, 'epubcfi(/6/4!/4/2/2)')
+    expect(backButton()).toBeNull()
+    act(() => {
+      ;(captured['onLink'] as (d: unknown, e: unknown) => void)(
+        { href: 'ch9.xhtml' },
+        { preventDefault: vi.fn() },
+      )
+    })
+    await waitFor(() => expect(backButton()).not.toBeNull())
+  })
+
+  it('records nothing from a place the stack cannot pin down', async () => {
+    /* ⚠️ A section still rendering has no CFI. Recording an origin the reader
+       never left is what puts a dead control behind a live button — the rule
+       `placeHere` states, and the reason it may answer null. */
+    const captured = await reading()
+    somewhere(captured, '')
+    const track = screen.getByRole('slider')
+    track.setPointerCapture = vi.fn()
+    track.releasePointerCapture = vi.fn()
+    track.hasPointerCapture = vi.fn(() => true)
+    track.getBoundingClientRect = vi.fn(
+      () => ({ left: 0, width: 100, top: 0, height: 3, right: 100, bottom: 3, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect,
+    )
+    fireEvent.pointerDown(track, { isPrimary: true, button: 0, clientX: 90, pointerId: 1 })
+    fireEvent.pointerUp(track, { clientX: 90, pointerId: 1 })
+    expect(backButton()).toBeNull()
   })
 })

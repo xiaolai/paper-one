@@ -16,7 +16,8 @@ import { DEFAULT_SPEECH_SKIP, type SpeechSkipPrefs } from './speechSkip'
 import type { SectionText } from './audiobook'
 import { refuseBookScripts, stripScripts } from './bookScripts'
 import { suppressEmptyGeneratedContent } from './generatedContent'
-import { markFigures } from './markFigures'
+import { isEnlargeable, markFigures } from './markFigures'
+import { type PlateDetail, plateOf, plateTargetOf } from './plate'
 import { matteFigures } from './matteFigures'
 import { markProse } from './markProse'
 import { markSmallText } from './markSmallText'
@@ -199,6 +200,14 @@ export interface SessionCallbacks {
    */
   onFootnote: (note: FootnoteRender | null) => void
   /**
+   * A plate the reader touched, for the host to show large — or null to close.
+   *
+   * THE SAME CONTRACT AS `onFootnote`, and for the same reason: the session
+   * decides only WHAT it is and hands over a source the host document can load;
+   * where it goes and how it is dismissed belong to the host.
+   */
+  onPlate: (plate: PlateDetail | null) => void
+  /**
    * A link whose scheme leaves the book. Same contract, and the same reason
    * for existing at all: unhandled, foliate hands the raw href to
    * `globalThis.open`, and an EPUB is a zip a stranger wrote.
@@ -328,6 +337,16 @@ export type BookmarkPlace = Omit<SelectionSnapshot, 'range'> & {
 
 export interface SessionNavigator {
   goTo: (target: string) => void
+  /**
+   * Go to a place, as a fraction of the whole book.
+   *
+   * ⚠️ **THE FORK HAS HAD THIS ALL ALONG AND NOTHING CALLED IT.** Every
+   * navigation in Paper was by href or CFI — a link, a footnote, a Contents
+   * row, a search hit — so a reader could reach a chapter and a phrase and not
+   * *a place*. This is the surface a seek needs and the ONLY thing that
+   * changed on the session's side.
+   */
+  goToFraction: (fraction: number) => void
   /** Streams hits as they are found; stops when `signal` aborts. */
   search: (query: string, signal: AbortSignal) => AsyncGenerator<SearchHit>
   /** Draw a mark immediately, without waiting for the section to re-render. */
@@ -550,6 +569,15 @@ function destroyable(value: unknown): value is Destroyable {
 export class ReaderSession {
   #disposed = false
   #view: View | null = null
+  /**
+   * How to let go of the open plate's URL, when it has one.
+   *
+   * Session-wide rather than per document: the viewer outlives the section
+   * whose image it shows — a page turn does not close it — so the release
+   * cannot hang off that document's teardown.
+   */
+  #plateRelease: (() => void) | null = null
+
   /** One per session — a gesture can span a spine boundary. See `#watchWheel`. */
   readonly #pager = wheelPager()
   /**
@@ -860,6 +888,7 @@ export class ReaderSession {
       this.#resetWatchers(doc)
       this.#openAtFootIfArrivedBackwards()
       this.#watchSelection(doc, view, index)
+      this.#watchPlates(doc)
       this.#watchKeys(doc)
       this.#watchWheel(doc)
       this.#watchDrops(doc)
@@ -1047,6 +1076,10 @@ export class ReaderSession {
       this.#cb.onRelocate({
         fraction: detail.fraction,
         chapterLabel,
+        /* Carried through rather than dropped — which is what this handler did
+           with it for as long as the fork has been reporting it. See
+           `ReaderPosition.printPage`. */
+        printPage: detail.pageItem?.label ?? '',
         chapterHref: detail.tocItem?.href ?? '',
         // Carried through rather than dropped, which is what this handler used
         // to do with it. It is what `lastLocation` below is given back.
@@ -1159,6 +1192,13 @@ export class ReaderSession {
        * saying which link it was. Nothing is shown to the reader: a link that
        * goes nowhere should do nothing, not raise a dialog. */
       goTo: (target) => void view.goTo(target).catch(reportNavigation('goTo', target)),
+      /* Clamped HERE rather than trusted from the caller: the fork is handed a
+         number that came from a pointer position, and a drag that leaves the
+         track by a pixel must not ask for -0.01 of a book. */
+      goToFraction: (fraction) => {
+        const at = Number.isFinite(fraction) ? Math.min(1, Math.max(0, fraction)) : 0
+        void view.goToFraction(at).catch(reportNavigation('goToFraction', String(at)))
+      },
       search: (query, signal) => runSearch(view, query, signal),
       // Reported, unlike the speculative offers made when an overlay is
       // created: this one is a direct response to the reader marking something,
@@ -1874,6 +1914,68 @@ export class ReaderSession {
    * session has no business knowing what any key means; it only makes sure the
    * event reaches the place that does.
    */
+  /**
+   * Opening a plate, from a click inside the book.
+   *
+   * ⚠️ **FOUR REFUSALS, AND EACH IS A DEFECT IF IT IS MISSED.** This listener
+   * sits on the same document as the selection, the keys and the wheel, so it
+   * has to be the one that gives way:
+   *
+   * - **A plate inside a link follows the link.** A cover that is an `<a>` to
+   *   chapter one must navigate. `closest('a')` wins outright.
+   * - **A live selection wins.** The reader is marking, not looking, and this
+   *   is the surface the selection popup is bound to. A click that ends a drag
+   *   arrives here too, so without this every marked plate opens underneath
+   *   the popup that was about to appear.
+   * - **Only an ENLARGEABLE image**, which is `isEnlargeable` and deliberately
+   *   NOT `data-paper-figure` — see `markFigures`, where the two questions are
+   *   written side by side and the 4 %-versus-77 % measurement is recorded.
+   * - **A modified click is the platform's.** Command, Control, Shift and Alt
+   *   all mean something to macOS and to the fork; only a plain primary click
+   *   opens a plate.
+   *
+   * ⚠️ **AND NOTHING HERE TOUCHES THE DOCUMENT.** Every mark is a CFI — a path
+   * counting element and text nodes — plus `markContext`'s characters either
+   * side. Wrapping the plate to make it clickable, which is the obvious way to
+   * do this, would silently move every mark after it in the section.
+   */
+  #watchPlates(doc: Document): void {
+    const onClick = (event: MouseEvent) => {
+      if (this.#disposed) return
+      if (event.defaultPrevented) return
+      if (event.button !== 0) return
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+      const target = event.target as Element | null
+      if (!target || typeof target.closest !== 'function') return
+      const selection = doc.defaultView?.getSelection()
+      if (selection && !selection.isCollapsed) return
+      /* The link, the outermost image and the enlargeability test all live in
+         `plateTargetOf`, which is pure and carries their reasons. */
+      const img = plateTargetOf(target, isEnlargeable)
+      if (!img) return
+      const plate = plateOf(img)
+      if (!plate) return
+      this.#releasePlate()
+      this.#plateRelease = plate.release
+      this.#cb.onPlate(plate.detail)
+    }
+    doc.addEventListener('click', onClick)
+    this.#onTeardown(doc, () => doc.removeEventListener('click', onClick))
+  }
+
+  /**
+   * Let go of a serialised plate's object URL.
+   *
+   * Only an inline `<svg>` ever has one — a raster image is shown through the
+   * fork's own blob, which belongs to the section and must NOT be revoked here:
+   * revoking it would blank the image on the page behind the viewer.
+   */
+  #releasePlate(): void {
+    const release = this.#plateRelease
+    this.#plateRelease = null
+    if (release) release()
+  }
+
   #watchKeys(doc: Document): void {
     const onKey = (event: KeyboardEvent) => {
       if (this.#disposed) return
@@ -2358,6 +2460,13 @@ export class ReaderSession {
          would skip this — and a host left holding a `FootnoteRender` for a
          session that is gone draws a note nothing can close. */
       quietly('onFootnote', () => this.#cb.onFootnote(null))
+      /* AND THE PLATE, for the reason directly above: a host left holding a
+         `PlateDetail` for a session that is gone draws an image nothing can
+         close, over the next book. The URL is released first — `onPlate(null)`
+         takes the viewer down, and revoking under a live `<img>` would blank it
+         for the frame between. */
+      quietly('plate url', () => this.#releasePlate())
+      quietly('onPlate', () => this.#cb.onPlate(null))
       const prepared = this.#prepared
       this.#prepared = null
       if (prepared) destroyQuietly(prepared)

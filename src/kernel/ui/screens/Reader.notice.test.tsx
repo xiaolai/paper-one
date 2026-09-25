@@ -152,6 +152,7 @@ function reader(over: Over = {}) {
       onLink={vi.fn()}
       onExternalLink={vi.fn()}
       onFootnote={vi.fn()}
+      onPlate={vi.fn()}
       {...props}
     />
   )

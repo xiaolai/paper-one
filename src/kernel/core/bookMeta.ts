@@ -13,6 +13,28 @@
 export interface ReaderPosition {
   readonly fraction: number
   readonly chapterLabel: string
+  /**
+   * The PRINT edition's page number here, or empty when the book has none.
+   *
+   * ⚠️ **NOT A PAGE COUNTED FROM THIS WINDOW.** A reflowed page is a property
+   * of the reader's font size and window, and a number derived from one
+   * reader's layout is a citation nobody else can follow — the argument
+   * `citation.ts` makes at length and correctly. This is the other thing: the
+   * page number of the PAPER edition, which the publisher put in the file and
+   * which is the same in every copy.
+   *
+   * ⚠️ **AND IT WAS ON THE WIRE, UNREAD, SINCE THE FORK WAS ADOPTED.** foliate
+   * reports it on every relocate as `pageItem.label`; nothing consumed it.
+   * Measured 2026-09-25 over the real shelf: **10 of 150 books carry the
+   * `page-list` nav this comes from** (~130 of 1 959), and a book with
+   * `pagebreak` markers but no nav gets `null` — the fork does not synthesise
+   * one, so the other ~210 are out of reach without building an index.
+   *
+   * Empty rather than null, because "no page" and "page 0" must not be
+   * spellable as the same thing, and every consumer here already treats an
+   * empty string as "the book did not say" (`chapterLabel` does).
+   */
+  readonly printPage: string
   /** Stable identity of the current TOC entry — labels repeat, hrefs do not. */
   readonly chapterHref: string
   /**

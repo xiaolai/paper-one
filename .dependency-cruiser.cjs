@@ -222,6 +222,12 @@ const MOBILE_CLIENT = '^src/app/mobile/'
 const KERNEL_OVERLAY_SHEET = '^src/kernel/ui/overlays/OverlaySheet\\.tsx?$'
 const KERNEL_BOOK_COVER = '^src/kernel/ui/screens/BookCover\\.tsx?$'
 const KERNEL_COVER_ART = '^src/kernel/core/coverArt\\.ts$'
+/* The seek control, drawn by BOTH shells: the desktop's footer and the phone's
+   and browser's `ProgressFooter`. A leaf for the same reason `OverlaySheet` is
+   one — `src/app/` cannot be imported by the kernel, so a control the desktop
+   also needs has to live here, and the alternative was a second copy of the one
+   control whose failure mode is losing the reader's place. */
+const KERNEL_SEEK_TRACK = '^src/kernel/ui/reader/SeekTrack\\.tsx?$'
 
 /** The kernel's two entries: the React-free public one every capability may
  *  import, and the UI one only a composition root may. */
@@ -678,7 +684,7 @@ module.exports = {
       comment:
         'The shared mobile shell (src/app/shell/) reaches the kernel through the public entry, the ' +
         'design-system stylesheets and metrics.ts, and the browser-safe leaves it renders — ' +
-        'OverlaySheet, BookCover and coverArt.ts. It may NOT name a UI door. The doors are ' +
+        'OverlaySheet, BookCover, coverArt.ts and SeekTrack. It may NOT name a UI door. The doors are ' +
         'per-platform (ui/browser.ts for a browser, ui/index.ts for a native build) and this ' +
         'directory is mounted by BOTH roots, so importing one would pick a platform on the other ' +
         "root's behalf and pull that barrel's whole re-export set into the wrong bundle. Naming the " +
@@ -695,6 +701,7 @@ module.exports = {
           KERNEL_OVERLAY_SHEET,
           KERNEL_BOOK_COVER,
           KERNEL_COVER_ART,
+          KERNEL_SEEK_TRACK,
         ],
       },
     },

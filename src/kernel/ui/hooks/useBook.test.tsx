@@ -295,6 +295,10 @@ describe('where a book is before it has been anywhere', () => {
     expect(book().position).toEqual({
       fraction: 0,
       chapterLabel: '',
+      /* Empty before any relocation, like the chapter beside it: a book that
+         has been nowhere has no page to report, and 93 % of books never get
+         one at all. */
+      printPage: '',
       chapterHref: '',
       cfi: null,
       sectionIndex: null,

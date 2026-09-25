@@ -1,0 +1,38 @@
+/* The seek track. Its LANE belongs to whoever draws it — the desktop footer
+   and the reader's foot size it differently — so there is no width here; the
+   caller passes a class for that. */
+
+.track {
+  position: relative;
+  /* `--track-w`, the reader's own progress rule: one quantity, one thickness,
+     wherever it is drawn. */
+  height: var(--track-w);
+  border-radius: var(--radius-pill);
+  background: var(--line);
+  overflow: visible;
+  /* The whole point is to be dragged, so the browser must not pan the page. */
+  touch-action: none;
+}
+
+.track[role='slider'] {
+  cursor: pointer;
+}
+
+.fill {
+  position: absolute;
+  border-radius: var(--radius-pill);
+  background: var(--line-3);
+}
+
+/* Drawn only while the reader is moving it. At rest this is a progress bar,
+   and a permanent knob would say otherwise. */
+.thumb {
+  position: absolute;
+  top: 50%;
+  width: var(--space-12);
+  height: var(--space-12);
+  margin-top: calc(var(--space-12) / -2);
+  margin-inline-start: calc(var(--space-12) / -2);
+  border-radius: var(--radius-pill);
+  background: var(--ink);
+}
