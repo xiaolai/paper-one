@@ -1520,3 +1520,92 @@ describe('the chrome, the progress footer and the Notes tab', () => {
     expect(screen.queryByRole('button', { name: 'One' })).toBeNull()
   })
 })
+
+describe('a read-only client is read-only by default, not by being told', () => {
+  function marksHolding(all: unknown[]) {
+    return {
+      all,
+      allBookmarks: [],
+      allUnplaced: [],
+      persistent: true,
+      remove: vi.fn(),
+      setNote: async () => {},
+      loadAll: () => {},
+      subscribe: () => () => {},
+      refresh: () => {},
+      dispose: () => {},
+    } as never
+  }
+
+  const MARK = {
+    id: 'm1',
+    bookId: 'one',
+    cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:9)',
+    sectionIndex: 0,
+    text: 'the whale',
+    prefix: '',
+    suffix: '',
+    note: '',
+    kind: 'highlight',
+    tint: 'yellow',
+    style: 'fill',
+    chapter: 'One',
+    createdAt: 1,
+  }
+
+  async function reading(extra: Record<string, unknown> = {}) {
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} {...extra} />,
+    )
+    await waitFor(() => expect(captured['onSelection']).toBeTypeOf('function'))
+    return captured
+  }
+
+  it('offers no write verb when nobody said it could write', async () => {
+    /* ⚠️ **THE DEFAULT IS THE CASE THAT MATTERS**, because it is the one every
+     * host that forgets to pass the prop gets. Flipped to `true`, a browser
+     * session holding a READ grant would draw Highlight and Note — each press
+     * applying optimistically, being refused, and undoing itself, with the
+     * refusal logged to a console no reader opens. */
+    const captured = await reading({ marks: marksHolding([]) })
+    act(() => {
+      ;(captured['onSelection'] as (s: unknown) => void)({
+        cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:15)',
+        sectionIndex: 0,
+        text: 'Call me Ishmael',
+        prefix: '',
+        suffix: '.',
+      })
+    })
+    const bar = await screen.findByRole('toolbar', { name: 'Selection' })
+    expect(bar.querySelector('[data-count]')?.getAttribute('data-count')).toBe('1')
+  })
+
+  it('offers no way to delete a mark it cannot delete', async () => {
+    /* The Notes panel draws a delete control only when it is GIVEN one, and a
+     * read-only client must not be. */
+    const captured = await reading({ marks: marksHolding([MARK]) })
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'c1.xhtml' }])
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Notes' }))
+    expect(await screen.findByText(/the whale/u)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Delete mark' })).toBeNull()
+  })
+
+  it('offers one to a client that can', async () => {
+    const captured = await reading({ marks: marksHolding([MARK]), canWrite: true })
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'c1.xhtml' }])
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Notes' }))
+    expect(await screen.findByRole('button', { name: 'Delete mark' })).toBeTruthy()
+  })
+})
