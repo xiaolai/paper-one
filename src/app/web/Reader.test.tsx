@@ -1478,13 +1478,9 @@ describe('the chrome, the progress footer and the Notes tab', () => {
     })
   }
 
-  /* ⚠️ **THE CHROME ITSELF IS NOT DRIVEN HERE, AND THAT IS SAID RATHER THAN
-   * FAKED.** `hideChrome` lives inside `useTapToTurn` and is reached only by a
-   * tap on the BOOK's own document, which this suite's view does not provide.
-   * Two mutants on `inert={!chrome}` and on the `chrome &&` half of the
-   * footer's condition therefore survive; a case that rendered with the chrome
-   * already down would assert the markup without ever exercising the toggle,
-   * which is the shape this file already refuses elsewhere. */
+  /* The chrome IS driven, in the last describe of this file — through the
+     book's own document, which `onDocument` hands over. An earlier version of
+     this comment said it could not be, which was wrong. */
 
   it('hides the progress footer behind a selection, and shows it again after', async () => {
     /* Both halves matter: the footer sits where the selection bar goes, so a
@@ -1607,5 +1603,58 @@ describe('a read-only client is read-only by default, not by being told', () => 
     fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
     fireEvent.click(screen.getByRole('button', { name: 'Notes' }))
     expect(await screen.findByRole('button', { name: 'Delete mark' })).toBeTruthy()
+  })
+})
+
+describe('the chrome goes down on a centre tap, and takes the header out of reach', () => {
+  it('is not merely hidden — it leaves the tab order and the accessibility tree', async () => {
+    /* ⚠️ **`data-visible` ALONE LEFT THE BUTTONS TABBABLE AND ANNOUNCED.** A
+     * keyboard reader tabbed into invisible controls and a screen reader read
+     * out a bar that is not there; `inert` removes both, and the browser puts
+     * them back when it goes.
+     *
+     * ⚠️ **AND THE TAP HAS TO GO TO THE BOOK'S OWN DOCUMENT.** The book is in
+     * an iframe, so a tap on it never reaches this page — `onDocument` hands
+     * the document over and `useTapToTurn` binds there. An earlier version of
+     * this file said the toggle could not be driven at all and left the mutant
+     * alive; it can, through the same callback the view already captures. */
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />,
+    )
+    await waitFor(() => expect(captured['onDocument']).toBeTypeOf('function'))
+
+    const book = document.implementation.createHTMLDocument('chapter')
+    /* ⚠️ **A ZERO-WIDTH PAGE IS NOT A PAGE**, and jsdom reports zero for every
+     * box — `tapIntent` refuses such a tap on purpose, so without a width this
+     * drives nothing and would pass whatever the code did. */
+    Object.defineProperty(book.documentElement, 'clientWidth', { value: 900, configurable: true })
+    act(() => {
+      ;(captured['onDocument'] as (g: number, d: Document | null) => void)(0, book)
+    })
+
+    const header = () => document.querySelector('header')
+    expect(header()?.getAttribute('data-visible')).toBe('true')
+    expect(header()?.hasAttribute('inert')).toBe(false)
+
+    /* The MIDDLE THIRD: a clean press and release at the centre, which
+     * `tapIntent` refuses as a turn and which is therefore the toggle. */
+    const centre = { pointerId: 1, clientX: 450, clientY: 100 }
+    act(() => {
+      book.dispatchEvent(new window.PointerEvent('pointerdown', centre))
+      book.dispatchEvent(new window.PointerEvent('pointerup', centre))
+    })
+    await waitFor(() => expect(header()?.getAttribute('data-visible')).toBe('false'))
+    expect(header()?.hasAttribute('inert')).toBe(true)
+
+    /* And back again on the next centre tap — §06's "tap centre to show". */
+    act(() => {
+      book.dispatchEvent(new window.PointerEvent('pointerdown', centre))
+      book.dispatchEvent(new window.PointerEvent('pointerup', centre))
+    })
+    await waitFor(() => expect(header()?.getAttribute('data-visible')).toBe('true'))
+    expect(header()?.hasAttribute('inert')).toBe(false)
   })
 })

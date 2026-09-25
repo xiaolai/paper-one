@@ -296,7 +296,30 @@ describe('the dependencies the sweep is given', () => {
   })
 
   it('hands the main thread back when asked to breathe', async () => {
+    /* ⚠️ **A LIVENESS BOUND, NOT A BARE AWAIT — AND THAT IS WHAT MAKES THIS
+     * READABLE BY THE MUTATION GATE.** Emptied, `breathe` returns a promise
+     * that never settles: this case DETECTS that, but by hanging with it, so
+     * the sweep saw a wall-clock timeout twice and answered `timed-out` —
+     * *whether a test kills it is unknown*, the one verdict that authorises
+     * nothing. Bounded, the same mutant fails by name in two seconds.
+     *
+     * Two seconds is a thousand-fold margin on a promise that settles in
+     * microseconds (`BREATHE_MS` is 0). The same fix phase 30 records for
+     * `downloads.stop`, whose two cases spent 30.7 s between them saying
+     * nothing.
+     *
+     * `Promise.race` is safe HERE and would not be in the source: an
+     * `ArrayDeclaration` mutant makes `race([])` pend for ever, which is the
+     * trap this comment is about — test files are not mutated. */
     const { api } = contextWith()
-    await expect(buildDeps(api, fakeIndex(), () => true).breathe()).resolves.toBeUndefined()
+    const settled = await Promise.race([
+      buildDeps(api, fakeIndex(), () => true)
+        .breathe()
+        .then(() => 'settled' as const),
+      new Promise<'never settled'>((resolve) => {
+        setTimeout(() => resolve('never settled'), 2000)
+      }),
+    ])
+    expect(settled).toBe('settled')
   })
 })
