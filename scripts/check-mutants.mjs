@@ -6576,10 +6576,13 @@ export function acquireLock(file, pid = process.pid, alive = isAlive, holderOf =
   for (;;) {
     try {
       writeFileSync(file, `${pid}\n`, { flag: 'wx' })
-      return () => {
+      const release = () => {
         // Stryker disable next-line ObjectLiteral,BooleanLiteral: `force` decides only what a MISSING file does, and the line before has just read this one's pid
         if (lockHolder(file) === pid) rmSync(file, { force: true })
       }
+      /* Only for a lock this process really holds — a test passing a made-up
+         pid must not install handlers on the runner. */
+      return pid === process.pid ? alsoOnTheWayOut(release) : release
     } catch (cause) {
       if (codeOf(cause) !== 'EEXIST') throw cause
     }
@@ -6587,6 +6590,63 @@ export function acquireLock(file, pid = process.pid, alive = isAlive, holderOf =
     if (holder === undefined) continue
     if (holder === null || alive(holder)) throw heldBy(file, holder)
     takeOver(file, pid, alive)
+  }
+}
+
+/**
+ * Release the lock on the ways out that `finally` never sees.
+ *
+ * ⚠️ **A SWEEP IS INTERRUPTED FAR MORE OFTEN THAN IT CRASHES.** The sweep's own
+ * `finally` covers a normal end and a throw, and covers neither Ctrl-C nor a
+ * `SIGTERM` — Node runs no `finally` for an unhandled signal — so a 20-minute
+ * run cut short left its lock behind. That is exactly when somebody stops one.
+ *
+ * ⚠️ **AND A LEFTOVER LOCK IS NOT MERELY UNTIDY, BECAUSE `isAlive` IS
+ * `process.kill(pid, 0)` — LIVENESS WITH NO IDENTITY.** While the stale pid
+ * stays dead, `takeOver` reclaims the lock and nobody notices. Once the
+ * operating system RECYCLES that pid onto any unrelated process, the check says
+ * alive, and the next sweep refuses to start with *"another sweep (pid N) holds
+ * …"* naming something that is not a sweep. macOS wraps pids in the tens of
+ * thousands, so this arrives in days rather than in theory.
+ *
+ * ⚠️ **`SIGKILL` IS STILL UNCATCHABLE**, and a harness memory kill is one — so
+ * this narrows the window rather than closing it. `takeOver` remains the
+ * recovery path; this stops feeding it.
+ *
+ * The handlers come off when the sweep ends normally, and `release` itself is
+ * safe to call twice: it re-reads the holder and removes nothing that is not
+ * its own.
+ */
+function alsoOnTheWayOut(release) {
+  const quietly = () => {
+    try {
+      release()
+    } catch {
+      /* The way out is already decided; a failed unlink must not replace the
+         exit code with a stack trace. `takeOver` is the backstop. */
+    }
+  }
+  /* `exit` covers `process.exit` and an uncaught throw. */
+  const onSignal = new Map()
+  for (const [signal, code] of [
+    ['SIGINT', 130],
+    ['SIGTERM', 143],
+    ['SIGHUP', 129],
+  ]) {
+    const handler = () => {
+      quietly()
+      /* The shell's own convention, 128 + the signal number, so a caller can
+         still tell an interrupted sweep from a failed one. */
+      process.exit(code)
+    }
+    onSignal.set(signal, handler)
+    process.once(signal, handler)
+  }
+  process.once('exit', quietly)
+  return () => {
+    for (const [signal, handler] of onSignal) process.off(signal, handler)
+    process.off('exit', quietly)
+    release()
   }
 }
 

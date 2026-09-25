@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   chmodSync,
@@ -600,6 +600,81 @@ describe('one sweep per checkout', () => {
       expect(existsSync(lock)).toBe(false)
       acquireLock(lock)()
       expect(existsSync(lock)).toBe(false)
+    })
+  })
+
+  /**
+   * ⚠️ **A SWEEP IS INTERRUPTED FAR MORE OFTEN THAN IT CRASHES, AND `finally`
+   * NEVER SEES A SIGNAL.** The sweep's own `finally` covers a normal end and a
+   * throw; Node runs no `finally` for an unhandled `SIGINT`, so a 20-minute run
+   * stopped with Ctrl-C left its lock behind — which is precisely when somebody
+   * stops one.
+   *
+   * ⚠️ **AND A LEFTOVER IS NOT MERELY UNTIDY.** `isAlive` is
+   * `process.kill(pid, 0)`: liveness with NO identity. While the stale pid
+   * stays dead `takeOver` reclaims the lock silently; once the system recycles
+   * that pid onto any unrelated process, the next sweep refuses to start,
+   * naming a "sweep" that is not one. Found 2026-09-25 on a real lock left from
+   * the day before.
+   *
+   * These drive a REAL child through a REAL signal, because that is the whole
+   * mechanism: a handler asserted in-process proves only that it was
+   * registered.
+   */
+  describe('a sweep stopped by a signal lets go of its lock', () => {
+    const holder = (lock) =>
+      `import { acquireLock } from ${JSON.stringify(path.resolve('scripts/check-mutants.mjs'))}\n` +
+      `acquireLock(${JSON.stringify(lock)})\n` +
+      `process.stdout.write('held\\n')\n` +
+      `setInterval(() => {}, 1000)\n`
+
+    /** Start a child holding the lock, and wait until it really holds it. */
+    const holding = async (root) => {
+      const lock = path.join(root, 'check-mutants.lock')
+      const script = path.join(root, 'holder.mjs')
+      writeFileSync(script, holder(lock))
+      const child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'ignore'] })
+      await new Promise((resolve, reject) => {
+        child.stdout.once('data', resolve)
+        child.once('error', reject)
+        setTimeout(() => reject(new Error('the holder never took the lock')), 10_000)
+      })
+      expect(existsSync(lock)).toBe(true)
+      return { lock, child }
+    }
+
+    const stoppedBy = async (root, signal) => {
+      const { lock, child } = await holding(root)
+      const code = await new Promise((resolve) => {
+        child.once('exit', (status, why) => resolve(status ?? why))
+        child.kill(signal)
+      })
+      return { lock, code }
+    }
+
+    it.each([
+      ['SIGINT', 130],
+      ['SIGTERM', 143],
+      ['SIGHUP', 129],
+    ])('releases on %s, and exits 128 plus the signal', async (signal, expected) => {
+      await inScratch('mutants-signal-', async (root) => {
+        const { lock, code } = await stoppedBy(root, signal)
+        expect(existsSync(lock)).toBe(false)
+        /* The shell's own convention, so a caller can still tell an interrupted
+           sweep from a failed one. */
+        expect(code).toBe(expected)
+      })
+    })
+
+    it('cannot release on SIGKILL, which is why takeOver still exists', async () => {
+      /* ⚠️ **THE HONEST LIMIT, MEASURED RATHER THAN ASSERTED.** A harness memory
+         kill is a SIGKILL and no handler runs for one, so the signal release
+         NARROWS the window and does not close it. A case that only proved the
+         catchable signals would imply a guarantee this does not give. */
+      await inScratch('mutants-signal-', async (root) => {
+        const { lock } = await stoppedBy(root, 'SIGKILL')
+        expect(existsSync(lock)).toBe(true)
+      })
     })
   })
 
