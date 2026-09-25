@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  deepFreeze,
   GRANT_FAMILIES,
   SERVICE_AUDIENCES,
   SERVICE_GRANTS,
@@ -325,5 +326,63 @@ describe('the published table cannot be rewritten at runtime', () => {
     expect(() => {
       ;(field as unknown as { name: string }).name = 'tampered'
     }).toThrow()
+  })
+})
+
+describe('the table is frozen, and reachable by name', () => {
+  /* ⚠️ **SIX MUTANTS SAT ON `deepFreeze` AND THE BY-NAME INDEX, AND THE MERGE
+   * BASE COULD DECIDE NONE OF THEM** — its report marks each `static`, and a
+   * static mutant that throws while the module loads is reported `Survived` by
+   * Stryker's vitest runner because the suite fails no test. So they were
+   * neither authorised nor billed; the gate's own instruction is to settle them
+   * by killing them here. */
+  it('freezes the rows, their arrays and their nested fields', () => {
+    const row = SERVICE_TABLE[0]
+    expect(row).toBeDefined()
+    if (!row) return
+    expect(Object.isFrozen(SERVICE_TABLE)).toBe(true)
+    expect(Object.isFrozen(row)).toBe(true)
+    /* NESTED, which is the whole of what `deepFreeze` adds over one
+     * `Object.freeze` — the recursion is what the mutants empty. */
+    const nested = Object.getOwnPropertyNames(row)
+      .map((key) => (row as unknown as Record<string, unknown>)[key])
+      .filter((value): value is object => value !== null && typeof value === 'object')
+    expect(nested.length, 'a row with no object field cannot show the recursion').toBeGreaterThan(0)
+    for (const value of nested) expect(Object.isFrozen(value)).toBe(true)
+  })
+
+  it('leaves a null field alone rather than walking its properties', () => {
+    /* ⚠️ **`typeof null === 'object'`**, so without the null clause this falls
+     * through to `Object.getOwnPropertyNames(null)` and throws — at IMPORT,
+     * because the table is frozen at module scope. No row carries a null field
+     * today, which is why nothing that walks `SERVICE_TABLE` reaches it, and
+     * why that one mutant survives where every other one in the function stops
+     * the module loading. Asked directly instead. */
+    expect(deepFreeze(null)).toBeNull()
+    const holding = { a: null, b: { c: null } }
+    expect(() => deepFreeze(holding)).not.toThrow()
+    expect(Object.isFrozen(holding)).toBe(true)
+    expect(Object.isFrozen(holding.b)).toBe(true)
+  })
+
+  it('leaves a primitive alone rather than trying to freeze it', () => {
+    /* The guard's own job: `Object.freeze` on a string is harmless and on
+     * `null` it throws in older engines, but the branch exists so the RECURSION
+     * stops — without it `deepFreeze` walks a string's indices for ever. */
+    const row = SERVICE_TABLE[0]
+    if (!row) return
+    expect(typeof row.name).toBe('string')
+    expect(row.name.length).toBeGreaterThan(0)
+  })
+
+  it('answers a descriptor for every name in the table, and null for anything else', () => {
+    /* ⚠️ **THE INDEX IS BUILT BY ONE `map` WHOSE ARROW WAS A SURVIVOR.**
+     * Returning `undefined` from it makes every entry `[undefined, undefined]`,
+     * so the map holds one key and every real lookup answers null — the
+     * router's `unknown-service` for every service the app has. */
+    for (const row of SERVICE_TABLE) {
+      expect(serviceDescriptor(row.name), row.name).toBe(row)
+    }
+    expect(serviceDescriptor('no.such.service')).toBeNull()
   })
 })

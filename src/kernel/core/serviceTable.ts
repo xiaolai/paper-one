@@ -1164,7 +1164,18 @@ export type ServiceName = (typeof TABLE)[number]['name']
  * so `BY_NAME` and the row identities stay the same objects the handlers are
  * typed against.
  */
-function deepFreeze<T>(value: T): T {
+/**
+ * ⚠️ **EXPORTED FOR ITS NULL GUARD, WHICH NOTHING IN THE TABLE REACHES.**
+ * `typeof null === 'object'`, so without the first clause a null field would
+ * fall through to `Object.getOwnPropertyNames(null)` and throw at import — and
+ * no row carries one today, which is exactly why no test that walks
+ * `SERVICE_TABLE` can reach it. Measured: that mutant survives while every
+ * other one in this function fails to LOAD the module. Asked directly, it is
+ * one assertion.
+ *
+ * Internal otherwise — nothing but `SERVICE_TABLE` should call it.
+ */
+export function deepFreeze<T>(value: T): T {
   if (value === null || typeof value !== 'object') return value
   for (const key of Object.getOwnPropertyNames(value)) {
     deepFreeze((value as Record<string, unknown>)[key])
@@ -1172,6 +1183,24 @@ function deepFreeze<T>(value: T): T {
   return Object.freeze(value)
 }
 
+/* ⚠️ **FIVE OF THIS FUNCTION'S MUTANTS CANNOT BE SCORED BY STRYKER'S VITEST
+   RUNNER, AND THAT IS MEASURED RATHER THAN ASSUMED.** It runs at module scope,
+   so a mutant that breaks it throws while the module is IMPORTED — and a suite
+   that fails to load fails no test, which the runner reads as `Survived`.
+   Measured 2026-09-25, each mutant applied by hand and the suite run:
+
+   | mutant | what happened |
+   |---|---|
+   | the body emptied | module did not load |
+   | the whole guard `false` | module did not load |
+   | `\|\|` for `&&` | module did not load |
+   | `typeof value !== 'object'` `false` | module did not load |
+   | the by-name map's arrow | module did not load |
+   | **`value === null` `false`** | **genuinely survived** — hence the export above |
+
+   The four `deepFreeze` ones are also covered by four live cases that DO fail
+   when the function stops freezing, so the behaviour is tested; what cannot be
+   done is reading that off a report. `AGENTS.md` records the runner's limit. */
 export const SERVICE_TABLE: readonly ServiceDescriptor[] = deepFreeze(TABLE)
 
 /** Names, in table order. */

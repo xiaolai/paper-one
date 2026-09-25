@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { WirePeer } from './lib/wire'
 import { fakeWire } from './lib/fakeWire.testkit'
-import { devicePortOver, deviceRow, personPortOver, publishPortOver, readRole, releasePeer, serveWhenShelf } from './index'
+import { devicePortOver, deviceRow, peer, personPortOver, publishPortOver, readRole, releasePeer, serveWhenShelf } from './index'
 
 /**
  * THE `device` NOUN'S ADAPTER — the three operations that change who this
@@ -816,5 +816,57 @@ describe('the person port’s identity lifecycle', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+describe('the capability’s own Devices section', () => {
+  /* ⚠️ **THREE MUTANTS SAT HERE AND THE MERGE BASE COULD DECIDE NONE OF THEM** —
+   * its report marks each `static`, so they were neither authorised nor billed.
+   * Measured at HEAD, applied by hand: all three genuinely survive, so they are
+   * killable and the gate's instruction is to kill them here. Nothing asserted
+   * that this capability contributes a settings section at all. */
+  it('contributes one section, named and ordered', () => {
+    expect(peer.settings).toHaveLength(1)
+    const section = peer.settings?.[0]
+    expect(section?.id).toBe('peer:devices')
+    expect(section?.title).toBe('Devices')
+    /* A NUMBER RATHER THAN THE DEFAULT, deliberately — see the note beside it:
+     * both this and Storage declare one, so neither moves when the other
+     * changes its mind. */
+    expect(section?.order).toBe(20)
+  })
+
+  it('draws nothing until the peer model exists, and something once it does', () => {
+    /* `render` is called on every Settings paint, before the plugin has
+     * answered — returning an element there would mount a pane over a model
+     * that is not there. */
+    const section = peer.settings?.[0]
+    expect(section?.render).toBeTypeOf('function')
+    expect(section?.render?.({ bookId: null })).toBeNull()
+  })
+})
+
+describe('serveWhenShelf asks the role only when it is going to use it', () => {
+  it('says nothing about a role it never tried to read, with no plugin', async () => {
+    /* ⚠️ **ASSERTING THAT NOTHING WAS SERVED CANNOT SEE THIS GUARD**, which is
+     * why both its mutants survived. The guard below catches a stopped
+     * capability and a satchel anyway, so the OUTCOME is identical either way;
+     * what changes is whether `readRole` is entered at all. With no plugin it
+     * would be called on `null`, throw, be retried twice behind 250 ms and
+     * 500 ms of backoff, and WARN — three quarters of a second of nothing, and
+     * a diagnostic about a plugin the reader does not have.
+     *
+     * ⚠️ **AND THE STOPPED CASE CANNOT SEE IT EITHER**, measured: `readRole`
+     * tests `stopped()` itself at the top of every attempt and returns `null`
+     * without asking, so a mutant that skips this guard reads no role there
+     * either. The no-plugin case is the only one that distinguishes them. */
+    const warned: string[] = []
+    const answer = await serveWhenShelf({
+      port: null,
+      stopped: () => false,
+      diagnostics: { warn: (event: string) => void warned.push(event) },
+    })([{ name: 'book.list', grant: 'book:read', handler: () => [] }] as never)
+    expect(warned).toEqual([])
+    expect(() => answer.dispose()).not.toThrow()
   })
 })
