@@ -37,7 +37,7 @@ concurrency:
 jobs:
   host:
     name: host (macOS, desktop target)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -57,9 +57,11 @@ jobs:
           components: rustfmt, clippy
       # ⚠️ **THE RUNNER'S DEFAULT XCODE IS TOO OLD FOR THE VOICE BRIDGE, AND THE
       # FAILURE NAMES CLIPPY.** `swift/QwenKit` depends on `mlx-audio-swift`,
-      # whose pinned revision declares `swift-tools-version: 6.2`; `macos-15`
-      # defaults to Xcode 16.4, which is Swift 6.1, while carrying 26.0 through
-      # 26.3 unselected. `tauri-plugin-voices`'s `build.rs` runs `swift build`,
+      # which declares `swift-tools-version: 6.2` — and whose own `mlx-swift`
+      # @ 0.31.6 declares 6.3, which is the number that actually binds. Measured
+      # in CI: `macos-15` defaults to Xcode 16.4 (Swift 6.1) and its NEWEST, 26.3,
+      # is only 6.2.4, so no Xcode on that image can build this at all. The runner
+      # is `macos-26` for that reason — it carries 26.4.1, 26.5 and 26.6. `tauri-plugin-voices`'s `build.rs` runs `swift build`,
       # so SwiftPM's refusal — "package is using Swift tools version 6.2.0 but
       # the installed version is 6.1.0" — surfaces thirty lines above
       # `✗ verify: cargo clippy -D warnings failed (exit 101)`, which is where
@@ -68,9 +70,9 @@ jobs:
       #
       # THE NEWEST INSTALLED XCODE, not a pinned path: the images rotate, and a
       # path that stops existing is another failure that names something else.
-      # The version is then ASSERTED — when a rotation takes 6.2 away, this says
+      # The version is then ASSERTED — when a rotation takes 6.3 away, this says
       # so in its own words instead of dying inside a Rust step.
-      - name: Swift 6.2 or newer, which the voice bridge requires
+      - name: Swift 6.3 or newer, which the voice bridge requires
         run: |
           set -euo pipefail
           newest="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
@@ -80,8 +82,8 @@ jobs:
             echo "could not read a version from: $(swift -version 2>&1 | head -1)"
             exit 1
           }
-          if [ "$(printf '%s\n' 6.2 "$have" | sort -V | head -1)" != "6.2" ]; then
-            echo "QwenKit needs Swift 6.2 or newer; $newest provides $have"
+          if [ "$(printf '%s\n' 6.3 "$have" | sort -V | head -1)" != "6.3" ]; then
+            echo "QwenKit needs Swift 6.3 or newer (mlx-swift asks for it); $newest provides $have"
             echo "installed Xcodes:"; ls -d /Applications/Xcode_*.app
             exit 1
           fi
