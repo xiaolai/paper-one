@@ -130,6 +130,8 @@ const WINDOWS_CANNOT = {
   nameAStar: '`*` is not a legal character in a Windows file name',
   refuseALink:
     'Node has no O_NOFOLLOW on Windows, so an exclusive create writes through a dangling link and a read follows a live one',
+  deliverASignal:
+    'Windows has no POSIX signals: `child.kill` calls TerminateProcess, so the target dies with no handler run and cannot let go of anything — the lock is left for `takeOver`, exactly as it is after a SIGKILL, and the case below and the takeover cases are what cover that',
 }
 
 /**
@@ -680,7 +682,14 @@ describe('one sweep per checkout', () => {
       ['SIGINT', 130],
       ['SIGTERM', 143],
       ['SIGHUP', 129],
-    ])('releases on %s, and exits 128 plus the signal', async (signal, expected) => {
+    ])('releases on %s, and exits 128 plus the signal', async (signal, expected, context) => {
+      /* ⚠️ **NOT A PLATFORM QUIRK TO WORK AROUND — THERE IS NO HANDLER TO RUN.**
+         Node's own documentation is explicit that on Windows 'SIGINT', 'SIGTERM'
+         and 'SIGKILL' cause unconditional termination of the target, so releasing
+         the lock on the way out is a mechanism that cannot exist there. What
+         Windows relies on instead is `takeOver`, which is what the SIGKILL case
+         below and the takeover cases beside it measure — on every platform. */
+      if (WINDOWS) return context.skip(WINDOWS_CANNOT.deliverASignal)
       await inScratch('mutants-signal-', async (root) => {
         const { lock, code } = await stoppedBy(root, signal)
         expect(existsSync(lock)).toBe(false)
