@@ -289,6 +289,27 @@ fn without_the_bridge_the_voice_refuses_by_name_rather_than_being_absent() {
         "and what a build that has one needs: {text}"
     );
     super::unload();
+
+    // ⚠️ **AND THE RENDER, WHICH THIS CASE'S OWN NAME PROMISED AND DID NOT
+    // CHECK.** `through_bridge` had no `cfg(not(...))` counterpart, so nothing
+    // without the bridge COMPILED — `error[E0425]: cannot find function
+    // `through_bridge``, red on the Linux gate and on the Linux bundle from
+    // 2026-09-25, and the escape hatch `PAPER_VOICES_NO_SWIFT` unusable for the
+    // one thing it exists for. This case was the place that should have caught
+    // it: it said "rather than being absent" and then asked only about `load`.
+    //
+    // Calling it at all is the assertion — a missing counterpart is a build
+    // error here rather than in CI — and the answer is checked because a
+    // counterpart that lied would be worse than none: `NotLoaded` is what a
+    // build with no bridge honestly is, and `worth_retrying` false is what stops
+    // a caller spending seeds on it.
+    let refused = super::through_bridge("春天", "Vivian", "zh", 24_000, 0, 1, 1);
+    let Attempt::Failed(why) = refused else {
+        panic!("a build with no bridge cannot have rendered: {refused:?}");
+    };
+    assert_eq!(why, Failure::NotLoaded, "and it is not loaded, by name");
+    assert!(!why.worth_retrying(), "so no seed is spent on it again");
+    assert_eq!(why.why(), "the voice was not loaded");
 }
 
 #[cfg(all(target_os = "macos", qwen_bridge))]

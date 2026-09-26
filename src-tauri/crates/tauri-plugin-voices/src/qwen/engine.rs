@@ -344,6 +344,40 @@ pub fn unload() {
 #[cfg(not(all(target_os = "macos", qwen_bridge)))]
 pub fn unload() {}
 
+/// Render one sentence where there is no bridge to render it through.
+///
+/// ⚠️ **THE COUNTERPART `load` AND `unload` BOTH HAVE, AND THIS ONE DID NOT —
+/// SO NOTHING WITHOUT THE BRIDGE COMPILED AT ALL.** `commands.rs` calls this
+/// unconditionally, which is correct: `load` refuses first in such a build, so
+/// this is unreachable at run time. Unreachable is not the same as absent, and
+/// the compiler only cares about the second — every push to `main` was red from
+/// 2026-09-25 with `error[E0425]: cannot find function `through_bridge` in
+/// module `qwen::engine``, on the Linux gate AND on the Linux bundle, which is
+/// the release artifact.
+///
+/// ⚠️ **AND IT TOOK THE ESCAPE HATCH WITH IT.** `PAPER_VOICES_NO_SWIFT` exists
+/// so a machine with no Metal toolchain can build the app saying it has no
+/// Chinese voice — `build.rs` and this module's own header say so. With this
+/// function missing, the hatch could not be used for the one thing it is for.
+///
+/// `NotLoaded` is the honest answer rather than a new variant: in a build with
+/// no bridge nothing is ever loaded, `why()` says *"the voice was not loaded"*,
+/// and `worth_retrying()` is false for it — so no caller spends seeds on a
+/// refusal that cannot change.
+#[cfg(not(all(target_os = "macos", qwen_bridge)))]
+#[must_use]
+pub fn through_bridge(
+    _sentence: &str,
+    _voice: &str,
+    _language: &str,
+    _sample_rate: u32,
+    _seed: u64,
+    _cap: usize,
+    _room: usize,
+) -> Attempt {
+    Attempt::Failed(Failure::NotLoaded)
+}
+
 /// Render one sentence through the bridge.
 ///
 /// The buffer is allocated here, from the cap the caller computed, so nothing
