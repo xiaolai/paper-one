@@ -55,6 +55,37 @@ jobs:
           # and `bump`-style changes to the toolchain touch both.
           toolchain: 1.97.0
           components: rustfmt, clippy
+      # ⚠️ **THE RUNNER'S DEFAULT XCODE IS TOO OLD FOR THE VOICE BRIDGE, AND THE
+      # FAILURE NAMES CLIPPY.** `swift/QwenKit` depends on `mlx-audio-swift`,
+      # whose pinned revision declares `swift-tools-version: 6.2`; `macos-15`
+      # defaults to Xcode 16.4, which is Swift 6.1, while carrying 26.0 through
+      # 26.3 unselected. `tauri-plugin-voices`'s `build.rs` runs `swift build`,
+      # so SwiftPM's refusal — "package is using Swift tools version 6.2.0 but
+      # the installed version is 6.1.0" — surfaces thirty lines above
+      # `✗ verify: cargo clippy -D warnings failed (exit 101)`, which is where
+      # anybody reading the log starts. Every push to `main` was red for this
+      # from 2026-09-25, and it passes on a developer Mac because those run 6.4.
+      #
+      # THE NEWEST INSTALLED XCODE, not a pinned path: the images rotate, and a
+      # path that stops existing is another failure that names something else.
+      # The version is then ASSERTED — when a rotation takes 6.2 away, this says
+      # so in its own words instead of dying inside a Rust step.
+      - name: Swift 6.2 or newer, which the voice bridge requires
+        run: |
+          set -euo pipefail
+          newest="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$newest"
+          have="$(swift -version 2>&1 | sed -nE 's/.*Apple Swift version ([0-9]+\.[0-9]+).*/\1/p' | head -1)"
+          [ -n "$have" ] || {
+            echo "could not read a version from: $(swift -version 2>&1 | head -1)"
+            exit 1
+          }
+          if [ "$(printf '%s\n' 6.2 "$have" | sort -V | head -1)" != "6.2" ]; then
+            echo "QwenKit needs Swift 6.2 or newer; $newest provides $have"
+            echo "installed Xcodes:"; ls -d /Applications/Xcode_*.app
+            exit 1
+          fi
+          echo "using $newest (Swift $have)"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
