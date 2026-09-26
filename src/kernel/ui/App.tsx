@@ -72,6 +72,7 @@ import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
 import { chapterSteps } from './tocOrder'
 import { useSpeech } from './reader/useSpeech'
+import { useAutoAdvance } from './reader/useAutoAdvance'
 import { documentLang } from './reader/speech'
 import { NO_GOOD_VOICE, voiceFor } from './reader/voiceChoice'
 import { engineVoiceFor, missingPackNotice } from './reader/engineVoice'
@@ -351,6 +352,15 @@ export function App({
     [book.next, book.goTo, book.toc, book.position.chapterHref],
   )
   const speech = useSpeech(book.doc, speechPaging, speechPrefs, voiceEngine)
+  /**
+   * The book turning itself, at the pace the time-left estimate uses.
+   *
+   * ⚠️ **DECLARED AFTER `speech` BECAUSE IT DEFERS TO IT.** Read aloud already
+   * turns the page, so the two together double-advance; `useAutoAdvance` refuses
+   * to start while a reading speaks and gives the book up if one starts under
+   * it. One pace at a time.
+   */
+  const autoAdvance = useAutoAdvance({ step: book.step, pace: book.pace, speaking: speech.speaking })
   /* What the Voice group in Settings needs that app state cannot answer: the
      language of the book on screen, and what this machine can actually say.
      `documentLang` is the same fact the utterance is given, read from the same
@@ -2109,6 +2119,10 @@ export function App({
            rather than offering one that would refuse. `useArchives` decides,
            because it is what knows. */
         exportMarks: archives.exportMarks,
+        /* Offered only when a pace can be derived and no reading is speaking —
+           `useAutoAdvance.offered` answers the first, `speech.speaking` the
+           second. Null is what keeps a dead row out of the palette. */
+        autoAdvance: autoAdvance.offered && !speech.speaking ? autoAdvance : null,
         /* ABSENT OFF macOS and with no book open — `useAudiobook` answers null
            there, and the palette then omits the row rather than offering one
            that would be refused. */

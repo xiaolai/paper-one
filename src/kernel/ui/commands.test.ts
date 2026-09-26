@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Command } from '../core/capability'
 import { buildCommands, filterCommands, score } from './commands'
 import { DEFAULT_STEP_IDX, READING_STEPS } from '../core/metrics'
@@ -8,7 +8,7 @@ import { PANES, PANE_SHORTCUTS, panesFor } from './panes'
 import { resolveAccel, resolvePageKey } from './accel'
 import { initialState, paneFits, screenJump, type AppState } from './state'
 
-function context(over: Partial<AppState> = {}) {
+function context(over: Partial<AppState> = {}, ctxOver: Record<string, unknown> = {}) {
   const dispatched: unknown[] = []
   const ctx = {
     state: { ...initialState, ...over },
@@ -30,6 +30,9 @@ function context(over: Partial<AppState> = {}) {
     jumpForward: null,
     exportMarks: null,
     importMarks: null,
+    /* Null is the ordinary state: no pace derived, or a reading speaking. */
+    autoAdvance: null,
+    ...ctxOver,
   }
   return { ctx, dispatched }
 }
@@ -1554,5 +1557,46 @@ describe('a contributed command that shadows a kernel one', () => {
     })
     expect(commands.filter((c) => c.id === 'circle:share')).toHaveLength(1)
     expect(seen).toEqual(['circle:share'])
+  })
+})
+
+describe('turning the pages by itself', () => {
+  /* ⚠️ **NULL RATHER THAN A DISABLED ROW**, the rule the jump pair states: the
+     palette has no disabled state, so a row that looks like every other row and
+     does nothing is worse than an absent one. It is null for a book whose pace
+     cannot be derived — every PDF — and while a reading speaks, because read
+     aloud already turns the page. */
+
+  it('offers nothing when it cannot be offered', () => {
+    const ids = buildCommands(context({}, { autoAdvance: null }).ctx).map((c) => c.id)
+    expect(ids).not.toContain('reading:auto-advance')
+  })
+
+  it('offers one row that starts it, naming what it will do', () => {
+    const toggle = vi.fn()
+    const rows = buildCommands(context({}, { autoAdvance: { advancing: false, toggle } }).ctx)
+    const row = rows.find((c) => c.id === 'reading:auto-advance')
+    expect(row).toBeDefined()
+    expect(row!.label).toBe('Turn the pages for me')
+    expect(row!.on).toBe(false)
+    row!.run()
+    expect(toggle).toHaveBeenCalledTimes(1)
+  })
+
+  it('names stopping while it is running, and reads as on', () => {
+    /* A row whose label does not change with its state tells a reader the app
+       has forgotten what it is doing. */
+    const rows = buildCommands(context({}, { autoAdvance: { advancing: true, toggle: vi.fn() } }).ctx)
+    const row = rows.find((c) => c.id === 'reading:auto-advance')
+    expect(row!.label).toBe('Stop turning the pages')
+    expect(row!.on).toBe(true)
+  })
+
+  it('sits in the Reading group, beside the flow switch', () => {
+    const rows = buildCommands(context({}, { autoAdvance: { advancing: false, toggle: vi.fn() } }).ctx)
+    const row = rows.find((c) => c.id === 'reading:auto-advance')
+    const flow = rows.find((c) => c.id === 'reading:flow')
+    expect(row!.group).toBe('Reading')
+    expect(row!.group).toBe(flow!.group)
   })
 })

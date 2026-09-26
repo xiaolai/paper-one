@@ -5,6 +5,10 @@ import type { SearchHit } from '../reader/bookSearch'
 import type { MarkAnchor } from '../reader/markPaint'
 import type { PassOutcome, PendingMark } from '../reader/reanchorPass'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
+import type { StepPace } from '../../core/autoAdvance'
+
+/** What a book with no derivable pace answers — `restPerStep` refuses it. */
+const NO_PACE: StepPace = { bookWords: null, sectionBytes: 0, spineBytes: 0, steps: 0 }
 import { bookIdFor } from '../../core/marks'
 
 export type { SearchHit }
@@ -116,6 +120,10 @@ export interface Book extends BookState {
   setFootnoteMount: (mount: HTMLElement | null, within: HTMLElement | null) => void
   /** Turn the page. The only way through a fixed-layout book. */
   next: () => void
+  /** One hands-free step; false when it would move nothing. See `useAutoAdvance`. */
+  step: () => boolean
+  /** What auto-advance derives its pace from — see `core/autoAdvance.ts`. */
+  pace: () => StepPace
   prev: () => void
   /**
    * The page to one SIDE — which is not the same question as next/prev.
@@ -428,6 +436,54 @@ export function useBook(): Book {
    * re-rendered every reader of this hook for a value nothing read. The verbs
    * delegate and nothing else now. */
   const next = useCallback(() => navigatorRef.current?.next(), [])
+  /**
+   * One step of hands-free reading, answering whether it moved.
+   *
+   * ⚠️ **ASKS `atEnd` BEFORE STEPPING RATHER THAN OBSERVING THE RESULT.**
+   * `next()` answers a promise and never says whether anything moved, so an
+   * auto-advance built on it would sit at the end of the book firing for ever
+   * with its control still lit. See `SessionNavigator.atEnd`.
+   */
+  const step = useCallback((): boolean => {
+    const navigator = navigatorRef.current
+    /* ⚠️ **THE METHOD IS CHECKED, NOT JUST THE NAVIGATOR.** `?.` guards a null
+       navigator and not one that is missing a member, and this runs where a
+       throw takes the whole reader down: `offered` is read during App's render,
+       so `pace is not a function` was an uncaught exception that unmounted the
+       app — 52 cases in one file, all of them timing out because App never
+       mounted. A navigator without these answers "cannot advance", which is a
+       correct answer; crashing for a missing optional feature is not. */
+    try {
+      if (typeof navigator?.atEnd !== 'function' || typeof navigator.next !== 'function') return false
+      if (navigator.atEnd()) return false
+      navigator.next()
+      return true
+    } catch {
+      /* Same reason as `pace` below. A step that cannot be taken is "no", which
+         stops the advance cleanly; a throw here would arrive inside a timer
+         callback, where nothing is listening for it. */
+      return false
+    }
+  }, [])
+  /** What auto-advance derives its pace from — see `core/autoAdvance.ts`. */
+  const pace = useCallback((): StepPace => {
+    /* ⚠️ **NOTHING READ HERE MAY THROW, BECAUSE THIS RUNS DURING RENDER.**
+       `useAutoAdvance.offered` calls this on every render of `App`, so an
+       exception is an uncaught one that unmounts the whole reader — which is
+       exactly what happened: `renderer.pages` is a GETTER that throws before
+       the paginator has a view, and the app came up as *"Uncaught error —
+       TypeError: undefined is not an object"* over a blank window.
+       `session.ts`'s `stepCount` catches that at the layer that touches the
+       fork; this is the second layer, and it earns its keep because the cost of
+       being wrong is the entire app rather than one absent feature. Even the
+       `typeof` test is inside the try: reading a property INVOKES a getter. */
+    try {
+      const navigator = navigatorRef.current
+      return typeof navigator?.pace === 'function' ? navigator.pace() : NO_PACE
+    } catch {
+      return NO_PACE
+    }
+  }, [])
   const prev = useCallback(() => navigatorRef.current?.prev(), [])
   const goLeft = useCallback(() => navigatorRef.current?.goLeft(), [])
   const goRight = useCallback(() => navigatorRef.current?.goRight(), [])
@@ -535,6 +591,8 @@ export function useBook(): Book {
     closeFootnote,
     setFootnoteMount,
     next,
+    step,
+    pace,
     prev,
     goLeft,
     goRight,

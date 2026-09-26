@@ -305,4 +305,85 @@ describe('where a book is before it has been anywhere', () => {
       sectionExact: false,
     })
   })
+
+  /**
+   * ⚠️ **THESE TWO ARE READ DURING RENDER, SO A THROW HERE UNMOUNTS THE READER.**
+   * `useAutoAdvance.offered` calls `pace()` on every render of `App`. When these
+   * helpers used a bare `navigatorRef.current?.pace()`, a navigator that was
+   * present but missing the member threw `pace is not a function` as an uncaught
+   * exception — 52 cases in one file, every one of them timing out at 15 s
+   * because App never mounted at all. The `?.` guarded the wrong thing.
+   *
+   * ⚠️ **AND THE FAKES ARE WHY `tsc` DID NOT SEE IT**: every navigator in these
+   * suites is a partial object cast through `as unknown as`, so the type held
+   * everywhere while the runtime object did not. The cases below supply the
+   * members for real, which is the only way the production path is exercised.
+   */
+  describe('hands-free stepping', () => {
+    const withNavigator = (over: Record<string, unknown>) => {
+      holdFetch()
+      const book = mount()
+      act(() => book().open('https://example.test/a.epub'))
+      const navigator = over as unknown as Parameters<Book['setNavigator']>[1]
+      act(() => book().setNavigator(book().generation, navigator))
+      return book
+    }
+
+    it('steps when there is somewhere to go', () => {
+      const moved: number[] = []
+      const book = withNavigator({ atEnd: () => false, next: () => moved.push(1) })
+      expect(book().step()).toBe(true)
+      expect(moved).toHaveLength(1)
+    })
+
+    it('refuses at the end of the book, and does not call next', () => {
+      const moved: number[] = []
+      const book = withNavigator({ atEnd: () => true, next: () => moved.push(1) })
+      expect(book().step()).toBe(false)
+      expect(moved).toHaveLength(0)
+    })
+
+    it('reads the pace the navigator answers', () => {
+      const pace = { bookWords: 90_000, sectionBytes: 100, spineBytes: 1_000, steps: 12 }
+      const book = withNavigator({ pace: () => pace })
+      expect(book().pace()).toEqual(pace)
+    })
+
+    it('answers no pace and no step for a navigator missing the members', () => {
+      /* The shape every existing fake in these suites has. It must not throw. */
+      const book = withNavigator({})
+      expect(book().step()).toBe(false)
+      expect(book().pace()).toEqual({ bookWords: null, sectionBytes: 0, spineBytes: 0, steps: 0 })
+    })
+
+    it('survives a navigator whose pace throws, rather than taking the reader down', () => {
+      /* ⚠️ **THE SHAPE NO FAKE HAD, AND THE ONE THAT ACTUALLY HAPPENED.**
+         `renderer.pages` is a GETTER that throws before the paginator has a
+         view — measured in the running app: reading it during App's first
+         render died at `viewSize` → `this.#view.element`, and the uncaught
+         exception unmounted the whole reader over a blank window. 12 464 tests
+         passed over it, because a plain-object fake cannot have a throwing
+         getter unless somebody writes one. So here is one. */
+      const book = withNavigator({
+        get pace() {
+          throw new TypeError('undefined is not an object (evaluating \'this.#view.element\')')
+        },
+        atEnd: () => {
+          throw new TypeError('the same, before layout')
+        },
+        next: () => {},
+      })
+      expect(() => book().pace()).not.toThrow()
+      expect(book().pace().bookWords).toBeNull()
+      expect(() => book().step()).not.toThrow()
+      expect(book().step()).toBe(false)
+    })
+
+    it('answers no pace and no step before a navigator arrives at all', () => {
+      holdFetch()
+      const book = mount()
+      expect(book().step()).toBe(false)
+      expect(book().pace().bookWords).toBeNull()
+    })
+  })
 })

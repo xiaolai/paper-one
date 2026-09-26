@@ -312,6 +312,31 @@ declare module 'foliate-js/view.js' {
      * caller reached it through a cast.
      */
     getContents(): { index: number; doc: Document; overlayer?: unknown }[]
+    /**
+     * Where in the section, and how many steps it has.
+     *
+     * ⚠️ **MEASURED, NOT ASSUMED — 2026-09-26 in the running app.** Both are
+     * live in scrolled flow as well as paginated: a 171 651-byte section of a
+     * real textbook answered `page: 0` and `pages: 159`, one viewport each.
+     * `session.ts` reads them for the auto-advance pace and its end-of-book
+     * check, and `AGENTS.md` has named them as the page-turn observable since
+     * the read-aloud work — they were simply never declared.
+     *
+     * ⚠️ **AND BOTH ARE GETTERS THAT THROW BEFORE THE PAGINATOR HAS A VIEW.**
+     * The type says `number | undefined`, which reads as safe to touch, and it
+     * is not: measured in the running app 2026-09-26, reading `pages` during
+     * App's first render died at `viewSize` → `this.#view.element` and the
+     * uncaught exception unmounted the entire reader. TypeScript has no way to
+     * say "this property may throw", so `session.ts`'s `stepCount` and
+     * `stepIndex` are the only permitted readers and this comment is the
+     * warning the type cannot carry.
+     *
+     * OPTIONAL, because a renderer that answers neither must leave every caller
+     * exactly where it was: `atEnd` says no and the pace declines, which is the
+     * same silence a fixed-layout book already produces.
+     */
+    readonly page?: number
+    readonly pages?: number
   }
 
   export interface InitOptions {

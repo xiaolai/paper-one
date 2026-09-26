@@ -142,6 +142,17 @@ export interface KernelCommandContext {
   exportMarks: (() => void) | null
   importMarks: (() => void) | null
   /**
+   * Turn the book by itself, or stop — null where it cannot be offered.
+   *
+   * NULL RATHER THAN A DISABLED ROW, the rule the jump pair below states: the
+   * palette has no disabled state, and a row that looks like every other row and
+   * does nothing is worse than an absent one. It is null for a book whose length
+   * cannot be derived — every PDF — and while a reading is speaking, because read
+   * aloud already turns the page and two paces on one book is a defect with no
+   * honest resolution.
+   */
+  autoAdvance: { readonly advancing: boolean; readonly toggle: () => void } | null
+  /**
    * Back to where the reader was, and forward again — null when the stack has
    * nothing that way.
    *
@@ -298,6 +309,18 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     on: state.progressLineOn,
     run: () => dispatch({ type: 'toggleProgressLine' }),
   })
+
+  if (ctx.autoAdvance) {
+    const auto = ctx.autoAdvance
+    commands.push({
+      id: 'reading:auto-advance',
+      label: auto.advancing ? 'Stop turning the pages' : 'Turn the pages for me',
+      group: 'Reading',
+      keywords: 'auto advance scroll hands free automatic turn itself pace',
+      on: auto.advancing,
+      run: () => auto.toggle(),
+    })
+  }
 
   commands.push({
     id: 'reading:flow',

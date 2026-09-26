@@ -1,14 +1,4 @@
-import type {
-  Book,
-  CreateOverlayDetail,
-  DrawAnnotationDetail,
-  ExternalLinkDetail,
-  LinkDetail,
-  LoadDetail,
-  RelocateDetail,
-  TocItem,
-  View,
-} from 'foliate-js/view.js'
+import type { Book, CreateOverlayDetail, DrawAnnotationDetail, ExternalLinkDetail, LinkDetail, LoadDetail, RelocateDetail, Renderer, TocItem, View } from 'foliate-js/view.js'
 import { reanchorPass, type PassOutcome, type PendingMark } from './reanchorPass'
 import { directionOf } from './direction'
 import { collectText } from './speech'
@@ -19,6 +9,7 @@ import { suppressEmptyGeneratedContent } from './generatedContent'
 import { isEnlargeable, markFigures } from './markFigures'
 import { type PlateDetail, plateOf, plateTargetOf } from './plate'
 import { type BookLength, spineBytes, wordsInSpine } from '../../core/readingTime'
+import type { StepPace } from '../../core/autoAdvance'
 import { matteFigures } from './matteFigures'
 import { markProse } from './markProse'
 import { markSmallText } from './markSmallText'
@@ -385,6 +376,28 @@ export interface SessionNavigator {
    * time, because scrolling worked and nobody missed the binding.
    */
   next: () => void
+  /**
+   * What auto-advance derives its pace from — see `core/autoAdvance.ts`.
+   *
+   * ON THE NAVIGATOR because only the session holds all four terms: the book's
+   * length, this section's bytes, the spine's total, and `renderer.pages`. A
+   * host that assembled them itself would be reading the fork's shapes from
+   * outside, which is what `spineBytes` exists to keep in one place.
+   *
+   * ⚠️ **ASKED PER TICK, NEVER CAPTURED.** `pages` settles after layout and the
+   * section changes under the reader, so a value read once at start-up is the
+   * wrong one twice over.
+   */
+  pace: () => StepPace
+  /**
+   * Whether a step would move nothing — the last page of the last section.
+   *
+   * ⚠️ **SYNCHRONOUS ON PURPOSE.** `next()` answers a promise and never says
+   * whether it moved, so an auto-advance built on it would sit at the end of the
+   * book firing for ever with its control still lit. Asking BEFORE stepping is
+   * the only shape that does not need to observe the result.
+   */
+  atEnd: () => boolean
   prev: () => void
   /**
    * The page to the left, and to the right — in VISUAL terms.
@@ -574,6 +587,48 @@ interface Destroyable {
 
 function destroyable(value: unknown): value is Destroyable {
   return typeof (value as Destroyable | null)?.destroy === 'function'
+}
+
+/**
+ * `renderer.page` and `renderer.pages`, read without taking the app down.
+ *
+ * ⚠️ **`pages` IS A GETTER THAT THROWS BEFORE THE PAGINATOR HAS A VIEW**, and
+ * nothing in its name says so. Measured in the running app 2026-09-26: reading
+ * it during App's first render died at `viewSize` → `this.#view.element`, with
+ * `#view` undefined, and the uncaught exception unmounted the whole reader —
+ * *"Uncaught error — TypeError: undefined is not an object"* over a blank
+ * window. `getContents()` is safe and documented as the only way in; these two
+ * are neither.
+ *
+ * ⚠️ **AND 12 464 TESTS PASSED OVER IT**, because every renderer fake in the
+ * suites is a plain object whose `pages` is a number or absent — a fake cannot
+ * have a throwing getter unless somebody writes one. This is the shape only the
+ * running app shows.
+ *
+ * Null means "cannot say", which every caller already treats as no pace and no
+ * end — the same silence a fixed-layout book produces.
+ */
+function stepCount(renderer: Renderer | null | undefined): number | null {
+  if (!renderer) return null
+  try {
+    const pages = renderer.pages
+    return typeof pages === 'number' && Number.isFinite(pages) ? pages : null
+  } catch {
+    /* Before layout. Not an error to report — the reader has simply not got a
+       laid-out section yet, and will in a moment. */
+    return null
+  }
+}
+
+/** `renderer.page`, with the same hazard and the same answer — see `stepCount`. */
+function stepIndex(renderer: Renderer | null | undefined): number | null {
+  if (!renderer) return null
+  try {
+    const page = renderer.page
+    return typeof page === 'number' && Number.isFinite(page) ? page : null
+  } catch {
+    return null
+  }
 }
 
 export class ReaderSession {
@@ -1219,6 +1274,33 @@ export class ReaderSession {
       closeFootnote: () => this.closeFootnote(),
       setFootnoteMount: (mount, within) => this.setFootnoteMount(mount, within),
       next: () => void view.next()?.catch?.(reportNavigation('next')),
+      pace: () => {
+        const section = this.#renderedIndex
+        const sections = view.book?.sections
+        const bytes = Array.isArray(sections) && section !== null
+          ? (sections[section] as { readonly size?: unknown } | undefined)?.size
+          : undefined
+        const spine = spineBytes(sections)
+        return {
+          bookWords: wordsInSpine(spine, view.isFixedLayout),
+          sectionBytes: typeof bytes === 'number' ? bytes : 0,
+          spineBytes: spine ?? 0,
+          /* `pages` is the step count in both flows: a viewport in scrolled,
+             a page in paginated. Measured 2026-09-26 — a 171 KB section
+             reports 159 of them scrolled. */
+          steps: stepCount(view.renderer) ?? 0,
+        }
+      },
+      atEnd: () => {
+        const renderer = view.renderer
+        const sections = view.book?.sections
+        if (!renderer || !Array.isArray(sections)) return false
+        const last = this.#renderedIndex !== null && this.#renderedIndex >= sections.length - 1
+        const page = stepIndex(renderer)
+        const pages = stepCount(renderer)
+        if (page === null || pages === null) return false
+        return last && page >= pages - 1
+      },
       prev: () => void view.prev()?.catch?.(reportNavigation('prev')),
       goLeft: () => void view.goLeft()?.catch?.(reportNavigation('goLeft')),
       goRight: () => void view.goRight()?.catch?.(reportNavigation('goRight')),
