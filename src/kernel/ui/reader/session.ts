@@ -633,6 +633,13 @@ interface Geometry {
 }
 
 function geometryOf(renderer: Renderer | null | undefined): Geometry | null {
+  /* ⚠️ **ONE TEST, NOT FIVE `?.` — AND IT IS THE `try` THAT MAKES EITHER WORK.**
+     Reading five properties through optional chaining was five mutants nothing
+     could kill: with the catch below, a missing renderer throws and arrives at
+     the same null. One test states the same thing once, and is the only mutant
+     left of the six. */
+  // Stryker disable next-line ConditionalExpression: with no renderer the reads below throw into the catch and answer the same null — this says it once instead of five times, and cannot be observed either way.
+  if (!renderer) return null
   try {
     /* `Number.isFinite` is the check that decides, and it is false for every
        value that is not a number — so a `typeof` test in front of it decides
@@ -640,11 +647,11 @@ function geometryOf(renderer: Renderer | null | undefined): Geometry | null {
        front of a test that already narrows. The cast follows the real check. */
     const num = (value: unknown): number | null => (Number.isFinite(value) ? (value as number) : null)
     return {
-      scrolled: renderer?.scrolled === true,
-      page: num(renderer?.page),
-      pages: num(renderer?.pages),
-      viewSize: num(renderer?.viewSize),
-      end: num(renderer?.end),
+      scrolled: renderer.scrolled === true,
+      page: num(renderer.page),
+      pages: num(renderer.pages),
+      viewSize: num(renderer.viewSize),
+      end: num(renderer.end),
     }
   } catch {
     /* Before layout. Not an error to report — the reader has simply not got a
@@ -652,16 +659,6 @@ function geometryOf(renderer: Renderer | null | undefined): Geometry | null {
     return null
   }
 }
-
-/**
- * A renderer that can say nothing, so a caller has one road rather than two.
- *
- * ⚠️ **THE POINT IS THAT `stepsHere` HAS NO NULL CASE OF ITS OWN.** A
- * `geometryOf(...) === null ? null : stepsHere(...)` at the call site is a second
- * guard for the state this value already IS, and the sweep's verdict on the first
- * version of this file was that every such second guard survived every mutation.
- */
-const NO_GEOMETRY: Geometry = { scrolled: false, page: null, pages: null, viewSize: null, end: null }
 
 /**
  * How many steps this section has, in the flow it is ACTUALLY laid out in.
@@ -678,10 +675,23 @@ const NO_GEOMETRY: Geometry = { scrolled: false, page: null, pages: null, viewSi
  * readable step has no honest pace, and `restPerStep` refuses one anyway.
  */
 function stepsHere(geometry: Geometry): number | null {
-  const { pages } = geometry
-  if (pages === null) return null
+  /* ⚠️ **`?? 0` RATHER THAN A NULL TEST**, because a null test here answered
+     exactly what the floor below answers — `null - 2` is -2 and `null >= 1` is
+     false, so both roads led to null and the test was a mutant nothing could
+     kill. Zero pages is no readable step, which is the same thing said once. */
+  const pages = geometry.pages ?? 0
   const steps = geometry.scrolled ? pages : pages - 2
   return steps >= 1 ? steps : null
+}
+
+/**
+ * The step count the pace asks for, with a renderer that can say nothing folded
+ * in — so `pace` has one road and not two.
+ */
+function stepsOf(renderer: Renderer | null | undefined): number {
+  const geometry = geometryOf(renderer)
+  if (geometry === null) return 0
+  return stepsHere(geometry) ?? 0
 }
 
 /**
@@ -727,9 +737,14 @@ function lastStepHere(geometry: Geometry): boolean | null {
  * the place that owns the band. `size` is the fork's own field on a spine entry.
  */
 function sectionBytes(sections: unknown, index: number | null): number {
-  if (index === null || !Array.isArray(sections)) return 0
-  const size = (sections[index] as { readonly size?: unknown } | undefined)?.size
-  return typeof size === 'number' && Number.isFinite(size) ? size : 0
+  if (!Array.isArray(sections)) return 0
+  /* ⚠️ **`?? -1` RATHER THAN A NULL TEST**, for the reason `stepsHere` records:
+     `sections[null]` is `undefined` and answers 0 by the road below, so the test
+     decided nothing. Minus one is an index no array holds. */
+  const size = (sections[index ?? -1] as { readonly size?: unknown } | undefined)?.size
+  /* `Number.isFinite` alone — it is false for every value that is not a number,
+     so a `typeof` test in front of it was four more unkillable mutants. */
+  return Number.isFinite(size) ? (size as number) : 0
 }
 
 /**
@@ -1392,12 +1407,12 @@ export class ReaderSession {
          the reader had seen a page. Every "cannot say" is gathered here, so the
          derivations below take values that are simply present. */
       if (geometry === null || section === null || !Array.isArray(sections)) return false
-      const last = lastStepHere(geometry)
-      /* ⚠️ **NULL IS NOT THE END OF THE BOOK.** A section whose geometry cannot
-         be read yet is a section the reader will be shown in a moment, and
-         answering "finished" would stop the advance on a transient. */
-      if (last === null) return false
-      return last && nextNavigable(sections, section) === null
+      /* ⚠️ **`=== true`, BECAUSE NULL IS NOT THE END OF THE BOOK.** A section
+         whose geometry cannot be read yet is one the reader will be shown in a
+         moment, and answering "finished" would stop the advance on a transient.
+         Written as a separate `if (last === null) return false` it was a mutant
+         nothing could kill — `null && …` is falsy, so both roads answered no. */
+      return lastStepHere(geometry) === true && nextNavigable(sections, section) === null
     }
     this.#cb.onNavigator({
       /* Every navigation reports its own failure. These are async and were
@@ -1433,7 +1448,7 @@ export class ReaderSession {
           spineBytes: spine ?? 0,
           /* Per flow, and NOT raw `pages` — see `stepsHere`, which the two
              sentinel columns of a paginated section made necessary. */
-          steps: stepsHere(geometryOf(view.renderer) ?? NO_GEOMETRY) ?? 0,
+          steps: stepsOf(view.renderer),
         }
       },
       /**

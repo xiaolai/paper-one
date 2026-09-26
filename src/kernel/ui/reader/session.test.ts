@@ -4365,7 +4365,7 @@ describe('the pace, and the end of the book', () => {
     renderer: Record<string, unknown>,
     sections: unknown = [{ size: 100 }],
     at: number | null = 0,
-    opts: { readonly noRenderer?: boolean } = {},
+    opts: { readonly noRenderer?: boolean; readonly noBook?: boolean } = {},
   ) {
     const view = fakeView()
     Object.assign(view.book as object, { sections })
@@ -4384,12 +4384,20 @@ describe('the pace, and the end of the book', () => {
        is the "the renderer went away" state, which `geometryOf` is the one guard
        for. */
     if (opts.noRenderer) Object.assign(view as object, { renderer: undefined })
+    /* A view with no book at all — what `view.book?.sections` is written for, and
+       what nothing reached until the sweep asked. */
+    if (opts.noBook) Object.assign(view as object, { book: undefined })
     /* `#renderedIndex` comes from a `load`, which is what tells `atEnd` and the
        pace WHICH section they are being asked about. A case passing null for `at`
        is asking about a session that has rendered nothing yet. */
     if (at !== null) view.emit('load', { doc: fakeDocument().asDocument(), index: at })
     const nav = cb.calls['onNavigator']?.[0]?.[0] as {
-      pace: () => { steps: number; bookWords: number | null; sectionBytes: number }
+      pace: () => {
+        steps: number
+        bookWords: number | null
+        sectionBytes: number
+        spineBytes: number
+      }
       step: () => Promise<boolean>
     }
     /**
@@ -4540,6 +4548,129 @@ describe('the pace, and the end of the book', () => {
   it('answers no end for a spine that is not a list', async () => {
     const { refuses } = await paced({ pages: 5, page: 3 }, 'not a spine', 0)
     await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  /**
+   * ⚠️ **ONE-SIDED GEOMETRY IS WHAT SEPARATES A `||` FROM AN `&&`, AND FROM
+   * NEITHER.** A renderer that answers none of its four numbers reaches the same
+   * refusal whichever way the guard is spelled — so the cases below give it ONE
+   * of a pair. That is also the only shape in which a mutated guard produces a
+   * WRONG answer rather than the same one: `null` coerces to 0 in arithmetic, so
+   * `viewSize - end` and `page >= pages - 2` both come back with a plausible
+   * number the moment a clause is allowed through.
+   */
+  it('does not read a scrolled section that answers only its end', async () => {
+    /* With `viewSize` missing, `null - 3399` is -3399, which is under the 2 px
+       bound — so a guard that lets this through reports the book finished. */
+    const { refuses } = await paced({ scrolled: true, pages: 3, page: 2, end: 3399 })
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('does not read a scrolled section that answers only its viewport', async () => {
+    /* And with `end` missing, `1 - null` is 1, under the same bound. */
+    const { refuses } = await paced({ scrolled: true, pages: 3, page: 2, viewSize: 1 })
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('takes the scrolled bound exactly, so two pixels left is the end', async () => {
+    /* A bound a case only brackets loosely is a bound any mutant can move. */
+    const { refuses } = await paced({ scrolled: true, pages: 3, page: 2, viewSize: 3400, end: 3398 })
+    await expect(refuses(), 'exactly 2 px left is finished').resolves.toEqual({ moved: false, turns: 0 })
+  })
+
+  it('does not read a paginated section that answers only its page', async () => {
+    /* With `pages` missing, `3 >= null - 2` is `3 >= -2`, which is true — so a
+       guard that lets this through reports the book finished. */
+    const { refuses } = await paced({ page: 3 })
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('does not read a paginated section that answers only its page count', async () => {
+    /* And with `page` missing, `null >= 2 - 2` is `0 >= 0`, also true. */
+    const { refuses } = await paced({ pages: 2 })
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('counts a one-page paginated section as no readable step', async () => {
+    /* `1 - 2` is -1. Without the floor the pace would be handed a negative step
+       count, which `restPerStep` turns into a negative rest. */
+    const { nav } = await paced({ pages: 1, page: 1 })
+    expect(nav.pace().steps).toBe(0)
+  })
+
+  it('counts the first readable page of a three-column section', async () => {
+    /* `3 - 2` is 1, exactly at the floor — the case that separates `>= 1` from
+       `> 1`. */
+    const { nav } = await paced({ pages: 3, page: 1 })
+    expect(nav.pace().steps).toBe(1)
+  })
+
+  it('reads the bytes of the section the reader is in, and the whole spine', async () => {
+    const spine = [{ size: 100 }, { size: 250 }]
+    const { nav } = await paced({ pages: 5, page: 1 }, spine, 1)
+    expect(nav.pace().sectionBytes, 'the section the reader is in').toBe(250)
+    expect(nav.pace().spineBytes, 'and the whole spine').toBe(350)
+  })
+
+  it('answers no bytes for a section index the spine does not hold', async () => {
+    /* `sections[9]` is `undefined`, and reading `.size` off it would throw. */
+    const { nav } = await paced({ pages: 5, page: 1 }, [{ size: 100 }], 9)
+    expect(nav.pace().sectionBytes).toBe(0)
+  })
+
+  it('walks past a hole in the spine rather than throwing on it', async () => {
+    /* A malformed book: an entry that is not there at all. Reading `.linear` off
+       it would throw, and the throw would land in a timer callback. */
+    const { refuses } = await paced({ pages: 5, page: 3 }, [{ size: 100 }, undefined, { size: 100 }], 0)
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('answers nothing at all for a view with no book', async () => {
+    const { nav, refuses } = await paced({ pages: 5, page: 3 }, [{ size: 100 }], 0, { noBook: true })
+    expect(nav.pace().sectionBytes).toBe(0)
+    expect(nav.pace().spineBytes).toBe(0)
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('reports a turn that failed as a step that did not move, and names it', async () => {
+    /* ⚠️ **AND THE NAME IS THE POINT.** A navigation that rejects with nothing
+       said is the shape this repository keeps having to fix — so the warning is
+       asserted, not just the answer. */
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const view = fakeView()
+      Object.assign(view.book as object, { sections: [{ size: 100 }] })
+      Object.defineProperties(view.renderer as object, { pages: { enumerable: true, value: 5 }, page: { enumerable: true, value: 1 } })
+      Object.assign(view as object, { next: () => Promise.reject(new Error('the section would not load')) })
+      const cb = callbacks()
+      const session = new ReaderSession(fakeHost(), cb)
+      await session.start('book.epub', deps(view))
+      view.emit('load', { doc: fakeDocument().asDocument(), index: 0 })
+      const nav = cb.calls['onNavigator']?.[0]?.[0] as { step: () => Promise<boolean> }
+      await expect(nav.step()).resolves.toBe(false)
+      expect(warn.mock.calls.map((c) => String(c[0])).join(' ')).toContain('next')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('does not claim a step for a view the session has replaced', async () => {
+    /* ⚠️ **NOT DISPOSED — REPLACED**, which is the case that separates the two
+       halves of the guard. A second `start` leaves the first navigator holding a
+       view the session no longer has, and answering "it moved" about that would
+       keep a dead chain alive. */
+    const first = fakeView()
+    Object.assign(first.book as object, { sections: [{ size: 100 }] })
+    Object.defineProperties(first.renderer as object, { pages: { enumerable: true, value: 5 }, page: { enumerable: true, value: 1 } })
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(first))
+    first.emit('load', { doc: fakeDocument().asDocument(), index: 0 })
+    const nav = cb.calls['onNavigator']?.[0]?.[0] as { step: () => Promise<boolean> }
+    const second = fakeView()
+    Object.assign(second.book as object, { sections: [{ size: 100 }] })
+    await session.start('other.epub', deps(second))
+    await expect(nav.step(), 'the view it was given is gone').resolves.toBe(false)
   })
 
   it('does not claim a step that landed after the session was torn down', async () => {
