@@ -19,7 +19,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { loadConfigFromFile } from 'vite'
 import { describe, expect, it, onTestFinished } from 'vitest'
 import { resolveConfig } from 'vitest/node'
@@ -622,8 +622,17 @@ describe('one sweep per checkout', () => {
    * registered.
    */
   describe('a sweep stopped by a signal lets go of its lock', () => {
+    /* ⚠️ **A `file:` URL, NOT A PATH — AND ON WINDOWS THAT IS THE DIFFERENCE
+       BETWEEN A TEST AND A TIMEOUT.** An ES module specifier is a URL. A POSIX
+       path happens to work as one because it begins with `/`; `D:\a\...` does
+       not, so the child died at its first line, never printed `held`, and all
+       four cases failed after ten seconds saying *"the holder never took the
+       lock"* — about a lock the child had never reached the code to take. Every
+       push to `main` was red on the Windows leg from 2026-09-25 for this.
+       `check-mutants.mjs` already writes its generated Vitest `include` with
+       forward slashes for the same family of reason. */
     const holder = (lock) =>
-      `import { acquireLock } from ${JSON.stringify(path.resolve('scripts/check-mutants.mjs'))}\n` +
+      `import { acquireLock } from ${JSON.stringify(pathToFileURL(path.resolve('scripts/check-mutants.mjs')).href)}\n` +
       `acquireLock(${JSON.stringify(lock)})\n` +
       `process.stdout.write('held\\n')\n` +
       `setInterval(() => {}, 1000)\n`
@@ -633,11 +642,26 @@ describe('one sweep per checkout', () => {
       const lock = path.join(root, 'check-mutants.lock')
       const script = path.join(root, 'holder.mjs')
       writeFileSync(script, holder(lock))
-      const child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'ignore'] })
+      /* ⚠️ **STDERR IS KEPT, BECAUSE THROWING IT AWAY IS WHAT MADE THE WINDOWS
+         FAILURE UNREADABLE.** With `'ignore'` here, a child that cannot even
+         import reports exactly the same thing as a child whose `acquireLock`
+         is broken: silence, then a timeout naming the lock. The child's own
+         words are the whole diagnosis, and they cost one pipe. */
+      const child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'pipe'] })
+      let cried = ''
+      child.stderr.on('data', (chunk) => {
+        cried += String(chunk)
+      })
       await new Promise((resolve, reject) => {
         child.stdout.once('data', resolve)
         child.once('error', reject)
-        setTimeout(() => reject(new Error('the holder never took the lock')), 10_000)
+        child.once('exit', (status, why) =>
+          reject(new Error(`the holder exited (${status ?? why}) before taking the lock: ${cried.trim() || '<nothing on stderr>'}`)),
+        )
+        setTimeout(
+          () => reject(new Error(`the holder never took the lock: ${cried.trim() || '<nothing on stderr>'}`)),
+          10_000,
+        )
       })
       expect(existsSync(lock)).toBe(true)
       return { lock, child }
