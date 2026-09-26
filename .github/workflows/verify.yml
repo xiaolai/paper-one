@@ -17,9 +17,12 @@
 #            on; the check is what catches a `cfg(target_os = "macos")` that
 #            leaked into shared code.
 #
-# Bundling is NOT here. It lives in `bundle.yml`, tag-triggered, on the glibc
-# floor (Ubuntu 22.04) — a release artifact is a different event from a green
-# commit, and the surveyed apps keep the two apart.
+# Bundling is NOT here. It lives in `bundle.yml`, tag-triggered — a release
+# artifact is a different event from a green commit, and the surveyed apps keep
+# the two apart. ⚠️ **AND IT NO LONGER RUNS ON AN OLDER RUNNER THAN THIS ONE**:
+# it said "on the glibc floor (Ubuntu 22.04)" until 2026-09-27, when the English
+# voice engine's prebuilt ONNX Runtime forced both to 24.04. `bundle.yml` carries
+# the reasoning and what it costs.
 name: verify
 
 on:

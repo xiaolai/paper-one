@@ -2,11 +2,16 @@
 # green commit — `verify.yml` is the gate and never bundles; this builds what a
 # tag names and keeps it as a workflow artifact. (WI-20.38, D10)
 #
-# UBUNTU 22.04 ON PURPOSE. A Linux binary links the glibc it was built
-# against and runs on nothing older, so the bundling runner is the oldest
-# supported LTS, not the newest — the floor every surveyed Tauri app builds
-# on. The gate runs on 24.04 because a gate wants the current toolchain; a
-# bundle wants the widest audience.
+# ⚠️ **UBUNTU 24.04 SINCE 2026-09-27, AND THIS PARAGRAPH USED TO ARGUE THE
+# OPPOSITE.** It said "UBUNTU 22.04 ON PURPOSE… the oldest supported LTS, not the
+# newest — the floor every surveyed Tauri app builds on. The gate runs on 24.04
+# because a gate wants the current toolchain; a bundle wants the widest audience."
+# That reasoning is still correct and it is no longer available: a Linux binary
+# links the glibc it was built against and runs on nothing older, and the English
+# voice engine's prebuilt ONNX Runtime cannot be linked against 2.35 at all. So
+# the widest audience this bundle can have is 2.39's, and the job's own name
+# carries the number rather than the word "floor". The cost and the way back are
+# written at the job.
 #
 # UNSIGNED, UNPUBLISHED. Nothing here has a signing identity or a release
 # token; the artifact is what a human downloads, checks, and publishes by
@@ -20,8 +25,29 @@ on:
 
 jobs:
   linux:
-    name: linux bundle (Ubuntu 22.04, the glibc floor)
-    runs-on: ubuntu-22.04
+    # ⚠️ **THIS SAID `Ubuntu 22.04, the glibc floor` UNTIL 2026-09-27, AND THE
+    # FLOOR MOVED BY DECISION.** Owner's call, having been given the four options.
+    # What forced it: `ort` is on its default, so `ort-sys` downloads a prebuilt
+    # ONNX Runtime from `cdn.pyke.io`, and that binary wants **glibc ≥ 2.38 and
+    # libstdc++ ≥ 13** — `undefined symbol: __isoc23_strtoull`, `__isoc23_strtol`
+    # and `std::__cxx11::basic_string<…>::_M_replace_cold`, referenced by ONNX
+    # Runtime's own `abi_session_options.cc`, `custom_ops.cc` and
+    # `inference_session_utils.cc`. Ubuntu 22.04 is glibc 2.35 and libstdc++ 12,
+    # so it could not link it, and **the Linux `.deb` and AppImage had not built
+    # since `v0.4.2` on 2026-09-22** — five tags, every one red the same way.
+    #
+    # ⚠️ **WHAT IT COSTS, STATED RATHER THAN DISCOVERED BY A READER.** 24.04 is
+    # glibc 2.39, so both artifacts now require it: Ubuntu 22.04 LTS (2.35) and
+    # Debian 12 (2.36) can no longer run them. **The AppImage is the half that is
+    # easy to miss** — an AppImage's portability floor is its BUILD HOST's glibc,
+    # not a property of the format, so the one artifact whose whole purpose is
+    # running anywhere now needs 2.39 as well.
+    #
+    # The way back, if that floor matters again, is not this line: it is
+    # `ORT_LIB_LOCATION` or ort's `load-dynamic` against a runtime built for the
+    # older floor — which makes Paper the owner of that binary and its provenance.
+    name: linux bundle (Ubuntu 24.04 — glibc 2.39, the floor the ONNX prebuilt forces)
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +62,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-      # Tauri 2's documented set for Ubuntu 22.04. `patchelf` is what the
+      # Tauri 2's documented set for Ubuntu 24.04. `patchelf` is what the
       # AppImage bundler uses to make the binary relocatable.
       - name: Tauri system libraries
         run: |
