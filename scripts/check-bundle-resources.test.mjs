@@ -49,8 +49,17 @@ const ALLOWED = {
      remove what the base declares. The path is a BUILD OUTPUT, written by the
      voices crate's `build.rs`, so a `tauri build` that somehow ran before it
      fails on a missing resource rather than producing an app that cannot
+
+     ⚠️ **AND `paper/` RATHER THAN A PROFILE DIRECTORY, WHICH COST FOUR CI RUNS.**
+     This said `.build/release` while `build.rs` builds whichever profile cargo is
+     building. A developer Mac has `.build/release` because somebody once ran a
+     release build, so it passed here; a clean checkout building `debug` — which
+     `cargo clippy` and `pnpm verify` both do — has only `.build/debug`, and the
+     APP crate's build script died with `resource path ... doesn't exist`. A static
+     config can name exactly one path, so `build.rs` copies the bundle to one that
+     does not depend on the profile
      speak. */
-  'tauri.macos.conf.json': ['crates/tauri-plugin-voices/swift/QwenKit/.build/release/mlx-swift_Cmlx.bundle'],
+  'tauri.macos.conf.json': ['crates/tauri-plugin-voices/swift/QwenKit/.build/paper/mlx-swift_Cmlx.bundle'],
 }
 
 describe('what the bundle carries', () => {

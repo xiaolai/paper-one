@@ -151,6 +151,8 @@ fn link_qwenkit() {
     println!("cargo:rustc-link-search=native={}", found.display());
     println!("cargo:rustc-link-lib=static=QwenKit");
 
+    ship_shaders(&package, found);
+
     // The Swift runtime the archive's autolink records name. Without these the
     // link fails on `_swift_retain` and its siblings.
     println!("cargo:rustc-link-search=native=/usr/lib/swift");
@@ -191,6 +193,62 @@ fn link_qwenkit() {
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
+}
+
+/// The Metal shaders, put where a static bundle configuration can name them.
+///
+/// ⚠️ **THE RESOURCE PATH SAID `release` WHILE THIS BUILDS WHATEVER PROFILE CARGO
+/// IS BUILDING, AND THAT COST FOUR CI RUNS TO SEE.** `tauri.macos.conf.json` has
+/// to name one fixed path — the config is static JSON and cannot branch on a
+/// profile — and it named `.build/release/mlx-swift_Cmlx.bundle`. A developer Mac
+/// has that directory because somebody once ran a release build, so it worked
+/// here; a clean checkout building `debug` (which `cargo clippy` and `pnpm verify`
+/// both do) has only `.build/debug`, so the APP crate's build script died with
+/// `resource path ... doesn't exist` — 275 seconds in, four layers below the line
+/// that reads `cargo clippy -D warnings failed`.
+///
+/// So the bundle is copied to one profile-independent place and the config names
+/// that. Six files and 4 MB, and `build.rs` only re-runs when its inputs change.
+///
+/// ⚠️ **AND IT IS CHECKED AFTERWARDS, NOT ASSUMED** — the same rule the archive
+/// search above follows, and for the same reason: a copy that silently wrote
+/// nothing would move the failure back to `tauri build`, which is where it was.
+fn ship_shaders(package: &std::path::Path, built: &std::path::Path) {
+    const BUNDLE: &str = "mlx-swift_Cmlx.bundle";
+    let from = built.join(BUNDLE);
+    assert!(
+        from.is_dir(),
+        "swift build wrote no {BUNDLE} beside libQwenKit.a in {}; MLX cannot load its shaders without it",
+        built.display()
+    );
+    let into = package.join(".build/paper");
+    let to = into.join(BUNDLE);
+    // Replaced rather than merged: a stale shader left from an older MLX would
+    // ship inside the app and be loaded in preference to nothing at all.
+    let _ = std::fs::remove_dir_all(&to);
+    std::fs::create_dir_all(&into).expect("a directory for the shaders");
+    copy_tree(&from, &to).expect("the shaders could not be copied");
+    assert!(
+        to.join("Contents/Resources/default.metallib").is_file(),
+        "{} holds no default.metallib, which is the one file MLX asks for by name",
+        to.display()
+    );
+    println!("cargo:rerun-if-changed={}", from.display());
+}
+
+/// Copy a directory tree, creating what it needs.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Where the toolchain keeps its Swift runtime dylibs.
