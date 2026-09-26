@@ -4363,8 +4363,9 @@ describe('the pace, and the end of the book', () => {
   /** A renderer whose geometry a case can state outright. */
   async function paced(
     renderer: Record<string, unknown>,
-    sections: readonly Record<string, unknown>[] = [{ size: 100 }],
-    at = 0,
+    sections: unknown = [{ size: 100 }],
+    at: number | null = 0,
+    opts: { readonly noRenderer?: boolean } = {},
   ) {
     const view = fakeView()
     Object.assign(view.book as object, { sections })
@@ -4379,9 +4380,14 @@ describe('the pace, and the end of the book', () => {
     const cb = callbacks()
     const session = new ReaderSession(fakeHost(), cb)
     await session.start('book.epub', deps(view))
+    /* AFTER `start`, because the session reads the renderer while it starts: this
+       is the "the renderer went away" state, which `geometryOf` is the one guard
+       for. */
+    if (opts.noRenderer) Object.assign(view as object, { renderer: undefined })
     /* `#renderedIndex` comes from a `load`, which is what tells `atEnd` and the
-       pace WHICH section they are being asked about. */
-    view.emit('load', { doc: fakeDocument().asDocument(), index: at })
+       pace WHICH section they are being asked about. A case passing null for `at`
+       is asking about a session that has rendered nothing yet. */
+    if (at !== null) view.emit('load', { doc: fakeDocument().asDocument(), index: at })
     const nav = cb.calls['onNavigator']?.[0]?.[0] as {
       pace: () => { steps: number; bookWords: number | null; sectionBytes: number }
       step: () => Promise<boolean>
@@ -4489,6 +4495,50 @@ describe('the pace, and the end of the book', () => {
 
   it('still has somewhere to go when the next section is readable', async () => {
     const { refuses } = await paced({ pages: 5, page: 3 }, [{ size: 100 }, { size: 100 }], 0)
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('answers no steps and no end with no renderer at all', async () => {
+    /* ⚠️ **ONE GUARD FOR THIS, NOT ONE PER VALUE.** The first version tested each
+       of `page`, `pages`, `viewSize` and `end` for null in three separate callers,
+       and the sweep survived every one of those tests: with the `try` there, a
+       renderer that is gone and a renderer that throws reach the same answer
+       whether the caller looks first or not. */
+    const { nav, refuses } = await paced({ pages: 5, page: 3 }, [{ size: 100 }], 0, { noRenderer: true })
+    expect(nav.pace().steps).toBe(0)
+    /* And a step still TURNS: nothing readable is not the end of the book. */
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('answers no end for a scrolled section whose distance it cannot read', async () => {
+    const { refuses } = await paced({ scrolled: true, pages: 3, page: 2 })
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('answers no end for a paginated section whose page it cannot read', async () => {
+    const { refuses } = await paced({ scrolled: false, viewSize: 3400, end: 3399 })
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('answers about no section before one has rendered', async () => {
+    /* ⚠️ `null + 1` is 1, so a walk that accepted null would start at the SECOND
+       section and answer about a book the reader is not in yet — and answering "no
+       next section" there means the END of the book, so a step would be refused
+       before a page had been seen. */
+    const { nav, refuses } = await paced({ pages: 5, page: 3 }, [{ size: 100 }], null)
+    expect(nav.pace().sectionBytes).toBe(0)
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('answers no section bytes for a spine it cannot read', async () => {
+    for (const sections of [null, 'not a spine', [{ size: 'big' }], [{}]]) {
+      const { nav } = await paced({ pages: 5, page: 1 }, sections, 0)
+      expect(nav.pace().sectionBytes, `sections: ${JSON.stringify(sections)}`).toBe(0)
+    }
+  })
+
+  it('answers no end for a spine that is not a list', async () => {
+    const { refuses } = await paced({ pages: 5, page: 3 }, 'not a spine', 0)
     await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
   })
 

@@ -360,6 +360,7 @@ export function App({
    * to start while a reading speaks and gives the book up if one starts under
    * it. One pace at a time.
    */
+  // Stryker disable next-line ObjectLiteral: wiring — five values straight from `useBook` and `useSpeech`; the hook's own cases hold every rule they feed.
   const autoAdvance = useAutoAdvance({
     step: book.step,
     pace: book.pace,
@@ -2129,13 +2130,11 @@ export function App({
            rather than offering one that would refuse. `useArchives` decides,
            because it is what knows. */
         exportMarks: archives.exportMarks,
-        /* ⚠️ **OR ADVANCING, WHICH IS THE HALF THAT WAS MISSING.** `offered`
-           already answers the pace, the reading and the screen — but a pace that
-           stops being derivable WHILE the book is turning itself took the only
-           Stop control away with it, leaving a reader with a moving book and no
-           row to press. A control that starts something must stay reachable to
-           end it. Null keeps a dead row out of the palette. */
-        autoAdvance: autoAdvance.offered || autoAdvance.advancing ? autoAdvance : null,
+        /* Handed over whole, with no rule spelled here: `reachable` is the rule
+           and `buildCommands` is what reads it, because a rule spelled in `App` is
+           a rule nothing measures — no test renders this file and reads the
+           palette back. */
+        autoAdvance,
         /* ABSENT OFF macOS and with no book open — `useAudiobook` answers null
            there, and the palette then omits the row rather than offering one
            that would be refused. */

@@ -445,27 +445,33 @@ export function useBook(): Book {
    * the OUTGOING section's pace, with the load counted as reading time.
    * `SessionNavigator.step` holds the await and the end check together.
    */
-  const step = useCallback(async (): Promise<boolean> => {
-    /* ⚠️ **THE METHOD IS CHECKED, NOT JUST THE NAVIGATOR.** `?.` guards a null
-       navigator and not one that is missing a member, and this runs where a
-       throw takes the whole reader down: `offered` is read during App's render,
-       so `pace is not a function` was an uncaught exception that unmounted the
-       app — 52 cases in one file, all of them timing out because App never
-       mounted. A navigator without this answers "cannot advance", which is a
-       correct answer; crashing for a missing optional feature is not. */
-    try {
-      const navigator = navigatorRef.current
-      if (typeof navigator?.step !== 'function') return false
-      return await navigator.step()
-    } catch {
-      /* Same reason as `pace` below. A step that cannot be taken is "no", which
-         stops the advance cleanly; a throw here would arrive inside a timer
-         callback, where nothing is listening for it. */
-      return false
-    }
-  }, [])
+  const step = useCallback(
+    async (): Promise<boolean> => {
+      /* ⚠️ **THE CATCH IS THE GUARD, AND A `typeof` TEST IN FRONT OF IT DECIDED
+         NOTHING.** This runs where a throw takes the whole reader down: `offered`
+         is read during App's render, so `pace is not a function` was an uncaught
+         exception that unmounted the app — 52 cases in one file, all of them
+         timing out because App never mounted. The first repair tested the member
+         before calling it, and the sweep on mbp16 survived every mutation of that
+         test: a navigator missing it throws and arrives at the same `false` by the
+         road below. What the test really did was keep the common case from
+         throwing, which is not a behaviour. */
+      try {
+        // Stryker disable next-line OptionalChaining: a null navigator throws into the catch below and answers the same false — defence in depth, whose equivalence is the design.
+        return (await navigatorRef.current?.step()) === true
+      } catch {
+        /* A step that cannot be taken is "no", which stops the advance cleanly; a
+           throw here would arrive inside a timer callback, where nothing is
+           listening for it. */
+        return false
+      }
+    },
+    // Stryker disable next-line ArrayDeclaration: this reads a ref and nothing else, so the list is constant either way and the callback is built once.
+    [],
+  )
   /** What auto-advance derives its pace from — see `core/autoAdvance.ts`. */
-  const pace = useCallback((): StepPace => {
+  const pace = useCallback(
+    (): StepPace => {
     /* ⚠️ **NOTHING READ HERE MAY THROW, BECAUSE THIS RUNS DURING RENDER.**
        `useAutoAdvance.offered` calls this on every render of `App`, so an
        exception is an uncaught one that unmounts the whole reader — which is
@@ -476,13 +482,18 @@ export function useBook(): Book {
        fork; this is the second layer, and it earns its keep because the cost of
        being wrong is the entire app rather than one absent feature. Even the
        `typeof` test is inside the try: reading a property INVOKES a getter. */
-    try {
-      const navigator = navigatorRef.current
-      return typeof navigator?.pace === 'function' ? navigator.pace() : NO_PACE
-    } catch {
-      return NO_PACE
-    }
-  }, [])
+      try {
+        /* Same as `step` above: the catch is the guard, and a `typeof` test in
+           front of it was a mutant nothing could kill. */
+        // Stryker disable next-line OptionalChaining: a null navigator throws into the catch below and answers the same NO_PACE — defence in depth, whose equivalence is the design.
+        return navigatorRef.current?.pace() ?? NO_PACE
+      } catch {
+        return NO_PACE
+      }
+    },
+    // Stryker disable next-line ArrayDeclaration: this reads a ref and nothing else, so the list is constant either way and the callback is built once.
+    [],
+  )
   const prev = useCallback(() => navigatorRef.current?.prev(), [])
   const goLeft = useCallback(() => navigatorRef.current?.goLeft(), [])
   const goRight = useCallback(() => navigatorRef.current?.goRight(), [])

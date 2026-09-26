@@ -596,29 +596,56 @@ function destroyable(value: unknown): value is Destroyable {
 }
 
 /**
- * `renderer.page` and `renderer.pages`, read without taking the app down.
+ * Everything the pace and the end of the book need off the renderer, read ONCE.
  *
- * ⚠️ **`pages` IS A GETTER THAT THROWS BEFORE THE PAGINATOR HAS A VIEW**, and
- * nothing in its name says so. Measured in the running app 2026-09-26: reading
- * it during App's first render died at `viewSize` → `this.#view.element`, with
- * `#view` undefined, and the uncaught exception unmounted the whole reader —
- * *"Uncaught error — TypeError: undefined is not an object"* over a blank
- * window. `getContents()` is safe and documented as the only way in; these two
- * are neither.
+ * ⚠️ **`pages`, `page`, `viewSize` AND `end` ARE GETTERS THAT THROW BEFORE THE
+ * PAGINATOR HAS A VIEW**, and nothing in their names says so. Measured in the
+ * running app 2026-09-26: reading `pages` during App's first render died at
+ * `viewSize` → `this.#view.element`, with `#view` undefined, and the uncaught
+ * exception unmounted the whole reader — *"Uncaught error — TypeError: undefined
+ * is not an object"* over a blank window. `getContents()` is safe and documented
+ * as the only way in; these four are neither.
  *
  * ⚠️ **AND 12 464 TESTS PASSED OVER IT**, because every renderer fake in the
  * suites is a plain object whose `pages` is a number or absent — a fake cannot
  * have a throwing getter unless somebody writes one. This is the shape only the
  * running app shows.
  *
- * Null means "cannot say", which every caller already treats as no pace and no
- * end — the same silence a fixed-layout book produces.
+ * ⚠️ **ONE READ RATHER THAN FOUR, BECAUSE FOUR GUARDED READS WERE FOURTEEN
+ * MUTANTS NOTHING COULD KILL.** The first version had a per-property reader and a
+ * null test in each of its three callers, and the sweep on mbp16 came back with
+ * every one of those tests surviving: with the `try` there, a null renderer and a
+ * throwing getter arrive at the same answer whether the caller looks first or
+ * not. Reading the whole set at the boundary leaves the derivations below with no
+ * guards at all — just arithmetic on numbers that are either all there or absent
+ * together, which is also the truth about a renderer.
+ *
+ * Null means "cannot say", which every caller treats as no pace and no end — the
+ * same silence a fixed-layout book produces.
  */
-function reads(renderer: Renderer | null | undefined, of: Measured): number | null {
-  if (!renderer) return null
+interface Geometry {
+  /** Laid out as one scroll rather than as pages. An ATTRIBUTE, so it cannot throw. */
+  readonly scrolled: boolean
+  readonly page: number | null
+  readonly pages: number | null
+  readonly viewSize: number | null
+  readonly end: number | null
+}
+
+function geometryOf(renderer: Renderer | null | undefined): Geometry | null {
   try {
-    const value = renderer[of]
-    return typeof value === 'number' && Number.isFinite(value) ? value : null
+    /* `Number.isFinite` is the check that decides, and it is false for every
+       value that is not a number — so a `typeof` test in front of it decides
+       nothing, which is `AGENTS.md`'s recorded shape for a narrowing test in
+       front of a test that already narrows. The cast follows the real check. */
+    const num = (value: unknown): number | null => (Number.isFinite(value) ? (value as number) : null)
+    return {
+      scrolled: renderer?.scrolled === true,
+      page: num(renderer?.page),
+      pages: num(renderer?.pages),
+      viewSize: num(renderer?.viewSize),
+      end: num(renderer?.end),
+    }
   } catch {
     /* Before layout. Not an error to report — the reader has simply not got a
        laid-out section yet, and will in a moment. */
@@ -626,24 +653,15 @@ function reads(renderer: Renderer | null | undefined, of: Measured): number | nu
   }
 }
 
-/** The geometry this module reads off the renderer, all four of it hazardous. */
-type Measured = 'page' | 'pages' | 'viewSize' | 'end'
-
 /**
- * Whether the section is laid out as one scroll rather than as pages.
+ * A renderer that can say nothing, so a caller has one road rather than two.
  *
- * Cheap and safe where the four above are not — it reads an ATTRIBUTE
- * (`flow="scrolled"`), so it answers before there is a view. Absent on a
- * renderer that has no such notion, which is read as paginated.
+ * ⚠️ **THE POINT IS THAT `stepsHere` HAS NO NULL CASE OF ITS OWN.** A
+ * `geometryOf(...) === null ? null : stepsHere(...)` at the call site is a second
+ * guard for the state this value already IS, and the sweep's verdict on the first
+ * version of this file was that every such second guard survived every mutation.
  */
-function scrolledFlow(renderer: Renderer | null | undefined): boolean {
-  if (!renderer) return false
-  try {
-    return renderer.scrolled === true
-  } catch {
-    return false
-  }
-}
+const NO_GEOMETRY: Geometry = { scrolled: false, page: null, pages: null, viewSize: null, end: null }
 
 /**
  * How many steps this section has, in the flow it is ACTUALLY laid out in.
@@ -656,13 +674,13 @@ function scrolledFlow(renderer: Renderer | null | undefined): boolean {
  * owed. Scrolled `pages` is a count of VIEWPORTS and needs no adjustment —
  * measured at 159 for a 171 KB section.
  *
- * Null rather than a floor when the adjustment leaves nothing: a section with
- * no readable step has no honest pace, and `restPerStep` refuses one anyway.
+ * Null rather than a floor when the adjustment leaves nothing: a section with no
+ * readable step has no honest pace, and `restPerStep` refuses one anyway.
  */
-function stepsHere(renderer: Renderer | null | undefined): number | null {
-  const pages = reads(renderer, 'pages')
+function stepsHere(geometry: Geometry): number | null {
+  const { pages } = geometry
   if (pages === null) return null
-  const steps = scrolledFlow(renderer) ? pages : pages - 2
+  const steps = geometry.scrolled ? pages : pages - 2
   return steps >= 1 ? steps : null
 }
 
@@ -680,8 +698,8 @@ function stepsHere(renderer: Renderer | null | undefined): number | null {
  * (`pages - 1` is reachable in general — `#scrollNext` scrolls INTO the sentinel
  * and reaching it is exactly how it decides to cross into the next section. So
  * the position is transient rather than impossible, and a flat claim of
- * unreachability, which this comment made until the 2026-09-26 round-2 audit,
- * is wrong. What matters is that it is unreachable at the LAST section.)
+ * unreachability, which this comment made until the 2026-09-26 round-2 audit, is
+ * wrong. What matters is that it is unreachable at the LAST section.)
  *
  * Scrolled, the same comparison fires EARLY: a 3 400 px section in a 1 000 px
  * viewport at offset 2 000 answers `page` 2 of `pages` 3 with 400 px unread.
@@ -691,17 +709,27 @@ function stepsHere(renderer: Renderer | null | undefined): number | null {
  * `#scrollNext` uses `viewSize - end > 2` instead, and that is the real
  * condition. Each branch here mirrors the one the fork itself acts on.
  */
-function lastStepHere(renderer: Renderer | null | undefined): boolean | null {
-  if (scrolledFlow(renderer)) {
-    const viewSize = reads(renderer, 'viewSize')
-    const end = reads(renderer, 'end')
+function lastStepHere(geometry: Geometry): boolean | null {
+  const { scrolled, page, pages, viewSize, end } = geometry
+  if (scrolled) {
     if (viewSize === null || end === null) return null
     return viewSize - end <= 2
   }
-  const page = reads(renderer, 'page')
-  const pages = reads(renderer, 'pages')
   if (page === null || pages === null) return null
   return page >= pages - 2
+}
+
+/**
+ * This section's share of the spine, in bytes.
+ *
+ * ⚠️ **ZERO FOR ANYTHING IT CANNOT READ, NOT A REFUSAL**, because `restPerStep`
+ * already refuses a section of no bytes — one rule for a missing measurement, in
+ * the place that owns the band. `size` is the fork's own field on a spine entry.
+ */
+function sectionBytes(sections: unknown, index: number | null): number {
+  if (index === null || !Array.isArray(sections)) return 0
+  const size = (sections[index] as { readonly size?: unknown } | undefined)?.size
+  return typeof size === 'number' && Number.isFinite(size) ? size : 0
 }
 
 /**
@@ -710,17 +738,27 @@ function lastStepHere(renderer: Renderer | null | undefined): boolean | null {
  * ⚠️ **`sections.length - 1` IS NOT THE LAST READABLE SECTION.** A turn skips
  * anything marked `linear: 'no'` — the fork walks forward for one in
  * `#adjacentIndex` — so a book ending in a colophon, an ad page or a second
- * cover never reported its end. That method is private, which is why the rule
- * is restated here; it is stated in exactly one place on this side.
+ * cover never reported its end. That method is private, which is why the rule is
+ * restated here; it is stated in exactly one place on this side.
+ *
+ * ⚠️ **AND NO `at >= 0` BOUND, BECAUSE THERE IS NO WAY TO BE BELOW ONE.** The
+ * only caller passes a rendered section index, which is a non-negative integer,
+ * so the lower bound was a guard the sweep proved could not decide anything.
+ *
+ * ⚠️ **AND IT TAKES A NUMBER, NOT A NULLABLE ONE — WHICH A TEST HAD TO TEACH.**
+ * Handling null here by answering "no next section" reads as tidy and is wrong in
+ * the worst direction: *nothing has rendered yet* then means *the end of the
+ * book*, so a step was refused before the reader had seen a page. A section that
+ * has not rendered is the CALLER's "cannot say", and `atEnd` answers it there.
  */
-function nextNavigable(sections: readonly unknown[], index: number | null): number | null {
-  if (index === null) return null
-  for (let at = index + 1; at >= 0 && at < sections.length; at += 1) {
+function nextNavigable(sections: readonly unknown[], index: number): number | null {
+  for (let at = index + 1; at < sections.length; at += 1) {
     const linear = (sections[at] as { readonly linear?: unknown } | undefined)?.linear
     if (linear !== 'no') return at
   }
   return null
 }
+
 
 export class ReaderSession {
   #disposed = false
@@ -1346,12 +1384,20 @@ export class ReaderSession {
        are its two halves, and both were wrong in the first version of this
        branch — see their headers. */
     const atEnd = (): boolean => {
-      const renderer = view.renderer
+      const geometry = geometryOf(view.renderer)
       const sections = view.book?.sections
-      if (!renderer || !Array.isArray(sections)) return false
-      const last = lastStepHere(renderer)
+      const section = this.#renderedIndex
+      /* ⚠️ **A SECTION THAT HAS NOT RENDERED IS NOT THE END OF THE BOOK**, and
+         letting `nextNavigable` answer that was measured to refuse a step before
+         the reader had seen a page. Every "cannot say" is gathered here, so the
+         derivations below take values that are simply present. */
+      if (geometry === null || section === null || !Array.isArray(sections)) return false
+      const last = lastStepHere(geometry)
+      /* ⚠️ **NULL IS NOT THE END OF THE BOOK.** A section whose geometry cannot
+         be read yet is a section the reader will be shown in a moment, and
+         answering "finished" would stop the advance on a transient. */
       if (last === null) return false
-      return last && nextNavigable(sections, this.#renderedIndex) === null
+      return last && nextNavigable(sections, section) === null
     }
     this.#cb.onNavigator({
       /* Every navigation reports its own failure. These are async and were
@@ -1379,19 +1425,15 @@ export class ReaderSession {
       setFootnoteMount: (mount, within) => this.setFootnoteMount(mount, within),
       next: () => void view.next()?.catch?.(reportNavigation('next')),
       pace: () => {
-        const section = this.#renderedIndex
         const sections = view.book?.sections
-        const bytes = Array.isArray(sections) && section !== null
-          ? (sections[section] as { readonly size?: unknown } | undefined)?.size
-          : undefined
         const spine = spineBytes(sections)
         return {
           bookWords: wordsInSpine(spine, view.isFixedLayout),
-          sectionBytes: typeof bytes === 'number' ? bytes : 0,
+          sectionBytes: sectionBytes(sections, this.#renderedIndex),
           spineBytes: spine ?? 0,
           /* Per flow, and NOT raw `pages` — see `stepsHere`, which the two
              sentinel columns of a paginated section made necessary. */
-          steps: stepsHere(view.renderer) ?? 0,
+          steps: stepsHere(geometryOf(view.renderer) ?? NO_GEOMETRY) ?? 0,
         }
       },
       /**

@@ -1572,9 +1572,32 @@ describe('turning the pages by itself', () => {
     expect(ids).not.toContain('reading:auto-advance')
   })
 
+  it('offers nothing when it is out of reach, whatever else it says', () => {
+    /* ⚠️ **THE RULE THAT USED TO LIVE IN `App`, WHERE NOTHING MEASURED IT.** No
+       test renders that file and reads the palette back, so spelling
+       `offered || advancing` there was three mutants no test could reach.
+       `useAutoAdvance.reachable` carries it and this is the case on the reading
+       of it. */
+    const ids = buildCommands(
+      context({}, { autoAdvance: { advancing: false, reachable: false, toggle: vi.fn() } }).ctx,
+    ).map((c) => c.id)
+    expect(ids).not.toContain('reading:auto-advance')
+  })
+
+  it('keeps the row while the book is turning itself, so Stop stays reachable', () => {
+    /* ⚠️ A pace that goes unreadable mid-book makes `offered` false while the
+       book is still moving. `reachable` stays true for exactly that, and without
+       this row the reader would have no way to stop it. */
+    const rows = buildCommands(
+      context({}, { autoAdvance: { advancing: true, reachable: true, toggle: vi.fn() } }).ctx,
+    )
+    const row = rows.find((c) => c.id === 'reading:auto-advance')
+    expect(row!.label).toBe('Stop turning the pages')
+  })
+
   it('offers one row that starts it, naming what it will do', () => {
     const toggle = vi.fn()
-    const rows = buildCommands(context({}, { autoAdvance: { advancing: false, toggle } }).ctx)
+    const rows = buildCommands(context({}, { autoAdvance: { advancing: false, reachable: true, toggle } }).ctx)
     const row = rows.find((c) => c.id === 'reading:auto-advance')
     expect(row).toBeDefined()
     expect(row!.label).toBe('Turn the pages for me')
@@ -1586,14 +1609,26 @@ describe('turning the pages by itself', () => {
   it('names stopping while it is running, and reads as on', () => {
     /* A row whose label does not change with its state tells a reader the app
        has forgotten what it is doing. */
-    const rows = buildCommands(context({}, { autoAdvance: { advancing: true, toggle: vi.fn() } }).ctx)
+    const rows = buildCommands(context({}, { autoAdvance: { advancing: true, reachable: true, toggle: vi.fn() } }).ctx)
     const row = rows.find((c) => c.id === 'reading:auto-advance')
     expect(row!.label).toBe('Stop turning the pages')
     expect(row!.on).toBe(true)
   })
 
+  it('can be found by the words a reader would reach for', () => {
+    /* ⚠️ **THE KEYWORDS ARE THE WHOLE FINDING SURFACE FOR THIS ROW.** Its label
+       says *Turn the pages for me*, which nobody searches for — the sweep found
+       the string mutable with nothing asserting on it, so an empty one would have
+       left the feature unreachable to anyone who typed what it does. */
+    const rows = buildCommands(context({}, { autoAdvance: { advancing: false, reachable: true, toggle: vi.fn() } }).ctx)
+    const row = rows.find((c) => c.id === 'reading:auto-advance')
+    for (const word of ['auto', 'advance', 'hands free', 'automatic', 'pace', 'scroll']) {
+      expect(row!.keywords, `a reader typing "${word}"`).toContain(word)
+    }
+  })
+
   it('sits in the Reading group, beside the flow switch', () => {
-    const rows = buildCommands(context({}, { autoAdvance: { advancing: false, toggle: vi.fn() } }).ctx)
+    const rows = buildCommands(context({}, { autoAdvance: { advancing: false, reachable: true, toggle: vi.fn() } }).ctx)
     const row = rows.find((c) => c.id === 'reading:auto-advance')
     const flow = rows.find((c) => c.id === 'reading:flow')
     expect(row!.group).toBe('Reading')

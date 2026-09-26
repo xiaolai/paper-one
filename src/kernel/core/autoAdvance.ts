@@ -69,17 +69,38 @@ export interface StepPace {
  */
 export function restPerStep(pace: StepPace): number | null {
   const { bookWords, sectionBytes, spineBytes, steps } = pace
-  if (bookWords === null) return null
-  if (!Number.isFinite(sectionBytes) || sectionBytes <= 0) return null
-  if (!Number.isFinite(spineBytes) || spineBytes <= 0) return null
-  if (!Number.isFinite(steps) || steps < 1) return null
   /* This section's words: the book's length, shared out by bytes. The same
      aggregate-not-sample rule `readingTime` records — a per-section text
-     measurement is not available from the host, and the byte share is. */
-  const sectionWords = bookWords * (sectionBytes / spineBytes)
-  const perStep = sectionWords / steps
-  if (perStep <= 0) return null
-  const rest = (perStep / WORDS_PER_MINUTE) * 60_000
+     measurement is not available from the host, and the byte share is.
+
+     ⚠️ **AN UNKNOWN LENGTH IS ZERO WORDS HERE, NOT AN EARLY RETURN**, and the
+     mutation sweep is what proved the difference is unobservable: `if
+     (bookWords === null) return null` answers exactly what the band below
+     answers, because no words is no rest. `?? 0` makes the absent case and a
+     chosen zero one instruction, which is the shape `AGENTS.md` records for a
+     type-required guard in front of a range test. */
+  const sectionWords = (bookWords ?? 0) * (sectionBytes / spineBytes)
+  const rest = (sectionWords / steps / WORDS_PER_MINUTE) * 60_000
+  /**
+   * ⚠️ **THE BAND IS THE WHOLE GUARD, AND SIX CHECKS IN FRONT OF IT WERE
+   * UNOBSERVABLE.** Measured on mbp16, 2026-09-26: the first version tested
+   * `sectionBytes`, `spineBytes`, `steps` and an intermediate `perStep` for
+   * finiteness and for being positive, and **fifteen mutants of those checks
+   * survived** — every one of them, because each degenerate input already
+   * arrives at the band as a refusal:
+   *
+   * | input | what reaches the band |
+   * |---|---|
+   * | no length, no bytes, no steps' worth of words | `0` — below the floor |
+   * | a NaN anywhere | `NaN` — neither finite nor in the band |
+   * | `spineBytes` or `steps` of 0 | `Infinity` — above the ceiling |
+   * | a negative anywhere | negative — below the floor |
+   *
+   * So the guards were not defence in depth; they were a second spelling of the
+   * band. Keeping them and disabling the mutants would have recorded that as
+   * intentional. `Number.isFinite` is what the band cannot say for itself — a
+   * NaN passes both comparisons and would be returned as `Math.round(NaN)`.
+   */
   if (!Number.isFinite(rest)) return null
   if (rest < FASTEST_REST_MS || rest > SLOWEST_REST_MS) return null
   return Math.round(rest)

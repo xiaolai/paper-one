@@ -142,16 +142,25 @@ export interface KernelCommandContext {
   exportMarks: (() => void) | null
   importMarks: (() => void) | null
   /**
-   * Turn the book by itself, or stop — null where it cannot be offered.
+   * Turn the book by itself, or stop.
    *
-   * NULL RATHER THAN A DISABLED ROW, the rule the jump pair below states: the
+   * NO ROW RATHER THAN A DISABLED ONE, the rule the jump pair below states: the
    * palette has no disabled state, and a row that looks like every other row and
-   * does nothing is worse than an absent one. It is null for a book whose length
-   * cannot be derived — every PDF — and while a reading is speaking, because read
-   * aloud already turns the page and two paces on one book is a defect with no
-   * honest resolution.
+   * does nothing is worse than an absent one. `reachable` is what says so — it is
+   * false for a book whose length cannot be derived (every PDF), away from the
+   * reader screen, and while a reading is speaking, because read aloud already
+   * turns the page and two paces on one book is a defect with no honest
+   * resolution.
+   *
+   * ⚠️ **AND `reachable` IS NOT `offered` — IT STAYS TRUE WHILE ADVANCING.** A
+   * pace that stops being derivable under a book that is already turning itself
+   * would otherwise take the only Stop control away with it. `useAutoAdvance`
+   * owns the rule and has the cases; this is the one place that reads it, because
+   * a rule spelled in `App` is a rule nothing measures.
    */
-  autoAdvance: { readonly advancing: boolean; readonly toggle: () => void } | null
+  autoAdvance:
+    | { readonly advancing: boolean; readonly reachable: boolean; readonly toggle: () => void }
+    | null
   /**
    * Back to where the reader was, and forward again — null when the stack has
    * nothing that way.
@@ -310,7 +319,7 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     run: () => dispatch({ type: 'toggleProgressLine' }),
   })
 
-  if (ctx.autoAdvance) {
+  if (ctx.autoAdvance?.reachable) {
     const auto = ctx.autoAdvance
     commands.push({
       id: 'reading:auto-advance',

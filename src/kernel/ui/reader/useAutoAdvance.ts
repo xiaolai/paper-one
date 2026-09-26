@@ -66,10 +66,26 @@ export interface AutoAdvance {
    * Whether it can be offered at all.
    *
    * False where the pace cannot be derived — a PDF, a book with a partial
-   * spine — so the control is ABSENT rather than present and dead. A button
-   * that declines teaches a reader the app cannot do this.
+   * spine — so the control is ABSENT rather than present and dead. A button that
+   * declines teaches a reader the app cannot do this. False while a reading
+   * speaks, and away from the reader screen, for the reasons in the deps above.
    */
   readonly offered: boolean
+  /**
+   * Whether a host should put the control in front of the reader at all.
+   *
+   * ⚠️ **`offered` IS NOT ENOUGH, AND THE GAP TOOK THE STOP BUTTON AWAY.** A
+   * pace that stops being derivable while the book is turning itself — a section
+   * between layouts — makes `offered` false, and a host that showed the row on
+   * `offered` alone then left a reader with a moving book and no control to stop
+   * it. A thing that can be started must stay reachable to be ended.
+   *
+   * ⚠️ **AND IT LIVES HERE RATHER THAN IN THE HOST BECAUSE A RULE IN `App` IS A
+   * RULE NOTHING MEASURES.** Spelled `offered || advancing` at the call site it
+   * was three mutants no test could reach, because nothing renders `App` and
+   * reads the palette back. Here it is one line with cases on it.
+   */
+  readonly reachable: boolean
   readonly start: () => void
   readonly stop: () => void
   readonly toggle: () => void
@@ -96,82 +112,124 @@ export function useAutoAdvance(deps: AutoAdvanceDeps): AutoAdvance {
   const live = useRef(deps)
   live.current = deps
 
-  const clear = useCallback(() => {
-    chain.current = null
-    if (timer.current !== null) {
-      clearTimeout(timer.current)
+  /* ⚠️ **NO `!== null` TEST, BECAUSE `clearTimeout` ALREADY TOLERATES NOTHING.**
+     The sweep answered this one: `if (true)` survived, because clearing a handle
+     that was never set is a no-op either way. `?? undefined` is what the DOM
+     signature needs, and the `??` itself is decisive — `&&` would pass
+     `undefined` for a LIVE handle and leave the timer running. */
+  const clear = useCallback(
+    () => {
+      chain.current = null
+      clearTimeout(timer.current ?? undefined)
       timer.current = null
-    }
-  }, [])
+    },
+    // Stryker disable next-line ArrayDeclaration: everything this reads is a ref, so the list is constant either way and the callback is built once.
+    [],
+  )
 
-  const stop = useCallback(() => {
-    clear()
-    setAdvancing(false)
-  }, [clear])
+  const stop = useCallback(
+    () => {
+      clear()
+      setAdvancing(false)
+    },
+    // Stryker disable next-line ArrayDeclaration: `clear` never moves, so this list and an empty one rebuild this equally often — never.
+    [clear],
+  )
 
   /**
    * One rest, then one step, then arrange the next.
    *
-   * ⚠️ **A CHAIN OF TIMEOUTS, NOT AN INTERVAL.** The rest is re-derived every tick
-   * because the section changes, so the gap between steps is not constant — an
-   * interval would keep the first section's pace for the whole book. It also
+   * ⚠️ **A CHAIN OF TIMEOUTS, NOT AN INTERVAL.** The rest is re-derived every
+   * tick because the section changes, so the gap between steps is not constant —
+   * an interval would keep the first section's pace for the whole book. It also
    * means a tick that cannot derive a pace stops cleanly instead of firing at a
    * stale rate.
+   *
+   * ⚠️ **AND NO CHAIN CHECK OR READING-OR-SCREEN CHECK AT THE TOP OF IT — BOTH
+   * WERE THIRD GUARDS ON ROADS ALREADY GUARDED**, which the sweep on mbp16
+   * showed by surviving every mutation of them; the second pair came back
+   * `NoCoverage`, so no test could reach them at all. The chain identity belongs
+   * where the WINDOW is, in `settle` below — checking it here as well made THAT
+   * one unkillable, because a stale continuation was stopped twice and the first
+   * stop was invisible. Speaking and off-reader belong to the effect at the
+   * bottom of this hook: a reading or a screen change is state, so it renders, so
+   * the effect runs and stops the chain before any timer it armed can fire.
    */
-  const tick = useCallback((mine: object) => {
-    if (chain.current !== mine) return
-    const { pace, speaking, onReader } = live.current
-    if (speaking || !onReader) {
-      stop()
-      return
-    }
-    const rest = restPerStep(pace())
-    if (rest === null) {
-      stop()
-      return
-    }
-    timer.current = setTimeout(() => {
-      timer.current = null
-      /* ⚠️ **THE END OF THE BOOK STOPS IT.** `step` answers whether it moved, and
-         a `next()` at the last page moves nothing — without this the book would
-         sit on its final page with a control still lit, which reads as a stall
-         rather than an ending. */
-      /* ⚠️ **THE AWAIT IS A WINDOW, AND EVERYTHING CAN CHANGE IN IT.** Stopped,
-         a different book opened, a reading started: the chain identity is what
-         says this answer is still the live one's. Without the check a stop
-         during a turn was followed by the next step being scheduled. */
-      const settle = (moved: boolean) => {
-        if (chain.current !== mine) return
-        if (!moved) {
-          stop()
-          return
-        }
-        tick(mine)
+  const tick = useCallback(
+    (mine: object) => {
+      const rest = restPerStep(live.current.pace())
+      if (rest === null) {
+        stop()
+        return
       }
-      /* ⚠️ **A STEP THAT FAILS IS A STEP THAT DID NOT MOVE, BOTH WAYS IT CAN
-         FAIL.** This runs inside a timer callback, where nothing is listening:
-         a rejection with no handler is an unhandled one at the window, and a
-         SYNCHRONOUS throw — which any host whose `step` is not itself `async`
-         can produce — would escape the callback entirely. `useBook.step`
-         already answers false rather than throwing; this does not depend on it,
-         for the same reason that layer does not depend on the session's. */
-      try {
-        void live.current.step().then(settle, () => settle(false))
-      } catch {
-        settle(false)
-      }
-    }, rest)
-  }, [stop])
+      timer.current = setTimeout(() => {
+        timer.current = null
+        /* ⚠️ **THE AWAIT IS A WINDOW, AND EVERYTHING CAN CHANGE IN IT.** Stopped,
+           a different book opened, a reading started: the chain identity is what
+           says this answer is still the live one's. Without the check, a stop
+           during a turn was followed by the next step being scheduled.
 
-  const start = useCallback(() => {
-    if (live.current.speaking || !live.current.onReader) return
-    if (restPerStep(live.current.pace()) === null) return
-    clear()
-    const mine = {}
-    chain.current = mine
-    setAdvancing(true)
-    tick(mine)
-  }, [clear, tick])
+           ⚠️ **AND THE END OF THE BOOK STOPS IT.** `step` answers whether it
+           moved, and a `next()` at the last page moves nothing — without that the
+           book would sit on its final page with a control still lit, which reads
+           as a stall rather than an ending. */
+        const settle = (moved: boolean) => {
+          if (chain.current !== mine) return
+          if (!moved) {
+            stop()
+            return
+          }
+          tick(mine)
+        }
+        /* ⚠️ **A STEP THAT FAILS IS A STEP THAT DID NOT MOVE, BOTH WAYS IT CAN
+           FAIL.** This runs inside a timer callback, where nothing is listening:
+           a rejection with no handler is an unhandled one at the window, and a
+           SYNCHRONOUS throw — which any host whose `step` is not itself `async`
+           can produce — would escape the callback entirely. `useBook.step`
+           already answers false rather than throwing; this does not depend on it,
+           for the same reason that layer does not depend on the session's. */
+        try {
+          void live.current.step().then(settle, () => settle(false))
+        } catch {
+          settle(false)
+        }
+      }, rest)
+    },
+    // Stryker disable next-line ArrayDeclaration: `stop` never moves, so this list and an empty one rebuild this equally often — never.
+    [stop],
+  )
+
+  /**
+   * ⚠️ **NOTHING IS REFUSED HERE, AND TRYING TO WAS TWO MUTANTS NOTHING COULD
+   * KILL.** This began with the two conditions `offered` is made of — a reading
+   * speaking, and the reader being away from the book — and a pace check as well.
+   * All three are answered a step further on, and answered indistinguishably:
+   *
+   * - a pace that cannot be derived stops at `tick`'s own `rest === null`, which
+   *   has to be there anyway for a section that goes unreadable mid-book;
+   * - speaking and off-reader stop at the effect below, which fires on the render
+   *   that `setAdvancing(true)` itself causes.
+   *
+   * An attempt was made to measure the difference as a timer that never got
+   * armed — `vi.getTimerCount()` after `start`. It cannot: the effect runs inside
+   * the same `act`, so the timer is armed and cleared before anything can look,
+   * and the count is 0 either way. Measured, not assumed.
+   *
+   * So `start` takes a fresh chain and ticks. `offered` is still the whole rule
+   * for whether a reader is shown the control; the two stopping rules live in one
+   * place each.
+   */
+  const start = useCallback(
+    () => {
+      clear()
+      const mine = {}
+      chain.current = mine
+      setAdvancing(true)
+      tick(mine)
+    },
+    // Stryker disable next-line ArrayDeclaration: neither ever moves, so this list and an empty one rebuild this equally often — never.
+    [clear, tick],
+  )
 
   const toggle = useCallback(() => {
     if (advancing) stop()
@@ -195,13 +253,15 @@ export function useAutoAdvance(deps: AutoAdvanceDeps): AutoAdvance {
    */
   useEffect(() => stop, [deps.generation, stop])
 
+  /* Speaking and off-reader are part of OFFERED, not only of the stopping rules:
+     a row a reader can see and press is a promise, and one that declines teaches
+     them the app cannot do this. */
+  const offered = !deps.speaking && deps.onReader && restPerStep(deps.pace()) !== null
+
   return {
     advancing,
-    /* Speaking and off-reader are part of OFFERED, not only of `start`: a row a
-       reader can see and press is a promise, and one that declines teaches them
-       the app cannot do this. The caller keeps `Stop` reachable while advancing
-       — see `App`, where a pace that became underivable once hid it. */
-    offered: !deps.speaking && deps.onReader && restPerStep(deps.pace()) !== null,
+    offered,
+    reachable: offered || advancing,
     start,
     stop,
     toggle,

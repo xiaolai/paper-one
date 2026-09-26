@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
+import type { StepPace } from '../../core/autoAdvance'
 import { useAutoAdvance, type AutoAdvance, type AutoAdvanceDeps } from './useAutoAdvance'
 
 /**
@@ -24,7 +25,7 @@ beforeEach(() => vi.useFakeTimers())
 afterEach(() => vi.useRealTimers())
 
 /** A section whose derived rest is a round hundred seconds a step. */
-const TEN_SECONDS = { bookWords: 250 * 10, sectionBytes: 100, spineBytes: 100, steps: 6 }
+const TEN_SECONDS: StepPace = { bookWords: 250 * 10, sectionBytes: 100, spineBytes: 100, steps: 6 }
 
 /** Move fake time, letting each awaited step settle and schedule the next. */
 async function pass(ms: number) {
@@ -138,6 +139,26 @@ describe('useAutoAdvance', () => {
     expect(fast).toBeLessThan(slow)
   })
 
+  it('stops when the pace stops being derivable under it', async () => {
+    /* ⚠️ **THE ONE ROAD A CHECK IN `start` CANNOT COVER**, and the sweep reported
+       it as reached by no test at all. A section whose geometry goes unreadable
+       mid-book — `renderer.pages` between layouts — leaves the chain with no
+       honest rest to wait, and inventing one is the thing this whole module
+       refuses to do. The tick has to stop. */
+    let pace: StepPace = { ...TEN_SECONDS }
+    const { seen, steps } = mount({ pace: () => pace })
+    act(() => seen.current!.start())
+    await pass(100_000)
+    expect(steps).toHaveLength(1)
+    expect(seen.current!.advancing).toBe(true)
+
+    pace = { ...TEN_SECONDS, bookWords: null }
+    await pass(100_000)
+    expect(seen.current!.advancing, 'it gave up rather than guessing a rest').toBe(false)
+    await pass(600_000)
+    expect(steps).toHaveLength(2)
+  })
+
   it('stops at the end of the book, where a step moves nothing', async () => {
     /* ⚠️ Without this the book sits on its last page with the control still
        lit, which reads as a stall rather than an ending. */
@@ -165,12 +186,18 @@ describe('useAutoAdvance', () => {
     expect(tried).toHaveLength(2)
   })
 
-  it('refuses to start while a reading is speaking', async () => {
+  it('does not advance while a reading is speaking, and leaves nothing armed', async () => {
     /* ⚠️ Read aloud already turns the page, so the two together would
        double-advance. Two paces on one book has no honest resolution. */
+    /* ⚠️ **THE STOPPING IS THE EFFECT'S, NOT `start`'s.** `start` refused outright
+       once; the sweep showed that mutant surviving, and `vi.getTimerCount()`
+       cannot separate the two either, because the effect runs inside this same
+       `act` and clears the timer before anything can look. So this measures the
+       property that matters to a reader instead. */
     const { seen, steps } = mount({ speaking: true })
     act(() => seen.current!.start())
     expect(seen.current!.advancing).toBe(false)
+    expect(vi.getTimerCount(), 'nothing is left armed').toBe(0)
     await pass(300_000)
     expect(steps).toHaveLength(0)
   })
@@ -194,10 +221,11 @@ describe('useAutoAdvance', () => {
     expect(seen.current!.advancing).toBe(false)
   })
 
-  it('refuses to start where the pace cannot be derived', async () => {
+  it('does not advance where the pace cannot be derived', async () => {
     const { seen, steps } = mount({ pace: () => ({ ...TEN_SECONDS, bookWords: null }) })
     act(() => seen.current!.start())
     expect(seen.current!.advancing).toBe(false)
+    expect(vi.getTimerCount(), 'nothing is left armed').toBe(0)
     await pass(600_000)
     expect(steps).toHaveLength(0)
   })
@@ -205,6 +233,30 @@ describe('useAutoAdvance', () => {
   it('is offered where it can be derived', () => {
     const { seen } = mount()
     expect(seen.current!.offered).toBe(true)
+    expect(seen.current!.reachable).toBe(true)
+  })
+
+  it('stays reachable while advancing, even once the pace goes unreadable', () => {
+    /* ⚠️ **THE HALF THAT WAS MISSING, AND IT TOOK THE STOP CONTROL AWAY.** A
+       section between layouts makes `offered` false; a host that read only that
+       left a reader with a moving book and no row to press. `reachable` is what a
+       host puts in front of them, and it lives in the hook because a rule spelled
+       in `App` is a rule nothing measures. */
+    let pace: StepPace = { ...TEN_SECONDS }
+    const { seen, again } = mount({ pace: () => pace })
+    act(() => seen.current!.start())
+    pace = { ...TEN_SECONDS, bookWords: null }
+    /* `offered` is computed during render, so it needs one — mutating the pace a
+       closure reads changes nothing a host can see until React asks again. */
+    act(() => again())
+    expect(seen.current!.offered, 'no honest pace to offer').toBe(false)
+    expect(seen.current!.advancing, 'but the book is still turning').toBe(true)
+    expect(seen.current!.reachable, 'so Stop is still in front of the reader').toBe(true)
+  })
+
+  it('is not reachable when it is neither offered nor running', () => {
+    const { seen } = mount({ onReader: false })
+    expect(seen.current!.reachable).toBe(false)
   })
 
   it('is not offered while a reading is speaking', () => {
@@ -223,10 +275,11 @@ describe('useAutoAdvance', () => {
     expect(seen.current!.offered).toBe(false)
   })
 
-  it('refuses to start away from the book', async () => {
+  it('does not advance away from the book, and leaves nothing armed', async () => {
     const { seen, steps } = mount({ onReader: false })
     act(() => seen.current!.start())
     expect(seen.current!.advancing).toBe(false)
+    expect(vi.getTimerCount(), 'nothing is left armed').toBe(0)
     await pass(600_000)
     expect(steps).toHaveLength(0)
   })
@@ -321,6 +374,31 @@ describe('useAutoAdvance', () => {
   it('stops when a step throws where it stands', async () => {
     /* A host whose `step` is not itself `async` — the shape every navigator fake
        in these suites has had. A synchronous throw escapes the timer callback
+       altogether unless it is caught there. */
+    const { seen } = mount({
+      step: () => {
+        throw new TypeError('pace is not a function')
+      },
+    })
+    act(() => seen.current!.start())
+    await pass(101_000)
+    expect(seen.current!.advancing).toBe(false)
+  })
+
+  it('stops when a step rejects, rather than leaving a rejection at the window', async () => {
+    /* ⚠️ This runs inside a timer callback, where nothing is listening. A `.then`
+       with no rejection handler makes an unhandled rejection of a step that
+       failed, and the chain would sit there having scheduled nothing. */
+    const { seen } = mount({ step: () => Promise.reject(new Error('the view went')) })
+    act(() => seen.current!.start())
+    expect(seen.current!.advancing).toBe(true)
+    await pass(101_000)
+    expect(seen.current!.advancing).toBe(false)
+  })
+
+  it('stops when a step throws where it stands', async () => {
+    /* A host whose `step` is not itself `async` — the shape every navigator fake in
+       these suites has had. A synchronous throw escapes the timer callback
        altogether unless it is caught there. */
     const { seen } = mount({
       step: () => {
