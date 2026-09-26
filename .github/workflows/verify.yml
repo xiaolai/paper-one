@@ -72,7 +72,7 @@ jobs:
       # path that stops existing is another failure that names something else.
       # The version is then ASSERTED — when a rotation takes 6.3 away, this says
       # so in its own words instead of dying inside a Rust step.
-      - name: Swift 6.3 or newer, which the voice bridge requires
+      - name: A toolchain the voice bridge can build with — Swift 6.3, and Metal
         run: |
           set -euo pipefail
           newest="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
@@ -88,6 +88,27 @@ jobs:
             exit 1
           fi
           echo "using $newest (Swift $have)"
+          # ⚠️ **AND XCODE SHIPS NO METAL COMPILER, WHICH IS A SEPARATE 839 MB.**
+          # `AGENTS.md` records it in as many words — "every machine and CI runner
+          # that compiles this will need it" — and CI only reached the point of
+          # needing it once Swift 6.3 let `swift build` run to completion. It then
+          # did the WORST available thing: exited 0, "Build complete! (382.97s)",
+          # and wrote no `mlx-swift_Cmlx.bundle` at all, because there was no
+          # `metal` to compile the shaders the bundle exists to carry. MLX then
+          # dies at run time with "Failed to load the default metallib".
+          #
+          # No sudo, and idempotent — already-present is not an error.
+          xcodebuild -downloadComponent MetalToolchain
+          # ⚠️ **ASKED WHETHER IT RUNS, NOT WHETHER THE DOWNLOAD SAID IT WORKED.**
+          # The same shape as `actool` and `screencapture` in this tree: the exit
+          # code is not the artifact. `xcrun -f metal` resolves a path inside a
+          # cryptex mount whose name rotates, so the path proves nothing either —
+          # only running the thing does.
+          metal="$(xcrun -f metal)" || {
+            echo "no metal compiler after -downloadComponent MetalToolchain"
+            exit 1
+          }
+          "$metal" --version
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target

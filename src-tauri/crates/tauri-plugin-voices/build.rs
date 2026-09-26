@@ -233,8 +233,20 @@ fn ship_shaders(package: &std::path::Path, candidates: &[std::path::PathBuf]) {
         // so a previous run's copy is never taken for the source.
         .or_else(|| find_directory(&build, BUNDLE, &into, 4))
         .unwrap_or_else(|| {
+            // ⚠️ **AND THE LIKELIEST CAUSE IS NAMED, BECAUSE IT COST FOUR CI RUNS
+            // TO FIND WITHOUT IT.** `swift build` reports "Build complete!" and
+            // exits 0 with no bundle when there is no `metal` to compile the
+            // shaders the bundle exists to carry — Xcode ships the compiler
+            // separately, and `AGENTS.md` records that every machine and CI runner
+            // building this needs it. A message that says only "not found" sends
+            // the next reader looking at layouts, which is where I looked.
             panic!(
-                "swift build exited 0 but wrote no {BUNDLE} anywhere under {}; MLX cannot load its shaders without it",
+                "swift build exited 0 but wrote no {BUNDLE} anywhere under {}.\n\
+                 The likeliest cause is a missing Metal compiler, which Xcode does \
+                 not ship: run `xcodebuild -downloadComponent MetalToolchain`, then \
+                 check it with `\"$(xcrun -f metal)\" --version`. Without the \
+                 shaders MLX dies at run time with \"Failed to load the default \
+                 metallib\".",
                 build.display()
             )
         });
