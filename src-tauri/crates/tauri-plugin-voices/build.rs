@@ -242,12 +242,14 @@ fn ship_shaders(package: &std::path::Path, candidates: &[std::path::PathBuf]) {
             // the next reader looking at layouts, which is where I looked.
             panic!(
                 "swift build exited 0 but wrote no {BUNDLE} anywhere under {}.\n\
-                 The likeliest cause is a missing Metal compiler, which Xcode does \
-                 not ship: run `xcodebuild -downloadComponent MetalToolchain`, then \
-                 check it with `\"$(xcrun -f metal)\" --version`. Without the \
-                 shaders MLX dies at run time with \"Failed to load the default \
-                 metallib\".",
-                build.display()
+                 Without the shaders MLX dies at run time with \"Failed to load \
+                 the default metallib\".\n\
+                 Check the Metal compiler, which Xcode does not ship: \
+                 `xcodebuild -downloadComponent MetalToolchain`, then \
+                 `\"$(xcrun -f metal)\" --version`.\n\
+                 What IS there:\n{}",
+                build.display(),
+                inventory(&build)
             )
         });
     let to = into.join(BUNDLE);
@@ -262,6 +264,58 @@ fn ship_shaders(package: &std::path::Path, candidates: &[std::path::PathBuf]) {
         to.display()
     );
     println!("cargo:rerun-if-changed={}", from.display());
+}
+
+/// What a build directory holds, for a message that has to explain an absence.
+///
+/// ⚠️ **WRITTEN BECAUSE TWO GUESSES WERE SPENT ON THIS.** When the bundle is not
+/// where it is expected, the useful question is what IS there — and a panic that
+/// says only "not found" sends the next reader to invent a hypothesis and spend a
+/// CI run on it. Twice, here: a layout difference, then a missing Metal compiler
+/// which turned out to be installed and running. Every product directory and
+/// every `.bundle` the walk can see, and the reader decides.
+fn inventory(build: &std::path::Path) -> String {
+    let mut lines = Vec::new();
+    for dir in [build.to_path_buf(), build.join("out/Products")] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        lines.push(format!("  {} → {}", dir.display(), names.join(", ")));
+    }
+    let mut bundles = Vec::new();
+    collect_bundles(build, 5, &mut bundles);
+    lines.push(if bundles.is_empty() {
+        "  no *.bundle anywhere within five levels".to_owned()
+    } else {
+        format!("  bundles: {}", bundles.join(", "))
+    });
+    lines.join("\n")
+}
+
+/// Every `*.bundle` within `depth`, as paths, skipping symbolic links.
+fn collect_bundles(root: &std::path::Path, depth: usize, into: &mut Vec<String>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "bundle") {
+            into.push(path.display().to_string());
+        } else {
+            collect_bundles(&path, depth - 1, into);
+        }
+    }
 }
 
 /// Find a directory by name, no deeper than `depth`, ignoring one subtree.
