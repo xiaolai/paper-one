@@ -337,6 +337,22 @@ declare module 'foliate-js/view.js' {
      */
     readonly page?: number
     readonly pages?: number
+    /**
+     * Which flow the section is laid out in, and the scrolled end condition.
+     *
+     * ⚠️ **`pages` MEANS DIFFERENT THINGS IN THE TWO FLOWS**, which is why
+     * `scrolled` has to be readable at all: scrolled it counts viewports, and
+     * paginated it counts COLUMNS — two of which are sentinels the reader never
+     * sees. `session.ts`'s `stepsHere` and `lastStepHere` carry the arithmetic
+     * and the measurements.
+     *
+     * `scrolled` reads an attribute and cannot throw. `viewSize` and `end` are
+     * geometry and belong to the hazardous set above — `reads` is their only
+     * permitted reader, for the same reason.
+     */
+    readonly scrolled?: boolean
+    readonly viewSize?: number
+    readonly end?: number
   }
 
   export interface InitOptions {

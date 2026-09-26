@@ -360,7 +360,17 @@ export function App({
    * to start while a reading speaks and gives the book up if one starts under
    * it. One pace at a time.
    */
-  const autoAdvance = useAutoAdvance({ step: book.step, pace: book.pace, speaking: speech.speaking })
+  const autoAdvance = useAutoAdvance({
+    step: book.step,
+    pace: book.pace,
+    speaking: speech.speaking,
+    /* The reader stays mounted behind the library and every contributed screen,
+       so without this the book turned itself where nobody could see it. */
+    onReader,
+    /* The chain belongs to the BOOK. `App` never unmounts, so this is the only
+       thing that tells it the book it was advancing has been replaced. */
+    generation: book.generation,
+  })
   /* What the Voice group in Settings needs that app state cannot answer: the
      language of the book on screen, and what this machine can actually say.
      `documentLang` is the same fact the utterance is given, read from the same
@@ -2119,10 +2129,13 @@ export function App({
            rather than offering one that would refuse. `useArchives` decides,
            because it is what knows. */
         exportMarks: archives.exportMarks,
-        /* Offered only when a pace can be derived and no reading is speaking —
-           `useAutoAdvance.offered` answers the first, `speech.speaking` the
-           second. Null is what keeps a dead row out of the palette. */
-        autoAdvance: autoAdvance.offered && !speech.speaking ? autoAdvance : null,
+        /* ⚠️ **OR ADVANCING, WHICH IS THE HALF THAT WAS MISSING.** `offered`
+           already answers the pace, the reading and the screen — but a pace that
+           stops being derivable WHILE the book is turning itself took the only
+           Stop control away with it, leaving a reader with a moving book and no
+           row to press. A control that starts something must stay reachable to
+           end it. Null keeps a dead row out of the palette. */
+        autoAdvance: autoAdvance.offered || autoAdvance.advancing ? autoAdvance : null,
         /* ABSENT OFF macOS and with no book open — `useAudiobook` answers null
            there, and the palette then omits the row rather than offering one
            that would be refused. */

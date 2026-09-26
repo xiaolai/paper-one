@@ -390,14 +390,20 @@ export interface SessionNavigator {
    */
   pace: () => StepPace
   /**
-   * Whether a step would move nothing — the last page of the last section.
+   * One hands-free step, resolving to whether the book moved.
    *
-   * ⚠️ **SYNCHRONOUS ON PURPOSE.** `next()` answers a promise and never says
-   * whether it moved, so an auto-advance built on it would sit at the end of the
-   * book firing for ever with its control still lit. Asking BEFORE stepping is
-   * the only shape that does not need to observe the result.
+   * ON THE NAVIGATOR rather than assembled by the host from an `atEnd` and a
+   * `next`, because the AWAIT is the point: the caller derives the next rest
+   * from where this lands, so the promise has to be the turn's own.
+   *
+   * ⚠️ **AND `atEnd` IS DELIBERATELY NOT ALSO EXPOSED.** It was, for one round,
+   * and the moment this member existed nothing in production read it — the
+   * shape this repository keeps having to delete twice. Whether a step would
+   * move nothing is asked INSIDE this, where the answer is used; the session's
+   * own `atEnd` predicate is where it lives, and `session.test.ts` measures it
+   * through here rather than around it.
    */
-  atEnd: () => boolean
+  step: () => Promise<boolean>
   prev: () => void
   /**
    * The page to the left, and to the right — in VISUAL terms.
@@ -608,11 +614,11 @@ function destroyable(value: unknown): value is Destroyable {
  * Null means "cannot say", which every caller already treats as no pace and no
  * end — the same silence a fixed-layout book produces.
  */
-function stepCount(renderer: Renderer | null | undefined): number | null {
+function reads(renderer: Renderer | null | undefined, of: Measured): number | null {
   if (!renderer) return null
   try {
-    const pages = renderer.pages
-    return typeof pages === 'number' && Number.isFinite(pages) ? pages : null
+    const value = renderer[of]
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
   } catch {
     /* Before layout. Not an error to report — the reader has simply not got a
        laid-out section yet, and will in a moment. */
@@ -620,15 +626,100 @@ function stepCount(renderer: Renderer | null | undefined): number | null {
   }
 }
 
-/** `renderer.page`, with the same hazard and the same answer — see `stepCount`. */
-function stepIndex(renderer: Renderer | null | undefined): number | null {
-  if (!renderer) return null
+/** The geometry this module reads off the renderer, all four of it hazardous. */
+type Measured = 'page' | 'pages' | 'viewSize' | 'end'
+
+/**
+ * Whether the section is laid out as one scroll rather than as pages.
+ *
+ * Cheap and safe where the four above are not — it reads an ATTRIBUTE
+ * (`flow="scrolled"`), so it answers before there is a view. Absent on a
+ * renderer that has no such notion, which is read as paginated.
+ */
+function scrolledFlow(renderer: Renderer | null | undefined): boolean {
+  if (!renderer) return false
   try {
-    const page = renderer.page
-    return typeof page === 'number' && Number.isFinite(page) ? page : null
+    return renderer.scrolled === true
   } catch {
-    return null
+    return false
   }
+}
+
+/**
+ * How many steps this section has, in the flow it is ACTUALLY laid out in.
+ *
+ * ⚠️ **PAGINATED `pages` COUNTS TWO SENTINEL COLUMNS, AND THIS READ IT RAW.**
+ * Confirmed in the pinned fork rather than inferred: `paginator.js` computes
+ * `const textPages = pages - 2`, reports `fraction = (page - 1) / (pages - 2)`,
+ * and ends a section at `page >= pages - 2`. So a three-page section answers
+ * `pages` 5, and a rest derived from 5 gave each page 60 % of the time it was
+ * owed. Scrolled `pages` is a count of VIEWPORTS and needs no adjustment —
+ * measured at 159 for a 171 KB section.
+ *
+ * Null rather than a floor when the adjustment leaves nothing: a section with
+ * no readable step has no honest pace, and `restPerStep` refuses one anyway.
+ */
+function stepsHere(renderer: Renderer | null | undefined): number | null {
+  const pages = reads(renderer, 'pages')
+  if (pages === null) return null
+  const steps = scrolledFlow(renderer) ? pages : pages - 2
+  return steps >= 1 ? steps : null
+}
+
+/**
+ * Whether this section has nothing further to show.
+ *
+ * ⚠️ **THE TWO FLOWS DO NOT AGREE, AND ONE TEST FOR BOTH WAS WRONG IN BOTH.**
+ * Paginated, `page >= pages - 1` never holds WHERE IT WAS ASKED — at the last
+ * navigable section, which is the only place the caller cares. The fork's own
+ * `#scrollNext` returns early there on `atEnd` (`page >= pages - 2`), so nothing
+ * scrolls into the trailing sentinel and the old test could not come back true:
+ * the end of the book never arrived, `next()` moved nothing, and the advance
+ * ticked for ever with its control lit.
+ *
+ * (`pages - 1` is reachable in general — `#scrollNext` scrolls INTO the sentinel
+ * and reaching it is exactly how it decides to cross into the next section. So
+ * the position is transient rather than impossible, and a flat claim of
+ * unreachability, which this comment made until the 2026-09-26 round-2 audit,
+ * is wrong. What matters is that it is unreachable at the LAST section.)
+ *
+ * Scrolled, the same comparison fires EARLY: a 3 400 px section in a 1 000 px
+ * viewport at offset 2 000 answers `page` 2 of `pages` 3 with 400 px unread.
+ *
+ * ⚠️ **AND `renderer.atEnd` IS NOT THE ANSWER, THOUGH IT LOOKS LIKE IT.** The
+ * fork's getter uses the paginated page test in BOTH flows; its scrolled
+ * `#scrollNext` uses `viewSize - end > 2` instead, and that is the real
+ * condition. Each branch here mirrors the one the fork itself acts on.
+ */
+function lastStepHere(renderer: Renderer | null | undefined): boolean | null {
+  if (scrolledFlow(renderer)) {
+    const viewSize = reads(renderer, 'viewSize')
+    const end = reads(renderer, 'end')
+    if (viewSize === null || end === null) return null
+    return viewSize - end <= 2
+  }
+  const page = reads(renderer, 'page')
+  const pages = reads(renderer, 'pages')
+  if (page === null || pages === null) return null
+  return page >= pages - 2
+}
+
+/**
+ * The next section a turn would actually reach, or null where there is none.
+ *
+ * ⚠️ **`sections.length - 1` IS NOT THE LAST READABLE SECTION.** A turn skips
+ * anything marked `linear: 'no'` — the fork walks forward for one in
+ * `#adjacentIndex` — so a book ending in a colophon, an ad page or a second
+ * cover never reported its end. That method is private, which is why the rule
+ * is restated here; it is stated in exactly one place on this side.
+ */
+function nextNavigable(sections: readonly unknown[], index: number | null): number | null {
+  if (index === null) return null
+  for (let at = index + 1; at >= 0 && at < sections.length; at += 1) {
+    const linear = (sections[at] as { readonly linear?: unknown } | undefined)?.linear
+    if (linear !== 'no') return at
+  }
+  return null
 }
 
 export class ReaderSession {
@@ -1249,6 +1340,19 @@ export class ReaderSession {
       const cover = view.book ? await coverFrom(view.book) : null
       if (!this.#disposed) this.#cb.onCover(cover ?? null)
     })()
+    /* ⚠️ **NOT A NAVIGATOR MEMBER — see `SessionNavigator.step`.** `step` is its
+       only caller and the only thing that needs the answer; exposing it as well
+       gave the host a surface nothing read. `lastStepHere` and `nextNavigable`
+       are its two halves, and both were wrong in the first version of this
+       branch — see their headers. */
+    const atEnd = (): boolean => {
+      const renderer = view.renderer
+      const sections = view.book?.sections
+      if (!renderer || !Array.isArray(sections)) return false
+      const last = lastStepHere(renderer)
+      if (last === null) return false
+      return last && nextNavigable(sections, this.#renderedIndex) === null
+    }
     this.#cb.onNavigator({
       /* Every navigation reports its own failure. These are async and were
        * discarded, so a target that will not resolve — a dead link in a table
@@ -1285,21 +1389,59 @@ export class ReaderSession {
           bookWords: wordsInSpine(spine, view.isFixedLayout),
           sectionBytes: typeof bytes === 'number' ? bytes : 0,
           spineBytes: spine ?? 0,
-          /* `pages` is the step count in both flows: a viewport in scrolled,
-             a page in paginated. Measured 2026-09-26 — a 171 KB section
-             reports 159 of them scrolled. */
-          steps: stepCount(view.renderer) ?? 0,
+          /* Per flow, and NOT raw `pages` — see `stepsHere`, which the two
+             sentinel columns of a paginated section made necessary. */
+          steps: stepsHere(view.renderer) ?? 0,
         }
       },
-      atEnd: () => {
-        const renderer = view.renderer
-        const sections = view.book?.sections
-        if (!renderer || !Array.isArray(sections)) return false
-        const last = this.#renderedIndex !== null && this.#renderedIndex >= sections.length - 1
-        const page = stepIndex(renderer)
-        const pages = stepCount(renderer)
-        if (page === null || pages === null) return false
-        return last && page >= pages - 1
+      /**
+       * One hands-free step, answering whether the book actually moved.
+       *
+       * ⚠️ **AWAITED, BECAUSE THE NEXT REST IS DERIVED FROM WHERE IT LANDS.**
+       * `View.next` is `async next(d) { await this.renderer.next(d) }`, so its
+       * promise settles after the turn AND any section change — a caller that
+       * fired and forgot derived the incoming section's pace from the outgoing
+       * one, and counted the load as reading time.
+       *
+       * ⚠️ **AND THE AWAIT IS NOT A COMPLETION GUARANTEE WHEN A TURN IS ALREADY
+       * RUNNING.** `#turnPage` holds a lock for the length of a turn and RETURNS
+       * IMMEDIATELY when it is held, remembering the request as `#queuedTurn` —
+       * so a step issued while another turn is in flight resolves before the
+       * queued turn lands, and that ONE rest is derived from geometry about to
+       * change. Bounded and self-correcting: the next tick re-derives.
+       *
+       * Two paths reach it, and NEITHER is the advance racing itself — the chain
+       * issues a step only once the previous one has settled. A reader turning
+       * the page by hand at the instant a rest expires is the first. The second
+       * is a stop-then-start inside a turn: `start` takes a new chain identity
+       * while the old step is unresolved, so the next step can arrive during a
+       * turn that has not landed. It needs a rest shorter than a turn, and the
+       * floor is `FASTEST_REST_MS` — two seconds against a few hundred
+       * milliseconds — so it takes a genuinely slow chapter load as well. Both
+       * found by audit (2026-09-26), both measured to cost one mistimed rest.
+       *
+       * Left as it is rather than papered over. Waiting for the geometry to move
+       * would be a poll at the most hazardous boundary in the app, and cannot
+       * tell a queued turn from one that moved nothing; reporting "it did not
+       * move" would stop the advance because the reader touched the book. The
+       * honest repair is upstream — a turn that reports its own completion — and
+       * that is a fork change, which `dev-docs/foliate-fork.md` is where to
+       * record. Found by the 2026-09-26 verification pass, which probed the real
+       * `#turnPage`: a queued promise resolved with zero completed turns.
+       */
+      step: async () => {
+        if (atEnd()) return false
+        try {
+          await view.next()
+        } catch (error) {
+          reportNavigation('next')(error)
+          return false
+        }
+        /* A teardown, or another book, while the turn was in flight. Answering
+           "it moved" would be a claim about a view this session no longer has,
+           and the caller would schedule another step against it. */
+        if (this.#disposed || this.#view !== view) return false
+        return true
       },
       prev: () => void view.prev()?.catch?.(reportNavigation('prev')),
       goLeft: () => void view.goLeft()?.catch?.(reportNavigation('goLeft')),

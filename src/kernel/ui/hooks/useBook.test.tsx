@@ -329,18 +329,26 @@ describe('where a book is before it has been anywhere', () => {
       return book
     }
 
-    it('steps when there is somewhere to go', () => {
-      const moved: number[] = []
-      const book = withNavigator({ atEnd: () => false, next: () => moved.push(1) })
-      expect(book().step()).toBe(true)
-      expect(moved).toHaveLength(1)
+    /* ⚠️ **THE STEP'S OWN RULES LIVE IN THE SESSION NOW, AND ON PURPOSE.** This
+       hook holds the DELEGATION and the two defences below; whether a turn is
+       possible, and whether it moved, needs the renderer's geometry and the
+       spine — see `session.test.ts`'s "the pace, and the end of the book",
+       where the end-of-book arithmetic is measured against the fork's own. */
+    it('steps by asking the navigator, and answers what it answers', async () => {
+      const asked: number[] = []
+      const book = withNavigator({
+        step: () => {
+          asked.push(1)
+          return Promise.resolve(true)
+        },
+      })
+      await expect(book().step()).resolves.toBe(true)
+      expect(asked).toHaveLength(1)
     })
 
-    it('refuses at the end of the book, and does not call next', () => {
-      const moved: number[] = []
-      const book = withNavigator({ atEnd: () => true, next: () => moved.push(1) })
-      expect(book().step()).toBe(false)
-      expect(moved).toHaveLength(0)
+    it('reports a step that moved nothing', async () => {
+      const book = withNavigator({ step: () => Promise.resolve(false) })
+      await expect(book().step()).resolves.toBe(false)
     })
 
     it('reads the pace the navigator answers', () => {
@@ -349,14 +357,14 @@ describe('where a book is before it has been anywhere', () => {
       expect(book().pace()).toEqual(pace)
     })
 
-    it('answers no pace and no step for a navigator missing the members', () => {
+    it('answers no pace and no step for a navigator missing the members', async () => {
       /* The shape every existing fake in these suites has. It must not throw. */
       const book = withNavigator({})
-      expect(book().step()).toBe(false)
+      await expect(book().step()).resolves.toBe(false)
       expect(book().pace()).toEqual({ bookWords: null, sectionBytes: 0, spineBytes: 0, steps: 0 })
     })
 
-    it('survives a navigator whose pace throws, rather than taking the reader down', () => {
+    it('survives a navigator whose pace throws, rather than taking the reader down', async () => {
       /* ⚠️ **THE SHAPE NO FAKE HAD, AND THE ONE THAT ACTUALLY HAPPENED.**
          `renderer.pages` is a GETTER that throws before the paginator has a
          view — measured in the running app: reading it during App's first
@@ -368,21 +376,19 @@ describe('where a book is before it has been anywhere', () => {
         get pace() {
           throw new TypeError('undefined is not an object (evaluating \'this.#view.element\')')
         },
-        atEnd: () => {
+        step: () => {
           throw new TypeError('the same, before layout')
         },
-        next: () => {},
       })
       expect(() => book().pace()).not.toThrow()
       expect(book().pace().bookWords).toBeNull()
-      expect(() => book().step()).not.toThrow()
-      expect(book().step()).toBe(false)
+      await expect(book().step()).resolves.toBe(false)
     })
 
-    it('answers no pace and no step before a navigator arrives at all', () => {
+    it('answers no pace and no step before a navigator arrives at all', async () => {
       holdFetch()
       const book = mount()
-      expect(book().step()).toBe(false)
+      await expect(book().step()).resolves.toBe(false)
       expect(book().pace().bookWords).toBeNull()
     })
   })

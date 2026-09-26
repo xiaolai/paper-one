@@ -120,8 +120,8 @@ export interface Book extends BookState {
   setFootnoteMount: (mount: HTMLElement | null, within: HTMLElement | null) => void
   /** Turn the page. The only way through a fixed-layout book. */
   next: () => void
-  /** One hands-free step; false when it would move nothing. See `useAutoAdvance`. */
-  step: () => boolean
+  /** One hands-free step; false when it moved nothing. See `useAutoAdvance`. */
+  step: () => Promise<boolean>
   /** What auto-advance derives its pace from — see `core/autoAdvance.ts`. */
   pace: () => StepPace
   prev: () => void
@@ -437,27 +437,26 @@ export function useBook(): Book {
    * delegate and nothing else now. */
   const next = useCallback(() => navigatorRef.current?.next(), [])
   /**
-   * One step of hands-free reading, answering whether it moved.
+   * One step of hands-free reading, resolving to whether it moved.
    *
-   * ⚠️ **ASKS `atEnd` BEFORE STEPPING RATHER THAN OBSERVING THE RESULT.**
-   * `next()` answers a promise and never says whether anything moved, so an
-   * auto-advance built on it would sit at the end of the book firing for ever
-   * with its control still lit. See `SessionNavigator.atEnd`.
+   * ⚠️ **AWAITS THE TURN, BECAUSE THE CALLER DERIVES THE NEXT REST FROM WHERE
+   * IT LANDS.** The first version returned `true` the moment `next()` was
+   * called, so a chapter boundary scheduled the incoming section's first rest at
+   * the OUTGOING section's pace, with the load counted as reading time.
+   * `SessionNavigator.step` holds the await and the end check together.
    */
-  const step = useCallback((): boolean => {
-    const navigator = navigatorRef.current
+  const step = useCallback(async (): Promise<boolean> => {
     /* ⚠️ **THE METHOD IS CHECKED, NOT JUST THE NAVIGATOR.** `?.` guards a null
        navigator and not one that is missing a member, and this runs where a
        throw takes the whole reader down: `offered` is read during App's render,
        so `pace is not a function` was an uncaught exception that unmounted the
        app — 52 cases in one file, all of them timing out because App never
-       mounted. A navigator without these answers "cannot advance", which is a
+       mounted. A navigator without this answers "cannot advance", which is a
        correct answer; crashing for a missing optional feature is not. */
     try {
-      if (typeof navigator?.atEnd !== 'function' || typeof navigator.next !== 'function') return false
-      if (navigator.atEnd()) return false
-      navigator.next()
-      return true
+      const navigator = navigatorRef.current
+      if (typeof navigator?.step !== 'function') return false
+      return await navigator.step()
     } catch {
       /* Same reason as `pace` below. A step that cannot be taken is "no", which
          stops the advance cleanly; a throw here would arrive inside a timer

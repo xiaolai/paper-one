@@ -4339,3 +4339,165 @@ describe('a mark drawn with nothing to report', () => {
     session.dispose()
   })
 })
+
+/**
+ * The pace auto-advance derives, and the end of the book it stops at.
+ *
+ * ⚠️ **EVERY CASE HERE ANSWERS A DEFECT THAT SHIPPED, AND THE FIRST VERSION HAD
+ * NO TEST AT ALL.** `pace` and `atEnd` went out reading `renderer.pages` raw and
+ * comparing `page >= pages - 1`, and all four numbers were wrong:
+ *
+ * | | the fork says | the first version did |
+ * |---|---|---|
+ * | paginated steps | `pages - 2` — `const textPages = pages - 2` | `pages` |
+ * | paginated end | `page >= pages - 2` | `page >= pages - 1`, UNREACHABLE |
+ * | scrolled end | `viewSize - end <= 2` | the paginated test, which fires early |
+ * | the last section | `#adjacentIndex` skips `linear: 'no'` | `sections.length - 1` |
+ *
+ * So a paginated page rested 60 % of its time, the end of the book never
+ * arrived in paginated flow, a scrolled book could stop with content unread, and
+ * a book ending in a colophon never ended. The numbers below are the fork's own,
+ * read from `paginator.js` at the pinned revision.
+ */
+describe('the pace, and the end of the book', () => {
+  /** A renderer whose geometry a case can state outright. */
+  async function paced(
+    renderer: Record<string, unknown>,
+    sections: readonly Record<string, unknown>[] = [{ size: 100 }],
+    at = 0,
+  ) {
+    const view = fakeView()
+    Object.assign(view.book as object, { sections })
+    /* ⚠️ **DESCRIPTORS, NOT `Object.assign`, AND THE DIFFERENCE IS A WHOLE CASE.**
+       `Object.assign` READS each source property, so a throwing getter throws
+       during setup — and a non-enumerable one is skipped outright, which is what
+       happened: the getter never reached the renderer, `pages` was merely ABSENT,
+       and the case that exists to prove a throw is survived passed without one
+       ever being thrown. The independent verification pass caught it by probing
+       the getter's call count, which was zero. */
+    Object.defineProperties(view.renderer as object, Object.getOwnPropertyDescriptors(renderer))
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    /* `#renderedIndex` comes from a `load`, which is what tells `atEnd` and the
+       pace WHICH section they are being asked about. */
+    view.emit('load', { doc: fakeDocument().asDocument(), index: at })
+    const nav = cb.calls['onNavigator']?.[0]?.[0] as {
+      pace: () => { steps: number; bookWords: number | null; sectionBytes: number }
+      step: () => Promise<boolean>
+    }
+    /**
+     * Whether a step is refused, asked THROUGH the step.
+     *
+     * ⚠️ **`atEnd` USED TO BE A NAVIGATOR MEMBER AND THESE CASES USED TO CALL
+     * IT — which made them the only readers it had.** A surface no production
+     * code reads is the shape this repository keeps having to delete twice, so it
+     * went, and the cases ask the thing that actually runs: a refused step turns
+     * no page and answers false. That is a stronger assertion than the predicate
+     * was, because it also measures that the refusal reaches the turn.
+     */
+    const refuses = async () => {
+      const turned = view.turns.next
+      const moved = await nav.step()
+      return { moved, turns: view.turns.next - turned }
+    }
+    return { nav, view, session, refuses }
+  }
+
+  it('drops the two sentinel columns of a paginated section', async () => {
+    /* A three-page section reports five. Reading it raw gave each page 60 % of
+       the rest it was owed, which is the whole reason this file exists. */
+    const { nav } = await paced({ pages: 5, page: 1 })
+    expect(nav.pace().steps).toBe(3)
+  })
+
+  it('takes a scrolled section’s viewports as they are', async () => {
+    /* Scrolled `pages` counts VIEWPORTS and has no sentinels — measured at 159
+       for a 171 KB section in the running app. Subtracting there would stretch
+       every rest instead of shrinking it. */
+    const { nav } = await paced({ scrolled: true, pages: 159, page: 0 })
+    expect(nav.pace().steps).toBe(159)
+  })
+
+  it('answers no steps for a paginated section with nothing readable in it', async () => {
+    /* Two columns are the two sentinels, so there is no page. A floor of one
+       would invent a step and a pace to go with it. */
+    const { nav } = await paced({ pages: 2, page: 1 })
+    expect(nav.pace().steps).toBe(0)
+  })
+
+  it('answers no steps where the geometry throws', async () => {
+    /* ⚠️ `pages` IS A GETTER THAT THROWS BEFORE LAYOUT — the crash that
+       unmounted the whole reader. A plain-object fake cannot reproduce it, so
+       this one is defined. */
+    let asked = 0
+    const renderer: Record<string, unknown> = {}
+    Object.defineProperty(renderer, 'pages', {
+      enumerable: true,
+      get() {
+        asked += 1
+        throw new TypeError("undefined is not an object (evaluating 'this.#view.element')")
+      },
+    })
+    const { nav, refuses } = await paced(renderer)
+    expect(() => nav.pace()).not.toThrow()
+    expect(nav.pace().steps).toBe(0)
+    /* Geometry it cannot read is not the end of the book: a step still turns the
+       page, because refusing would strand the reader on a transient. */
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+    /* ⚠️ **THE GETTER'S OWN CALL COUNT, BECAUSE THE FIRST VERSION OF THIS CASE
+       NEVER REACHED IT.** Without this the assertions above hold just as well
+       for a renderer that simply has no `pages`, which is a different and much
+       easier thing to survive. */
+    expect(asked, 'the throwing getter was actually read').toBeGreaterThan(0)
+  })
+
+  it('reaches the end of a paginated section, where `pages - 1` could not', async () => {
+    const { refuses } = await paced({ pages: 5, page: 3 })
+    await expect(refuses(), 'page 3 of 5 is the last readable page').resolves.toEqual({
+      moved: false,
+      turns: 0,
+    })
+  })
+
+  it('is not at the end one page earlier', async () => {
+    const { refuses } = await paced({ pages: 5, page: 2 })
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('does not call a scrolled section finished with content still below', async () => {
+    /* 3 400 px of section, a 1 000 px viewport scrolled to 2 000: the paginated
+       test reads `page` 2 of `pages` 3 and says finished, with 400 px never
+       shown. The fork's own scrolled condition is the distance left. */
+    const { refuses } = await paced({ scrolled: true, pages: 3, page: 2, viewSize: 3400, end: 3000 })
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('is at the end of a scrolled section when the distance left is gone', async () => {
+    const { refuses } = await paced({ scrolled: true, pages: 3, page: 2, viewSize: 3400, end: 3399 })
+    await expect(refuses()).resolves.toEqual({ moved: false, turns: 0 })
+  })
+
+  it('treats a trailing non-linear section as no section at all', async () => {
+    /* ⚠️ A turn SKIPS `linear: 'no'` — a colophon, an ad page, a second cover.
+       Counting it made the real last section not the last, so the end of the
+       book never arrived and the advance kept firing against a turn that moved
+       nothing. */
+    const { refuses } = await paced({ pages: 5, page: 3 }, [{ size: 100 }, { size: 100, linear: 'no' }], 0)
+    await expect(refuses()).resolves.toEqual({ moved: false, turns: 0 })
+  })
+
+  it('still has somewhere to go when the next section is readable', async () => {
+    const { refuses } = await paced({ pages: 5, page: 3 }, [{ size: 100 }, { size: 100 }], 0)
+    await expect(refuses()).resolves.toEqual({ moved: true, turns: 1 })
+  })
+
+  it('does not claim a step that landed after the session was torn down', async () => {
+    /* ⚠️ The caller schedules the NEXT step on this answer, so "it moved" about a
+       view this session no longer has would keep a dead chain alive. */
+    const { nav, session } = await paced({ pages: 5, page: 1 })
+    const stepping = nav.step()
+    session.dispose()
+    await expect(stepping).resolves.toBe(false)
+  })
+})
