@@ -151,7 +151,7 @@ fn link_qwenkit() {
     println!("cargo:rustc-link-search=native={}", found.display());
     println!("cargo:rustc-link-lib=static=QwenKit");
 
-    ship_shaders(&package, found);
+    ship_shaders(&package, &candidates);
 
     // The Swift runtime the archive's autolink records name. Without these the
     // link fails on `_swift_retain` and its siblings.
@@ -213,15 +213,31 @@ fn link_qwenkit() {
 /// ⚠️ **AND IT IS CHECKED AFTERWARDS, NOT ASSUMED** — the same rule the archive
 /// search above follows, and for the same reason: a copy that silently wrote
 /// nothing would move the failure back to `tauri build`, which is where it was.
-fn ship_shaders(package: &std::path::Path, built: &std::path::Path) {
+fn ship_shaders(package: &std::path::Path, candidates: &[std::path::PathBuf]) {
     const BUNDLE: &str = "mlx-swift_Cmlx.bundle";
-    let from = built.join(BUNDLE);
-    assert!(
-        from.is_dir(),
-        "swift build wrote no {BUNDLE} beside libQwenKit.a in {}; MLX cannot load its shaders without it",
-        built.display()
-    );
-    let into = package.join(".build/paper");
+    let build = package.join(".build");
+    let into = build.join("paper");
+    // ⚠️ **THE BUNDLE IS LOOKED FOR SEPARATELY FROM THE ARCHIVE, BECAUSE THEY ARE
+    // NOT ALWAYS IN THE SAME DIRECTORY.** The first version of this took the
+    // directory `libQwenKit.a` was found in and asserted the bundle was beside
+    // it. On a developer Mac it is: `.build/debug` is a SYMLINK to
+    // `out/Products/Debug`, so both appear there. On the CI runner the archive
+    // was in `.build/debug` and the bundle was not, and the assertion fired —
+    // correctly, and having assumed exactly what the archive search directly
+    // above refuses to assume. Two artifacts, two searches.
+    let from = candidates
+        .iter()
+        .map(|dir| dir.join(BUNDLE))
+        .find(|path| path.is_dir())
+        // And if SwiftPM moves it again, look: bounded, skipping the destination
+        // so a previous run's copy is never taken for the source.
+        .or_else(|| find_directory(&build, BUNDLE, &into, 4))
+        .unwrap_or_else(|| {
+            panic!(
+                "swift build exited 0 but wrote no {BUNDLE} anywhere under {}; MLX cannot load its shaders without it",
+                build.display()
+            )
+        });
     let to = into.join(BUNDLE);
     // Replaced rather than merged: a stale shader left from an older MLX would
     // ship inside the app and be loaded in preference to nothing at all.
@@ -234,6 +250,40 @@ fn ship_shaders(package: &std::path::Path, built: &std::path::Path) {
         to.display()
     );
     println!("cargo:rerun-if-changed={}", from.display());
+}
+
+/// Find a directory by name, no deeper than `depth`, ignoring one subtree.
+///
+/// Symbolic links are stepped over rather than followed: `file_type` reports a
+/// link as a link, so this walks only real directories and cannot loop. The
+/// candidate paths above are checked with `is_dir`, which DOES follow a link, so
+/// between them both layouts are covered.
+fn find_directory(
+    root: &std::path::Path,
+    name: &str,
+    skip: &std::path::Path,
+    depth: usize,
+) -> Option<std::path::PathBuf> {
+    if depth == 0 {
+        return None;
+    }
+    let mut deeper = Vec::new();
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let path = entry.path();
+        if path == skip {
+            continue;
+        }
+        if entry.file_name() == name {
+            return Some(path);
+        }
+        deeper.push(path);
+    }
+    deeper
+        .iter()
+        .find_map(|dir| find_directory(dir, name, skip, depth - 1))
 }
 
 /// Copy a directory tree, creating what it needs.
