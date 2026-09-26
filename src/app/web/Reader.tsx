@@ -407,6 +407,14 @@ export function Reader({
   const [fraction, setFraction] = useState(0)
   /* The print edition's page here, when the book carries a `page-list`. */
   const [printPage, setPrintPage] = useState('')
+  /**
+   * How long this book is, in words, or null when that cannot be known.
+   *
+   * ⚠️ **THE FOOTER USED TO ASSUME 90,000 WORDS FOR EVERY BOOK.** Measured over
+   * 400 books of the real library, that is an excellent median (95,715) and
+   * wrong by more than 2x for a third of the shelf — see `readingTime.ts`.
+   */
+  const [words, setWords] = useState<number | null>(null)
   /* The last CFI a relocation reported, which is what a departure is made of.
      A ref rather than state: it is read when a jump is recorded and must not
      make the reader re-render on every page turn. */
@@ -750,6 +758,7 @@ export function Reader({
       <ProgressFooter
         fraction={fraction}
         printPage={printPage}
+        words={words}
         visible={chrome && selection === null}
         /* ⚠️ **RECORD, THEN MOVE.** `jumpTo` performs the navigation itself
            and takes a CFI; a seek has only a proportion, which the renderer
@@ -920,6 +929,7 @@ export function Reader({
           onExternalLink={followExternalLink}
           onFootnote={setFootnote}
           onPlate={setPlate}
+          onLength={(_generation, at) => setWords(at)}
           onFileDropped={ignore}
           onPageIntent={turn}
           onFixedLayout={ignore}

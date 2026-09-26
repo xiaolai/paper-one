@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { ProgressFooter, minutesLeft } from './ProgressFooter'
+import { ProgressFooter } from './ProgressFooter'
 
 /**
  * The footer's own concerns: the readouts beside the track, and the row that
@@ -15,17 +15,6 @@ import { ProgressFooter, minutesLeft } from './ProgressFooter'
 
 afterEach(cleanup)
 
-describe('minutesLeft', () => {
-  it('counts down as the reader advances', () => {
-    expect(minutesLeft(0)).toBe(360)
-    expect(minutesLeft(1)).toBe(0)
-  })
-
-  it('clamps a fraction outside the book', () => {
-    expect(minutesLeft(-1)).toBe(360)
-    expect(minutesLeft(2)).toBe(0)
-  })
-})
 
 describe('ProgressFooter, as a readout', () => {
 
@@ -114,5 +103,54 @@ describe('ProgressFooter — the readouts follow the THUMB, not the book', () =>
     expect(screen.getByText('37%')).toBeTruthy()
     fireEvent.pointerDown(track, { isPrimary: true, button: 0, clientX: 80, pointerId: 1 })
     expect(screen.getByText('80%')).toBeTruthy()
+  })
+})
+
+describe('ProgressFooter — the estimate is the book\'s own length now', () => {
+  /* ⚠️ **IT WAS AN ASSUMED 90,000 WORDS FOR EVERY BOOK.** Measured over 400
+     books of the real library that is an excellent MEDIAN — 95,715 — and wrong
+     by more than 2x for a third of the shelf, more than 3x for 17 %. The
+     longest book measured, 988,448 words, was told "about 6 hours" for eleven
+     hours of reading. `readingTime.ts` holds the arithmetic and the corpus. */
+
+  it('says nothing about time when the book\'s length is unknown', () => {
+    /* Every PDF takes this path: a fixed-layout book reports section sizes that
+       are progress weights, not file sizes. Silence beats a confident number
+       about nothing. */
+    render(<ProgressFooter fraction={0.5} visible />)
+    expect(screen.queryByText(/left|Nearly done/u)).toBeNull()
+  })
+
+  it('reads a short book as short, which the old constant could not', () => {
+    /* 1,207 words is the shortest on the shelf. The assumption said six hours. */
+    render(<ProgressFooter fraction={0.5} visible words={1_207} />)
+    expect(screen.getByText(/min left|Nearly done/u)).toBeTruthy()
+    expect(screen.queryByText(/h left/u)).toBeNull()
+  })
+
+  it('reads a long book as long, which is the case it was most wrong about', () => {
+    render(<ProgressFooter fraction={0.5} visible words={988_448} />)
+    expect(screen.getByText(/~33 h left/u)).toBeTruthy()
+  })
+
+  it('still says nothing before the reader has moved', () => {
+    render(<ProgressFooter fraction={0} visible words={95_715} />)
+    expect(screen.queryByText(/left|Nearly done/u)).toBeNull()
+  })
+
+  it('follows the THUMB while dragging, not the book', () => {
+    /* Dragging to 90 % should say how long is left from there. */
+    /* 25,000 words: half of it is 50 minutes, which stays in the minutes
+       branch. At 90 min the reading crosses to hours and the case would be
+       asserting the rounding rather than the preview. */
+    render(<ProgressFooter fraction={0.5} visible words={250 * 100} onSeek={vi.fn()} />)
+    const track = screen.getByRole('slider')
+    track.setPointerCapture = vi.fn()
+    track.getBoundingClientRect = vi.fn(
+      () => ({ left: 0, width: 100, top: 0, height: 3, right: 100, bottom: 3, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect,
+    )
+    expect(screen.getByText('~50 min left')).toBeTruthy()
+    fireEvent.pointerDown(track, { isPrimary: true, button: 0, clientX: 90, pointerId: 1 })
+    expect(screen.getByText('~10 min left')).toBeTruthy()
   })
 })

@@ -228,6 +228,12 @@ const KERNEL_COVER_ART = '^src/kernel/core/coverArt\\.ts$'
    also needs has to live here, and the alternative was a second copy of the one
    control whose failure mode is losing the reader's place. */
 const KERNEL_SEEK_TRACK = '^src/kernel/ui/reader/SeekTrack\\.tsx?$'
+/* How long a book is and how long is left of it: pure arithmetic over numbers,
+   no DOM and no React, so it sits in `core/` beside `citation.ts` — the same
+   shape as `coverArt.ts` already in this list. The footer that draws the
+   estimate is in the shared shell; the session that measures the spine is in
+   the kernel. One module, both callers. */
+const KERNEL_READING_TIME = '^src/kernel/core/readingTime\\.ts$'
 
 /** The kernel's two entries: the React-free public one every capability may
  *  import, and the UI one only a composition root may. */
@@ -684,7 +690,7 @@ module.exports = {
       comment:
         'The shared mobile shell (src/app/shell/) reaches the kernel through the public entry, the ' +
         'design-system stylesheets and metrics.ts, and the browser-safe leaves it renders — ' +
-        'OverlaySheet, BookCover, coverArt.ts and SeekTrack. It may NOT name a UI door. The doors are ' +
+        'OverlaySheet, BookCover, coverArt.ts, SeekTrack and readingTime.ts. It may NOT name a UI door. The doors are ' +
         'per-platform (ui/browser.ts for a browser, ui/index.ts for a native build) and this ' +
         'directory is mounted by BOTH roots, so importing one would pick a platform on the other ' +
         "root's behalf and pull that barrel's whole re-export set into the wrong bundle. Naming the " +
@@ -702,6 +708,7 @@ module.exports = {
           KERNEL_BOOK_COVER,
           KERNEL_COVER_ART,
           KERNEL_SEEK_TRACK,
+          KERNEL_READING_TIME,
         ],
       },
     },

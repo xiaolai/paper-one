@@ -131,6 +131,7 @@ function callbacks() {
     onExternalLink: rec('onExternalLink'),
     onFootnote: rec('onFootnote'),
     onPlate: vi.fn(),
+    onLength: vi.fn(),
     onToc: rec('onToc'),
     onRelocate: rec('onRelocate'),
     onDocument: rec('onDocument'),

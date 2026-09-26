@@ -95,6 +95,7 @@ const callbacks = () => ({
   onExternalLink: vi.fn(),
   onFootnote: vi.fn(),
   onPlate: vi.fn(),
+  onLength: vi.fn(),
   onFileDropped: vi.fn(),
   onPageIntent: vi.fn(),
   onFixedLayout: vi.fn(),

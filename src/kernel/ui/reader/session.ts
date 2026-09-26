@@ -18,6 +18,7 @@ import { refuseBookScripts, stripScripts } from './bookScripts'
 import { suppressEmptyGeneratedContent } from './generatedContent'
 import { isEnlargeable, markFigures } from './markFigures'
 import { type PlateDetail, plateOf, plateTargetOf } from './plate'
+import { type BookLength, spineBytes, wordsInSpine } from '../../core/readingTime'
 import { matteFigures } from './matteFigures'
 import { markProse } from './markProse'
 import { markSmallText } from './markSmallText'
@@ -300,6 +301,15 @@ export interface SessionCallbacks {
    * always fixed-layout, and an EPUB declaring `pre-paginated` is too.
    */
   onFixedLayout: (fixed: boolean) => void
+  /**
+   * How long the book is, in words, or null when that cannot be known.
+   *
+   * Published ONCE at open, beside `onFixedLayout`, from the spine the fork has
+   * already parsed — see `wordsInSpine`, which carries the measurement and the
+   * two routes not taken. Null for a fixed-layout book, whose section sizes are
+   * progress weights rather than file sizes.
+   */
+  onLength: (words: BookLength) => void
   /**
    * Which way the book's text runs, once a section has rendered.
    *
@@ -1232,6 +1242,12 @@ export class ReaderSession {
     })
 
     this.#cb.onFixedLayout(view.isFixedLayout)
+    /* ⚠️ **THE WHOLE SPINE, NEVER A SAMPLE.** Measured over 250 books: within
+       one book the chars-per-byte ratio spans 18.6x between its 10th and 90th
+       percentile sections, because front matter is markup over a handful of
+       words and a chapter is the opposite. Only the aggregate is stable, which
+       is why this is summed here rather than accumulated as sections load. */
+    this.#cb.onLength(wordsInSpine(spineBytes(view.book.sections), view.isFixedLayout))
 
     // Settings go on BEFORE the first paint, so the reader never flashes
     // foliate's defaults on the way to the configured layout.

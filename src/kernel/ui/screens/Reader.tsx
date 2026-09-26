@@ -128,6 +128,15 @@ function FootNotice({
   )
 }
 
+/**
+ * A callback this screen deliberately does not want.
+ *
+ * Module-level so the prop is one identity rather than a fresh arrow each
+ * render, and named so the absence reads as a decision — `app/web/Reader.tsx`
+ * has its own `ignore` for the same reason.
+ */
+const ignore = (): void => {}
+
 export interface ReaderProps {
   state: AppState
   dispatch: AppDispatch
@@ -869,6 +878,11 @@ export function Reader({
                       onExternalLink={onExternalLink}
                       onFootnote={onFootnote}
                       onPlate={onPlate}
+                      /* The desktop draws no time estimate, so it holds no
+                         length. Its footer reports the chapter, the seek and the
+                         percentage; the minutes are the phone and browser
+                         footer's, which is where `ProgressFooter` lives. */
+                      onLength={ignore}
                       onFileDropped={book.open}
                       onPageIntent={onPageIntent}
                       onFixedLayout={book.setFixedLayout}

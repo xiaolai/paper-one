@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { SeekTrack, shownFraction } from '../../kernel/ui/reader/SeekTrack'
+import { timeLeft } from '../../kernel/core/readingTime'
 import styles from './ProgressFooter.module.css'
 
 /**
@@ -29,6 +30,18 @@ export interface ProgressFooterProps {
   readonly fraction: number
   readonly visible: boolean
   /**
+   * How long this book is, in words, or null when that cannot be known.
+   *
+   * ⚠️ **THIS USED TO BE AN ASSUMED 90,000 AND THE COMMENT BELOW SAID SO.**
+   * Measured over 400 books of the real library: 90,000 is an excellent MEDIAN
+   * (95,715) and wrong by more than 2x for a THIRD of the shelf, more than 3x
+   * for 17 % — the longest book was told "about 6 hours" for eleven hours of
+   * reading. Null draws no estimate at all, which is the same rule this footer
+   * already followed at 0 %. See `readingTime.ts` for where the number comes
+   * from and the two routes not taken.
+   */
+  readonly words?: number | null | undefined
+  /**
    * The print edition's page here, or empty — see `ReaderPosition.printPage`.
    *
    * ⚠️ **NEVER A SYNTHESISED NUMBER.** A page counted from this window is a
@@ -48,15 +61,13 @@ export interface ProgressFooterProps {
   readonly onSeek?: ((fraction: number) => void) | undefined
 }
 
-const WORDS_PER_MINUTE = 250
-const ASSUMED_BOOK_WORDS = 90_000
-
-export function minutesLeft(fraction: number): number {
-  const left = Math.max(0, Math.min(1, 1 - fraction))
-  return Math.round((left * ASSUMED_BOOK_WORDS) / WORDS_PER_MINUTE)
-}
-
-export function ProgressFooter({ fraction, visible, onSeek, printPage = '' }: ProgressFooterProps) {
+export function ProgressFooter({
+  fraction,
+  visible,
+  onSeek,
+  printPage = '',
+  words = null,
+}: ProgressFooterProps) {
   /* The READOUTS follow the thumb, not the book, so the percentage a reader
      sees while dragging is the place they are about to land on. `SeekTrack`
      owns the drag; this owns the words beside it, and both read the same
@@ -64,7 +75,9 @@ export function ProgressFooter({ fraction, visible, onSeek, printPage = '' }: Pr
   const [preview, setPreview] = useState<number | null>(null)
   const shown = shownFraction(fraction, preview)
   const pct = Math.round(shown * 100)
-  const mins = minutesLeft(shown)
+  /* The words follow the THUMB too: dragging to 80 % should say how long is
+     left from there, not from where the book still is. */
+  const left = timeLeft(shown, words)
 
   return (
     /* ⚠️ **`aria-hidden` AND `opacity: 0` DO NOT DISABLE ANYTHING.** The hidden
@@ -85,12 +98,10 @@ export function ProgressFooter({ fraction, visible, onSeek, printPage = '' }: Pr
       {/* ⚠️ **ALWAYS RENDERED, EMPTY WHEN THERE IS NOTHING TO SAY.** It used to
           be absent below 1 %, which meant the row REFLOWED the instant a drag
           preview passed 0 — the track is `flex: 1`, so it narrowed under the
-          reader's thumb. The rule the text obeys is unchanged: no estimate
-          before the reader has moved, because "~6 h left" for a book nobody
-          has opened is a real-sounding figure from an assumed word count. */}
-      <span className={styles.left}>
-        {pct > 0 ? (mins < 1 ? 'Nearly done' : mins < 60 ? `~${mins} min left` : `~${Math.round(mins / 60)} h left`) : ''}
-      </span>
+          reader's thumb. `timeLeft` answers null both before the reader has
+          moved and where the book's length cannot be known, so the two refusals
+          the footer has to make are one decision in one place. */}
+      <span className={styles.left}>{left ?? ''}</span>
     </div>
   )
 }
