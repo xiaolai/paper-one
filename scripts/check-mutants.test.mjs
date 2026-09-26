@@ -678,26 +678,36 @@ describe('one sweep per checkout', () => {
       return { lock, code }
     }
 
-    it.each([
+    /* ⚠️ **A `for` LOOP RATHER THAN `it.each`, BECAUSE `each` HANDS ITS CALLBACK
+       NO TEST CONTEXT.** Written as `it.each([...])('...', (signal, expected,
+       context) => …)` the third parameter is simply `undefined`, and the skip
+       below died with `Cannot read properties of undefined (reading 'skip')` on
+       every platform rather than skipping on one. A loop gives each case its own
+       `it`, which does take a context — and `vitest list` still sees three names,
+       which is what `test:ledger` reads. */
+    for (const [signal, expected] of [
       ['SIGINT', 130],
       ['SIGTERM', 143],
       ['SIGHUP', 129],
-    ])('releases on %s, and exits 128 plus the signal', async (signal, expected, context) => {
-      /* ⚠️ **NOT A PLATFORM QUIRK TO WORK AROUND — THERE IS NO HANDLER TO RUN.**
-         Node's own documentation is explicit that on Windows 'SIGINT', 'SIGTERM'
-         and 'SIGKILL' cause unconditional termination of the target, so releasing
-         the lock on the way out is a mechanism that cannot exist there. What
-         Windows relies on instead is `takeOver`, which is what the SIGKILL case
-         below and the takeover cases beside it measure — on every platform. */
-      if (WINDOWS) return context.skip(WINDOWS_CANNOT.deliverASignal)
-      await inScratch('mutants-signal-', async (root) => {
-        const { lock, code } = await stoppedBy(root, signal)
-        expect(existsSync(lock)).toBe(false)
-        /* The shell's own convention, so a caller can still tell an interrupted
-           sweep from a failed one. */
-        expect(code).toBe(expected)
+    ]) {
+      it(`releases on ${signal}, and exits 128 plus the signal`, async (context) => {
+        /* ⚠️ **NOT A PLATFORM QUIRK TO WORK AROUND — THERE IS NO HANDLER TO RUN.**
+           Node's own documentation is explicit that on Windows 'SIGINT', 'SIGTERM'
+           and 'SIGKILL' cause unconditional termination of the target, so
+           releasing the lock on the way out is a mechanism that cannot exist
+           there. What Windows relies on instead is `takeOver`, which is what the
+           SIGKILL case below and the takeover cases beside it measure — on every
+           platform. */
+        if (WINDOWS) return context.skip(WINDOWS_CANNOT.deliverASignal)
+        await inScratch('mutants-signal-', async (root) => {
+          const { lock, code } = await stoppedBy(root, signal)
+          expect(existsSync(lock)).toBe(false)
+          /* The shell's own convention, so a caller can still tell an interrupted
+             sweep from a failed one. */
+          expect(code).toBe(expected)
+        })
       })
-    })
+    }
 
     it('cannot release on SIGKILL, which is why takeOver still exists', async () => {
       /* ⚠️ **THE HONEST LIMIT, MEASURED RATHER THAN ASSERTED.** A harness memory
