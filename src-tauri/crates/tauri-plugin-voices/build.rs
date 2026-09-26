@@ -106,8 +106,36 @@ fn link_qwenkit() {
         "debug"
     };
 
+    // ⚠️ **THE BUILD SYSTEM IS NAMED, AND NOT NAMING IT WAS FOUR SEPARATE CI
+    // FAILURES.** `swift build --build-system` takes `swiftbuild` (Swift Build) or
+    // `native` (llbuild, deprecated), and WHICH ONE IS THE DEFAULT MOVED: Swift
+    // 6.4 defaults to `swiftbuild`, Swift 6.3 still defaults to `native`. They do
+    // not produce the same tree and they do not do the same work:
+    //
+    // | | `swiftbuild` (6.4 default) | `native` (6.3 default) |
+    // |---|---|---|
+    // | layout | `.build/out/Products/Debug` | `.build/arm64-apple-macosx/debug` |
+    // | `.metal` files | compiled into `mlx-swift_Cmlx.bundle` | NOT COMPILED AT ALL |
+    //
+    // So a developer Mac on 6.4 got the shaders and the runner on 6.3 did not —
+    // and `native` reported "Build complete!" and exited 0 while simply ignoring
+    // every `.metal` file, which is why nothing named the cause. Measured from the
+    // runner's own inventory: it had `swift-transformers_Hub.bundle` and
+    // `swift-crypto_Crypto.bundle` and no MLX bundle, so resource bundles were
+    // working and only Metal was absent.
+    //
+    // Naming it makes the layout and the work the same on every machine, which is
+    // also what makes the candidate search below mere tolerance rather than the
+    // thing correctness rests on.
     let built = std::process::Command::new("swift")
-        .args(["build", "-c", profile, "--package-path"])
+        .args([
+            "build",
+            "--build-system",
+            "swiftbuild",
+            "-c",
+            profile,
+            "--package-path",
+        ])
         .arg(&package)
         .status()
         .expect("swift build could not be started — is Xcode's toolchain installed?");
