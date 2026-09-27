@@ -1643,8 +1643,25 @@ describe('turning a page', () => {
         await act(async () => reader.live!.relocate(cfi))
         await settle()
       }
-      const keydowns = added.mock.calls.filter(([type]) => type === 'keydown')
-      expect(keydowns, 'no key listener was added for a page turn').toEqual([])
+      /* ⚠️ **`keyup`, NOT `keydown`, AND THE DIFFERENCE MADE THIS FLAKY ON CI.**
+         The defect guarded here is APP's effect re-running. A `window` spy is
+         global, and `keydown` on `window` is bound by two other components —
+         `ReadingRuler` (whose effect lists `doc`) and `FootnotePopover` — both of
+         which REBIND LEGITIMATELY when the book's document changes. This case's
+         own CFIs cross spine items (`/6/4` → `/6/8`), so a document change is
+         expected during it, and a rebind there is correct behaviour being
+         reported as this defect. It failed exactly that way on the Linux leg of
+         `36278655229` while passing nine times here — eight in isolation and once
+         through the whole `test:coverage` leg.
+
+         `window.addEventListener('keyup', …)` appears EXACTLY ONCE in the app, at
+         `App.tsx`'s own effect, on the line after its `keydown` — so one window
+         `keyup` add is one run of that effect and nothing else can contribute one.
+         The assertion is therefore no weaker: it measures the same effect more
+         precisely. `session.ts` binds `keyup` on the book's `doc`, which a
+         `window` spy never sees. */
+      const reinstalls = added.mock.calls.filter(([type]) => type === 'keyup')
+      expect(reinstalls, 'App reinstalled its keyboard map for a page turn').toEqual([])
     } finally {
       added.mockRestore()
     }
