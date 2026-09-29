@@ -218,26 +218,29 @@ describe('copyTree', () => {
   })
 
   /**
-   * ⚠️ **AND `pnpm` IS THE ONLY COMMAND THE RUNNER THAT RUNS THESE IS PREPARED
-   * FOR.** The list above pins the steps, which is a different claim from this
-   * one: this is about what the CI job needs installed. Since 2026-09-29 the
-   * deletion proof is its own job in `verify.yml`, and it deliberately carries no
-   * Rust toolchain, no Xcode selection and no Metal component — the three steps
-   * `host` needs because a Cargo command there runs `tauri-plugin-voices`'s build
-   * script, which runs `swift build`. Every Cargo step is in `EXCLUDED` with its
-   * own reason, so shedding them was sound.
+   * ⚠️ **EVERY COPIED STEP IS A `pnpm` ONE, WHICH IS WHY THE JOB THAT RUNS THEM
+   * COMPILES NOTHING.** The list above pins the steps; this is the consequence
+   * for CI. Since 2026-09-29 the deletion proof is its own job in `verify.yml`,
+   * carrying no Xcode selection, no Metal component and no `rust-cache` — the
+   * three things `host` needs because a Cargo command there runs
+   * `tauri-plugin-voices`'s build script, and that runs a six-minute
+   * `swift build`. Every Cargo step is in `EXCLUDED` with its own reason, so
+   * shedding them was sound, and the job's first run proved it: `circle` passed
+   * all twelve of these steps in 209.4s with no Rust installed at all.
    *
-   * Written DERIVED rather than as a second literal list: a Cargo step added
-   * above would be edited into that list as a matter of course, and the first
-   * thing anybody would learn about the consequence is `cargo: command not found`
-   * ninety seconds into a job nobody thought about. This fails here, in seconds,
-   * saying which toolchain the job would need.
+   * ⚠️ **AND THIS CLAIM IS ABOUT THE COPIED STEPS ONLY — WHICH IS NARROWER THAN
+   * THE ONE IT MADE WHEN IT WAS WRITTEN, AND THE DIFFERENCE FAILED A CI JOB.** It
+   * read *"needs nothing but pnpm, which is all the deletion job installs"*, and
+   * that second clause is about a list this test never reads. `capability:remove`
+   * runs BEFORE these steps and is not one of them, so a green assertion here said
+   * nothing about it — and it needs `rustfmt` and `cargo`. The case below is the
+   * one that covers it.
    */
-  it('needs nothing but pnpm, which is all the deletion job installs', () => {
+  it('runs nothing but pnpm in the copy, so those steps compile nothing', () => {
     const foreign = COPY_STEPS.filter((step) => step.cmd !== 'pnpm').map((step) => `${step.name} runs ${step.cmd}`)
     expect(
       foreign,
-      'verify.yml\'s `deletion` job installs node and pnpm only — a step needing another toolchain has to be added there too',
+      'a copied step needing another toolchain has to be installed in verify.yml\'s `deletion` job too',
     ).toEqual([])
   })
 

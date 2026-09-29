@@ -12,8 +12,9 @@
 #            `pnpm verify:without` accounted for **1242s of it — 51%**, against
 #            1099s for `pnpm verify` itself. The two prove different things and
 #            share no state, so running them in series was spending wall clock
-#            for nothing and leaving 90% of the bound consumed. Apart, `host` is
-#            ~19.5 min and this is ~21.
+#            for nothing and leaving 90% of the bound consumed. **Apart, `host`
+#            measured 14.7 min** — 33% of the bound, where it had been 90% — and
+#            this one is ~21, so the wall clock is this job rather than that one.
 #   linux    Ubuntu 24.04 — the SAME `pnpm verify`, unchanged, after Tauri's
 #            system libraries. Every Tauri app surveyed runs its tests on one
 #            primary Linux runner; this is the first time this repository's
@@ -153,8 +154,11 @@ jobs:
       #     nothing when it takes the one that was saving more.
       #
       # The 45-minute bound was the reason to want it. Splitting the deletion
-      # proof into its own job took this one to ~19.5 min instead, which buys
-      # more than the cache would and costs no correctness.
+      # proof into its own job took this one to a MEASURED 14.7 min instead —
+      # 33% of the bound — which buys more than the cache would and costs no
+      # correctness. The estimate written here first was ~19.5; the measurement
+      # replaced it on the run that produced it, which is the only honest way
+      # round.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
@@ -162,18 +166,36 @@ jobs:
       - run: pnpm verify
 
   # ⚠️ **THE DELETION PROOF WAS `host`'s LAST STEP AND IS ITS OWN JOB NOW.** The
-  # header above has the arithmetic; what belongs here is what it does NOT need,
-  # because that is what a reader will be tempted to copy back in.
+  # header above has the arithmetic. What belongs here is what it needs and what
+  # it does not — and the first version of this job got that wrong, so both halves
+  # are measured rather than reasoned.
   #
-  # NO RUST TOOLCHAIN, NO XCODE SELECTION, NO METAL COMPONENT, NO `rust-cache`.
-  # `verify-without.mjs`'s `COPY_STEPS` is ten `pnpm` commands and nothing else —
-  # every Cargo step is in `EXCLUDED` with its reason, because they "cost minutes
-  # on a fresh target directory, and `pnpm verify` runs them on the real tree".
-  # No cargo means no `tauri-plugin-voices` build script, which means no
-  # `swift build`, which is what the three shed steps exist to make possible.
-  # `verify-without.test.mjs` asserts that every copied step is a `pnpm` one, so
-  # adding a Cargo step there fails in the suite in seconds rather than here, as
-  # a `cargo: command not found` ninety seconds into a runner nobody prepared.
+  # NOTHING HERE COMPILES, so there is no Xcode selection, no Metal component and
+  # no `rust-cache`. `verify-without.mjs`'s `COPY_STEPS` is ten `pnpm` commands
+  # and nothing else — every Cargo step is in `EXCLUDED` with its reason, because
+  # they "cost minutes on a fresh target directory, and `pnpm verify` runs them on
+  # the real tree" — so the `tauri-plugin-voices` build script, and the six-minute
+  # `swift build` inside it, are never reached. Measured on this job's first run:
+  # `circle` passed all twelve copied steps in 209.4s with no Rust installed.
+  #
+  # ⚠️ **BUT THE REMOVAL IS NOT ONE OF THOSE STEPS, AND IT NEEDS TWO RUST TOOLS.**
+  # `capability:remove` runs BEFORE the copied steps and spawns exactly three
+  # binaries — `git`, `rustfmt` and `cargo` — because it rewrites `lib.rs` and
+  # prunes `Cargo.lock`. The first run of this job shed the toolchain and died on
+  # `passages` with `rustfmt is not available`, AFTER `circle` had passed all
+  # twelve steps: `circle` is the only removable capability with no Rust crate, so
+  # it is precisely the one that cannot show this. `verify-without.test.mjs` pins
+  # that three-binary set now, so a fourth tool fails in the suite in seconds
+  # instead of here, a quarter of an hour in.
+  #
+  # ⚠️ **AND `cargo metadata --offline` NEEDS A POPULATED REGISTRY, WHICH A CLEAN
+  # RUNNER HAS NOT GOT.** Measured against an empty `CARGO_HOME`: exit 101, *"no
+  # matching package named `tauri` found … offline mode (via `--offline`) can
+  # sometimes cause surprising resolution failures"*. `cargo fetch --locked` fixes
+  # it in 13.5s and compiles nothing. `rust-cache` would also populate it and is
+  # WORSE here: its key is per-job, so a new job's first run is a miss, the
+  # offline call fails, the job fails — and a failed job saves no cache, which is
+  # a state that cannot recover on its own.
   deletion:
     name: deletion (every removable capability, temp checkout)
     runs-on: macos-26
@@ -191,7 +213,18 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
+      # `rustfmt` only — no `clippy`, because nothing here runs it. The version
+      # moves with `rust-toolchain.toml` and the other jobs, as `host` records.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt
       - run: pnpm install --frozen-lockfile
+      # The registry, so the removal's `cargo metadata --offline` can resolve.
+      # `--locked` because a fetch that silently updated the lockfile would make
+      # the copy's pruning a different operation from the one this proves.
+      - name: Cargo's registry, so a lockfile can be pruned without a network
+        run: cargo fetch --locked --manifest-path src-tauri/Cargo.toml
       # NO ARGUMENT, DELIBERATELY. The script derives which capability it can
       # remove — the manifest declares it, nothing `requires` it, no host
       # imports it outside a composition root — and prints what it chose.
