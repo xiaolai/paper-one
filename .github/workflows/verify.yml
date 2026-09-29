@@ -2,9 +2,18 @@
 # developer runs locally; CI runs exactly the same thing so "green here" and
 # "green there" are one fact. (dev-docs/plans/phase-05-kernel-capabilities.md, K.12)
 #
-# THREE LEGS SINCE PHASE 20 (WI-20.38, D10), and what each one is for:
+# FOUR LEGS — three since phase 20 (WI-20.38, D10), and the fourth split off on
+# 2026-09-29 — and what each one is for:
 #
-#   host     macOS — the full gate, as it always was, plus the deletion proof.
+#   host     macOS — the full gate, as it always was.
+#   deletion macOS — the deletion proof, which was `host`'s last step until
+#            2026-09-29. ⚠️ **IT WAS HALF OF THAT JOB.** Measured from the green
+#            run at `d39f2df2`: `host` took 40m43s against a 45-minute bound, and
+#            `pnpm verify:without` accounted for **1242s of it — 51%**, against
+#            1099s for `pnpm verify` itself. The two prove different things and
+#            share no state, so running them in series was spending wall clock
+#            for nothing and leaving 90% of the bound consumed. Apart, `host` is
+#            ~19.5 min and this is ~21.
 #   linux    Ubuntu 24.04 — the SAME `pnpm verify`, unchanged, after Tauri's
 #            system libraries. Every Tauri app surveyed runs its tests on one
 #            primary Linux runner; this is the first time this repository's
@@ -112,11 +121,77 @@ jobs:
             exit 1
           }
           "$metal" --version
+      # ⚠️ **AND THE SWIFT BUILD IS DELIBERATELY NOT CACHED, THOUGH IT IS THE
+      # LARGEST SINGLE BLOCK IN `pnpm verify`.** Measured from `d39f2df2`'s log,
+      # where the voices build script's output is captured and only the silence
+      # shows: 350s inside `cargo clippy` (00:19:57.9 to 00:25:47.4, nothing
+      # printed between) and 97s more inside `cargo test` — 447s, 41% of that
+      # step. `swift/QwenKit/.build` is 2.4 GB and caching it is the obvious move.
+      # Three reasons not to, and the first decides it:
+      #
+      #  1. A COLD SWIFT BUILD IS WHAT MAKES `build.rs`'s ASSERTIONS MEAN
+      #     ANYTHING, and a warm one would have hidden the defect that cost four
+      #     days. `--build-system native` exits 0 having compiled no `.metal`
+      #     file and written no `mlx-swift_Cmlx.bundle`; `ship_shaders` catches
+      #     exactly that by asserting the bundle carries `default.metallib`. A
+      #     restored `.build` satisfies that assertion without compiling a
+      #     shader. The gate would have been green for the whole of 2026-09-23
+      #     to 09-26 and the Linux artifact would still not build.
+      #  2. THE BUILD PLAN HOLDS AN ABSOLUTE PATH INTO A MOUNT THAT ROTATES.
+      #     SwiftPM's XCBuild plans name
+      #     `/var/run/com.apple.security.cryptexd/mnt/…MetalToolchain-v<ver>.<SUFFIX>/`,
+      #     and the suffix belongs to the MOUNT, regenerated when the cryptex is
+      #     remounted. Reproduced on a developer Mac on 2026-09-29 against a
+      #     three-day-old `.build`: `unable to spawn process '…Apk4m6/…/metal'`
+      #     while `xcrun -f metal` answered `…3Or21M` and that compiler ran fine.
+      #     A cache restored onto a runner that installs the component itself is
+      #     that failure by construction. The remedy costs 76s of Metal
+      #     recompilation (measured, 802 tasks) and the cache saves 447s, so what
+      #     is left is thin even when it works.
+      #  3. 2.4 GB against a 10 GB per-repository budget already holding three
+      #     `rust-cache` entries, with least-recently-used eviction that says
+      #     nothing when it takes the one that was saving more.
+      #
+      # The 45-minute bound was the reason to want it. Splitting the deletion
+      # proof into its own job took this one to ~19.5 min instead, which buys
+      # more than the cache would and costs no correctness.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
+
+  # ⚠️ **THE DELETION PROOF WAS `host`'s LAST STEP AND IS ITS OWN JOB NOW.** The
+  # header above has the arithmetic; what belongs here is what it does NOT need,
+  # because that is what a reader will be tempted to copy back in.
+  #
+  # NO RUST TOOLCHAIN, NO XCODE SELECTION, NO METAL COMPONENT, NO `rust-cache`.
+  # `verify-without.mjs`'s `COPY_STEPS` is ten `pnpm` commands and nothing else —
+  # every Cargo step is in `EXCLUDED` with its reason, because they "cost minutes
+  # on a fresh target directory, and `pnpm verify` runs them on the real tree".
+  # No cargo means no `tauri-plugin-voices` build script, which means no
+  # `swift build`, which is what the three shed steps exist to make possible.
+  # `verify-without.test.mjs` asserts that every copied step is a `pnpm` one, so
+  # adding a Cargo step there fails in the suite in seconds rather than here, as
+  # a `cargo: command not found` ninety seconds into a runner nobody prepared.
+  deletion:
+    name: deletion (every removable capability, temp checkout)
+    runs-on: macos-26
+    # 5 capabilities x ~250s = 1242s measured, so ~21 min: `circle` 266.7,
+    # `passages` 249.2, `public` 250.8, `voices` 258.8, `webhost` 208.0. The list
+    # is DERIVED, so it grows as capabilities are added — 40 leaves room for four
+    # more before anybody has to think about this number. When it does bind, the
+    # lever is the one `verify-without.mjs` already names: a CI matrix over
+    # `removableCapabilities()`, not measuring fewer of them.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       # NO ARGUMENT, DELIBERATELY. The script derives which capability it can
       # remove — the manifest declares it, nothing `requires` it, no host
       # imports it outside a composition root — and prints what it chose.

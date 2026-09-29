@@ -217,6 +217,30 @@ describe('copyTree', () => {
     ])
   })
 
+  /**
+   * ⚠️ **AND `pnpm` IS THE ONLY COMMAND THE RUNNER THAT RUNS THESE IS PREPARED
+   * FOR.** The list above pins the steps, which is a different claim from this
+   * one: this is about what the CI job needs installed. Since 2026-09-29 the
+   * deletion proof is its own job in `verify.yml`, and it deliberately carries no
+   * Rust toolchain, no Xcode selection and no Metal component — the three steps
+   * `host` needs because a Cargo command there runs `tauri-plugin-voices`'s build
+   * script, which runs `swift build`. Every Cargo step is in `EXCLUDED` with its
+   * own reason, so shedding them was sound.
+   *
+   * Written DERIVED rather than as a second literal list: a Cargo step added
+   * above would be edited into that list as a matter of course, and the first
+   * thing anybody would learn about the consequence is `cargo: command not found`
+   * ninety seconds into a job nobody thought about. This fails here, in seconds,
+   * saying which toolchain the job would need.
+   */
+  it('needs nothing but pnpm, which is all the deletion job installs', () => {
+    const foreign = COPY_STEPS.filter((step) => step.cmd !== 'pnpm').map((step) => `${step.name} runs ${step.cmd}`)
+    expect(
+      foreign,
+      'verify.yml\'s `deletion` job installs node and pnpm only — a step needing another toolchain has to be added there too',
+    ).toEqual([])
+  })
+
   it('does not link node_modules when the source has none', () => {
     const src = mkdtempSync(path.join(tmpdir(), 'verify-without-bare-'))
     roots.push(src)
