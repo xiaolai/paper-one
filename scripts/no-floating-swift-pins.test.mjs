@@ -52,6 +52,35 @@ import { describe, expect, it } from 'vitest'
 /** Where this repository keeps its own Swift packages. */
 const SWIFT_ROOT = 'src-tauri/crates'
 
+/**
+ * The crate those packages live in, named because the deletion proof cannot be
+ * asked.
+ *
+ * ⚠️ **`capability:remove voices` DELETES THIS DIRECTORY, AND `swift/QwenKit` IS
+ * INSIDE IT** — so in that copy of the tree there is genuinely no manifest to
+ * find, and the non-vacuity case below is false of the copy while staying true of
+ * this repository. Measured 2026-09-29: the case failed there with `expected 0 to
+ * be greater than 0` after `circle`, `passages` and `public` had all passed,
+ * because those three do not touch this crate.
+ *
+ * Naming the crate rather than skipping on `PAPER_VERIFY_WITHOUT` alone keeps the
+ * relaxation exact: every other removal, `passages` and `webhost` included, must
+ * still find a manifest. And the pin cannot go stale, because
+ * `keeps its Swift packages where the relaxation says` asserts every manifest
+ * found is under it — which is a statement about what WAS found, so it holds in
+ * the real tree and vacuously in the copy that has none.
+ */
+const SWIFT_CRATE = `${SWIFT_ROOT}/tauri-plugin-voices`
+
+/** `verify:without` sets this to the directories the removal deleted. */
+const DELETED_DIRS_ENV = 'PAPER_VERIFY_WITHOUT_DIRS'
+
+/** Repo-relative directories the deletion proof removed, `[]` in the real tree. */
+function deletedDirs() {
+  const raw = process.env[DELETED_DIRS_ENV]
+  return raw === undefined ? [] : raw.split(':').filter((one) => one !== '')
+}
+
 /** Never descend into these: `.build` holds every dependency's OWN manifest. */
 const NOT_OURS = new Set(['.build', 'node_modules', '.git', 'target'])
 
@@ -116,13 +145,19 @@ export function withoutComments(text) {
   return out
 }
 
-/** Every `Package.swift` this repository owns, as a repo-relative path. */
-export function manifestsIn(root) {
+/**
+ * Every `Package.swift` this repository owns, as a REPO-relative path.
+ *
+ * Repo-relative rather than relative to `SWIFT_ROOT`, so a path compares directly
+ * with `PAPER_VERIFY_WITHOUT_DIRS`, which is repo-relative too. Two spellings of
+ * one path is the shape this repository keeps having to fix.
+ */
+export function manifestsIn(repoRoot) {
   const found = []
   const walk = (rel) => {
     let entries
     try {
-      entries = readdirSync(resolve(root, rel), { withFileTypes: true })
+      entries = readdirSync(resolve(repoRoot, rel), { withFileTypes: true })
     } catch {
       return
     }
@@ -131,12 +166,12 @@ export function manifestsIn(root) {
       /* Forward slashes always: `globSync` and `join` answer in the platform's
          separator, and comparing `crates\a` with `crates/a` is how a Windows leg
          reported a file as missing that was right there. */
-      const child = rel === '' ? entry.name : `${rel}/${entry.name}`
+      const child = `${rel}/${entry.name}`
       if (entry.isDirectory()) walk(child)
       else if (entry.name === 'Package.swift') found.push(child)
     }
   }
-  walk('')
+  walk(SWIFT_ROOT)
   return found
 }
 
@@ -198,11 +233,32 @@ export function branchedIn(json) {
 }
 
 describe('no Swift dependency of this repository floats', () => {
-  const root = resolve(import.meta.dirname, '..', SWIFT_ROOT)
+  const root = resolve(import.meta.dirname, '..')
 
-  it('finds the manifests at all', () => {
+  /**
+   * ⚠️ **SKIPPED ONLY WHERE THE REMOVAL TOOK THE PACKAGES, AND THROUGH THE TEST'S
+   * OWN `context`.** Never `it.skipIf`: `vitest list` drops those, and
+   * `check-test-ledger` then reads a dropped title as a test that was DELETED. The
+   * Windows cases in this tree skip the same way for the same reason.
+   */
+  it('finds the manifests at all', (context) => {
+    if (deletedDirs().includes(SWIFT_CRATE)) {
+      context.skip(`capability:remove voices deletes ${SWIFT_CRATE}, where this repository keeps its Swift packages, so the copy has none — the real tree's pnpm verify runs this`)
+      return
+    }
     /* A walk that finds nothing passes every assertion below it. */
     expect(manifestsIn(root).length).toBeGreaterThan(0)
+  })
+
+  /**
+   * THE PIN ABOVE, HELD TO ITSELF. A statement about what WAS found, so it is true
+   * in this tree and vacuously true in the copy that has no manifest — which is
+   * why it needs no skip of its own. A Swift package added under another crate
+   * fails here, saying that the relaxation above has become too broad.
+   */
+  it('keeps its Swift packages where the relaxation says', () => {
+    const stray = manifestsIn(root).filter((rel) => !rel.startsWith(`${SWIFT_CRATE}/`))
+    expect(stray, `a Swift package outside ${SWIFT_CRATE} means the skip above now excuses too much`).toEqual([])
   })
 
   it('pins every dependency to something with an upper bound, and to what is locked', () => {
@@ -216,7 +272,7 @@ describe('no Swift dependency of this repository floats', () => {
         /* No lock beside the manifest. A `revision:` is then reported below as a
            pin nothing resolved, which is the finding rather than an excuse. */
       }
-      return floatingIn(text, locks).map((where) => `${SWIFT_ROOT}/${rel}:${where}`)
+      return floatingIn(text, locks).map((where) => `${rel}:${where}`)
     })
     expect(
       offenders,

@@ -1577,6 +1577,7 @@
     "scripts/no-floating-swift-pins.test.mjs > no Swift dependency of this repository floats > can actually see what it refuses",
     "scripts/no-floating-swift-pins.test.mjs > no Swift dependency of this repository floats > does not eat a URL while blanking comments",
     "scripts/no-floating-swift-pins.test.mjs > no Swift dependency of this repository floats > finds the manifests at all",
+    "scripts/no-floating-swift-pins.test.mjs > no Swift dependency of this repository floats > keeps its Swift packages where the relaxation says",
     "scripts/no-floating-swift-pins.test.mjs > no Swift dependency of this repository floats > leaves no branch in a lock either",
     "scripts/no-floating-swift-pins.test.mjs > no Swift dependency of this repository floats > pins every dependency to something with an upper bound, and to what is locked",
     "scripts/no-foreign-formatting.test.mjs > no foreign formatter has been run over this tree > can actually see each fingerprint",
