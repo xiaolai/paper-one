@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Paper",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "identifier": "one.paper.reader",
   "build": {
     "frontendDist": "../dist",
