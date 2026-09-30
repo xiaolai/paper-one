@@ -1702,7 +1702,18 @@ describe('the Listen control and the voices this machine has', () => {
         ],
         install: async () => {},
         remove: async () => {},
-        render: async () => ({ pcm: new Uint8Array(0), sampleRate: 24_000, words: [], skipped: [] }),
+        render: async () => ({
+          pcm: new Uint8Array(0),
+          sampleRate: 24_000,
+          words: [],
+          skipped: [],
+          evicted: { clips: 0, bytes: 0 },
+          clipPath: '/tmp/audio/clips/x.wav',
+        }),
+        findClip: async () => null,
+        holdClips: async (stems: readonly string[]) => stems.length,
+        clipUsage: async () => ({ bytes: 0, budget: 5 * 1024 * 1024 * 1024, clips: 0 }),
+        forgetClips: async () => ({ clips: 0, bytes: 0 }),
         release: async () => {},
       })
     }
@@ -1768,6 +1779,76 @@ describe('the Listen control and the voices this machine has', () => {
     )
     expect(button).toHaveProperty('disabled', false)
     expect(button.getAttribute('title')).toBe('Read this chapter aloud')
+  })
+
+  it('sends the book and the section the reader is IN, not the first render’s', async () => {
+    /* ⚠️ **`speechPlace` HAD NO CASE AT ALL — FOUND BY THE MUTATION SWEEP, which
+       reported the memo, its body and its dependency list as survivors.** It is
+       the whole of how a render is addressed: `bookId` is a content hash that
+       resolves asynchronously and `docSection` arrives WITH the document, so at
+       the first render both are null. The in-app run of WI-34.6 found exactly that
+       — every Listen died, because the value reaching the plugin was the one from
+       before the book had opened — and nothing here could see it.
+
+       Observed through the request the engine is handed, which is where the key
+       actually goes. */
+    reader.prose = '<p>Call me Ishmael.</p>'
+    reader.lang = 'en'
+    const asked: { clip?: { bookId: string; section: number | null } }[] = []
+    const button = await listenWith(
+      [{ name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }],
+      (services) => {
+        /* ⚠️ **ONE BIND, BECAUSE A PORT MAY ONLY BE BOUND ONCE** — `services.ts`
+           refuses a second and says so. The catalogue and the recording `render`
+           go in together rather than one over the other. */
+        services.bindSpeechEngines({
+          catalogue: async () => [
+            {
+              id: 'english-kokoro',
+              name: 'English',
+              summary: '',
+              family: 'kokoro',
+              languages: ['en'],
+              bytes: 336_822_660,
+              minimumMemoryGb: 4,
+              voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+              installed: true,
+            },
+          ],
+          install: async () => {},
+          remove: async () => {},
+          render: async (request) => {
+            asked.push(request as { clip?: { bookId: string; section: number | null } })
+            throw new Error('nothing to play here — the request is what this case is about')
+          },
+          findClip: async () => null,
+          holdClips: async (stems: readonly string[]) => stems.length,
+          clipUsage: async () => ({ bytes: 0, budget: 5 * 1024 * 1024 * 1024, clips: 0 }),
+          forgetClips: async () => ({ clips: 0, bytes: 0 }),
+          release: async () => {},
+        })
+      },
+    )
+    await act(async () => {
+      button.click()
+    })
+    await settled()
+
+    expect(asked, 'the engine was asked to read').not.toHaveLength(0)
+    const clip = asked[0]?.clip
+    /* ⚠️ **`bookId` IS THE WHOLE OF WHAT THIS CAN OBSERVE, AND IT IS ENOUGH.** It
+       is a content hash that resolves asynchronously, so it is `null` at the first
+       render — which is the value a frozen memo would send for ever, and the value
+       the in-app run watched every Listen die on. All three mutants the sweep found
+       (`() => undefined`, `() => ({})` and an emptied dependency list) produce a
+       key with no book id, so this assertion refuses each of them.
+
+       ⚠️ **AND THE SECTION IS NOT OBSERVABLE HERE**, which is worth saying rather
+       than asserting around: this harness's renderer reports no section index, so
+       `docSection` is genuinely absent and the key carries that faithfully.
+       `useSpeech.test.tsx` is where the section half is driven, through a `place`
+       the case sets. */
+    expect(clip?.bookId, 'a real book id rather than the first render’s null').toBeTruthy()
   })
 
   /* And a pack that is OFFERED but not here names itself and its size, which is

@@ -351,6 +351,63 @@ export function rangeAt(
   return range
 }
 
+/**
+ * Where a place in the DOCUMENT falls in the collected text — the reverse of
+ * {@link rangeAt}.
+ *
+ * ⚠️ **THE DIRECTION THAT HAD NO CALLER UNTIL PHASE 34, AND COULD NOT HAVE
+ * ONE.** An utterance used to be a SENTENCE, so an offset somewhere else in the
+ * section named a position in no buffer that existed. One buffer for the whole
+ * section makes a tap on a word a place the reading can go.
+ *
+ * `null` for a node this walk never collected — a `<script>`, a hidden note,
+ * the text inside an element `collectText` skips. That is the honest answer: the
+ * voice is not going to read it, so there is nowhere in the sound to go.
+ *
+ * ⚠️ **BY NODE IDENTITY AND NOT BY POSITION.** A document has many text nodes
+ * with the same content, and `segments` is ordered by the walk rather than
+ * searchable by anything the DOM gives a caret. The list is short — one entry
+ * per text node the voice reads — and this runs once per tap, not per frame.
+ */
+export function offsetIn(spoken: SpokenText, node: Node, offset: number): number | null {
+  for (const segment of spoken.segments) {
+    if (segment.node !== node) continue
+    /* CLAMPED to the segment, because a caret may sit one past the last
+       character of a node and that position belongs to the next one. */
+    const within = Math.min(Math.max(0, offset), segment.end - segment.start)
+    return segment.start + within
+  }
+  return null
+}
+
+/**
+ * The text node and offset under a point in the book's own document.
+ *
+ * ⚠️ **TWO SPELLINGS, AND WEBKIT HAS ONLY THE OLDER ONE.** `caretPositionFromPoint`
+ * is the standard and `caretRangeFromPoint` is what Safari and this app's WebView
+ * answer to; a reader that knew only the standard would find no caret on the one
+ * platform the downloaded voices run on at all. Both are optional on the type,
+ * so a document with neither answers null rather than throwing.
+ */
+export function textAtPoint(
+  doc: Document,
+  x: number,
+  y: number,
+): { readonly node: Node; readonly offset: number } | null {
+  const legacy = (doc as Partial<Document>).caretRangeFromPoint?.bind(doc)
+  if (legacy) {
+    const range = legacy(x, y)
+    return range ? { node: range.startContainer, offset: range.startOffset } : null
+  }
+  const standard = (
+    doc as {
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null
+    }
+  ).caretPositionFromPoint
+  const at = standard?.call(doc, x, y)
+  return at ? { node: at.offsetNode, offset: at.offset } : null
+}
+
 function findSegment(segments: readonly Segment[], index: number): Segment | null {
   let low = 0
   let high = segments.length - 1

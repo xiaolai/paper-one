@@ -85,11 +85,12 @@ const engine: Harness = {
   make() {
     const host = new FakeAudioHost()
     const cb: SpeakerCallbacks = { onWord: vi.fn(), onDone: vi.fn(), onNoBoundaries: vi.fn() }
-    const answer: SpokenAudio = { pcm: pcmOf(RATE), sampleRate: RATE, words: [], skipped: [] }
+    const answer: SpokenAudio = { pcm: pcmOf(RATE), sampleRate: RATE, words: [], skipped: [], evicted: { clips: 0, bytes: 0 }, clipPath: '/tmp/audio/clips/x.wav' }
     const speaker = new EngineSpeaker(cb, {
       render: async () => answer,
       host: () => host,
       choose: (lang) => (lang === 'is-IS' ? null : { packId: 'english-kokoro', voiceId: 'af_heart' }),
+      clip: () => ({ bookId: 'book:a', section: 0, textDigest: 'fnv1a64:1:0000000000000001' }),
     })
     return {
       speaker,

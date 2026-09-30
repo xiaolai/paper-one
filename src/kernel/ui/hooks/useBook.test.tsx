@@ -235,6 +235,50 @@ describe('a value arriving from a session already replaced', () => {
   })
 })
 
+describe('the section the renderer reported, which the reading is keyed on', () => {
+  /* ⚠️ **`docSection` HAD NO CASE — FOUND BY THE MUTATION SWEEP, which reported
+     the pair guard, its second setter and the reset among the survivors.** It is
+     NOT `position.sectionIndex`: that one is documented as null *"when that cannot
+     be told yet"* and was measured answering null in the running app while the
+     renderer knew perfectly well where the reader was. This is the index the
+     renderer reported WITH the document, and it is what the reading's clip key and
+     the audiobook export both count in. */
+  it('arrives with the document, and both are dropped for a session already replaced', () => {
+    holdFetch()
+    const book = mount()
+    act(() => book().open('https://example.test/first.epub'))
+    const mine = book().generation
+    const doc = document.implementation.createHTMLDocument('t')
+
+    act(() => book().setDoc(mine, doc, 8))
+    expect(book().doc, 'its own session was heard').toBe(doc)
+    expect(book().docSection, 'and the index came with it').toBe(8)
+
+    /* ⚠️ **ONE GUARD OVER BOTH, WHICH IS WHY THEY ARE SET TOGETHER.** A document
+       applied without its index — or an index without its document — would leave
+       the reading addressing a section of a book that is not on screen, and every
+       render would be filed under the wrong key. */
+    act(() => book().open('https://example.test/second.epub'))
+    const left = document.implementation.createHTMLDocument('t')
+    act(() => book().setDoc(mine, left, 99))
+    expect(book().doc, 'the book the reader left spoke, and was not heard').toBeNull()
+    expect(book().docSection, 'and neither half of it landed').toBeNull()
+  })
+
+  it('goes back to nothing when the book closes', () => {
+    /* A stale index outliving its book is the value every render would be keyed
+       on for the next one — the same defect the in-app run met as `?? -1`. */
+    holdFetch()
+    const book = mount()
+    act(() => book().open('https://example.test/first.epub'))
+    act(() => book().setDoc(book().generation, document.implementation.createHTMLDocument('t'), 8))
+    expect(book().docSection).toBe(8)
+
+    act(() => book().close())
+    expect(book().docSection, 'no book, no section').toBeNull()
+  })
+})
+
 describe('a book that cannot be identified', () => {
   /**
    * The identity fetch is the only thing here that can fail in practice, and a

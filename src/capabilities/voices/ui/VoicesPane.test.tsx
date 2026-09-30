@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { POLL_MS, STOPPED, VoicesPane, arrivedOf, languagesOf, progressLine, sizeOf } from './VoicesPane'
-import type { InstallProgress, SpeechEnginePort, SpokenAudio, VoicePack } from '../../../kernel'
+import { POLL_MS, STOPPED, VoicesPane, arrivedOf, languagesOf, progressLine, sizeOf, usageLine } from './VoicesPane'
+import type { ClipUsage, InstallProgress, SpeechEnginePort, SpokenAudio, VoicePack } from '../../../kernel'
 import { StopFailed } from '../lib/port'
 import { makeDownloads } from '../lib/downloads'
 
@@ -29,7 +29,11 @@ function portOver(packs: readonly VoicePack[], over: Partial<SpeechEnginePort> =
     catalogue: async () => packs,
     install: async () => {},
     remove: async () => {},
-    render: async (): Promise<SpokenAudio> => ({ pcm: new Uint8Array(0), sampleRate: 24_000, words: [], skipped: [] }),
+    render: async (): Promise<SpokenAudio> => ({ pcm: new Uint8Array(0), sampleRate: 24_000, words: [], skipped: [], evicted: { clips: 0, bytes: 0 }, clipPath: '/tmp/audio/clips/x.wav' }),
+    findClip: async () => null,
+    holdClips: async (stems: readonly string[]) => stems.length,
+    clipUsage: async () => ({ bytes: 0, budget: 5 * 1024 * 1024 * 1024, clips: 0 }),
+    forgetClips: async () => ({ clips: 0, bytes: 0 }),
     release: async () => {},
     ...over,
   }
@@ -44,6 +48,11 @@ function portOver(packs: readonly VoicePack[], over: Partial<SpeechEnginePort> =
 async function show(port: SpeechEnginePort, downloads = makeDownloads()) {
   const view = render(<VoicesPane port={port} downloads={downloads} />)
   await act(async () => {
+    /* ⚠️ **TWO TURNS, BECAUSE THERE ARE TWO READS.** The catalogue and the
+       rendered reading's usage are started together and are independent promises,
+       so one microtask lands the first and leaves the second pending — and a case
+       about the usage row would then find no row and read as a missing feature. */
+    await Promise.resolve()
     await Promise.resolve()
   })
   return view
@@ -698,5 +707,366 @@ describe('the pane', () => {
       await Promise.resolve()
     })
     expect(screen.queryByText(STOPPED)).toBeNull()
+  })
+})
+
+describe('the rendered reading, and the disk it holds', () => {
+  const usage = (over: Partial<ClipUsage> = {}): ClipUsage => ({
+    bytes: 1_500_000_000,
+    budget: 5 * 1024 * 1024 * 1024,
+    clips: 12,
+    ...over,
+  })
+
+  it('says how much is held, the budget, and what goes first', async () => {
+    /* ⚠️ **WI-34.5's *eviction shown*.** Five gigabytes of audio derived from
+       books the reader already has, and the only other sign of it is a chapter
+       they heard last week being made again. */
+    await show(portOver([pack()], { clipUsage: async () => usage() }))
+    expect(screen.getByText(/in 12 chapters/u).textContent).toBe(
+      `${sizeOf(1_500_000_000)} in 12 chapters · up to ${sizeOf(5 * 1024 * 1024 * 1024)} is kept · the least recently played goes first`,
+    )
+  })
+
+  it('asks the line directly, because the DOM flattens its answers', () => {
+    /* ⚠️ `packSize` REFUSES ZERO — correctly, for a SIZE — and nought bytes of
+       rendered reading is an ordinary amount. The same rule the
+       `sizeOf`/`arrivedOf` pair records, one level along. */
+    expect(usageLine(usage({ bytes: 0, clips: 0 }))).toBe(
+      `nothing yet · up to ${sizeOf(5 * 1024 * 1024 * 1024)} is kept · the least recently played goes first`,
+    )
+    expect(usageLine(usage({ clips: 1 }))).toContain('in 1 chapter ·')
+    expect(usageLine(usage({ clips: 2 }))).toContain('in 2 chapters ·')
+  })
+
+  it('offers no Forget where there is nothing to forget', async () => {
+    await show(portOver([pack()], { clipUsage: async () => usage({ bytes: 0, clips: 0 }) }))
+    expect(screen.getByRole('button', { name: 'Forget them' }).hasAttribute('disabled')).toBe(true)
+  })
+
+  it('forgets everything on one press, and reads the usage back', async () => {
+    const forgot: (string | undefined)[] = []
+    let held = usage()
+    const port = portOver([pack()], {
+      clipUsage: async () => held,
+      forgetClips: async (bookId) => {
+        forgot.push(bookId)
+        held = usage({ bytes: 0, clips: 0 })
+        return { clips: 12, bytes: 1_500_000_000 }
+      },
+    })
+    await show(port)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Forget them' }))
+    })
+    expect(forgot, 'all of it, not one book').toEqual([undefined])
+    expect(screen.getByText(/nothing yet/u)).toBeTruthy()
+  })
+
+  it('keeps the newer read where two are in flight, in either order', async () => {
+    /* ⚠️ **THE GENERATION TOKEN HAD NO CASE AT ALL — FOUND BY THE MUTATION SWEEP,
+       which reported the guard, its negation and the whole `catch` as survivors.**
+       The pane polls every four seconds and re-reads after a forget, so two reads
+       overlap the moment either is slow — and the older one landing last would
+       put stale disk in front of the reader, or `null` over a row that had just
+       loaded. Every other case here has one read that resolves at once. */
+    const answers: ((value: ClipUsage) => void)[] = []
+    const port = portOver([pack()], {
+      clipUsage: () => new Promise<ClipUsage>((resolve) => answers.push(resolve)),
+    })
+    /* ⚠️ **FAKE TIMERS BEFORE THE RENDER, NOT AFTER.** The poll's interval is
+       armed in an effect at mount; switching clocks afterwards leaves that
+       interval on the real one, so advancing the fake clock fires nothing and the
+       case reports one read where it needs two. */
+    vi.useFakeTimers()
+    let view
+    try {
+      view = render(<VoicesPane port={port} downloads={makeDownloads()} />)
+      await act(async () => {
+        await Promise.resolve()
+      })
+      /* A second read, from the poll, before the first has answered. */
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_MS)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(answers.length, 'two reads really are in flight').toBeGreaterThanOrEqual(2)
+
+    /* THE OLDER ONE LANDS LAST, which is the case the token exists for. */
+    await act(async () => {
+      answers.at(-1)?.({ bytes: 2_000_000_000, budget: 5 * 1024 * 1024 * 1024, clips: 9 })
+      await Promise.resolve()
+    })
+    await act(async () => {
+      answers[0]?.({ bytes: 1, budget: 5 * 1024 * 1024 * 1024, clips: 1 })
+      await Promise.resolve()
+    })
+    expect(
+      screen.getByText(/in 9 chapters/u),
+      'the newer answer stands; the stale one was dropped',
+    ).toBeTruthy()
+    view.unmount()
+  })
+
+  it('leaves a loaded row alone when a LATER read fails', async () => {
+    /* ⚠️ **THE `catch`'s OWN TOKEN CHECK, which nothing reached.** A poll that
+       fails after the row has loaded must not blank it — the disk is still there,
+       and a row flickering to nothing every four seconds on a transient failure is
+       worse than a row that is briefly stale. And a STALE failure must not blank a
+       row a newer read has just filled, which is the same question the other way
+       round. */
+    let answer: (value: ClipUsage) => void = () => {}
+    let refuse: (cause: unknown) => void = () => {}
+    let first = true
+    const port = portOver([pack()], {
+      clipUsage: () =>
+        new Promise<ClipUsage>((resolve, reject) => {
+          if (first) {
+            first = false
+            refuse = reject
+          } else {
+            answer = resolve
+          }
+        }),
+    })
+    /* FAKE TIMERS BEFORE THE RENDER — see the case above. */
+    vi.useFakeTimers()
+    let view
+    try {
+      view = render(<VoicesPane port={port} downloads={makeDownloads()} />)
+      await act(async () => {
+        await Promise.resolve()
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_MS)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+    /* The NEWER read succeeds, then the older one fails. */
+    await act(async () => {
+      answer({ bytes: 2_000_000_000, budget: 5 * 1024 * 1024 * 1024, clips: 9 })
+      await Promise.resolve()
+    })
+    await act(async () => {
+      refuse(new Error('the store went away'))
+      await Promise.resolve()
+    })
+    expect(
+      screen.getByText(/in 9 chapters/u),
+      'a stale failure does not blank a row a newer read filled',
+    ).toBeTruthy()
+    view.unmount()
+  })
+
+  it('takes the row away when the read that fails is the CURRENT one', async () => {
+    /* ⚠️ **AND THIS IS WHY `setUsage(null)` IS THERE AT ALL — the sweep reported
+       it as removable, because the only case about a failing read had never loaded
+       a row to lose.** The decision is the pane's own: a build without the store
+       answers nothing, and a row about disk is not worth a sentence explaining its
+       own absence beside a catalogue that loaded. So a current failure blanks it —
+       which is a different answer from the stale failure above, and the token is
+       what tells them apart. */
+    let fails = false
+    const port = portOver([pack()], {
+      clipUsage: async () => {
+        if (fails) throw new Error('the store went away')
+        return usage()
+      },
+    })
+    vi.useFakeTimers()
+    try {
+      const view = render(<VoicesPane port={port} downloads={makeDownloads()} />)
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(screen.getByText(/in 12 chapters/u), 'the row loaded first').toBeTruthy()
+      fails = true
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_MS)
+      })
+      expect(screen.queryByText(/in 12 chapters/u), 'and the failure took it away').toBeNull()
+      view.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads the usage from the port it has NOW, not the one it was built with', async () => {
+    /* ⚠️ **THE DEPENDENCY LIST, WHICH NOTHING HELD — the sweep emptied it and every
+       case passed.** A port arrives asynchronously in the app, so a pane memoised
+       against the first one would poll a store that is not the reader's for as
+       long as Settings stayed open, and the row would never load at all. */
+    const first = vi.fn(async () => usage())
+    const second = vi.fn(async () => usage({ clips: 3 }))
+    vi.useFakeTimers()
+    try {
+      const view = render(
+        <VoicesPane port={portOver([pack()], { clipUsage: first })} downloads={makeDownloads()} />,
+      )
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(first).toHaveBeenCalled()
+      view.rerender(
+        <VoicesPane port={portOver([pack()], { clipUsage: second })} downloads={makeDownloads()} />,
+      )
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(second, 'the new port was asked').toHaveBeenCalled()
+      expect(screen.getByText(/in 3 chapters/u)).toBeTruthy()
+      view.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('draws no row at all where the store cannot be asked', async () => {
+    /* A build without the store answers nothing, and a row about disk is not
+       worth a sentence explaining its own absence beside a catalogue that
+       loaded. */
+    await show(
+      portOver([pack()], {
+        clipUsage: async () => {
+          throw new Error('no store here')
+        },
+      }),
+    )
+    expect(screen.queryByRole('button', { name: 'Forget them' })).toBeNull()
+  })
+
+  it('does not start a second forget while the first is in flight', async () => {
+    /* ⚠️ THE REF AND NOT THE STATE: two presses before React commits the first
+       both read the old value — the same defect `remove` records above. */
+    let releases = 0
+    const port = portOver([pack()], {
+      clipUsage: async () => usage(),
+      forgetClips: async () => {
+        releases += 1
+        await Promise.resolve()
+        return { clips: 1, bytes: 1 }
+      },
+    })
+    await show(port)
+    const button = screen.getByRole('button', { name: 'Forget them' })
+    /* ⚠️ **BOTH INSIDE ONE `act`, AND THIS CASE USED TO PRESS THEM APART — FOUND BY
+       THE MUTATION SWEEP, which reported the ref lock and both of its assignments
+       as survivors over a green test.** `fireEvent` wraps each call in its own
+       `act`, so the first press committed `forgetting: true` and DISABLED the
+       button: the second never reached the handler at all, and the state was the
+       thing that refused it. The ref exists for the window state cannot close, and
+       measuring it means closing that window in the test too. */
+    await act(async () => {
+      button.click()
+      button.click()
+    })
+    expect(releases).toBe(1)
+  })
+
+  it('disables Forget while it is running, which is the only sign a reader gets', async () => {
+    /* ⚠️ **THE STATE IS NOT THE LOCK — the ref is — SO NOTHING OBSERVED THE STATE
+       AT ALL, and the sweep reported `setForgetting(true)` as removable.** It is
+       not redundant: a forget of five gigabytes is not instant, and the button
+       going flat is the whole of what tells the reader the press landed. The ref
+       refuses a second call and the state refuses a second PRESS; they answer
+       different halves and only one of them is visible. */
+    let release: () => void = () => {}
+    const port = portOver([pack()], {
+      clipUsage: async () => usage(),
+      forgetClips: () =>
+        new Promise<{ clips: number; bytes: number }>((resolve) => {
+          release = () => resolve({ clips: 1, bytes: 1 })
+        }),
+    })
+    await show(port)
+    const button = () => screen.getByRole('button', { name: 'Forget them' })
+    expect(button().hasAttribute('disabled'), 'live before the press').toBe(false)
+
+    await act(async () => {
+      button().click()
+    })
+    expect(button().hasAttribute('disabled'), 'flat while it runs').toBe(true)
+
+    await act(async () => {
+      release()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(button().hasAttribute('disabled'), 'live again afterwards').toBe(false)
+  })
+
+  it('forgets through the port it has NOW, not the one it was built with', async () => {
+    /* ⚠️ **THE DEPENDENCY LIST AGAIN, on the other callback** — a pane memoised
+       against the first port would send *forget everything* to a store that is not
+       the reader's, and the row would go on showing disk that was never reclaimed. */
+    const first = vi.fn(async () => ({ clips: 0, bytes: 0 }))
+    const second = vi.fn(async () => ({ clips: 1, bytes: 1 }))
+    const view = render(
+      <VoicesPane
+        port={portOver([pack()], { clipUsage: async () => usage(), forgetClips: first })}
+        downloads={makeDownloads()}
+      />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    view.rerender(
+      <VoicesPane
+        port={portOver([pack()], { clipUsage: async () => usage(), forgetClips: second })}
+        downloads={makeDownloads()}
+      />,
+    )
+    await act(async () => {
+      screen.getByRole('button', { name: 'Forget them' }).click()
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(second, 'the new port was asked').toHaveBeenCalled()
+    expect(first, 'and the old one was not').not.toHaveBeenCalled()
+    view.unmount()
+  })
+
+  it('lets the reader forget again once the first has finished', async () => {
+    /* ⚠️ **THE LOCK HAS TO BE GIVEN BACK, AND ONLY A SECOND PRESS AFTER THE FIRST
+       SETTLES CAN SEE IT — FOUND BY THE MUTATION SWEEP.** A ref left `true` would
+       disable Forget for the life of the pane: the row would keep showing disk the
+       reader had asked to reclaim, and the only way back would be closing Settings
+       and opening it again. Every other case here presses once, so the release was
+       unobservable. */
+    let releases = 0
+    let held = usage()
+    const port = portOver([pack()], {
+      clipUsage: async () => held,
+      forgetClips: async () => {
+        releases += 1
+        /* Still something there afterwards, so the button is not disabled for the
+           OTHER reason and this case measures the lock rather than the count. */
+        held = usage({ bytes: 1, clips: 1 })
+        return { clips: 1, bytes: 1 }
+      },
+    })
+    await show(port)
+    const press = async () => {
+      await act(async () => {
+        screen.getByRole('button', { name: 'Forget them' }).click()
+      })
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+    }
+    await press()
+    expect(releases).toBe(1)
+    await press()
+    expect(releases, 'the lock was given back').toBe(2)
   })
 })

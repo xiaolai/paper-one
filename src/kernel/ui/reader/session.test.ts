@@ -470,7 +470,35 @@ describe('ReaderSession disposal', () => {
     // dispose() itself reports one null document; nothing after it counts.
     expect(cb.calls['onDocument']).toHaveLength(docsBefore + 1)
     expect(cb.calls['onDocument']?.at(-1)?.[0]).toBeNull()
+    /* ⚠️ **AND THE SECTION WITH IT — FOUND BY THE MUTATION SWEEP.** The index rides
+       WITH the document because the two must agree; a teardown that cleared one
+       and not the other would leave the reading addressing a section of a book
+       that is gone, which is the key every render is filed under. */
+    expect(cb.calls['onDocument']?.at(-1)?.[1], 'and no section either').toBeNull()
     expect(cb.calls['onRelocate'] ?? []).toHaveLength(relocationsBefore)
+  })
+
+  it('names which callback threw while it was being torn down', async () => {
+    /* ⚠️ **THE LABEL HAD NO READER — FOUND BY THE MUTATION SWEEP.** `quietly`
+       exists so one consumer's failure cannot stop the rest of the teardown, and
+       the whole value of catching it is the line in `Paper.log` saying WHICH —
+       a teardown that reports "something threw" names nothing a reader can act on.
+       Emptied, the warning read `Paper:  threw during teardown`. */
+    const view = fakeView()
+    const cb = callbacks()
+    cb.onDocument = () => {
+      throw new Error('the consumer went away')
+    }
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    session.dispose()
+
+    expect(said).toHaveBeenCalledWith('Paper: onDocument threw during teardown', expect.anything())
+    /* AND THE REST OF THE TEARDOWN RAN, which is what `quietly` is for. */
+    expect(cb.calls['onNavigator']?.at(-1)?.[0], 'the next one still happened').toBeNull()
+    said.mockRestore()
   })
 
   it('flattens foliate\'s mixed search yields into plain hits', async () => {
@@ -922,6 +950,25 @@ describe('ReaderSession places', () => {
    * Every source is made to disagree here on purpose: a test where they agree
    * proves nothing about which was read.
    */
+  it('carries the load event’s own index WITH the document', async () => {
+    /* ⚠️ **THE SECOND HALF OF `onDocument` HAD NO CASE — FOUND BY THE MUTATION
+       SWEEP.** The index rides with the document because the two must agree: it
+       is the spine position `sectionTexts` counts in, so the reading and the
+       audiobook export name the same section — which is the whole of what makes
+       WI-34.4 more than a sentence. `position.sectionIndex` is a DIFFERENT number
+       and was measured answering null while the renderer knew perfectly well
+       where the reader was. */
+    const { view, cb, doc } = await reading()
+    const before = cb.calls['onDocument']?.length ?? 0
+    view.emit('load', { doc, index: 4 })
+    expect(cb.calls['onDocument']).toHaveLength(before + 1)
+    expect(cb.calls['onDocument']?.at(-1)).toEqual([doc, 4])
+
+    const next = fakeDocument().asDocument()
+    view.emit('load', { doc: next, index: 5 })
+    expect(cb.calls['onDocument']?.at(-1), 'the next section, with its own index').toEqual([next, 5])
+  })
+
   it('takes the section the renderer publishes, over the range and the last render', async () => {
     const { view, cb, doc } = await reading()
     view.emit('load', { doc, index: 4 })
@@ -4202,7 +4249,15 @@ describe('the section walk’s liveness, and what it can read', () => {
     const session = new ReaderSession(fakeHost(), callbacks())
     await session.start('book.epub', deps(view))
     const walk = await session.sectionTexts()
-    expect(walk).toEqual({ sections: [{ index: 0, title: null, text: '' }], complete: true })
+    /* ⚠️ THE DIGEST OF THE CANONICAL TEXT COMES BACK TOO — WI-34.4's half of the
+       walk, so the export can ask for audio the reader has already heard. An
+       empty section digests the empty string, which is FNV's offset basis. */
+    expect(walk).toEqual({
+      sections: [
+        { index: 0, title: null, text: '', textDigest: 'fnv1a64:0:cbf29ce484222325' },
+      ],
+      complete: true,
+    })
     expect(asked, 'the book was asked to resolve a contents entry nobody gave it').toEqual([])
   })
 

@@ -261,6 +261,49 @@ export interface SpeechRequest {
   readonly text: string
   /** A multiplier on the engine's own speed; 1 is its default. */
   readonly rate?: number
+  /**
+   * Which section of which book this is, and what it says.
+   *
+   * ⚠️ **REQUIRED, AND WITH NO DEFAULT, BECAUSE THE ARTIFACT IS ADDRESSED BY
+   * IT.** A render is minutes long and is kept on disk to be played again; a
+   * request that could not say which section it was would either be rendered
+   * every time or, worse, share a clip with another section. A default here is
+   * the shape `SidePane` had when two capabilities drew the same jigsaw piece.
+   */
+  readonly clip: ClipKey
+}
+
+/**
+ * What names one rendered section, apart from the voice that read it.
+ *
+ * ⚠️ **`textDigest` IS OVER `indexText`'s CANONICAL FORM AND NOT OVER `text`.**
+ * The plan's requirement, and its reason is agreement rather than freshness: it
+ * is the same form phase 31 indexes, so the audio key and the search index
+ * cannot disagree about what a section says. `clipKey.textDigest` is the
+ * function; `passageText.canonicalTextOf` is the form.
+ *
+ * The digest of `text` itself is the PORT's to compute — one place rather than
+ * two, so a caller cannot hand over a digest of something it did not send.
+ */
+export interface ClipKey {
+  readonly bookId: string
+  /**
+   * The spine index, which is what `renderer.pages` and `#adjacentIndex` count —
+   * or `null` where the reader's place cannot say.
+   *
+   * ⚠️ **NULLABLE, AND A SENTINEL IS WHAT MADE IT SO — FOUND IN THE RUNNING APP,
+   * 2026-09-30.** It was `number`, and the host spelled an absent index `?? -1`:
+   * the plugin's `u32` refused it — *"invalid value: integer `-1`, expected
+   * u32"* — so every Listen failed at the IPC boundary with *"This chapter could
+   * not be made into audio"* on a real machine, while 3 007 tests passed because
+   * every one of them supplied a section. A value the caller genuinely may not
+   * have is `null`, not a number outside the range.
+   *
+   * It is part of the identity either way, and two sections with no index are
+   * told apart by their text digests exactly as two with one are.
+   */
+  readonly section: number | null
+  readonly textDigest: string
 }
 
 /** A word, and when it is spoken. Absent for an engine that cannot say. */
@@ -280,13 +323,51 @@ export interface SpokenWordTiming {
  * distinction is what lets the reading fall back to a sentence highlight
  * instead of dropping the follow-along entirely — see `EngineSpeaker`.
  */
+/**
+ * A passage the engine would not say, and why.
+ *
+ * ⚠️ **NAMED ONCE, AND IT WAS WRITTEN OUT TWICE.** `SpokenAudio` and
+ * `SpokenClip` carry the same list for the same reason — the reading names a
+ * refused passage and the export has to as well — and two inline spellings of
+ * one shape are two places for it to drift.
+ */
+export interface SpokenSkip {
+  readonly text: string
+  readonly why: string
+}
+
 export interface SpokenAudio {
   /** 16-bit mono PCM, little-endian, at `sampleRate`. */
   readonly pcm: Uint8Array
   readonly sampleRate: number
   readonly words: readonly SpokenWordTiming[]
   /** Sentences the engine refused, with the reason, so they can be named. */
-  readonly skipped: readonly { readonly text: string; readonly why: string }[]
+  readonly skipped: readonly SpokenSkip[]
+  /**
+   * What keeping this one had to remove, so the reader can be told.
+   *
+   * ⚠️ **ZERO FOR A CLIP THAT WAS ALREADY THERE, AND ZERO ALMOST ALWAYS.** The
+   * owner asked for eviction to be SHOWN rather than silent, and this is the
+   * only moment at which it is known — a re-render of audio a reader heard last
+   * week otherwise looks exactly like a first render, with nothing to explain
+   * the wait.
+   */
+  readonly evicted: ClipsEvicted
+  /** Where the samples came from, for a caller that wants the file itself. */
+  readonly clipPath: string
+}
+
+/** How much rendered reading was removed, and how many sections that was. */
+export interface ClipsEvicted {
+  readonly clips: number
+  readonly bytes: number
+}
+
+/** What the rendered reading holds on disk, and what it may. */
+export interface ClipUsage {
+  readonly bytes: number
+  readonly budget: number
+  readonly clips: number
 }
 
 /**
@@ -328,6 +409,33 @@ export interface SpeechEnginePort {
    */
   render(request: SpeechRequest): Promise<SpokenAudio>
   /**
+   * The rendered section already on disk, or `null` the first time.
+   *
+   * ⚠️ **PUBLISHED BECAUSE THE EXPORT IS A CONSUMER NOW, NOT A SECOND ENGINE.**
+   * An audiobook of a book the reader has listened to costs only the muxing, and
+   * this is the question that makes that true — asked without rendering, because
+   * asking by rendering is not asking.
+   */
+  findClip(request: SpeechRequest): Promise<SpokenClip | null>
+  /**
+   * Hold rendered sections open while something reads them, or let them go.
+   *
+   * ⚠️ **THE AUDIOBOOK EXPORT IS THE CALLER, AND WITHOUT IT THE EXPORT CAN LOSE
+   * A CHAPTER UNDER ITSELF.** `findClip` hands the packer a PATH rather than
+   * bytes, and the packer reads that file for as long as the muxing takes — so a
+   * concurrent reading's render could evict it, and *Forget them* could delete
+   * it. Answers how many of the names were actually moved.
+   *
+   * ⚠️ **AND A RELEASE FOR SOMETHING NEVER HELD IS NOT AN ERROR.** An export has
+   * more than one road out — a failure, the reader's stop, the window closing —
+   * and a lease that can only be given back on the happy path is a leak.
+   */
+  holdClips(stems: readonly string[], hold: boolean): Promise<number>
+  /** How much disk the rendered reading holds, for the row in Settings. */
+  clipUsage(): Promise<ClipUsage>
+  /** Take that disk back — all of it, or one book's. */
+  forgetClips(bookId?: string): Promise<ClipsEvicted>
+  /**
    * Let a loaded model go.
    *
    * Published because it is the reader's memory: Qwen holds about 2.5 GB while
@@ -335,6 +443,32 @@ export interface SpeechEnginePort {
    * machine from one that is reading.
    */
   release(): Promise<void>
+}
+
+/**
+ * A rendered section on disk, without its samples.
+ *
+ * What the audiobook export needs: a path the packer can open and a duration, but
+ * not 140 MB of audio in the webview's heap for a file it is only going to name.
+ */
+export interface SpokenClip {
+  /** The clip's own name, which is what `holdClips` takes. */
+  readonly stem: string
+  readonly path: string
+  readonly bytes: number
+  readonly sampleRate: number
+  readonly durationMs: number
+  readonly words: readonly SpokenWordTiming[]
+  /**
+   * What the engine could not pronounce, carried so the export can say so.
+   *
+   * ⚠️ **THIS FIELD WAS MISSING AND THE EXPORT WAS SILENTLY INCOMPLETE.** The
+   * reading tells a reader about a skipped passage as it happens; the export had
+   * no way to, because the clip it reuses arrived here without them. An
+   * audiobook that omits a sentence and reports success is exactly the
+   * complete-looking-and-wrong outcome `narrate` refuses everywhere else.
+   */
+  readonly skipped: readonly SpokenSkip[]
 }
 
 /**

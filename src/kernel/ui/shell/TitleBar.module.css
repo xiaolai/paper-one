@@ -264,3 +264,42 @@
   font-variant-numeric: tabular-nums;
   letter-spacing: var(--track-snug);
 }
+
+/**
+ * A section being made into audio.
+ *
+ * ⚠️ **IT REPLACES THE WHOLE TRANSPORT RATHER THAN SITTING BESIDE IT**, because
+ * there is nothing yet for the other controls to act on: no position to scrub, no
+ * sentence to step, nothing to pause. Only a stop is honest, and only a stop is
+ * drawn. WI-34.0 measured a real section at 315 s, so this is a state a reader
+ * spends minutes in and not a flicker.
+ *
+ * `--ink-2` rather than `--ink`: it is a state, not the title of anything.
+ */
+.preparing {
+  padding-inline: var(--space-2);
+  color: var(--ink-2);
+  font-size: var(--text-small);
+  white-space: nowrap;
+}
+
+/**
+ * How far through the chapter, and how the reader moves it.
+ *
+ * ⚠️ **A NATIVE `range`, WHICH IS A DECISION AND NOT A SHORTCUT.** It is
+ * keyboard-operable, it has a value a screen reader can read, and it drags the
+ * way every other slider on the machine drags — none of which a div with a
+ * pointer handler gets for free, and all of which a reader scrubbing a
+ * forty-eight-minute chapter needs. What it costs is that the thumb and the
+ * track are the platform's; §07 accepts that for the same reason the form-control
+ * reset does.
+ *
+ * `--control-lg` twice over: wide enough that one step of an hour-long section is
+ * more than a pixel, narrow enough that the book's title survives beside it.
+ */
+.scrub {
+  width: calc(var(--control-lg) * 2);
+  height: var(--control-titlebar);
+  accent-color: var(--accent);
+  cursor: pointer;
+}

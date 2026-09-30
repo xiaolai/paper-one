@@ -16,6 +16,11 @@ links = "tauri-plugin-voices"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"
+# `tauri_plugin_log` is what carries these to `~/Library/Logs/.../Paper.log`,
+# which is the only way a release build says anything at all. `clips.rs` is what
+# needs it: a rendered section being evicted, or forgotten because its file went
+# missing, is the kind of thing a reader notices and cannot otherwise explain.
+log = "0.4"
 # The digest a pack is checked against is SHA-256 because that is what the model
 # hosts publish; `digest.rs` says why it is not BLAKE3, which is already here.
 sha2 = "0.10"
@@ -35,8 +40,16 @@ ort = "2.0.0-rc.13"
 # that turned them on would decide for every host that links it.
 tauri = { version = "2.11.3", default-features = false }
 
+# Keeping `audio/` out of Time Machine — one `setxattr` in `clips.rs`. macOS
+# ONLY: Linux and Windows have no per-item backup exclusion, so there is nothing
+# to name there. Already in the tree through tokio and tauri, so this adds no
+# compilation.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 tauri-plugin = { version = "2.6", features = ["build"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tempfile = "3"

@@ -37,9 +37,14 @@ const COMMANDS: &[&str] = &[
     "voices_install",
     "voices_stop",
     "voices_remove",
-    "voices_render",
     "voices_render_file",
     "voices_release",
+    "voices_clip_find",
+    "voices_clip_render",
+    "voices_clip_read",
+    "voices_clip_hold",
+    "voices_clip_usage",
+    "voices_clip_forget",
 ];
 
 /// Where macOS keeps the Swift runtime dylibs a Swift archive asks for by

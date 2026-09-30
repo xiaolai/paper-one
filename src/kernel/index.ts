@@ -79,6 +79,10 @@ export { messageOf } from './core/messageOf'
    Listen control's notice and the Voices pane both say a pack's size, and
    their two copies had already drifted apart at 1 023.6 MiB. */
 export { packArrived, packSize } from './ui/reader/engineVoice'
+/* The digest a rendered section is keyed by. Exported for the voices
+   capability's port, which is the one place a `spokenDigest` is computed —
+   see `SpeechRequest.clip`. */
+export { textDigest } from './ui/reader/clipKey'
 /* THE EXTRACTOR, published because the `passages` capability is what drives it
  * and a capability may import nothing of the kernel but this entry.
  *
@@ -206,9 +210,13 @@ export type {
   ShelfFacts,
   ShelfPort,
   SizePort,
+  ClipKey,
+  ClipUsage,
+  ClipsEvicted,
   SpeechEnginePort,
   SpeechRequest,
   SpokenAudio,
+  SpokenClip,
   SpokenWordTiming,
   UnreadableBook,
   VoiceChoice,

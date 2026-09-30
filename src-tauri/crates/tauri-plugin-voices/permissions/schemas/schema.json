@@ -307,6 +307,78 @@
           "markdownDescription": "Denies the voices_catalogue command without any pre-configured scope."
         },
         {
+          "description": "Enables the voices_clip_find command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voices-clip-find",
+          "markdownDescription": "Enables the voices_clip_find command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voices_clip_find command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voices-clip-find",
+          "markdownDescription": "Denies the voices_clip_find command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voices_clip_forget command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voices-clip-forget",
+          "markdownDescription": "Enables the voices_clip_forget command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voices_clip_forget command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voices-clip-forget",
+          "markdownDescription": "Denies the voices_clip_forget command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voices_clip_hold command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voices-clip-hold",
+          "markdownDescription": "Enables the voices_clip_hold command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voices_clip_hold command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voices-clip-hold",
+          "markdownDescription": "Denies the voices_clip_hold command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voices_clip_read command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voices-clip-read",
+          "markdownDescription": "Enables the voices_clip_read command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voices_clip_read command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voices-clip-read",
+          "markdownDescription": "Denies the voices_clip_read command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voices_clip_render command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voices-clip-render",
+          "markdownDescription": "Enables the voices_clip_render command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voices_clip_render command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voices-clip-render",
+          "markdownDescription": "Denies the voices_clip_render command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the voices_clip_usage command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-voices-clip-usage",
+          "markdownDescription": "Enables the voices_clip_usage command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the voices_clip_usage command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-voices-clip-usage",
+          "markdownDescription": "Denies the voices_clip_usage command without any pre-configured scope."
+        },
+        {
           "description": "Enables the voices_install command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voices-install",
@@ -343,18 +415,6 @@
           "markdownDescription": "Denies the voices_remove command without any pre-configured scope."
         },
         {
-          "description": "Enables the voices_render command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-voices-render",
-          "markdownDescription": "Enables the voices_render command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the voices_render command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-voices-render",
-          "markdownDescription": "Denies the voices_render command without any pre-configured scope."
-        },
-        {
           "description": "Enables the voices_render_file command without any pre-configured scope.",
           "type": "string",
           "const": "allow-voices-render-file",
@@ -379,10 +439,10 @@
           "markdownDescription": "Denies the voices_stop command without any pre-configured scope."
         },
         {
-          "description": "The commands a Paper webview needs from the voices plugin: the catalogue of\ndownloadable voice packs and which are installed; fetching one, stopping a\nfetch, and removing one; reading text aloud through an installed pack; and\nletting a loaded model go.\n\n⚠️ FETCHING A PACK IS A NETWORK REQUEST AND A LARGE ONE — up to 2.5 GB from the\nhosts the embedded manifest pins by revision. It is never started by anything\nbut a reader pressing Download, every byte is checked against the manifest's\ndigest before it is promoted, and a stopped fetch leaves nothing half-installed.\nNothing here can reach a URL the manifest does not name.\n\nRendering holds a model — about 2.5 GB resident for the Chinese pack — until\n`voices_release`, which is why releasing is a command rather than a timer the\nwebview cannot reach.\n\n#### This default permission set includes:\n\n- `allow-voices-catalogue`\n- `allow-voices-install`\n- `allow-voices-stop`\n- `allow-voices-remove`\n- `allow-voices-render`\n- `allow-voices-render-file`\n- `allow-voices-release`",
+          "description": "The commands a Paper webview needs from the voices plugin: the catalogue of\ndownloadable voice packs and which are installed; fetching one, stopping a\nfetch, and removing one; reading text aloud through an installed pack; and\nletting a loaded model go.\n\n⚠️ FETCHING A PACK IS A NETWORK REQUEST AND A LARGE ONE — up to 2.5 GB from the\nhosts the embedded manifest pins by revision. It is never started by anything\nbut a reader pressing Download, every byte is checked against the manifest's\ndigest before it is promoted, and a stopped fetch leaves nothing half-installed.\nNothing here can reach a URL the manifest does not name.\n\nRendering holds a model — about 2.5 GB resident for the Chinese pack — until\n`voices_release`, which is why releasing is a command rather than a timer the\nwebview cannot reach.\n\n⚠️ THE RENDERED READING IS KEPT ON DISK, up to the budget in `clips.rs` — five\ngigabytes, which is about 29 hours of audio. `voices_clip_render` writes a file\nunder the app's own data directory and answers its path; the webview reads it\nthrough the fs plugin's existing `$APPDATA` scope, because a real section is\n140 MB of samples and that cannot cross the IPC as a JSON array of numbers.\nNothing here writes outside `audio/`, and every path is built from a digest of\nthe caller's key rather than from a string the webview chose.\n\n`voices_clip_forget` is how a reader takes that disk back, and\n`voices_clip_usage` is what the row in Settings reads.\n\n#### This default permission set includes:\n\n- `allow-voices-catalogue`\n- `allow-voices-install`\n- `allow-voices-stop`\n- `allow-voices-remove`\n- `allow-voices-render-file`\n- `allow-voices-release`\n- `allow-voices-clip-find`\n- `allow-voices-clip-render`\n- `allow-voices-clip-read`\n- `allow-voices-clip-hold`\n- `allow-voices-clip-usage`\n- `allow-voices-clip-forget`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "The commands a Paper webview needs from the voices plugin: the catalogue of\ndownloadable voice packs and which are installed; fetching one, stopping a\nfetch, and removing one; reading text aloud through an installed pack; and\nletting a loaded model go.\n\n⚠️ FETCHING A PACK IS A NETWORK REQUEST AND A LARGE ONE — up to 2.5 GB from the\nhosts the embedded manifest pins by revision. It is never started by anything\nbut a reader pressing Download, every byte is checked against the manifest's\ndigest before it is promoted, and a stopped fetch leaves nothing half-installed.\nNothing here can reach a URL the manifest does not name.\n\nRendering holds a model — about 2.5 GB resident for the Chinese pack — until\n`voices_release`, which is why releasing is a command rather than a timer the\nwebview cannot reach.\n\n#### This default permission set includes:\n\n- `allow-voices-catalogue`\n- `allow-voices-install`\n- `allow-voices-stop`\n- `allow-voices-remove`\n- `allow-voices-render`\n- `allow-voices-render-file`\n- `allow-voices-release`"
+          "markdownDescription": "The commands a Paper webview needs from the voices plugin: the catalogue of\ndownloadable voice packs and which are installed; fetching one, stopping a\nfetch, and removing one; reading text aloud through an installed pack; and\nletting a loaded model go.\n\n⚠️ FETCHING A PACK IS A NETWORK REQUEST AND A LARGE ONE — up to 2.5 GB from the\nhosts the embedded manifest pins by revision. It is never started by anything\nbut a reader pressing Download, every byte is checked against the manifest's\ndigest before it is promoted, and a stopped fetch leaves nothing half-installed.\nNothing here can reach a URL the manifest does not name.\n\nRendering holds a model — about 2.5 GB resident for the Chinese pack — until\n`voices_release`, which is why releasing is a command rather than a timer the\nwebview cannot reach.\n\n⚠️ THE RENDERED READING IS KEPT ON DISK, up to the budget in `clips.rs` — five\ngigabytes, which is about 29 hours of audio. `voices_clip_render` writes a file\nunder the app's own data directory and answers its path; the webview reads it\nthrough the fs plugin's existing `$APPDATA` scope, because a real section is\n140 MB of samples and that cannot cross the IPC as a JSON array of numbers.\nNothing here writes outside `audio/`, and every path is built from a digest of\nthe caller's key rather than from a string the webview chose.\n\n`voices_clip_forget` is how a reader takes that disk back, and\n`voices_clip_usage` is what the row in Settings reads.\n\n#### This default permission set includes:\n\n- `allow-voices-catalogue`\n- `allow-voices-install`\n- `allow-voices-stop`\n- `allow-voices-remove`\n- `allow-voices-render-file`\n- `allow-voices-release`\n- `allow-voices-clip-find`\n- `allow-voices-clip-render`\n- `allow-voices-clip-read`\n- `allow-voices-clip-hold`\n- `allow-voices-clip-usage`\n- `allow-voices-clip-forget`"
         }
       ]
     }

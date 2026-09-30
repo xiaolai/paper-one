@@ -225,7 +225,12 @@ export function App({
    * uses when a pack can read the book on screen. Empty and null in a build
    * with no voices capability — a phone, a browser client — where everything
    * below reads exactly as it did before. */
-  const { packs: voicePacks, engine: voiceEngine } = useVoicePacks(services)
+  const {
+    packs: voicePacks,
+    engine: voiceEngine,
+    findClip: findVoiceClip,
+    holdClips: holdVoiceClips,
+  } = useVoicePacks(services)
   /* ⚠️ IT SUBSCRIBES TO THE FLAG, NOT TO THE VALUES, and that is the whole
      point. `persistent` flips the first time the store's write is REFUSED, and
      that refusal happens after `values` has already changed and been published
@@ -347,11 +352,35 @@ export function App({
   const speechPaging = useMemo(
     () => ({
       next: book.next,
+      /* ⚠️ **IN READING ORDER, SO NOT `goLeft`** — the same rule `next` states:
+         in a right-to-left book, back is to the right. `book.prev` is the
+         session's own, and is what the arrow key runs. */
+      prev: book.prev,
       chapter: chapterSteps(book.toc, book.position.chapterHref, book.goTo),
     }),
-    [book.next, book.goTo, book.toc, book.position.chapterHref],
+    [book.next, book.prev, book.goTo, book.toc, book.position.chapterHref],
   )
-  const speech = useSpeech(book.doc, speechPaging, speechPrefs, voiceEngine)
+  /**
+   * Which book and section the reading is in, so a render can be addressed.
+   *
+   * ⚠️ **`book.docSection` AND NOT `book.position.sectionIndex` — MEASURED IN THE
+   * RUNNING APP, 2026-09-30.** The position's index is documented as null *"when
+   * that cannot be told yet"* and was exactly that: the reader was in section 8,
+   * the renderer knew it, and the position answered null. The host spelled that
+   * `?? -1`, the plugin's `u32` refused a negative, and every Listen died at the
+   * IPC boundary with *"This chapter could not be made into audio"* — invisible
+   * to 3 007 tests, every one of which supplied a section.
+   *
+   * `docSection` is the index the renderer reported WITH the document, which is
+   * also the index `sectionTexts` counts in — so the reading and the audiobook
+   * export name the same section, which is what makes WI-34.4 more than a
+   * sentence.
+   */
+  const speechPlace = useMemo(
+    () => ({ bookId: book.bookId, sectionIndex: book.docSection }),
+    [book.bookId, book.docSection],
+  )
+  const speech = useSpeech(book.doc, speechPaging, speechPrefs, voiceEngine, speechPlace)
   /**
    * The book turning itself, at the pace the time-left estimate uses.
    *
@@ -793,6 +822,13 @@ export function App({
     packs: voicePacks,
     chosen: state.readingVoice,
     rate: state.readingRate,
+    /* WI-34.4: the export asks for the reading's own audio before rendering a
+       chapter again. In a build with no voices capability this answers null,
+       which is the truth there — there is no rendered reading at all. */
+    findClip: findVoiceClip,
+    /* The lease that keeps a cached chapter from being evicted under the packer —
+       see `AudiobookPlatform.hold`. */
+    holdClips: holdVoiceClips,
     say: setImportNotice,
   })
 

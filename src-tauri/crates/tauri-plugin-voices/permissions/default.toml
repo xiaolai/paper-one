@@ -16,13 +16,29 @@ Nothing here can reach a URL the manifest does not name.
 Rendering holds a model — about 2.5 GB resident for the Chinese pack — until
 `voices_release`, which is why releasing is a command rather than a timer the
 webview cannot reach.
+
+⚠️ THE RENDERED READING IS KEPT ON DISK, up to the budget in `clips.rs` — five
+gigabytes, which is about 29 hours of audio. `voices_clip_render` writes a file
+under the app's own data directory and answers its path; the webview reads it
+through the fs plugin's existing `$APPDATA` scope, because a real section is
+140 MB of samples and that cannot cross the IPC as a JSON array of numbers.
+Nothing here writes outside `audio/`, and every path is built from a digest of
+the caller's key rather than from a string the webview chose.
+
+`voices_clip_forget` is how a reader takes that disk back, and
+`voices_clip_usage` is what the row in Settings reads.
 """
 permissions = [
   "allow-voices-catalogue",
   "allow-voices-install",
   "allow-voices-stop",
   "allow-voices-remove",
-  "allow-voices-render",
   "allow-voices-render-file",
   "allow-voices-release",
+  "allow-voices-clip-find",
+  "allow-voices-clip-render",
+  "allow-voices-clip-read",
+  "allow-voices-clip-hold",
+  "allow-voices-clip-usage",
+  "allow-voices-clip-forget",
 ]

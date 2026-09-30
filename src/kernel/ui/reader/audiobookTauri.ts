@@ -19,11 +19,11 @@
 import { invoke } from '@tauri-apps/api/core'
 import { appDataDir, join } from '@tauri-apps/api/path'
 import { save } from '@tauri-apps/plugin-dialog'
-import { BaseDirectory, mkdir, readDir, remove } from '@tauri-apps/plugin-fs'
+import { BaseDirectory, exists, mkdir, readDir, remove } from '@tauri-apps/plugin-fs'
 import { basename } from '../../core/bookFiles'
 import type { AudiobookPlatform } from './audiobook'
 import { unqualify } from './engineVoice'
-import type { VoicePack } from '../../core/ports'
+import type { SpeechRequest, SpokenClip, SpokenSkip, VoicePack } from '../../core/ports'
 
 /** Under `$APPDATA`, so the fs grant already covers it. */
 const SCRATCH_DIR = 'audiobook'
@@ -219,6 +219,30 @@ export async function tauriAudiobook(
    * standing in front of a decision worth making at the call site.
    */
   packs: readonly VoicePack[],
+  /**
+   * Whether a section is already rendered, asked WITHOUT rendering it.
+   *
+   * ⚠️ **THIS IS THE WHOLE OF WI-34.4 — *exporting a book you have listened to
+   * costs only the muxing*.** A hit is the reader's own audio, already on disk, at
+   * the voice and speed they chose; the export names that file to the packer and
+   * does not remove it afterwards.
+   *
+   * ⚠️ **REQUIRED, AND WITH NO DEFAULT.** A `?? (() => null)` would be a build
+   * that silently re-rendered everything, which is the state this item exists to
+   * leave — and no test could tell one absent function from another. A build with
+   * no voices capability passes one that answers null, and says so at the call
+   * site.
+   */
+  findClip: (request: SpeechRequest) => Promise<SpokenClip | null>,
+  /**
+   * Hold rendered sections open while the packer reads them, or let them go.
+   *
+   * REQUIRED, and with no default, for the reason `findClip` is: a build that
+   * silently held nothing would lose a chapter under a running export only when
+   * a reader happened to be listening at the same time, which is the hardest
+   * kind of defect to find and the easiest kind to ship.
+   */
+  holdClips: (stems: readonly string[], hold: boolean) => Promise<number>,
 ): Promise<AudiobookPlatform> {
   /**
    * ⚠️ **ONE DIRECTORY PER EXPORT, AND IT USED TO BE ONE FOR ALL OF THEM.**
@@ -235,6 +259,15 @@ export async function tauriAudiobook(
   const dir = `${SCRATCH_DIR}/${run}`
   await mkdir(dir, { baseDir: BaseDirectory.AppData, recursive: true })
   const root = await join(await appDataDir(), dir)
+  /**
+   * Which clip NAME each cached path belongs to.
+   *
+   * The export speaks in paths, because that is what `narrate_package` takes; the
+   * store speaks in names, because a name is its key and is what makes a hold
+   * impossible to point at a file this app did not write. One map, at the one
+   * place both are in hand.
+   */
+  const leases = new Map<string, string>()
   /* Abandoned runs go now rather than at boot: this is the only moment the app is
      certainly about to use this directory, and a sweep at launch would cost every
      reader who never exports anything. */
@@ -264,13 +297,69 @@ export async function tauriAudiobook(
          * would not use. */
         throw new Error(`${job.voice} is not a downloaded voice, and an audiobook is rendered on one`)
       }
-      await invoke('plugin:voices|voices_render_file', {
-        pack: packs.find((pack) => pack.family === named.family)?.id ?? named.family,
+      const pack = packs.find((one) => one.family === named.family)?.id ?? named.family
+      /* ⚠️ **ASKED BEFORE RENDERING, WHICH IS WHAT MAKES THE EXPORT A CONSUMER.**
+       * The key is exactly the reading's: same book, same section, same canonical
+       * digest, same pack, same voice, same rate. Where any of those differs the
+       * answer is a MISS and the chapter is rendered — never wrong audio, because
+       * a clip found under a matching digest is a clip of the same words. */
+      const already = await findClip({
+        packId: pack,
+        voiceId: named.voiceId,
+        text: job.text,
+        rate: job.rate,
+        clip: { bookId: job.bookId, section: job.section, textDigest: job.textDigest },
+      })
+      /* ⚠️ **HELD BEFORE IT IS ANSWERED FOR, AND THE COUNT IS READ — FOUND BY AN
+       * INDEPENDENT AUDIT, 2026-09-30.** The find and the hold are two commands,
+       * so *Forget them* between them takes the clip and the export goes on to
+       * name a path that holds nothing: the packer fails on a missing file,
+       * which reads as a broken export rather than as the race it is.
+       *
+       * `voices_clip_hold` answers how many of the names it MOVED, and that
+       * number is the whole point of it: 0 means the clip is no longer there, so
+       * this is a MISS and the chapter falls through to the render below. The
+       * earlier version discarded the count and could not tell the two apart.
+       *
+       * THE CLIP'S OWN NAME is what a hold takes and the PATH is what the packer
+       * takes, so both travel, and `releaseClips` maps one to the other. */
+      /* ⚠️ **AN ASSIGNMENT RATHER THAN `.catch(() => 0)` — FOUND BY THE MUTATION
+         SWEEP.** An arrow returning a falsy constant has a falsy twin: `() => 0`
+         mutated to `() => undefined` compares the same against 1. The success
+         handler carries the answer instead, where emptying it loses the hit. */
+      let held = false
+      if (already) {
+        await holdClips([already.stem], true)
+          .then((moved) => {
+            held = moved === 1
+          })
+          .catch(() => {})
+      }
+      if (already && held) {
+        leases.set(already.path, already.stem)
+        /* THE CLIP'S OWN SKIPS, which are the skips of the render that MADE it —
+           the same passages the reader was told about when they heard it. */
+        return { path: already.path, cached: true, skipped: already.skipped }
+      }
+      /* ⚠️ **TO SCRATCH AND NOT INTO THE STORE, DELIBERATELY.** A ten-hour book is
+       * 6.2 GB against a 5 GB budget, so an export that filled the store would
+       * evict its own earlier chapters before the muxer read them. The store holds
+       * what a reader has HEARD. */
+      const made = await invoke<{
+        sampleRate: number
+        skipped: readonly { text: string; why: string }[]
+      }>('plugin:voices|voices_render_file', {
+        pack,
         voice: named.voiceId,
         text: job.text,
         rate: job.rate,
         path: job.path,
       })
+      /* ⚠️ **READ THROUGH `skippedOf`, NOT TAKEN AS GIVEN.** The command's reply
+         crosses the IPC boundary as unknown JSON, and an export that trusted its
+         shape would report `undefined.length` chapters late — the same reason
+         every other reply on this road goes through a reader in `rows.ts`. */
+      return { path: job.path, cached: false, skipped: skippedOf(made) }
     },
     package: (job) =>
       invoke<{ durationMs: number; chapters: number }>('narrate_package', { ...job }),
@@ -294,5 +383,91 @@ export async function tauriAudiobook(
     discardScratch: async () => {
       await remove(dir, { baseDir: BaseDirectory.AppData, recursive: true })
     },
+    /**
+     * Whether there is already a book at the destination the reader chose.
+     *
+     * ⚠️ **AN ABSOLUTE PATH, ON THE SAVE DIALOG'S OWN GRANT — the same authority
+     * `discardBook` below runs on.** `save()` calls `allow_file` for the path the
+     * reader picked, which is what makes both this and the removal reachable
+     * without widening the app's filesystem scope by a line.
+     */
+    exists: (path) => exists(path),
+    /**
+     * Let the cached chapters go.
+     *
+     * ⚠️ **ONE DIRECTION, AND IT USED TO BE TWO — `hold(paths, boolean)`.** That
+     * spelling pretended taking a lease and giving one back were one operation
+     * with a flag, and they are not: taking one must be ATOMIC WITH THE FIND,
+     * which only this adapter can do, because only it has the stem; giving one
+     * back must happen on every road out of the export, which only
+     * `exportAudiobook` knows. Naming them as one hid the first requirement, and
+     * the acquisition raced (audit, 2026-09-30).
+     *
+     * ⚠️ **BY NAME AND NOT BY PATH**, because the store's own key is the name:
+     * `voices_clip_hold` looks a stem up in the checkpoint, which is what makes
+     * it impossible to hold something this app did not write. The export speaks
+     * in paths because that is what the packer takes, so the two are mapped here
+     * — at the one place both are in hand.
+     */
+    releaseClips: async (paths) => {
+      const stems = paths.map((path) => leases.get(path)).filter((stem): stem is string => !!stem)
+      if (stems.length === 0) return
+      await holdClips(stems, false)
+      for (const path of paths) leases.delete(path)
+    },
+    /**
+     * Remove the book at the destination the reader chose.
+     *
+     * ⚠️ **AN ABSOLUTE PATH, AND `discard` ABOVE DELIBERATELY REFUSES ONE.**
+     * That one is scoped to `$APPDATA` because scratch is the app's own
+     * directory; this one names a path OUTSIDE it, and the authority for that is
+     * the save dialog itself.
+     *
+     * ⚠️ **AND THAT IS READ IN THE PLUGIN'S SOURCE RATHER THAN ASSUMED**, because
+     * it decides whether this works at all: `tauri-plugin-dialog`'s `save`
+     * command ends with `s.allow_file(&path)` on the window's fs scope, so the
+     * file the reader named — and only that file — is granted to the fs plugin at
+     * runtime. `fs:allow-remove` in `capabilities/default.json` stays at
+     * `$APPDATA/**`, which is the point: the grant that reaches this book is one
+     * the reader issued by naming it, and it does not outlive the export.
+     *
+     * A WIDER STATIC GRANT WAS THE OBVIOUS ALTERNATIVE AND IS REFUSED — this
+     * file's own header says a permission added for a tidy-up is a permission
+     * that outlives it.
+     *
+     * ⚠️ **AND IT IS ONLY EVER CALLED FOR A BOOK THIS EXPORT WROTE.**
+     * `exportAudiobook` passes `request.path` and nothing else, which is the
+     * path the dialog answered. A caller that assembled one itself would be
+     * asking the app to delete a file nobody named.
+     */
+    discardBook: async (path) => {
+      await remove(path)
+    },
   }
+}
+
+/**
+ * The skips out of `voices_render_file`'s reply, or none.
+ *
+ * ⚠️ **A REPLY THAT CROSSES THE IPC BOUNDARY IS UNKNOWN JSON.** An export that
+ * took `made.skipped.length` on trust would throw on a plugin that did not send
+ * the field — which is every build older than this one — and it would do it
+ * after the chapter had been written, which is the most expensive moment there
+ * is to fail. An ABSENT list is none; a list holding something that is not a
+ * skip is refused rather than counted, on the rule this repository states for
+ * every store: absent is empty, present-and-wrong is refused.
+ */
+export function skippedOf(reply: unknown): readonly SpokenSkip[] {
+  const row = (typeof reply === 'object' && reply !== null ? reply : {}) as Record<string, unknown>
+  if (row.skipped === undefined || row.skipped === null) return []
+  if (!Array.isArray(row.skipped)) {
+    throw new Error('the chapter was rendered with a skip list that is not one')
+  }
+  return row.skipped.map((one) => {
+    const skip = (typeof one === 'object' && one !== null ? one : {}) as Record<string, unknown>
+    if (typeof skip.text !== 'string' || typeof skip.why !== 'string') {
+      throw new Error('the chapter was rendered with a skip that names neither text nor reason')
+    }
+    return { text: skip.text, why: skip.why }
+  })
 }

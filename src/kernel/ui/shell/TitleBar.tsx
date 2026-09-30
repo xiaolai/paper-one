@@ -204,7 +204,28 @@ export function TitleBar({
       data-platform={platform}
       data-tauri-drag-region
       onMouseEnter={() => dispatch({ type: 'setChrome', on: true })}
-      onMouseLeave={() => dispatch({ type: 'setChrome', on: false })}
+      /* ⚠️ **THE POINTER LEAVING IS NOT ENOUGH TO HIDE THIS WHILE SOMETHING IN IT
+         HAS FOCUS — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.** `chromeHidden`
+         sets `visibility: hidden` and `inert`, which take the whole subtree out of
+         the focus order and the hit-testing; doing that to a control the reader is
+         USING takes it away mid-interaction. The scrubber makes this reachable in
+         a way it was not before: it is a native `range`, so a keyboard reader
+         holds focus on it and drags with the arrow keys for as long as they like,
+         and any pointer movement onto the page removed it under them.
+
+         `relatedTarget` is where the focus is GOING, and `null` means it is
+         leaving the document altogether — the window losing focus, which is not a
+         reason to keep the chrome up. */
+      onMouseLeave={(event) => {
+        if (event.currentTarget.contains(document.activeElement)) return
+        dispatch({ type: 'setChrome', on: false })
+      }}
+      onFocus={() => dispatch({ type: 'setChrome', on: true })}
+      onBlur={(event) => {
+        if (event.currentTarget.contains(event.relatedTarget)) return
+        if (event.currentTarget.matches(':hover')) return
+        dispatch({ type: 'setChrome', on: false })
+      }}
     >
       <div className={styles.sysZone} data-platform={platform} data-tauri-drag-region>
         {isMac
@@ -353,15 +374,32 @@ export function TitleBar({
               <button
                 type="button"
                 className={styles.action}
+                /* ⚠️ **A REFUSAL THE READING ITSELF REPORTED IS SHOWN HERE, AND
+                   IT USED TO BE SHOWN NOWHERE.** A chapter that could not be made
+                   into audio left this control back where it was with nothing
+                   said — indistinguishable from a chapter that had finished.
+                   `listenRefusal` outranks it: that one says the reading cannot
+                   START, which is the more actionable news, and it is why the
+                   control is disabled. */
                 title={
                   !speech.available
                     ? 'Listen — this build has no speech engine'
                     : listenRefusal !== null
                       ? `Listen — ${listenRefusal}`
-                      : 'Read this chapter aloud'
+                      : speech.refusal !== null
+                        ? `Listen — ${speech.refusal}`
+                        : 'Read this chapter aloud'
                 }
                 aria-label="Read aloud"
                 aria-pressed={false}
+                /* ⚠️ **THE SENTENCE ITSELF, WHERE IT USED TO BE AN EMPTY STRING —
+                   FOUND BY THE MUTATION SWEEP.** A presence attribute's value is
+                   whatever you like, so `''` had a mutant no test could tell from
+                   it. Carrying the refusal makes the attribute say WHY as well as
+                   THAT, which is worth having on a control a reader is looking at,
+                   and gives it one value a test can be wrong about. Nothing styles
+                   on it today; `[data-refused]` matches either way. */
+                data-refused={speech.refusal ?? undefined}
                 disabled={!speech.available || !hasBook || listenRefusal !== null}
                 data-disabled={!speech.available || !hasBook || listenRefusal !== null}
                 onClick={() => speech.start()}
@@ -501,6 +539,32 @@ function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps) {
     </button>
   )
 
+  /**
+   * A section being made into audio.
+   *
+   * ⚠️ **"MAKING" AND NOT "LOADING", AND THE WORD IS THE WHOLE POINT.** WI-34.0
+   * measured a real section at 315 s on an idle M4 Max. Nothing is arriving over
+   * a wire — the machine is synthesising a voice — so calling it buffering would
+   * be a lie about a five-minute wait. WI-34.5 asks for that sentence to be
+   * written honestly, and asks for the stop beside it, because a wait a reader
+   * cannot leave is worse than a wait they can.
+   *
+   * ⚠️ **AND IT SAYS THE WAIT IS WORTH IT ONCE.** A reader who stops during a
+   * render and presses Listen again gets it at once: the render finishes into the
+   * store whether or not anybody is listening, which is a promise the transport
+   * can make because `staging`-then-rename-then-checkpoint makes it true.
+   */
+  if (speech.preparing) {
+    return (
+      <div className={styles.transport} role="group" aria-label="Reading aloud">
+        <span className={styles.preparing} role="status">
+          Making this chapter’s audio…
+        </span>
+        {step('Stop reading aloud', Square, () => speech.stop())}
+      </div>
+    )
+  }
+
   return (
     <div className={styles.transport} role="group" aria-label="Reading aloud">
       {speech.chapters.back ? step('Previous chapter', ChevronsLeft, () => speech.stepChapter(-1)) : null}
@@ -523,6 +587,27 @@ function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps) {
       {step('Next sentence', ChevronRight, () => speech.stepSentence(1))}
       {step('Next paragraph', SkipForward, () => speech.stepParagraph(1))}
       {speech.chapters.forward ? step('Next chapter', ChevronsRight, () => speech.stepChapter(1)) : null}
+      {/* ⚠️ **PRESENT ONLY WHERE THERE IS SOMETHING TO SCRUB.** `speech.at` is
+          null on the platform speaker, which cannot report a position or seek at
+          all, so the control is ABSENT there rather than disabled: a disabled
+          scrubber says "not now", and the true statement is "not on this voice".
+          The same reasoning as the chapter buttons above. */}
+      {speech.at === null ? null : (
+        <input
+          type="range"
+          className={styles.scrub}
+          min={0}
+          max={SCRUB_STEPS}
+          /* ROUNDED TO A STEP, so the thumb does not jitter between two pixels
+             four times a second while the value it stands for has not visibly
+             moved. The fraction that goes back out is computed from the step. */
+          value={Math.round(fractionOf(speech.at) * SCRUB_STEPS)}
+          title={`${clockOf(speech.at.positionMs)} of ${clockOf(speech.at.durationMs)}`}
+          aria-label="How far through the chapter"
+          aria-valuetext={`${clockOf(speech.at.positionMs)} of ${clockOf(speech.at.durationMs)}`}
+          onChange={(event) => speech.seekToFraction(Number(event.target.value) / SCRUB_STEPS)}
+        />
+      )}
       <button
         type="button"
         className={`${styles.action} ${styles.transportButton} ${styles.rate}`}
@@ -540,6 +625,50 @@ function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps) {
       {step('Stop reading aloud', Square, () => speech.stop())}
     </div>
   )
+}
+
+/**
+ * How many positions the scrubber has.
+ *
+ * A thousand, so one step of a 48-minute section is under three seconds — finer
+ * than a reader can aim — while the value stays an integer the element can hold
+ * without a floating-point round trip.
+ */
+const SCRUB_STEPS = 1000
+
+/**
+ * How far through, as a fraction — 0 where the section has no length yet.
+ *
+ * ⚠️ **A ZERO DURATION IS NOT A DIVISION.** A section of one sample rounds to
+ * 0 ms, and `0 / 0` is `NaN`, which a `<input type="range">` takes as its
+ * minimum silently — so the thumb would sit at the start of a chapter that had
+ * finished, with nothing saying why.
+ */
+export function fractionOf(at: { readonly positionMs: number; readonly durationMs: number }): number {
+  if (at.durationMs <= 0) return 0
+  return Math.min(1, Math.max(0, at.positionMs / at.durationMs))
+}
+
+/**
+ * Milliseconds as a clock a reader reads — `4:07`, or `1:02:30` past an hour.
+ *
+ * ⚠️ **HOURS ARE NOT OPTIONAL HERE.** WI-34.0 measured the character-weighted
+ * median section of this shelf at 48.6 minutes and its p95 at over an hour, so a
+ * `m:ss` format would show `68:12` for a real chapter — which reads as
+ * sixty-eight minutes only if you already knew it could not be sixty-eight
+ * seconds.
+ */
+export function clockOf(ms: number): string {
+  /* ⚠️ **`Math.max` RATHER THAN `ms > 0` — FOUND BY THE MUTATION SWEEP.** The
+     clause is there to refuse a NEGATIVE, and at zero `> 0` and `>= 0` give the
+     same answer — so the comparison had a mutant nothing could kill. Clamping says
+     the same thing with no boundary to be wrong about. */
+  const whole = Number.isFinite(ms) ? Math.floor(Math.max(0, ms) / 1000) : 0
+  const seconds = whole % 60
+  const minutes = Math.floor(whole / 60) % 60
+  const hours = Math.floor(whole / 3600)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
 }
 
 /**

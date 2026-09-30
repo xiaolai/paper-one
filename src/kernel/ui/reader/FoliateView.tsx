@@ -74,7 +74,12 @@ export interface FoliateViewProps {
   onRelocate: (generation: number, position: ReaderPosition) => void
   /** Called with each spine item's document as it loads, for the ruler and
    *  selection handling, and again with null when the view is torn down. */
-  onDocument: (generation: number, doc: Document | null) => void
+  /**
+   * The section on screen and WHICH section it is — see
+   * `SessionCallbacks.onDocument`, which records why the index travels with the
+   * document rather than being read off the reader's position.
+   */
+  onDocument: (generation: number, doc: Document | null, sectionIndex: number | null) => void
   onMeta: (generation: number, meta: BookMeta) => void
   /** The book's jacket, or null — see `SessionCallbacks.onCover`. */
   onCover: (generation: number, cover: Blob | null) => void
@@ -572,7 +577,7 @@ export function FoliateView({
     const session = new ReaderSession(host, {
       onToc: (toc) => handlers.current.onToc(gen, toc),
       onRelocate: (position) => handlers.current.onRelocate(gen, position),
-      onDocument: (doc) => handlers.current.onDocument(gen, doc),
+      onDocument: (doc, sectionIndex) => handlers.current.onDocument(gen, doc, sectionIndex),
       onMeta: (meta) => handlers.current.onMeta(gen, meta),
       onCover: (cover) => handlers.current.onCover(gen, cover),
       onError: (message) => handlers.current.onError(gen, message),

@@ -84,6 +84,7 @@ function mount(over: Partial<AudiobookDeps> = {}) {
     available: true,
     packs: [INSTALLED],
     source: {
+      bookId: 'book:a',
       title: 'A Measured Book',
       author: 'Paper',
       lang: 'en-US',
@@ -93,6 +94,8 @@ function mount(over: Partial<AudiobookDeps> = {}) {
       sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
     },
     chosen: {},
+    findClip: async () => null,
+    holdClips: async (stems: readonly string[]) => stems.length,
     rate: 1,
     say,
     ...over,
@@ -153,6 +156,7 @@ describe('a book laid out in fixed pages', () => {
     const read = vi.fn(async () => ({ sections: [], complete: true }))
     const { seen, say } = mount({
       source: {
+        bookId: 'book:a',
         title: 'A Scanned Book',
         author: 'Paper',
         lang: 'en-US',
@@ -176,6 +180,7 @@ describe('a book laid out in fixed pages', () => {
        answer — the control exists and refuses. */
     const { seen } = mount({
       source: {
+        bookId: 'book:a',
         title: 'A Scanned Book',
         author: 'Paper',
         lang: 'en-US',
@@ -279,6 +284,7 @@ describe('a book with no voice this app would choose', () => {
     const { seen } = mount({
       packs: [{ ...ENGLISH_PACK, installed: true }, chinese],
       source: {
+        bookId: 'book:a',
         title: 'A Measured Book',
         author: 'Paper',
         lang: 'zh-CN',
@@ -286,7 +292,7 @@ describe('a book with no voice this app would choose', () => {
         fixedLayout: false,
         skip: { notes: false },
         sectionTexts: vi.fn(async () => ({
-          sections: [{ index: 0, title: '第一章', text: '春天来了。' }],
+          sections: [{ index: 0, title: '第一章', text: '春天来了。', textDigest: 'fnv1a64:1:0000000000000000' }],
           complete: true,
         })),
       },
@@ -320,6 +326,7 @@ describe('two calls before React has committed anything', () => {
     let calls = 0
     const { seen, say } = mount({
       source: {
+        bookId: 'book:a',
         title: 'A Measured Book',
         author: 'Paper',
         lang: 'en-US',
@@ -357,6 +364,7 @@ describe('a walk that did not finish', () => {
   it('refuses rather than exporting what it managed to read', async () => {
     const { seen, say } = mount({
       source: {
+        bookId: 'book:a',
         title: 'A Measured Book',
         author: 'Paper',
         lang: 'en-US',
@@ -364,7 +372,7 @@ describe('a walk that did not finish', () => {
         fixedLayout: false,
         skip: { notes: false },
         sectionTexts: vi.fn(async () => ({
-          sections: [{ index: 0, title: 'One', text: 'Some real text.' }],
+          sections: [{ index: 0, title: 'One', text: 'Some real text.', textDigest: 'fnv1a64:1:0000000000000000' }],
           complete: false,
         })),
       },
@@ -381,6 +389,7 @@ describe('a walk that did not finish', () => {
     /* So the refusal cannot pass by refusing everything. */
     const { seen, say } = mount({
       source: {
+        bookId: 'book:a',
         title: 'A Measured Book',
         author: 'Paper',
         lang: 'en-US',
@@ -388,7 +397,7 @@ describe('a walk that did not finish', () => {
         fixedLayout: false,
         skip: { notes: false },
         sectionTexts: vi.fn(async () => ({
-          sections: [{ index: 0, title: 'One', text: 'Some real text.' }],
+          sections: [{ index: 0, title: 'One', text: 'Some real text.', textDigest: 'fnv1a64:1:0000000000000000' }],
           complete: true,
         })),
       },
@@ -432,6 +441,7 @@ describe('the control while an export is under way', () => {
     })
     const harness = mount({
       source: {
+        bookId: 'book:a',
         title: 'A Measured Book',
         author: 'Paper',
         lang: 'en-US',
@@ -474,13 +484,14 @@ describe('the control while an export is under way', () => {
 /* TWO CHAPTERS, the second at spine index 2 — so a scratch path built from the
    position in the list rather than the section's own index would show. */
 const SECTIONS = [
-  { index: 0, title: 'One', text: 'The first chapter.' },
-  { index: 2, title: 'Two', text: 'The second chapter.' },
+  { index: 0, title: 'One', text: 'The first chapter.', textDigest: 'fnv1a64:1:0000000000000000' },
+  { index: 2, title: 'Two', text: 'The second chapter.', textDigest: 'fnv1a64:1:0000000000000002' },
 ]
 const WHERE = '/books/A Measured Book.m4b'
 
 function book(over: Partial<AudiobookSource> = {}): AudiobookSource {
   return {
+    bookId: 'book:a',
     title: 'A Measured Book',
     author: 'A. Writer',
     lang: 'en-US',
@@ -501,9 +512,14 @@ function engine(over: Partial<AudiobookPlatform> = {}) {
   const rendered: Parameters<AudiobookPlatform['render']>[0][] = []
   const packaged: Parameters<AudiobookPlatform['package']>[0][] = []
   const discarded: string[] = []
+  /** The book at the reader's chosen name — `discard` cannot reach it. */
+  const books: string[] = []
+  /** Every lease the export gave back, in order. */
+  const released: string[][] = []
   const platform: AudiobookPlatform = {
     render: async (job) => {
       rendered.push(job)
+      return { path: job.path, cached: false, skipped: [] }
     },
     package: async (job) => {
       packaged.push(job)
@@ -513,12 +529,19 @@ function engine(over: Partial<AudiobookPlatform> = {}) {
     discard: async (path) => {
       discarded.push(path)
     },
+    discardBook: async (path: string) => {
+      books.push(path)
+    },
     discardScratch: async () => {},
+    exists: async () => false,
+    releaseClips: async (paths) => {
+      released.push([...paths])
+    },
     ...over,
   }
   tauri.platform = platform
   tauri.path = WHERE
-  return { rendered, packaged, discarded }
+  return { rendered, packaged, discarded, books, released }
 }
 
 /** A promise the test resolves, and the function that resolves it. */
@@ -549,6 +572,52 @@ describe('an export that runs to the end', () => {
     ])
   })
 
+  it('says how many passages could not be pronounced, beside the file it wrote', async () => {
+    /* ⚠️ **THE EXPORT SAID NOTHING ABOUT THESE AND WAS THEREFORE DISHONEST —
+     * FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.** A name the engine has no
+     * pronunciation for is DROPPED, by design — the reading tells the reader so
+     * as it reaches it, rather than guessing at the sound. The export had no way
+     * to tell them at all, so a book missing three passages was reported as
+     * finished. */
+    engine({
+      render: async (job) => ({
+        path: job.path,
+        cached: false,
+        skipped:
+          job.section === 0
+            ? [{ text: 'Coenties', why: 'no pronunciation' }]
+            : [
+                { text: 'Manhattoes', why: 'no pronunciation' },
+                { text: '𓀀', why: 'no pronunciation' },
+              ],
+      }),
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(say).toHaveBeenLastCalledWith(
+      'Exported 2 chapters, 3 minutes, to A Measured Book.m4b. 3 passages could not be pronounced and are not in it.',
+    )
+  })
+
+  it('says one passage where there was one, rather than a number', async () => {
+    engine({
+      render: async (job) => ({
+        path: job.path,
+        cached: false,
+        skipped: job.section === 0 ? [{ text: 'Coenties', why: 'no pronunciation' }] : [],
+      }),
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(say).toHaveBeenLastCalledWith(
+      'Exported 2 chapters, 3 minutes, to A Measured Book.m4b. One passage could not be pronounced and is not in it.',
+    )
+  })
+
   it('renders in the voice the reading would use, at the reader’s rate, into the book’s own name', async () => {
     /* The voice is the engine-qualified name the reading stores, since phase
      * 30: one choice serves the reading and the export alike. */
@@ -558,8 +627,27 @@ describe('an export that runs to the end', () => {
       seen.at(-1)?.run()
     })
     expect(rendered).toEqual([
-      { text: 'The first chapter.', voice: 'kokoro:af_heart', rate: 1.25, path: '/scratch/chapter-0.wav' },
-      { text: 'The second chapter.', voice: 'kokoro:af_heart', rate: 1.25, path: '/scratch/chapter-2.wav' },
+      {
+        text: 'The first chapter.',
+        voice: 'kokoro:af_heart',
+        rate: 1.25,
+        path: '/scratch/chapter-0.wav',
+        /* ⚠️ WI-34.4: the job names WHICH SECTION it is, so the platform can ask
+           the rendered-reading store for audio the reader has already heard
+           before rendering the chapter a second time. */
+        bookId: 'book:a',
+        section: 0,
+        textDigest: 'fnv1a64:1:0000000000000000',
+      },
+      {
+        text: 'The second chapter.',
+        voice: 'kokoro:af_heart',
+        rate: 1.25,
+        path: '/scratch/chapter-2.wav',
+        bookId: 'book:a',
+        section: 2,
+        textDigest: 'fnv1a64:1:0000000000000002',
+      },
     ])
     expect(packaged).toEqual([
       {
@@ -589,7 +677,10 @@ describe('an export that runs to the end', () => {
 
   it('is running while it works, and not once it has finished', async () => {
     const held = gate()
-    engine({ render: () => held.shut })
+    engine({ render: async () => {
+        await held.shut
+        return { path: '/tmp/x.wav', cached: false, skipped: [] }
+      } })
     const { seen } = mount({ source: book() })
     await act(async () => {
       seen.at(-1)?.run()
@@ -618,11 +709,67 @@ describe('an export that runs to the end', () => {
   })
 })
 
-describe('scratch the tidy-up could not remove', () => {
-  it('says one file, when one would not go', async () => {
+describe('a stop that came too late to undo the file', () => {
+  it('says the book was written over the one the reader chose', async () => {
+    /* ⚠️ **THE NOTICE USED TO CLAIM "Nothing was left behind" OVER A FILE THAT HAD
+       REPLACED ONE OF THEIRS — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.** The
+       join cannot be interrupted, so a stop during it lands after the packer has
+       written the destination; removing the result would leave the reader with
+       neither book, so it is kept. Keeping it silently is the worse half of the
+       defect: they pressed Stop and were told nothing happened. */
+    const joining = gate()
+    let reached = false
     engine({
-      discard: async (path) => {
-        if (path === '/scratch/chapter-0.wav') throw new Error('in use')
+      exists: async () => true,
+      package: async (job) => {
+        /* ⚠️ **THE STOP HAS TO LAND DURING THE JOIN, WHICH IS THE WHOLE CASE.**
+           Pressed any earlier it is caught at a chapter boundary, before the
+           packer has written anything — and there the destination is untouched, so
+           nothing is kept and the ordinary notice is right. Held here, the join is
+           in flight when the second press arrives. */
+        reached = true
+        await joining.shut
+        return { durationMs: 180_000, chapters: job.chapters.length }
+      },
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+      await vi.waitFor(() => expect(reached).toBe(true))
+    })
+    /* The second press is the stop, because the first is in flight. */
+    await act(async () => {
+      seen.at(-1)?.run()
+      joining.open()
+    })
+
+    expect(say).toHaveBeenLastCalledWith(
+      'The export was stopped, but the book had already been written over the file you chose.',
+    )
+  })
+})
+
+describe('scratch the tidy-up could not remove', () => {
+  /* ⚠️ **THESE TWO CASES ASSERTED A COUNT THAT WAS WRONG — FOUND BY AN
+   * INDEPENDENT AUDIT, 2026-09-30.** A per-file removal that fails is followed
+   * by `discardScratch`, which removes the whole directory RECURSIVELY and
+   * therefore takes those very files — so the reader was told files had been
+   * left behind that no longer existed. A count of what is on the disk has to be
+   * a count of what is on the disk, so the sweep succeeding now clears them.
+   *
+   * Both cases still exist, with the SWEEP made to fail too — which is the state
+   * in which the files really are still there. */
+  it('says ONE file, in the singular, where exactly one thing was left', async () => {
+    /* ⚠️ **THE SINGULAR BRANCH LOST ITS CASE TO THE ROUND-2 FIX — FOUND BY THE
+       MUTATION SWEEP.** The case below used to produce a count of one and now
+       produces two, because a per-file failure is only counted when the recursive
+       sweep ALSO fails, and then the directory counts as well. So the only way to
+       one is every file going and the sweep alone refusing — which is also the
+       likeliest shape in life: the files are gone and the directory is held open
+       by something. */
+    engine({
+      discardScratch: async () => {
+        throw new Error('in use')
       },
     })
     const { seen, say } = mount({ source: book() })
@@ -634,7 +781,29 @@ describe('scratch the tidy-up could not remove', () => {
     )
   })
 
-  it('says how many, when more than one would not go', async () => {
+  it('says one file, when one would not go and the sweep did not either', async () => {
+    engine({
+      discard: async (path) => {
+        if (path === '/scratch/chapter-0.wav') throw new Error('in use')
+      },
+      discardScratch: async () => {
+        throw new Error('in use')
+      },
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    /* One refused file, plus the directory itself. */
+    expect(say).toHaveBeenLastCalledWith(
+      'Exported 2 chapters, 3 minutes, to A Measured Book.m4b. 2 temporary audio files could not be removed.',
+    )
+  })
+
+  it('says nothing was left where the sweep took what the files would not give up', async () => {
+    /* THE DEFECT ITSELF: every per-file removal refused, and the recursive sweep
+       then removed the directory they were in. Nothing is left behind, and the
+       reader must not be told otherwise. */
     engine({
       discard: async () => {
         throw new Error('in use')
@@ -645,7 +814,25 @@ describe('scratch the tidy-up could not remove', () => {
       seen.at(-1)?.run()
     })
     expect(say).toHaveBeenLastCalledWith(
-      'Exported 2 chapters, 3 minutes, to A Measured Book.m4b. 2 temporary audio files could not be removed.',
+      'Exported 2 chapters, 3 minutes, to A Measured Book.m4b.',
+    )
+  })
+
+  it('says how many, when neither the files nor the sweep would go', async () => {
+    engine({
+      discard: async () => {
+        throw new Error('in use')
+      },
+      discardScratch: async () => {
+        throw new Error('in use')
+      },
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(say).toHaveBeenLastCalledWith(
+      'Exported 2 chapters, 3 minutes, to A Measured Book.m4b. 3 temporary audio files could not be removed.',
     )
   })
 })
@@ -692,6 +879,7 @@ describe('a stop the reader asks for', () => {
       render: async (job) => {
         rendered.push(job.path)
         await held.shut
+        return { path: job.path, cached: false, skipped: [] }
       },
     })
     const { seen, say } = mount({ source: book() })
@@ -712,8 +900,18 @@ describe('a stop the reader asks for', () => {
   it('says what it could not remove, rather than claiming nothing was left', async () => {
     const held = gate()
     engine({
-      render: () => held.shut,
+      render: async () => {
+        await held.shut
+        return { path: '/tmp/x.wav', cached: false, skipped: [] }
+      },
       discard: async () => {
+        throw new Error('in use')
+      },
+      /* ⚠️ **THE SWEEP HAS TO FAIL TOO, OR NOTHING IS LEFT BEHIND.** It removes
+         the directory recursively, which takes the files a per-file removal was
+         refused — so a case that only failed `discard` was asserting a count the
+         audit found to be wrong. */
+      discardScratch: async () => {
         throw new Error('in use')
       },
     })
@@ -728,7 +926,7 @@ describe('a stop the reader asks for', () => {
       held.open()
     })
     expect(say).toHaveBeenLastCalledWith(
-      'The export was stopped. One temporary audio file could not be removed.',
+      'The export was stopped. 2 temporary audio files could not be removed.',
     )
   })
 })
@@ -771,7 +969,10 @@ describe('a control held past the book it was for', () => {
        the export ends, that `run` is neither a stop nor a start: there is no book
        to export. */
     const held = gate()
-    engine({ render: () => held.shut })
+    engine({ render: async () => {
+        await held.shut
+        return { path: '/tmp/x.wav', cached: false, skipped: [] }
+      } })
     const harness = mount({ source: book() })
     await act(async () => {
       harness.seen.at(-1)?.run()
@@ -824,6 +1025,7 @@ describe('the source an export is built from', () => {
   it('carries what the book declares, and the language of its document', () => {
     const one = book()
     expect(audiobookSourceOf(one, false)).toEqual({
+      bookId: 'book:1',
       title: 'Le Horla',
       author: 'Maupassant',
       lang: 'fr',

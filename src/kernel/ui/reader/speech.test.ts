@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Speaker, collectText, placeOf, speechAvailable, wordLengthAt } from './speech'
+import {
+  Speaker,
+  collectText,
+  offsetIn,
+  placeOf,
+  speechAvailable,
+  textAtPoint,
+  wordLengthAt,
+} from './speech'
 import { FakeSynth, FakeUtterance } from './speechSynth.testkit'
 import type { HostRect } from './coordinates'
 
@@ -869,5 +877,129 @@ describe('collectText', () => {
     const leading = collectText(bodyOf('<p><a epub:type="noteref">1</a>Hello.</p>'))
     expect(leading.text).toBe('Hello.')
     expect(leading.blocks).toEqual([0])
+  })
+})
+
+describe('where a place in the document falls in the collected text', () => {
+  /** A section whose prose runs over two paragraphs and an inline element. */
+  function page() {
+    const doc = document.implementation.createHTMLDocument('t')
+    doc.body.innerHTML = '<p>One <em>two</em> three.</p><p>Four five.</p><p hidden>Not read.</p>'
+    return doc
+  }
+
+  it('answers the offset of a caret inside a node the voice reads', () => {
+    const doc = page()
+    const spoken = collectText(doc)
+    const first = doc.querySelector('p')!.firstChild!
+    expect(offsetIn(spoken, first, 0)).toBe(0)
+    expect(offsetIn(spoken, first, 4)).toBe(4)
+    /* And the text it names is what `rangeAt` would give back, which is the
+       round trip that makes the two directions one mapping. */
+    const at = offsetIn(spoken, first, 4)!
+    expect(spoken.text.slice(at, at + 3)).toBe('two')
+  })
+
+  it('clamps a caret past the end of a node to that node, in a LATER segment', () => {
+    /* ⚠️ **THE CLAMP'S UPPER BOUND IS `end - start`, AND `end + start` WAS
+       INDISTINGUISHABLE — FOUND BY THE MUTATION SWEEP.** In the FIRST segment
+       `start` is 0, so the two arithmetics agree and every case here passed. The
+       second paragraph is where they differ, and a caret one past the last
+       character of a node is an ordinary place for one to sit: the browser puts it
+       there for a click at the right-hand edge of a word. */
+    const doc = page()
+    const spoken = collectText(doc)
+    const second = doc.querySelectorAll('p')[1]!.firstChild!
+    const text = second.textContent ?? ''
+    const end = offsetIn(spoken, second, text.length)
+    expect(end, 'the position just past the node').not.toBeNull()
+    expect(
+      spoken.text.slice(end!),
+      'and it is the END of that node, not somewhere beyond it',
+    ).toBe('')
+    /* And well past it is the same place, rather than running into nothing. */
+    expect(offsetIn(spoken, second, text.length + 50)).toBe(end)
+  })
+
+  it('reaches a node inside an inline element, which is where a word splits', () => {
+    const doc = page()
+    const spoken = collectText(doc)
+    const em = doc.querySelector('em')!.firstChild!
+    const at = offsetIn(spoken, em, 0)
+    expect(at).not.toBeNull()
+    expect(spoken.text.slice(at!, at! + 3)).toBe('two')
+  })
+
+  it('reaches the second paragraph, so a tap is not confined to the first', () => {
+    const doc = page()
+    const spoken = collectText(doc)
+    const second = doc.querySelectorAll('p')[1]!.firstChild!
+    const at = offsetIn(spoken, second, 0)
+    expect(at).not.toBeNull()
+    expect(spoken.text.slice(at!, at! + 4)).toBe('Four')
+  })
+
+  it('answers null for text the voice does not read', () => {
+    /* ⚠️ A REAL ANSWER RATHER THAN A GUESS: a hidden note has nowhere in the
+       sound to go, so a tap on it must do nothing rather than land somewhere
+       plausible. */
+    const doc = page()
+    const spoken = collectText(doc)
+    const hidden = doc.querySelector('p[hidden]')!.firstChild!
+    expect(offsetIn(spoken, hidden, 0)).toBeNull()
+    /* And for a node from another document entirely. */
+    expect(offsetIn(spoken, page().body, 0)).toBeNull()
+  })
+
+  it('clamps a caret that sits one past the last character of a node', () => {
+    /* A caret may be at `node.length`, which belongs to the NEXT node — reported
+       raw it would name a character in a segment this one does not cover. */
+    const doc = page()
+    const spoken = collectText(doc)
+    const first = doc.querySelector('p')!.firstChild as Text
+    const end = offsetIn(spoken, first, first.length + 50)
+    expect(end).not.toBeNull()
+    expect(end).toBeLessThanOrEqual(spoken.text.length)
+    expect(offsetIn(spoken, first, -5)).toBe(0)
+  })
+})
+
+describe('the caret under a point', () => {
+  it('prefers the spelling WebKit has, which is the platform the voices run on', () => {
+    /* ⚠️ `caretPositionFromPoint` is the standard and `caretRangeFromPoint` is
+       what Safari and this app's WebView answer to. A reader that knew only the
+       standard would find no caret on the one platform the downloaded voices run
+       on at all. */
+    const asked: string[] = []
+    const node = document.createTextNode('x')
+    const doc = {
+      caretRangeFromPoint: (x: number, y: number) => {
+        asked.push(`legacy ${x},${y}`)
+        return { startContainer: node, startOffset: 3 } as unknown as Range
+      },
+      caretPositionFromPoint: () => {
+        asked.push('standard')
+        return { offsetNode: node, offset: 9 }
+      },
+    } as unknown as Document
+    expect(textAtPoint(doc, 10, 20)).toEqual({ node, offset: 3 })
+    expect(asked).toEqual(['legacy 10,20'])
+  })
+
+  it('falls back to the standard where the older one is absent', () => {
+    const node = document.createTextNode('x')
+    const doc = {
+      caretPositionFromPoint: (x: number, y: number) => ({ offsetNode: node, offset: x + y }),
+    } as unknown as Document
+    expect(textAtPoint(doc, 2, 3)).toEqual({ node, offset: 5 })
+  })
+
+  it('answers null where there is no caret, and where the document has neither', () => {
+    const empty = { caretRangeFromPoint: () => null } as unknown as Document
+    expect(textAtPoint(empty, 0, 0)).toBeNull()
+    const neither = {} as unknown as Document
+    expect(textAtPoint(neither, 0, 0)).toBeNull()
+    const noPosition = { caretPositionFromPoint: () => null } as unknown as Document
+    expect(textAtPoint(noPosition, 0, 0)).toBeNull()
   })
 })

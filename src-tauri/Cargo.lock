@@ -7306,6 +7306,8 @@ version = "0.1.0"
 dependencies = [
  "data-encoding",
  "futures-util",
+ "libc",
+ "log",
  "ort",
  "reqwest 0.12.28",
  "serde",
@@ -7313,6 +7315,7 @@ dependencies = [
  "sha2 0.10.9",
  "tauri",
  "tauri-plugin",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
 ]

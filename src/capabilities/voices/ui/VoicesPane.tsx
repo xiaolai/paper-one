@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CAPABILITY_UI as ui, messageOf, packArrived, packSize, type InstallProgress, type VoicePack } from '../../../kernel'
-import type { SpeechEnginePort } from '../../../kernel'
+import type { ClipUsage, SpeechEnginePort } from '../../../kernel'
 import { STOPPED, theDownloads, type Downloads } from '../lib/downloads'
 
 /**
@@ -27,6 +27,24 @@ export const POLL_MS = 5000
    which nobody would have found by reading either. Re-exported so this file's
    own cases can drive them directly. */
 export { packArrived as arrivedOf, packSize as sizeOf }
+
+/**
+ * What the rendered reading holds, in a sentence.
+ *
+ * ⚠️ **EXPORTED AND ASKED DIRECTLY, BECAUSE THE DOM FLATTENS ITS ANSWERS.** The
+ * pane's own record for `voicePickerValue` says why: a value drawn into markup
+ * collapses several decisions into one string, and a case that drives the pane
+ * cannot tell an empty store from one whose numbers rounded to the same words.
+ *
+ * ⚠️ **`packSize` REFUSES ZERO — CORRECTLY, AND NOT FOR THIS.** It answers
+ * *"unknown size"* for a pack whose catalogue row has no size, which is right for
+ * a SIZE and wrong for a COUNT: nought bytes of rendered reading is an ordinary
+ * amount and not a missing one. Same rule the `sizeOf`/`arrivedOf` pair records.
+ */
+export function usageLine(usage: ClipUsage): string {
+  const held = usage.clips === 0 ? 'nothing yet' : `${packSize(usage.bytes)} in ${usage.clips === 1 ? '1 chapter' : `${usage.clips} chapters`}`
+  return `${held} · up to ${packSize(usage.budget)} is kept · the least recently played goes first`
+}
 
 /** What a download has got to, as a sentence. */
 export function progressLine(progress: InstallProgress): string {
@@ -96,6 +114,25 @@ export function VoicesPane({
    * progress and the only control that could stop a 2.3 GB fetch, while the
    * plugin went on fetching. Reopening showed **Download** on a pack that was
    * half here. `theDownloads` outlives the tree; this only watches it. */
+  /**
+   * How much disk the rendered reading holds — WI-34.5's *eviction shown*.
+   *
+   * ⚠️ **SHOWN BECAUSE IT IS REAL DISK A READER CANNOT OTHERWISE FIND.** Five
+   * gigabytes of audio derived from books they already have, and the only sign of
+   * it without this row is that a chapter they heard last week is made again. The
+   * same argument the export's `leftBehind` count makes: a tidy-up failure was
+   * swallowed, and *"nothing was left behind"* was asserted with nothing checking.
+   */
+  const [usage, setUsage] = useState<ClipUsage | null>(null)
+  /* ⚠️ **ITS OWN TOKEN, NOT THE CATALOGUE'S `asked`.** The two reads are started
+     together and race each other; one shared token means whichever answers second
+     cancels the first's result. An IDENTITY rather than a counter, for the reason
+     `EngineSpeaker.#current` records — a fresh object cannot collide, ever. */
+  const askedUsage = useRef<object>({})
+  const [forgetting, setForgetting] = useState(false)
+  /* ⚠️ **THE LOCK IS THE REF, NOT THE STATE** — the same defect `remove` records
+     below: two presses before React commits the first both read the old value. */
+  const forgettingNow = useRef(false)
   const [running, setRunning] = useState(downloads.states)
   useEffect(() => downloads.watch(() => setRunning(downloads.states())), [downloads])
 
@@ -115,11 +152,45 @@ export function VoicesPane({
     }
   }, [port])
 
+  const readUsage = useCallback(async () => {
+    const mine = (askedUsage.current = {})
+    try {
+      const read = await port.clipUsage()
+      if (mine !== askedUsage.current) return
+      setUsage(read)
+    } catch {
+      /* ⚠️ **SILENT, AND THAT IS THE ONE PLACE IN THIS PANE IT IS RIGHT.** A
+       * build without the store answers nothing, and a row about disk is not
+       * worth a sentence explaining its own absence beside a catalogue that
+       * loaded. `failed` above is for the catalogue, which is the pane's subject. */
+      if (mine === askedUsage.current) setUsage(null)
+    }
+  }, [port])
+
   useEffect(() => {
     void refresh()
-    const timer = setInterval(() => void refresh(), POLL_MS)
+    void readUsage()
+    const timer = setInterval(() => {
+      void refresh()
+      void readUsage()
+    }, POLL_MS)
     return () => clearInterval(timer)
-  }, [refresh])
+  }, [refresh, readUsage])
+
+  const forget = useCallback(async () => {
+    if (forgettingNow.current) return
+    forgettingNow.current = true
+    setForgetting(true)
+    try {
+      await port.forgetClips()
+    } catch {
+      /* Nothing is lost by a refused forget: the audio is derived, and the row
+         below will show it is still there. */
+    }
+    forgettingNow.current = false
+    setForgetting(false)
+    void readUsage()
+  }, [port, readUsage])
 
   const install = useCallback(
     async (pack: VoicePack) => {
@@ -253,6 +324,29 @@ export function VoicesPane({
           </div>
         )
       })}
+      {usage === null ? null : (
+        <div>
+          <div className={ui.row}>
+            <div className={ui.grow}>
+              <div className={ui.value}>Chapters made into audio</div>
+            </div>
+            <div className={ui.actions}>
+              <button
+                type="button"
+                className={ui.button}
+                disabled={forgetting || usage.clips === 0}
+                onClick={() => void forget()}
+              >
+                Forget them
+              </button>
+            </div>
+          </div>
+          {/* ⚠️ **THE FACTS GO UNDER THE ROW** — the same measurement the pack
+              rows record: a `paper-cap-grow` truncates, and 585 px of text was
+              clipped into 271 px with everything from the size onwards invisible. */}
+          <div className={ui.hint}>{usageLine(usage)}</div>
+        </div>
+      )}
       <p className={ui.hint}>
         Kokoro and Qwen3-TTS are Apache-2.0. The English pronunciations come from misaki (Apache-2.0)
         and CMUdict (BSD-2-Clause).

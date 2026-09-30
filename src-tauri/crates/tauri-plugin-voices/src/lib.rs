@@ -7,6 +7,7 @@
 //! makes a stopped download leave nothing half-installed.
 
 pub mod cancel;
+pub mod clips;
 pub mod commands;
 pub mod digest;
 pub mod english;

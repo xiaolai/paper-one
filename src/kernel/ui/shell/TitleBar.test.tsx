@@ -5,7 +5,7 @@ import type { Platform } from '../../core/metrics'
 import type { Speech } from '../reader/useSpeech'
 import { initialState } from '../state'
 import { NO_GOOD_VOICE } from '../reader/voiceChoice'
-import { TitleBar } from './TitleBar'
+import { TitleBar, clockOf, fractionOf } from './TitleBar'
 
 afterEach(cleanup)
 
@@ -24,10 +24,15 @@ const speech: Speech = {
   paused: false,
   followsWords: false,
   chapters: { back: false, forward: false },
+  at: null,
+  preparing: false,
+  refusal: null,
   start: () => {},
   stop: () => {},
   pause: () => {},
   resume: () => {},
+  seekToFraction: () => false,
+  seekToOffset: () => false,
   stepSentence: () => {},
   stepParagraph: () => {},
   stepChapter: () => {},
@@ -221,6 +226,7 @@ function draw(
     speech?: Speech
     screens?: React.ComponentProps<typeof TitleBar>['screens']
     hasBook?: boolean
+    listenRefusal?: string | null
   } = {},
 ) {
   const dispatch = vi.fn()
@@ -233,7 +239,7 @@ function draw(
       bookTitle="Paper"
       bookSubtitle=""
       speech={over.speech ?? speech}
-      listenRefusal={null}
+      listenRefusal={over.listenRefusal ?? null}
       hasBook={over.hasBook ?? false}
     />,
   )
@@ -253,6 +259,10 @@ function listening(over: Partial<Speech> = {}) {
     stepSentence: (by) => asked.push(`sentence ${by}`),
     stepParagraph: (by) => asked.push(`paragraph ${by}`),
     stepChapter: (by) => asked.push(`chapter ${by}`),
+    seekToFraction: (fraction) => {
+      asked.push(`seek ${fraction}`)
+      return true
+    },
     ...over,
   }
   draw({ state: { screen: 'reader', chromeOn: true }, speech: reading, hasBook: true })
@@ -654,5 +664,263 @@ describe('what the chrome says without a word', () => {
     cleanup()
     listening({ paused: true })
     expect(screen.getByRole('button', { name: 'Go on reading' }).getAttribute('title')).toBe('Go on reading')
+  })
+})
+
+describe('a section being made into audio', () => {
+  it('says so, and offers a stop and nothing else', () => {
+    /* ⚠️ **"MAKING" AND NOT "LOADING" — WI-34.5's ONE NEW SENTENCE.** WI-34.0
+       measured a real section at 315 s on an idle M4 Max. Nothing is arriving
+       over a wire, so calling it buffering would be a lie about a five-minute
+       wait — and a wait a reader cannot leave is worse than one they can. */
+    const asked = listening({ preparing: true })
+    expect(screen.getByRole('status').textContent).toBe('Making this chapter’s audio…')
+    expect(screen.getByRole('status').textContent).not.toMatch(/loading|buffer/iu)
+    /* Nothing else is drawn, because there is nothing yet for it to act on: no
+       position to scrub, no sentence to step, nothing to pause. */
+    for (const name of ['Pause', 'Next sentence', 'Previous sentence', 'Next paragraph']) {
+      expect(screen.queryByRole('button', { name }), name).toBeNull()
+    }
+    expect(screen.queryByRole('slider')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Stop reading aloud' }))
+    expect(asked).toEqual(['stop'])
+  })
+
+  it('gives the ordinary transport back once there is something to hear', () => {
+    listening({ preparing: false, at: { positionMs: 0, durationMs: 1000 } })
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeTruthy()
+  })
+})
+
+describe('how far through the chapter', () => {
+  it('is absent where the voice cannot say — which is Web Speech', () => {
+    /* ⚠️ ABSENT, NOT DISABLED, for the reason the chapter buttons are: a disabled
+       scrubber says "not now", and the true statement is "not on this voice". */
+    listening({ at: null })
+    expect(screen.queryByRole('slider')).toBeNull()
+  })
+
+  it('shows the position and the length, with hours where a chapter has them', () => {
+    listening({ at: { positionMs: 247_000, durationMs: 2_915_100 } })
+    const slider = screen.getByRole('slider', { name: 'How far through the chapter' })
+    expect(slider.getAttribute('aria-valuetext')).toBe('4:07 of 48:35')
+    expect(slider.getAttribute('title')).toBe('4:07 of 48:35')
+    /* 247 000 of 2 915 100 is 0.0847, which at a thousand steps is 85. */
+    expect((slider as HTMLInputElement).value).toBe('85')
+  })
+
+  it('asks for a fraction when it is dragged', () => {
+    const asked = listening({ at: { positionMs: 0, durationMs: 2_915_100 } })
+    fireEvent.change(screen.getByRole('slider'), { target: { value: '250' } })
+    expect(asked).toEqual(['seek 0.25'])
+  })
+})
+
+describe('the clock and the fraction the scrubber is built on', () => {
+  it('writes minutes and seconds, and hours only where there are some', () => {
+    /* ⚠️ HOURS ARE NOT OPTIONAL: WI-34.0 measured the character-weighted median
+       section of this shelf at 48.6 minutes and its p95 past an hour, so `m:ss`
+       would show `68:12` for a real chapter — which reads as sixty-eight minutes
+       only if you already knew it could not be seconds. */
+    expect(clockOf(0)).toBe('0:00')
+    expect(clockOf(999)).toBe('0:00')
+    expect(clockOf(1000)).toBe('0:01')
+    expect(clockOf(61_000)).toBe('1:01')
+    expect(clockOf(247_000)).toBe('4:07')
+    expect(clockOf(2_915_100)).toBe('48:35')
+    expect(clockOf(3_600_000)).toBe('1:00:00')
+    expect(clockOf(3_750_000)).toBe('1:02:30')
+    expect(clockOf(4_092_000)).toBe('1:08:12')
+  })
+
+  it('takes a nonsense duration as nothing rather than showing NaN', () => {
+    expect(clockOf(-1)).toBe('0:00')
+    expect(clockOf(Number.NaN)).toBe('0:00')
+    expect(clockOf(Number.POSITIVE_INFINITY)).toBe('0:00')
+  })
+
+  it('never divides by a zero duration', () => {
+    /* A section of one sample rounds to 0 ms, and `0 / 0` is `NaN`, which a
+       `range` takes as its minimum silently — the thumb at the start of a chapter
+       that had finished, with nothing saying why. */
+    expect(fractionOf({ positionMs: 0, durationMs: 0 })).toBe(0)
+    expect(fractionOf({ positionMs: 500, durationMs: 0 })).toBe(0)
+    expect(fractionOf({ positionMs: 500, durationMs: -1 })).toBe(0)
+  })
+
+  it('clamps rather than reporting past either end', () => {
+    expect(fractionOf({ positionMs: 0, durationMs: 1000 })).toBe(0)
+    expect(fractionOf({ positionMs: 500, durationMs: 1000 })).toBe(0.5)
+    expect(fractionOf({ positionMs: 1000, durationMs: 1000 })).toBe(1)
+    /* The player's own position can sit a frame past the buffer's length. */
+    expect(fractionOf({ positionMs: 1200, durationMs: 1000 })).toBe(1)
+    expect(fractionOf({ positionMs: -5, durationMs: 1000 })).toBe(0)
+  })
+})
+
+describe('a reading that stopped on its own', () => {
+  it('says why on the Listen control, where it used to say nothing', () => {
+    /* ⚠️ **WI-34.5's OTHER SENTENCE.** A chapter that could not be made into
+       audio left this control back where it was with nothing said — which is
+       exactly what a chapter that had FINISHED looks like. */
+    draw({
+      state: { screen: 'reader', chromeOn: true },
+      speech: {
+        ...speech,
+        available: true,
+        refusal: 'This chapter could not be made into audio. Trying again may work.',
+      },
+      hasBook: true,
+    })
+    const button = screen.getByRole('button', { name: 'Read aloud' })
+    expect(button.getAttribute('title')).toBe(
+      'Listen — This chapter could not be made into audio. Trying again may work.',
+    )
+    expect(button.hasAttribute('data-refused')).toBe(true)
+    /* ⚠️ **THE VALUE, NOT JUST THE PRESENCE — FOUND BY THE MUTATION SWEEP.** It
+       used to be an empty string, whose value nothing could be wrong about; it
+       carries the refusal now, so the attribute says WHY as well as THAT. */
+    expect(button.getAttribute('data-refused')).toBe(
+      'This chapter could not be made into audio. Trying again may work.',
+    )
+    /* STILL OFFERED: a render that failed may succeed, which is what the sentence
+       says — so the control must not be disabled by it. */
+    expect(button.hasAttribute('disabled')).toBe(false)
+  })
+
+  it('is outranked by a refusal to start at all, which is the more actionable news', () => {
+    draw({
+      state: { screen: 'reader', chromeOn: true },
+      speech: { ...speech, available: true, refusal: 'the last one failed' },
+      listenRefusal: 'no voice on this Mac is good enough',
+      hasBook: true,
+    })
+    const button = screen.getByRole('button', { name: 'Read aloud' })
+    expect(button.getAttribute('title')).toBe('Listen — no voice on this Mac is good enough')
+    expect(button.hasAttribute('disabled')).toBe(true)
+  })
+})
+
+/**
+ * ⚠️ **THE CHROME HID ITSELF OUT FROM UNDER A CONTROL THE READER WAS USING —
+ * FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.** `chromeHidden` sets `visibility:
+ * hidden` and `inert`, which take the whole subtree out of the focus order and
+ * the hit-testing at once. Doing that on `mouseleave` alone is harmless while
+ * every control is a button somebody clicks; the scrubber changed that, because
+ * it is a native `range` a keyboard reader holds focus on and drags with the
+ * arrow keys for as long as they like. Any pointer movement onto the page took
+ * it away mid-drag.
+ */
+describe('the chrome, and what keeps it up', () => {
+  function bar() {
+    const dispatch = vi.fn()
+    const view = render(
+      <TitleBar
+        screens={[]}
+        state={{ ...initialState, screen: 'reader', chromeOn: true }}
+        dispatch={dispatch}
+        platform="macos"
+        bookTitle="Paper"
+        bookSubtitle=""
+        speech={{
+          ...speech,
+          available: true,
+          speaking: true,
+          at: { positionMs: 1000, durationMs: 10_000 },
+        }}
+        listenRefusal={null}
+        hasBook
+      />,
+    )
+    return { ...view, dispatch }
+  }
+
+  it('stays up when the pointer leaves while a control inside it has focus', () => {
+    const { container, dispatch } = bar()
+    const scrub = screen.getByLabelText('How far through the chapter')
+    scrub.focus()
+    dispatch.mockClear()
+
+    fireEvent.mouseLeave(container.firstChild as Element)
+
+    expect(
+      dispatch.mock.calls.map(([action]) => action),
+      'the reader is still dragging it with the arrow keys',
+    ).toEqual([])
+  })
+
+  it('goes down when the pointer leaves and nothing inside it has focus', () => {
+    const { container, dispatch } = bar()
+    dispatch.mockClear()
+
+    fireEvent.mouseLeave(container.firstChild as Element)
+
+    expect(dispatch).toHaveBeenCalledWith({ type: 'setChrome', on: false })
+  })
+
+  it('comes up when something inside it takes focus, so a keyboard reader can see it', () => {
+    /* TABBING TO IT IS A WAY IN, and it was not one: the chrome came up on
+       pointer-near and on nothing else, so a reader who never touches the mouse
+       could focus an invisible control. */
+    const { dispatch } = bar()
+    dispatch.mockClear()
+
+    fireEvent.focus(screen.getByLabelText('How far through the chapter'))
+
+    expect(dispatch).toHaveBeenCalledWith({ type: 'setChrome', on: true })
+  })
+
+  it('goes down when focus leaves for something outside it', () => {
+    const { dispatch } = bar()
+    const outside = document.createElement('button')
+    document.body.append(outside)
+    dispatch.mockClear()
+
+    fireEvent.blur(screen.getByLabelText('How far through the chapter'), { relatedTarget: outside })
+
+    expect(dispatch).toHaveBeenCalledWith({ type: 'setChrome', on: false })
+    outside.remove()
+  })
+
+  it('stays up when focus leaves but the pointer is still on it', () => {
+    /* ⚠️ **THE HOVER CHECK HAD NO CASE — FOUND BY THE MUTATION SWEEP.** Focus and
+       the pointer are two ways of being here and either is enough: a reader who
+       tabs away from the scrubber to something outside the bar, with the mouse
+       still resting on it, must not have the chrome vanish under their cursor —
+       and `mouseleave` will never fire to bring it back, because the pointer
+       never left.
+
+       jsdom reports `:hover` for nothing, so the element has to be told. */
+    const { container, dispatch } = bar()
+    const root = container.firstChild as HTMLElement
+    const real = root.matches.bind(root)
+    root.matches = (selector: string) => (selector === ':hover' ? true : real(selector))
+    const outside = document.createElement('button')
+    document.body.append(outside)
+    dispatch.mockClear()
+
+    fireEvent.blur(screen.getByLabelText('How far through the chapter'), { relatedTarget: outside })
+
+    expect(
+      dispatch.mock.calls.map(([action]) => action),
+      'the pointer is still here, so the chrome is too',
+    ).toEqual([])
+    root.matches = real
+    outside.remove()
+  })
+
+  it('stays up when focus moves between two of its own controls', () => {
+    /* Tabbing from the scrubber to the speed button is one interaction, and a
+       blur fires for it — so without this the chrome would blink out and back on
+       every tab press. */
+    const { dispatch } = bar()
+    const scrub = screen.getByLabelText('How far through the chapter')
+    const rate = screen.getByRole('button', { name: /^Reading speed/u })
+    dispatch.mockClear()
+
+    fireEvent.blur(scrub, { relatedTarget: rate })
+
+    expect(dispatch.mock.calls.map(([action]) => action)).toEqual([])
   })
 })

@@ -76,6 +76,17 @@ export interface BookState {
    */
   readonly direction: 'ltr' | 'rtl'
   readonly doc: Document | null
+  /**
+   * Which spine item `doc` is, or null when no book is open.
+   *
+   * ⚠️ **NOT `position.sectionIndex`, AND THE DIFFERENCE IS MEASURED.** That one
+   * is documented as null *"when that cannot be told yet"* and was: on
+   * 2026-09-30 in the running app the reader was in section 8, the renderer knew
+   * it, and the position answered null. This is the index the renderer reported
+   * with the document, which is also the index `sectionTexts` counts in — so the
+   * reading and the audiobook export name the same section.
+   */
+  readonly docSection: number | null
   readonly error: string | null
 }
 
@@ -147,7 +158,7 @@ export interface Book extends BookState {
   /** Renderer callbacks. Each takes the generation it was issued under. */
   setToc: (generation: number, toc: readonly TocItem[]) => void
   setPosition: (generation: number, position: ReaderPosition) => void
-  setDoc: (generation: number, doc: Document | null) => void
+  setDoc: (generation: number, doc: Document | null, sectionIndex: number | null) => void
   setFixedLayout: (generation: number, fixed: boolean) => void
   setDirection: (generation: number, direction: 'ltr' | 'rtl') => void
   setMeta: (generation: number, meta: BookMeta) => void
@@ -231,6 +242,18 @@ export function useBook(): Book {
   const [meta, setMetaState] = useState<BookMeta | null>(null)
   const [cover, setCoverState] = useState<Blob | null>(null)
   const [doc, setDocState] = useState<Document | null>(null)
+  /**
+   * Which spine item `doc` is, or null when no book is open.
+   *
+   * ⚠️ **THE RENDERER'S OWN INDEX, NOT `position.sectionIndex`.** That one is
+   * documented as null *"when that cannot be told yet"* and is: measured in the
+   * running app on 2026-09-30, the reader was in section 8, the renderer knew it,
+   * and the position answered null — which the reading spelled `?? -1` and the
+   * plugin's `u32` refused, killing every Listen. It is also the index the
+   * EXPORT counts in (`sectionTexts`), so keying the reading on anything else
+   * would mean the export could never find a clip the reading made.
+   */
+  const [docSection, setDocSectionState] = useState<number | null>(null)
   const [fixedLayout, setFixedLayoutState] = useState(false)
   const [direction, setDirectionState] = useState<'ltr' | 'rtl'>('ltr')
   const [error, setError] = useState<string | null>(null)
@@ -266,11 +289,18 @@ export function useBook(): Book {
     setMetaState(null)
     setCoverState(null)
     setDocState(null)
+    setDocSectionState(null)
     setFixedLayoutState(false)
     setDirectionState('ltr')
     setError(null)
     setBookId(null)
-  }, [])
+  },
+  /* ⚠️ **THE LIST IS ON ITS OWN LINE SO THE DIRECTIVE CAN REACH IT.** Above a
+     closing `}, [])` Babel attaches a leading comment as a TRAILING one of the
+     statement before, and `check-inert-directives` refuses it — the trap
+     `AGENTS.md` records and the one this file's other directive already avoids. */
+  // Stryker disable next-line ArrayDeclaration: every setter here is React's own, whose identity never moves, so this list has no dependency to name and a constant one is a constant identity whatever is in it.
+  [])
 
   /**
    * Replace whatever is loaded — a book, or nothing.
@@ -543,10 +573,29 @@ export function useBook(): Book {
         (generation: number, value: T) => {
           if (current(generation)) set(value)
         }
+      /**
+       * A setter for a callback that carries TWO values, guarded once.
+       *
+       * ⚠️ **ONE `current` TEST FOR BOTH, WHICH IS THE POINT.** Two `guard`s
+       * called in a row would each ask again, and a generation that turned over
+       * between them would write one and drop the other — leaving a section index
+       * beside a document from a different book. The pairing exists precisely so
+       * that state cannot be reached.
+       */
+      const guardPair =
+        <A, B>(first: (value: A) => void, second: (value: B) => void) =>
+        (generation: number, a: A, b: B) => {
+          if (!current(generation)) return
+          first(a)
+          second(b)
+        }
       return {
         setToc: guard<readonly TocItem[]>(setTocState),
         setPosition: guard<ReaderPosition>(setPositionState),
-        setDoc: guard<Document | null>(setDocState),
+        /* ⚠️ **TWO VALUES, GUARDED TOGETHER.** The section index arrives with the
+           document and is written with it, so no commit can hold one section's
+           index beside another's document — see `SessionCallbacks.onDocument`. */
+        setDoc: guardPair<Document | null, number | null>(setDocState, setDocSectionState),
         setFixedLayout: guard<boolean>(setFixedLayoutState),
         setDirection: guard<'ltr' | 'rtl'>(setDirectionState),
         setCover: guard<Blob | null>(setCoverState),
@@ -585,6 +634,7 @@ export function useBook(): Book {
     position,
     meta,
     doc,
+    docSection,
     fixedLayout,
     direction,
     error,

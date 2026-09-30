@@ -35,8 +35,25 @@ function fake(): SpeakerLike & { calls: string[]; began: boolean } {
     stop() {
       self.calls.push('stop')
     },
-    prepare(text: string) {
-      self.calls.push(`prepare:${text}`)
+    at() {
+      self.calls.push('at')
+      return { positionMs: 1234, durationMs: 5678 }
+    },
+    seekToMs(ms: number) {
+      self.calls.push(`seekToMs:${ms}`)
+      return true
+    },
+    seekToOffset(offset: number) {
+      self.calls.push(`seekToOffset:${offset}`)
+      return true
+    },
+    seekToFraction(fraction: number) {
+      self.calls.push(`seekToFraction:${fraction}`)
+      return true
+    },
+    spokenOffset() {
+      self.calls.push('spokenOffset')
+      return 42
     },
   }
   return self
@@ -169,34 +186,113 @@ describe('routing a reading', () => {
   })
 })
 
-describe('rendering the next passage ahead', () => {
-  it('prepares on the engine where the next passage goes there', () => {
+describe('seeking, which only the speaker that is reading can do', () => {
+  /* ⚠️ THE `prepare` CASES THAT USED TO BE HERE ARE GONE WITH IT. The look-ahead
+     was refused by the owner on 2026-09-30 — the whole section is rendered once
+     and kept, with no render the reader has not asked for. What replaced it is
+     the four members below, which a reading can only have once it is one buffer. */
+
+  it('reaches only the speaker that is reading', () => {
     const engine = fake()
     const platform = fake()
     const speaker = routedSpeaker(engine, platform, () => [pack()])
-    speaker.prepare?.('the next one', 'en')
-    expect(engine.calls).toContain('prepare:the next one')
+    speaker.speak('a passage', 'en')
+    engine.calls.length = 0
+    platform.calls.length = 0
+    expect(speaker.seekToMs?.(500)).toBe(true)
+    expect(speaker.seekToOffset?.(7)).toBe(true)
+    expect(speaker.seekToFraction?.(0.5)).toBe(true)
+    expect(speaker.at?.()).toEqual({ positionMs: 1234, durationMs: 5678 })
+    expect(engine.calls).toEqual(['seekToMs:500', 'seekToOffset:7', 'seekToFraction:0.5', 'at'])
+    expect(platform.calls, 'the speaker that is not reading hears nothing').toEqual([])
   })
 
-  it('prepares nothing for a passage the platform will read', () => {
-    // A render nobody will play, on a model that has to be loaded to make it.
+  it('reaches the platform speaker where that is the one reading', () => {
     const engine = fake()
     const platform = fake()
     const speaker = routedSpeaker(engine, platform, () => [pack()])
-    speaker.prepare?.('la suite', 'fr')
+    /* French: no pack can read it, so the platform takes the passage. */
+    speaker.speak('la suite', 'fr')
+    platform.calls.length = 0
+    expect(speaker.seekToMs?.(500)).toBe(true)
+    expect(platform.calls).toEqual(['seekToMs:500'])
+  })
+
+  it('asks the reading speaker where in the text it is', () => {
+    const engine = fake()
+    const platform = fake()
+    const speaker = routedSpeaker(engine, platform, () => [pack()])
+    speaker.speak('a passage', 'en')
+    engine.calls.length = 0
+    /* `speak` STOPS BOTH first — see the header — so the platform's list is
+       cleared here rather than asserted empty from the start. */
+    platform.calls.length = 0
+    expect(speaker.spokenOffset?.()).toBe(42)
+    expect(engine.calls).toEqual(['spokenOffset'])
+    expect(platform.calls, 'and not the one that is quiet').toEqual([])
+  })
+
+  it('answers null for a speaker that cannot say where it is, and for none at all', () => {
+    /* ⚠️ **BOTH OPTIONAL CHAINS ARE LOAD-BEARING AND NEITHER WAS REACHED — FOUND
+       BY THE MUTATION SWEEP.** `current` is null between utterances, and the
+       PLATFORM speaker genuinely has no `spokenOffset`: Web Speech reports no
+       position in an utterance, so there is no offset to give. Either way the
+       caller leaves its cursor alone, which is the same answer it had before this
+       member existed. */
+    const engine = fake()
+    const platform = fake()
+    delete (platform as { spokenOffset?: unknown }).spokenOffset
+    const speaker = routedSpeaker(engine, platform, () => [pack()])
+    expect(speaker.spokenOffset?.(), 'nothing is reading').toBeNull()
+    /* French: no pack can read it, so the platform takes it — and it cannot say. */
+    speaker.speak('la suite', 'fr')
+    expect(speaker.spokenOffset?.()).toBeNull()
+  })
+
+  it('answers no between utterances rather than reaching the last speaker used', () => {
+    /* `current` is null before a `speak` and after a `stop`, and there is nothing
+       to seek in either — a seek that reached the last speaker used would start a
+       sound over a reading the reader has ended. */
+    const engine = fake()
+    const platform = fake()
+    const speaker = routedSpeaker(engine, platform, () => [pack()])
+    expect(speaker.seekToMs?.(500)).toBe(false)
+    expect(speaker.at?.()).toBeNull()
+    speaker.speak('a passage', 'en')
+    speaker.stop()
+    engine.calls.length = 0
+    expect(speaker.seekToMs?.(500)).toBe(false)
+    expect(speaker.seekToOffset?.(1)).toBe(false)
+    expect(speaker.seekToFraction?.(1)).toBe(false)
+    expect(speaker.at?.()).toBeNull()
     expect(engine.calls).toEqual([])
-    expect(platform.calls).toEqual([])
   })
 
-  it('does not fail where the target cannot prepare', () => {
+  it('answers no where the speaker reading cannot seek at all', () => {
+    /* Web Speech declares none of these. `?? false` is what makes "cannot" and
+       "did not" one answer for a caller that only wants to know whether the
+       reading moved. */
     const platform = fake()
-    const noPrepare: SpeakerLike = {
+    const cannot: SpeakerLike = {
       speak: () => true,
       pause: () => {},
       resume: () => {},
       stop: () => {},
     }
-    const speaker = routedSpeaker(noPrepare, platform, () => [pack()])
-    expect(() => speaker.prepare?.('anything', 'en')).not.toThrow()
+    const speaker = routedSpeaker(cannot, platform, () => [pack()])
+    speaker.speak('a passage', 'en')
+    expect(speaker.seekToMs?.(500)).toBe(false)
+    expect(speaker.seekToOffset?.(1)).toBe(false)
+    expect(speaker.seekToFraction?.(0.5)).toBe(false)
+    expect(speaker.at?.()).toBeNull()
+  })
+
+  it('answers no after a refused speak, which is not a reading', () => {
+    const engine = fake()
+    engine.began = false
+    const platform = fake()
+    const speaker = routedSpeaker(engine, platform, () => [pack()])
+    expect(speaker.speak('a passage', 'en')).toBe(false)
+    expect(speaker.seekToMs?.(500)).toBe(false)
   })
 })

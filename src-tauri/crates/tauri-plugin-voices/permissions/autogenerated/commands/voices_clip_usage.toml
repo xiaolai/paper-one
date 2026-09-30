@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-voices-clip-usage"
+description = "Enables the voices_clip_usage command without any pre-configured scope."
+commands.allow = ["voices_clip_usage"]
+
+[[permission]]
+identifier = "deny-voices-clip-usage"
+description = "Denies the voices_clip_usage command without any pre-configured scope."
+commands.deny = ["voices_clip_usage"]

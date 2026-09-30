@@ -21,9 +21,14 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::voices_install,
             commands::voices_stop,
             commands::voices_remove,
-            commands::voices_render,
             commands::voices_render_file,
             commands::voices_release,
+            commands::voices_clip_find,
+            commands::voices_clip_render,
+            commands::voices_clip_read,
+            commands::voices_clip_hold,
+            commands::voices_clip_usage,
+            commands::voices_clip_forget,
         ])
         .setup(|app, _api| {
             let state = VoicesState::default();

@@ -7,7 +7,7 @@ import type { SpeechSkipPrefs } from '../reader/speechSkip'
 import type { SectionTextWalk } from '../reader/session'
 import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
 import { engineVoiceFor, missingPackNotice, packVoiceOf, qualify } from '../reader/engineVoice'
-import type { VoicePack } from '../../core/ports'
+import type { SpeechRequest, SpokenClip, VoicePack } from '../../core/ports'
 import { documentLang } from '../reader/speech'
 import type { Book } from './useBook'
 
@@ -30,6 +30,8 @@ import type { Book } from './useBook'
  */
 
 export interface AudiobookSource {
+  /** Which book this is, so a chapter already rendered can be found. */
+  readonly bookId: string
   readonly title: string
   readonly author: string
   readonly lang: string | null
@@ -88,6 +90,7 @@ export function audiobookSourceOf(
 ): AudiobookSource | null {
   if (!book.bookId || !book.doc) return null
   return {
+    bookId: book.bookId,
     title: book.meta?.title ?? 'Audiobook',
     author: book.meta?.author ?? '',
     lang: documentLang(book.doc),
@@ -117,6 +120,24 @@ export interface AudiobookDeps {
   readonly packs: readonly VoicePack[]
   readonly chosen: Readonly<Record<string, string>>
   readonly rate: number
+  /**
+   * Whether a section is already rendered, asked without rendering it.
+   *
+   * ⚠️ **THE HALF OF WI-34.4 THAT CANNOT BE DEFAULTED.** Given a
+   * `?? (() => null)` this hook would silently re-render every chapter of a book
+   * the reader had just listened to, and no test could tell one absent function
+   * from another. A build with no voices capability supplies one that answers
+   * null, at the call site, where the absence can be read.
+   */
+  readonly findClip: (request: SpeechRequest) => Promise<SpokenClip | null>
+  /**
+   * Hold rendered sections open while the packer reads them, or let them go.
+   *
+   * REQUIRED for the reason `findClip` is: a build that silently held nothing
+   * would lose a chapter under a running export only when a reader happened to be
+   * listening at the same time, which is the hardest kind of defect to find.
+   */
+  readonly holdClips: (stems: readonly string[], hold: boolean) => Promise<number>
   /** One line to the reader. The same surface an import reports through. */
   readonly say: (text: string) => void
 }
@@ -134,7 +155,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
    * no test could tell from its absence. */
   const stop = useRef(false)
 
-  const { available, source, packs, chosen, rate, say } = deps
+  const { available, source, packs, chosen, rate, findClip, holdClips, say } = deps
 
   /**
    * ⚠️ **ONE LONG FUNCTION, AND THAT IS THE DECISION RATHER THAN THE DEBT.** An
@@ -274,13 +295,14 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
          * read has been made to do work for an answer that was already known. */
         if (!path) return
 
-        const platform = await tauriAudiobook(packs)
+        const platform = await tauriAudiobook(packs, findClip, holdClips)
         const result = await exportAudiobook(platform, {
           chapters,
           voice,
           rate,
           title: source.title,
           author: source.author,
+          bookId: source.bookId,
           path,
           onProgress: (done, total, title) => {
             say(
@@ -293,6 +315,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
         })
         say(
           `Exported ${result.chapters} chapters, ${Math.round(result.durationMs / 60_000)} minutes, to ${nameOf(result.path)}.` +
+            skippedNote(result.skipped) +
             leftBehindNote(result.leftBehind),
         )
       } catch (cause) {
@@ -302,6 +325,20 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
              sentence a reader would act on was the one thing nobody had checked.
              A chapter of a ten-hour book is tens of megabytes. It is counted now,
              and the claim is only made when it is true. */
+          /* ⚠️ **A STOP CAN COME TOO LATE TO UNDO THE FILE, AND THE READER USED TO
+           * BE TOLD NOTHING ABOUT IT — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.**
+           * The join cannot be interrupted, so a stop during it lands after the
+           * packer has written the destination. Where that destination held an
+           * earlier audiobook, removing the result would leave the reader with
+           * NEITHER — so it is kept, and this is the sentence that says so. Without
+           * it the notice claimed *"Nothing was left behind"* over a file that had
+           * replaced one of theirs. */
+          if (cause.kept) {
+            say(
+              `The export was stopped, but the book had already been written over the file you chose.${leftBehindNote(cause.leftBehind)}`,
+            )
+            return
+          }
           say(`The export was stopped.${leftBehindNote(cause.leftBehind) || ' Nothing was left behind.'}`)
           return
         }
@@ -319,7 +356,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
     /* NO `running` HERE. It is not read — the claim is `inFlight.current`, which
        is the whole point of that ref — so listing it only changed this callback's
        identity on every start and stop, for a value the body never looks at. */
-  }, [source, packs, chosen, rate, say])
+  }, [source, packs, chosen, rate, findClip, holdClips, say])
 
   /**
    * ⚠️ **MEMOISED BECAUSE A CONSUMER HAS TO BE ABLE TO DEPEND ON IT.** A fresh
@@ -374,6 +411,27 @@ function nameOf(path: string): string {
  * well as the text — a reader is told about leftover files or told nothing, and
  * never told a number that is zero.
  */
+/**
+ * What the engine would not say, where there was any.
+ *
+ * ⚠️ **THE EXPORT SAID NOTHING ABOUT THIS AND WAS THEREFORE DISHONEST — FOUND BY
+ * AN INDEPENDENT AUDIT, 2026-09-30.** Both rendering roads drop passages the
+ * engine refuses: a name it has no pronunciation for, a line it cannot read.
+ * The reading tells a reader about each one as it reaches it; the export
+ * reported the book as finished. A count is what the export owes them — *this is
+ * not quite the whole book* — and the text of each passage belongs to the
+ * reading, which is where the reader is at the words.
+ *
+ * Empty at zero, for the reason `leftBehindNote` is: a reader is told about
+ * missing words or told nothing, and never told a number that is zero.
+ */
+function skippedNote(count: number): string {
+  if (count <= 0) return ''
+  return count === 1
+    ? ' One passage could not be pronounced and is not in it.'
+    : ` ${count} passages could not be pronounced and are not in it.`
+}
+
 function leftBehindNote(count: number): string {
   if (count <= 0) return ''
   return count === 1

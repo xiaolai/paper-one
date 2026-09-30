@@ -2,6 +2,8 @@ import type { Book, CreateOverlayDetail, DrawAnnotationDetail, ExternalLinkDetai
 import { reanchorPass, type PassOutcome, type PendingMark } from './reanchorPass'
 import { directionOf } from './direction'
 import { collectText } from './speech'
+import { textDigest } from './clipKey'
+import { canonicalTextOf } from './passageText'
 import { DEFAULT_SPEECH_SKIP, type SpeechSkipPrefs } from './speechSkip'
 import type { SectionText } from './audiobook'
 import { refuseBookScripts, stripScripts } from './bookScripts'
@@ -207,7 +209,27 @@ export interface SessionCallbacks {
   onExternalLink: (detail: ExternalLinkDetail, event: Event) => void
   onToc: (toc: readonly TocItem[]) => void
   onRelocate: (position: ReaderPosition) => void
-  onDocument: (doc: Document | null) => void
+  /**
+   * The section on screen, and WHICH section it is.
+   *
+   * ⚠️ **THE INDEX COMES WITH THE DOCUMENT, AND HAD TO — FOUND IN THE RUNNING
+   * APP, 2026-09-30.** The host needs the spine index to key the rendered
+   * reading, and the only other published answer is
+   * `ReaderPosition.sectionIndex`, which is documented as null *"when that
+   * cannot be told yet"* and genuinely was: the reader was in section 8, the
+   * renderer knew it, and the position did not. Worse, the EXPORT keys on
+   * `sectionTexts`'s own spine index — so a reading keyed on anything else could
+   * never hand the export a clip, and WI-34.4 would be a sentence with nothing
+   * behind it.
+   *
+   * Paired rather than published beside, for the reason `spokenRef` pairs the
+   * document with the text it collected: held apart, a consumer can read one
+   * section's index against another's document, and that state is worth making
+   * unrepresentable.
+   *
+   * Null for both when the book closes.
+   */
+  onDocument: (doc: Document | null, sectionIndex: number | null) => void
   onMeta: (meta: BookMeta) => void
   /**
    * The book's own jacket, or null when it declares none.
@@ -1168,7 +1190,9 @@ export class ReaderSession {
          the page, not only inside the note popover. */
       suppressEmptyGeneratedContent(doc)
 
-      this.#cb.onDocument(doc)
+      /* THE LOAD EVENT'S OWN INDEX, which is the spine position `sectionTexts`
+         counts in — so the reading and the export name the same section. */
+      this.#cb.onDocument(doc, index)
     })
 
     /* Every link in the book, before foliate navigates — see `LinkDetail`.
@@ -1936,7 +1960,7 @@ export class ReaderSession {
 
     const titles = await tocTitles(book as Book, toc)
 
-    const out: { index: number; title: string | null; text: string }[] = []
+    const out: SectionText[] = []
     /* BY `entries()`, so the walk has no index to fall off. A `for (let index =
        0; index < sections.length; …)` beside the `!section` check below gave the
        loop two conditions for one question: reading past the end lands on
@@ -1954,7 +1978,22 @@ export class ReaderSession {
       const section = entry as { createDocument?: () => Promise<Document> } | null
       if (!section || typeof section.createDocument !== 'function') continue
       const doc = await section.createDocument()
-      out.push({ index, title: titles.get(index) ?? null, text: collectText(doc, skip).text })
+      /* ⚠️ **THE CANONICAL DIGEST TOO, SO THE EXPORT CAN ASK FOR THE READING'S
+       * OWN AUDIO.** Phase 34 keeps a rendered section on disk keyed by a digest
+       * of `indexText`'s canonical form, and without it here the export could
+       * only ever miss — which would make *"exporting a book you have listened to
+       * costs only the muxing"* a sentence with nothing behind it.
+       *
+       * The DIGEST and not the string: a section is up to two million characters
+       * and a book has forty of them, so carrying the text would put megabytes in
+       * this list for a value that is compared and never read. `canonicalTextOf`
+       * is 1.8 ms on a real section against a walk that is already seconds. */
+      out.push({
+        index,
+        title: titles.get(index) ?? null,
+        text: collectText(doc, skip).text,
+        textDigest: textDigest(canonicalTextOf(doc)),
+      })
       await BREATHE()
     }
     return { sections: out, complete: true }
@@ -2725,7 +2764,7 @@ export class ReaderSession {
     if (this.#disposed) return
     this.#disposed = true
     try {
-      quietly('onDocument', () => this.#cb.onDocument(null))
+      quietly('onDocument', () => this.#cb.onDocument(null, null))
       quietly('onNavigator', () => this.#cb.onNavigator(null))
       quietly('onSelection', () => this.#cb.onSelection(null))
       for (const offs of this.#unwatch.values())

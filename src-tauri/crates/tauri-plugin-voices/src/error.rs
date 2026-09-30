@@ -20,6 +20,23 @@ pub enum Error {
     /// A path from the manifest that may not be written.
     #[error("{0} is not a path inside the pack")]
     BadPath(String),
+    /// A clip key that cannot be turned into a filename.
+    ///
+    /// ⚠️ **ITS OWN VARIANT, AND `BadPath` COST THREE ROUNDS OF GUESSING.**
+    /// `clips::Key::stem` refused an empty book id with `BadPath("")`, whose text
+    /// is *" is not a path inside the pack"* — a sentence about a PACK, with the
+    /// offending value invisible because it is empty. The reading reported it
+    /// faithfully and it named neither the field nor the reason. Measured
+    /// 2026-09-30 while driving the running app: three rounds were spent asking
+    /// which of four call sites could produce an empty path.
+    ///
+    /// A refusal that names the wrong thing is worse than one that says nothing,
+    /// because it sends the reader somewhere.
+    #[error("the rendered reading cannot be filed: {field} is {why}")]
+    BadKey {
+        field: &'static str,
+        why: &'static str,
+    },
     #[error("{route} answered {status}")]
     Http { status: u16, route: String },
     #[error("{route} could not be reached: {why}")]
@@ -54,6 +71,7 @@ impl Error {
             Self::Manifest(_) => "manifest",
             Self::UnknownPack(_) => "unknownPack",
             Self::BadPath(_) => "badPath",
+            Self::BadKey { .. } => "badKey",
             Self::Http { .. } => "http",
             Self::Unreachable { .. } => "unreachable",
             Self::Malformed { .. } => "malformed",

@@ -18,6 +18,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KernelServices } from '../../core/services'
 import type { VoicePack } from '../../core/ports'
 import type { AudioHost } from '../reader/enginePlayer'
+import type { SpeechRequest, SpokenClip } from '../../core/ports'
 import type { ReadingEngine } from '../reader/useSpeech'
 
 /** How often the catalogue is re-read. */
@@ -29,10 +30,36 @@ export interface VoicesState {
   readonly packs: readonly VoicePack[]
   /** The engine for `useSpeech`, or null where this build has none. */
   readonly engine: ReadingEngine | null
+  /**
+   * Whether a section is already rendered, asked without rendering it.
+   *
+   * ⚠️ **PUBLISHED FOR THE EXPORT, WHICH IS A CONSUMER OF THE READING'S AUDIO
+   * NOW.** WI-34.4: a book the reader has listened to costs only the muxing. In a
+   * build with no voices capability it answers null, which is the same answer as
+   * *nothing is rendered* and is the truth there.
+   */
+  readonly findClip: (request: SpeechRequest) => Promise<SpokenClip | null>
+  /**
+   * Hold rendered sections open while something reads them — the audiobook
+   * export's lease. Answers zero in a build with no store, which is the truth
+   * there: nothing was held because there is nothing to hold.
+   */
+  readonly holdClips: (stems: readonly string[], hold: boolean) => Promise<number>
 }
 
-/** Nothing at all — a build with no voices capability. */
-const NONE: VoicesState = { packs: [], engine: null }
+/**
+ * Nothing at all — a build with no voices capability.
+ *
+ * ⚠️ **`findClip` ANSWERS NULL RATHER THAN BEING ABSENT.** A build with no engine
+ * has no rendered reading, and *there is no clip* is the true answer — where an
+ * optional member would make every caller repeat the question.
+ */
+const NONE: VoicesState = {
+  packs: [],
+  engine: null,
+  findClip: async () => null,
+  holdClips: async () => 0,
+}
 
 export function useVoicePacks(services: KernelServices): VoicesState {
   const [packs, setPacks] = useState<readonly VoicePack[]>([])
@@ -96,6 +123,8 @@ export function useVoicePacks(services: KernelServices): VoicesState {
     if (!bound) return NONE
     return {
       packs,
+      findClip: (request) => bound.findClip(request),
+      holdClips: (stems, hold) => bound.holdClips(stems, hold),
       engine: {
         packs: () => packsRef.current,
         render: (request) => bound.render(request),

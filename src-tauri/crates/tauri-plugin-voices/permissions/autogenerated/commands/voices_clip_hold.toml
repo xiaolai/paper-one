@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-voices-clip-hold"
+description = "Enables the voices_clip_hold command without any pre-configured scope."
+commands.allow = ["voices_clip_hold"]
+
+[[permission]]
+identifier = "deny-voices-clip-hold"
+description = "Denies the voices_clip_hold command without any pre-configured scope."
+commands.deny = ["voices_clip_hold"]
