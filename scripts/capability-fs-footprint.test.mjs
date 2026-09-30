@@ -2,6 +2,22 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+/**
+ * ⚠️ **A SECOND COMMENT STRIPPER, AND THE DIFFERENCE IS LOAD-BEARING.** This one
+ * keeps STRING CONTENTS; the `stripComments` below blanks them.
+ *
+ * The local one is for detecting CALLS (`writeFile(`), where a quoted `/*` in a
+ * glob or a URL once opened a comment that ran to the next `*\/` anywhere later
+ * in the file — so blanking strings is what makes it safe. The imported one is for
+ * detecting a PACKAGE, where the string literal IS the evidence: run through the
+ * local stripper, `from '@tauri-apps/plugin-fs'` comes back as `from` and a run of
+ * spaces, and the check passes for every file in the tree whatever it imports.
+ *
+ * Two strippers in one file is the shape this repository normally deletes. Kept,
+ * because the two questions genuinely differ, and named so the next reader cannot
+ * pick the wrong one by accident.
+ */
+import { stripComments as commentsOnly } from './lib/compositions.mjs'
 
 /**
  * WI-10.1 — the capability fs/storage FOOTPRINT, pinned from source.
@@ -683,9 +699,47 @@ describe('the capability fs/storage footprint (WI-10.1)', () => {
 
   it('no capability imports the platform fs or reaches for localStorage', () => {
     for (const file of productionSources()) {
-      const text = readFileSync(file, 'utf8')
-      expect(text.includes('@tauri-apps/plugin-fs'), `${file} imports the platform fs`).toBe(false)
-      expect(/\blocalStorage\b/.test(stripComments(text)), `${file} reaches localStorage`).toBe(false)
+      /* ⚠️ **COMMENTS ARE BLANKED FOR BOTH, AND THE fs ONE DID NOT DO IT.** The
+       * `localStorage` test beside it has always used `stripComments`; the package
+       * test read the raw bytes, so a comment SAYING a file does not reach the fs
+       * plugin was reported as a file that does. Met 2026-09-30 by
+       * `voices/lib/wire.ts`, whose comment explains why the samples come back
+       * through a command of the plugin's own rather than through `plugin-fs`.
+       *
+       * This is the shape this repository records three times over —
+       * `check-browser-safe` counted `@tauri-apps` inside doc comments (and
+       * `bookVault.ts` names the package three times to say it does NOT import
+       * it); a `Stryker disable` in prose looks like a directive to a grep and is
+       * nothing to the tool; `notify.test.ts`'s own comment was reported as an
+       * offender by its own scan. A rule a comment cannot explain without
+       * breaking is a rule nobody can explain. */
+      /* `commentsOnly`, NOT the local `stripComments`: that one blanks string
+         contents, and the string is the evidence here — see the import's note. */
+      const code = commentsOnly(readFileSync(file, 'utf8'))
+      expect(code.includes('@tauri-apps/plugin-fs'), `${file} imports the platform fs`).toBe(false)
+      expect(/\blocalStorage\b/.test(code), `${file} reaches localStorage`).toBe(false)
     }
+  })
+
+  it('reads the code and not the prose, which is what a comment about the rule is', () => {
+    /* ⚠️ **THE GUARD, ON ITSELF.** Reproduced in memory rather than by editing a
+       real file: a comment naming the package is not an import, and an import is.
+       Without this the fix above is a change nobody has seen work — the same
+       argument `measuredIn` dropping `excluded` records. */
+    const prose = `/** Not \`@tauri-apps/plugin-fs\`: see the wire. */\nexport const x = 1\n`
+    const real = `import { readFile } from '@tauri-apps/plugin-fs'\nexport const x = readFile\n`
+    expect(commentsOnly(prose).includes('@tauri-apps/plugin-fs')).toBe(false)
+    expect(commentsOnly(real).includes('@tauri-apps/plugin-fs')).toBe(true)
+    /* And a LINE comment too, which is the other spelling this tree uses. */
+    expect(commentsOnly(`// @tauri-apps/plugin-fs is refused here\n`).includes('@tauri-apps/plugin-fs')).toBe(
+      false,
+    )
+    /* ⚠️ **AND THE LOCAL STRIPPER WOULD MAKE THIS CHECK INERT**, which is the
+       whole reason the two are named apart: it blanks string contents, so a real
+       import comes back with nothing to find. Asserted, so nobody swaps them back. */
+    expect(
+      stripComments(real).includes('@tauri-apps/plugin-fs'),
+      'the local stripper blanks the string the package test needs',
+    ).toBe(false)
   })
 })
