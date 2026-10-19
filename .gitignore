@@ -1,0 +1,23 @@
+# Test corpus: copyrighted books, never committed or published.
+corpus/
+
+.DS_Store
+
+# Agentic artifacts stay local: instructions, plugin settings, bridges and
+# per-tool configs for AI assistants are not project source.
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
+.claude/
+.codex/
+.agents/
+.gemini/
+.grok/
+.cc-suite/
+.cc-suite.md
+.cc-suite-*.json
+.mcp.json
+opencode.json
+.english-buddy.json
+.claude-english-buddy.json
