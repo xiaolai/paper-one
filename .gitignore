@@ -21,3 +21,6 @@ GEMINI.md
 opencode.json
 .english-buddy.json
 .claude-english-buddy.json
+
+# Spike fixtures (derived from corpus/)
+spikes/ts-toolkit/fixtures/
