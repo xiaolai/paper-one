@@ -1,0 +1,134 @@
+/**
+ * A set of TypeScript modules, flattened into one self-contained script.
+ *
+ * Two harnesses need this and they need it identically: `word-snap-parity.mjs`
+ * inlines the segmentation core to compare Node's ICU against WebKit's, and
+ * `word-snap-live.mjs` inlines the whole selection adapter to exercise it
+ * against a real WKWebView `Selection`. Both hand the result to
+ * `webview_execute_js`, where an unresolved import fails with no explanation
+ * that points anywhere near the cause.
+ *
+ * Two copies of this logic would be one mechanism in two places, and they would
+ * drift: the first draft of the live runner needed multi-line import support
+ * that the parity runner had never met, and a copy would have grown it alone.
+ *
+ * **Everything is read from disk on every call.** A generator holding its own
+ * transcription of the modules would report a green run against code the app
+ * does not contain, which is worse than no harness at all.
+ *
+ * ## Why not a bundler
+ *
+ * There isn't one to reach for. `esbuild` is a transitive dependency of vite
+ * and pnpm's isolated `node_modules` does not expose it to the project root
+ * (verified: `ERR_MODULE_NOT_FOUND`), so using it would mean taking a direct
+ * dependency on a bundler for two dev scripts. Node's own type stripping plus
+ * the small amount of module syntax these files actually use is cheaper, and
+ * every case it does NOT understand throws instead of emitting a snippet that
+ * would fail later and elsewhere.
+ */
+
+import { readFileSync } from 'node:fs'
+import { stripTypeScriptTypes } from 'node:module'
+
+/**
+ * One import statement, single-line or wrapped.
+ *
+ * `[\s\S]*?` is lazy, so the match ends at the FIRST `from '...'` that closes a
+ * line — a second import below is a separate match rather than being swallowed
+ * along with the code between them. Bare side-effect imports (`import './x'`)
+ * are matched by the second alternative; nothing here has one, and one arriving
+ * silently would be an unresolvable specifier in a webview.
+ */
+const IMPORT_STATEMENT = /^import\s(?:[\s\S]*?\sfrom\s*)?['"]([^'"]+)['"];?[ \t]*$/gm
+
+/** Any module syntax left after the rewrite. Not a style check — an `import`
+ *  that survives is a snippet that throws at parse inside WebKit. */
+const MODULE_SYNTAX = /^[ \t]*(?:import|export)\b/m
+
+/** A value export. `export interface` and `export type` are erased by the type
+ *  stripper before this runs, so only real bindings are found. */
+const EXPORTED_NAME = /^export (?:function|const|let|var|class) ([A-Za-z_$][\w$]*)/gm
+
+/**
+ * One module, ready to be inlined.
+ *
+ * `allowed` is the rest of the set. An import outside it cannot be resolved by
+ * a snippet, so it throws here — where the message names the file and the
+ * specifier — instead of inside a webview, where it does not.
+ */
+function inlineModule(dir, file, allowed) {
+  const source = readFileSync(new URL(file, dir), 'utf8')
+  const stripped = stripTypeScriptTypes(source, { mode: 'strip' })
+
+  const names = [...stripped.matchAll(EXPORTED_NAME)].map((match) => match[1])
+  if (names.length === 0) {
+    throw new Error(`inline-ts: ${file} exports nothing this generator can inline`)
+  }
+
+  const specifiers = []
+  const body = stripped
+    .replace(IMPORT_STATEMENT, (_statement, specifier) => {
+      specifiers.push(specifier)
+      /* Replaced with nothing rather than with a blank line: the statement may
+       * have spanned several lines, and keeping the count would mean counting
+       * them. Line numbers in a generated snippet point at the snippet anyway. */
+      return ''
+    })
+    .replace(/^export /gm, '')
+
+  for (const specifier of specifiers) {
+    const target = specifier.replace(/^\.\//, '') + '.ts'
+    if (!allowed.includes(target)) {
+      throw new Error(
+        `inline-ts: ${file} imports ${specifier}, which is outside the inlinable set ` +
+          `(${allowed.join(', ')}). A snippet cannot resolve it in a webview.`,
+      )
+    }
+  }
+  if (MODULE_SYNTAX.test(body)) {
+    throw new Error(
+      `inline-ts: ${file} still holds module syntax after inlining — ` +
+        'the generator does not understand it, and an unresolved import fails silently in a webview',
+    )
+  }
+
+  return { file, slug: file.replace(/\W/g, '_'), names, body }
+}
+
+/** Cached per directory-and-set: a runner often builds several snippets in one
+ *  process, and stripping five files each time is pure waste. */
+const cache = new Map()
+
+/**
+ * The named modules as one fragment, in the order given.
+ *
+ * That order is a dependency order and it is not checked: a module may only use
+ * names the modules before it export. Getting it wrong yields a
+ * `ReferenceError` naming the binding, which is a good enough signal not to
+ * warrant a topological sort over five files.
+ *
+ * Each module keeps its own scope and hands its exports out through a returned
+ * object, rather than everything being concatenated into one flat scope. That
+ * costs two lines per module and buys isolation: `classify.ts` has a private
+ * helper called `segments`, `rangeText.ts` has one called `join`, and a flat
+ * concatenation would collide them with an error message pointing nowhere near
+ * the cause. Two modules exporting the SAME name still collide — as a
+ * `SyntaxError` on a duplicate `const`, at parse, which is loud.
+ */
+export function inlineModules(dir, files) {
+  const key = new URL('.', dir).href + '\u0000' + files.join(',')
+  const hit = cache.get(key)
+  if (hit !== undefined) return hit
+
+  let out = ''
+  for (const file of files) {
+    const module = inlineModule(dir, file, files)
+    const list = module.names.join(', ')
+    out +=
+      `/* ---- ${module.file} ---- */\n` +
+      `const __${module.slug} = (function () {\n${module.body}\nreturn { ${list} };\n})();\n` +
+      `const { ${list} } = __${module.slug};\n`
+  }
+  cache.set(key, out)
+  return out
+}

@@ -1,0 +1,86 @@
+/* THE MOBILE SHEET'S GEOMETRY, laid over the kernel's `OverlaySheet`.
+ *
+ * `OverlaySheet` renders a scrim (`[data-overlay-scrim]`) and a dialog
+ * (`[role="dialog"]`) as siblings, positioned for a desktop: the dialog sits
+ * at `--sheet-top`, centred by `translateX(-50%)`. Those are the ONLY things
+ * wrong with it for a phone, so these rules re-anchor the same two nodes to
+ * the bottom edge and leave the component — and its focus and inertness
+ * logic — untouched. Matching by attribute rather than by class is what lets
+ * this override a CSS module it cannot name.
+ *
+ * `.host` is the positioned ancestor. `OverlaySheet` positions against its
+ * parent, so without one the sheet would anchor to the nearest positioned
+ * element up the tree — which in the reader is the stage and on the shelf is
+ * the document. */
+.host {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-scrim);
+  pointer-events: none;
+}
+
+.host > * {
+  pointer-events: auto;
+}
+
+.host [role='dialog'] {
+  top: auto;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  transform: none;
+  width: 100%;
+  max-width: none;
+  height: var(--sheet-h);
+  max-height: var(--sheet-h);
+  /* A FLEX COLUMN, so `.body` can be the part that scrolls and whatever the
+     caller puts after it — the tools rail — stays pinned at the foot. Without
+     this the body grew to its content and pushed the rail under the fold:
+     34 chapters of contents and no way to reach Search. `OverlaySheet` sets
+     this too, but its rule is a CSS module this one cannot depend on, so it
+     is stated here where the geometry is. */
+  display: flex;
+  flex-direction: column;
+  /* 24px top corners in the mockup; the shell radius token is 20 and the
+     card 14. 24 sits above the scale on purpose — a sheet is the outermost
+     surface on a phone, and its corners should read as the phone's own. */
+  border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
+  box-shadow: var(--shadow-pop);
+  /* THE SPRING, §08. Under `prefers-reduced-motion` every duration collapses
+     to 0 — see the media block below. */
+  animation: rise var(--motion-sheet) both;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@keyframes rise {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+/* The grab affordance: 36×4 in the mockup, `--line-3`. */
+.handle {
+  flex: 0 0 auto;
+  width: var(--sheet-handle-w);
+  height: var(--sheet-handle-h);
+  margin: var(--space-10) auto var(--space-6);
+  border-radius: var(--radius-pill);
+  background: var(--line-3);
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .host [role='dialog'] {
+    animation: none;
+  }
+}

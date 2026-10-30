@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+  <description>
+    <title-info>
+      <genre>sf</genre>
+      <author><first-name>Fixture</first-name><last-name>Wright</last-name></author>
+      <book-title>Paper Format Fixture FB2</book-title>
+      <lang>en</lang>
+    </title-info>
+    <document-info>
+      <author><nickname>paper</nickname></author>
+      <date value="2026-09-05">2026-09-05</date>
+      <id>urn:paper:fixture:fb2</id>
+      <version>1.0</version>
+    </document-info>
+  </description>
+  <body>
+    <section><title><p>The First Chapter</p></title><p>This fixture is FB2 and its watchword is fenugreek.</p></section>
+    <section><title><p>The Second Chapter</p></title><p>A second section, so a one-section reader cannot pass by accident.</p></section>
+  </body>
+</FictionBook>

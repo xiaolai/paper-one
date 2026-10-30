@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-pair-cancel"
+description = "Enables the peer_pair_cancel command without any pre-configured scope."
+commands.allow = ["peer_pair_cancel"]
+
+[[permission]]
+identifier = "deny-peer-pair-cancel"
+description = "Denies the peer_pair_cancel command without any pre-configured scope."
+commands.deny = ["peer_pair_cancel"]

@@ -1,0 +1,767 @@
+/* The reader.
+ *
+ * §03: gutter 56 / measure 660 / margin 250, gap 32. With the side pane open
+ * the measure narrows to 620 and the gutter to 40, the margin collapses, and
+ * the gap closes to 22. The gutter and margin are HOST columns — margin notes
+ * and the ruler hint live there, outside the text, which is why they are grid
+ * tracks rather than padding on the book.
+ */
+
+.reader {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.column {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Clears the overlay titlebar so the text starts below the traffic lights. */
+.column[data-platform='macos'] {
+  padding-top: var(--titlebar-h);
+}
+
+.stage {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: grid;
+  justify-content: center;
+  margin: 0 auto;
+  width: 100%;
+  padding: var(--space-12) var(--stage-pad-x) 0;
+  /* Track widths come from `proseGrid()` in metrics.ts, not from minmax():
+   * grid cannot express which track should yield first, and left to itself it
+   * shrinks the measure and keeps the margin column. */
+  grid-template-columns: var(--track-gutter) var(--track-measure) var(--track-margin);
+  /* The row must be told to fill. A grid's implicit row is auto-height, so the
+   * book's `height: 100%` resolves against zero and the column renders blank
+   * with no error anywhere — it simply is not there. */
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0 var(--track-gap);
+}
+
+/*
+ * How far through the BOOK the reader is, down the leading edge.
+ *
+ * At the stage's very edge, on the padding box, so it sits outside the 24px the
+ * scroll port respects and shares a lane with nothing. That is the point: it
+ * reads as a property of the page rather than as a control on it, and 3px is
+ * the width at which a colour is an edge and not a bar.
+ *
+ * WHICH EDGE FOLLOWS THE PANE. It was always the leading one, which is right
+ * only while the pane is on the trailing side — moved to the left, the pane put
+ * itself against the rule, and the two together read as a divider between two
+ * panels rather than as a page with a measure of progress down its free side.
+ * `data-edge` says which, and the reader sets it to whichever side the pane is
+ * not on.
+ *
+ * Logical properties throughout, so this composes with reading direction rather
+ * than fighting it.
+ *
+ * Not on §12's layer list, and it does not need to be: the outermost 3px of the
+ * stage is territory nothing else in the reading area reaches — the scroll port
+ * starts at 24 on both sides and the prose grid well after that — so there is no
+ * stacking question to answer at either edge.
+ */
+.progressTrack {
+  position: absolute;
+  inset-block: 0;
+  width: var(--track-w);
+  /* The unread part. A token rather than a tint of the book's own colour, so
+     the track reads the same on all five themes and only the fill carries hue. */
+  background: var(--line-2);
+}
+
+.progressTrack[data-edge='start'] {
+  inset-inline-start: 0;
+}
+
+.progressTrack[data-edge='end'] {
+  inset-inline-end: 0;
+}
+
+.progressFill {
+  width: 100%;
+  /* Deliberately not §08's page-turn timing, which is now 300ms and describes
+     foliate easing between two discrete pages. This is a continuous value being
+     reported rather than a transition between states, and snapping it would
+     make a 1% move look like a glitch instead of progress. */
+  transition: height var(--motion-readout);
+}
+
+/* The gutter and margin are OVERLAYS on the same grid row as the book, not
+ * siblings beside it — see `.text` for why. */
+.gutter {
+  grid-column: 1;
+  grid-row: 1;
+  z-index: 1;
+  position: relative;
+  min-height: 0;
+  /* Empty lane: clicks and selection drags belong to the book underneath. */
+  pointer-events: none;
+  /* The size the ruler's hint queries against — see ReadingRuler.module.css.
+   * `proseGrid` yields the gutter before it yields the measure, so this track
+   * can be driven to zero on a narrow window. Layout containment comes with
+   * this, which changes nothing here: the lane is already `position: relative`,
+   * so it was already the containing block for the hint. */
+  container-type: inline-size;
+  container-name: gutter;
+}
+
+/*
+ * The book spans the WHOLE grid, not just the measure track.
+ *
+ * foliate's scroll container is this element, and it sets
+ * `body { max-width: <measure>; margin: auto }` — it expects a container wider
+ * than the measure and centres the text itself. Sizing the container to the
+ * measure instead left the scrollbar sitting on the last characters of every
+ * justified line.
+ *
+ * `scrollbar-gutter: stable` does not fix this: per the CSS Overflow spec, a
+ * gutter is only reserved for CLASSIC scrollbars — "when using overlay
+ * scrollbars, the gutter will not be present" — and macOS uses overlay
+ * scrollbars by default. Reserving a lane would also have to come out of the
+ * measure. Widening the scroller is the fix that works for both kinds: the
+ * bar lands in the margin either way.
+ *
+ * The text lands on the measure track because foliate centres within the span
+ * and the padding below equalises the outer tracks — without it, a widened
+ * margin would drag the centred text off the measure.
+ */
+/*
+ * MARGIN, not padding, for the bleed.
+ *
+ * The book is a `position: absolute; inset: 0` child of this element, and an
+ * absolutely positioned box resolves its insets against the containing block's
+ * PADDING box — so padding here does not constrain it by a single pixel. The
+ * book stayed the full width of the grid, foliate centred the measure in that,
+ * and once marks widened the margin column the text sat 72px right of its own
+ * track, overlapping the notes. A margin shrinks this element's own box, which
+ * the absolute child does follow.
+ *
+ * This is why the asymmetric path had to be checked in the running app: the
+ * arithmetic in `proseBleed` was right, and asserted by unit tests, while the
+ * CSS carrying it out did nothing.
+ */
+.text {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  margin-inline-start: var(--text-bleed-start, 0);
+  margin-inline-end: var(--text-bleed-end, 0);
+}
+
+/*
+ * THE BOOK AND ITS MARKS ARE ONE BLEND GROUP, and saying so is what makes a
+ * highlight a highlighter instead of a sticker.
+ *
+ * The Overlayer's bands are painted OVER the glyphs and survive only because
+ * they multiply — see `--overlayer-highlight-blend-mode` in `global.css`. The
+ * band and the words it marks live on opposite sides of an iframe boundary:
+ * the SVG is the iframe's sibling in the paginator's shadow tree. With no
+ * isolation declared, the blend group resolves at whatever ancestor happens to
+ * establish a stacking context, WebKit composites the book's iframe onto its
+ * own layer, and the band ends up with nothing beneath it to darken — so it
+ * composites as `normal` and paints an opaque slab over the marked words.
+ *
+ * NOT VISIBLE TO EITHER SCREENSHOT PATH THAT AN AGENT REACHES FIRST, which is
+ * why it survived: `webview_screenshot` re-renders the webview off the
+ * compositor and applies the blend correctly, so the capture looked right while
+ * the screen was wrong. Only a window-server capture (`scripts/shot-window.sh`)
+ * or the reader's own eyes show it. Measured on the running app, Sage, amber
+ * tint: the screen read #FAE3B5 — the raw fill — against #DBCC94 captured from
+ * the same instant through the webview. The words under it were gone.
+ *
+ * On `foliate-view` rather than `.text` because this element IS the boundary
+ * the group has to span: everything the blend needs — the book's iframe and the
+ * overlay that marks it — is inside its shadow tree, and nothing that has to
+ * escape a stacking context is.
+ */
+.text foliate-view {
+  isolation: isolate;
+}
+
+/*
+ * THE STRIP OUTSIDE THE PAGE IS THE STAGE'S, not a colour anybody stores.
+ *
+ * The book's iframe is narrower than the view by one `--page-margin` at each
+ * edge, so a band down both sides of the page belongs to the paginator. foliate
+ * fills it by COPYING the book document's background into an inline style —
+ * once, when the section loads, and after that only on a `prefers-color-scheme`
+ * change or at the end of `setStyles`. A theme change is none of those: it
+ * reaches the book as custom properties and rebuilds nothing. So the strips
+ * kept the paper of whatever theme the section was built in, and a reader who
+ * went from Sepia to Night got two bright bands down a black page until they
+ * happened to jump to another section.
+ *
+ * TRANSPARENT RATHER THAN A COLOUR, and that is the fix rather than a shortcut.
+ * Naming a colour here would be a THIRD copy of the page — `tokens.css` has
+ * `--surface` and `bookCss` has `BOOK_COLOURS[theme].surface` — and a third
+ * copy is a third thing that can go stale, which is the defect this rule
+ * exists to remove. Unset, the strip shows the reading surface the shell is
+ * already painting behind it, so it cannot disagree with the page: there is
+ * nothing left to disagree with.
+ *
+ * `!important` because foliate's value is an INLINE style, and a `::part` rule
+ * loses to one otherwise. NO JAVASCRIPT IS NEEDED to reach it — `view.js` sets
+ * `exportparts="head,foot,filter"` on the renderer itself, which is what the
+ * fixed-layout rule further down already depends on. Writing that attribute
+ * from here was tried and removed: it landed as `filter` alone, quietly
+ * dropping `head` and `foot` from foliate's own contract to buy nothing.
+ *
+ * A SECOND RULE ON THIS SELECTOR is deliberate rather than an oversight. The
+ * one below §14.5 sets the fixed-layout page's light on the same part, and the
+ * two are different subjects — this is the reflowable page's edge, that is a
+ * PDF's brightness. `part="filter"` is also on the iframe as well as on the
+ * background div, so both rules reach both; the iframe carries no background of
+ * its own, so this changes nothing there. Measured, not assumed.
+ *
+ * The other repair for this was to put the theme in `applySheets`' key so
+ * `setStyles` fires again. It worked, and it flashed the window on every theme
+ * change: the sheet re-parsed carries the `@font-face` rules copied out of the
+ * host, so the book re-resolved its faces each time. Repainting one strip must
+ * not cost a relayout of the book.
+ */
+.text foliate-view::part(filter) {
+  background: transparent !important;
+}
+
+/*
+ * In scrolled flow the book element is also the SCROLL PORT, and a scroll port
+ * sized to the prose grid puts its scrollbar at the prose grid's edge.
+ *
+ * Measured, at a 1332px window with the pane open: the stage ran 0→920 and this
+ * element 72→848 — exactly gutter + gap + measure + gap + margin. The bar sat
+ * 72px inside the reading area, beside the last characters of every line,
+ * reading as part of the page rather than as chrome.
+ *
+ * So in scrolled flow it leaves the track flow and spans the stage. `inset-
+ * inline` is the stage's own padding rather than 0, because an absolute box
+ * resolves against the PADDING box: with the pane open the stage's edge is the
+ * pane's card, and a bar hard against it would break §03's spacing.
+ *
+ * The text does not move. The stage centres the grid, so the grid's centre and
+ * the stage's centre are the same point, and widening this element about that
+ * point leaves the measure exactly where `proseGrid` put it — confirmed by the
+ * numbers above: (24 + 896) / 2 and 72 + 56 + 32 + 600 / 2 are both 460.
+ *
+ * The bleed CANNOT come with it. It is a margin here because the book is an
+ * absolutely positioned child that ignores this element's padding — see above —
+ * and a margin would narrow the port again, which is the whole thing being
+ * fixed. It moves inside the port instead, as padding on foliate's `#container`
+ * through `--paper-scroll-pad-*`. A scrollbar sits on the border box, so
+ * padding there places the column and leaves the bar at the edge.
+ *
+ * Paginated flow keeps the rule above untouched: it has no scroll port, so it
+ * has nothing to gain here and a layout to lose.
+ */
+.text[data-flow='scrolled'] {
+  position: absolute;
+  /* Both placements dropped, and this is the load-bearing line.
+   *
+   * `position: absolute` alone does NOT take a grid item out of the grid. Per
+   * CSS Grid, an absolutely positioned grid child whose grid placement is
+   * DEFINITE is contained by its grid area — so `inset-inline: 24px` measured
+   * from the edges of tracks 1…3, and the element came out NARROWER than the
+   * margin version it replaced: 96→824 against 72→848, measured in the app.
+   * Only an `auto` placement falls back to the grid container's padding box. */
+  grid-column: auto;
+  grid-row: auto;
+  inset-block: var(--space-12) 0;
+  inset-inline: var(--stage-pad-x, 24px);
+  margin-inline: 0;
+}
+
+/*
+ * §11 page turn, on the pointer — the page to either side.
+ *
+ * REVEALED BY :hover ON THE STAGE, and that works for a reason worth recording
+ * rather than rediscovering: the book is an iframe, so the instinct is that the
+ * host cannot know where the pointer is. It can. `elementsFromPoint` over the
+ * words returns FOLIATE-VIEW with `.text` and `.stage` above it in the same
+ * stack — the iframe is a DESCENDANT of the stage, and :hover applies to the
+ * element under the pointer and every ancestor of it. So the stage is hovered
+ * whenever the pointer is anywhere over the book, and `mouseleave` does not
+ * fire on the way in, because entering a descendant is not leaving.
+ *
+ * That is why there is no JavaScript here, no pointer state and nothing
+ * injected into the book document. One selector does it.
+ *
+ * IN THE LANE OUTSIDE THE PAGE, not over it. `--page-margin` is half of what
+ * `applyLayout` adds to the measure to make the page, so this is exactly the
+ * strip between the book element's edge and the page's own — 44px at the
+ * default reading size. The text starts on the far side of it, so a chevron
+ * never sits over a word and never takes a click meant for one.
+ */
+.turn {
+  position: absolute;
+  inset-block: 0;
+  width: var(--page-margin, 44px);
+  z-index: var(--z-chrome);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  /* The FILL is on the glyph, never here: this box is the full height of the
+     page so that the pointer finds it easily, and a wash across it would be a
+     grey bar down the edge of the book rather than a control. */
+  opacity: 0;
+  transition: opacity var(--motion-chrome);
+}
+
+/*
+ * The visible control — square, centred in the lane, and the only part of this
+ * that is ever painted.
+ *
+ * `--icon-standalone` is 2em at the app's root, and the box is sized FROM the
+ * icon rather than the other way round, so moving that one rung moves the fill
+ * with it and the two cannot drift.
+ */
+.turnGlyph {
+  display: grid;
+  place-items: center;
+  width: calc(var(--icon-standalone) + var(--space-8));
+  height: calc(var(--icon-standalone) + var(--space-8));
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  transition: background var(--motion-chrome), color var(--motion-chrome);
+}
+
+.turn svg {
+  /* Overrides lucide's own width/height attributes, which is the point of
+     sizing here rather than passing `size` — a presentation attribute loses to
+     a stylesheet, so the type scale wins over the component's default. */
+  width: var(--icon-standalone);
+  height: var(--icon-standalone);
+}
+
+/* PHYSICAL SIDES, deliberately, and the one place in the reader where that is
+   right: these name where the control IS, not which page it fetches. Which
+   page a side holds is the book's to answer — see `onPageIntent`. */
+.turn[data-side='left'] {
+  left: 0;
+}
+
+.turn[data-side='right'] {
+  right: 0;
+}
+
+.stage:hover .turn {
+  opacity: 1;
+}
+
+/* §07's hover fill, on the glyph. Reached from the BUTTON's hover rather than
+   the glyph's own, so the whole tall target lights the control up — a fill that
+   appeared only once the pointer found the small square would make the large
+   target feel like it was not there. */
+.turn:hover .turnGlyph,
+.turn:focus-visible .turnGlyph {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+/* The pointer is already on it, so there is nothing to reveal and no reason to
+   wait: a control that fades in under a stationary pointer reads as lag. */
+.turn:focus-visible {
+  opacity: 1;
+}
+
+/*
+ * A CONTROL THAT CANNOT BE REVEALED MUST NOT BE TAPPABLE.
+ *
+ * The reveal is `:hover`, and a touch screen has none — so on iOS and Android,
+ * which this repo builds for, these would be invisible buttons occupying 44px
+ * down both edges of the page, turning it on a tap that was meant for the text
+ * or for nothing at all. Hidden and inert is the honest state there; the swipe
+ * already turns the page and is the gesture that platform expects.
+ */
+@media (hover: none) {
+  .turn {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn,
+  .turnGlyph {
+    transition: none;
+  }
+}
+
+/* `.pdfStage` and `.loading` were here, for a second reader that no longer
+ * exists: a PDF is now a Book like any other and goes through the same stage,
+ * which is what gives it marks, search and the ruler. Their markup went with
+ * PdfView; these were what was left. */
+
+.margin {
+  grid-column: 3;
+  grid-row: 1;
+  z-index: 1;
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* The reading ruler styles itself — see ReadingRuler.module.css. */
+
+/* A passing message about an action that did not work — see `notice` in
+ * Reader.tsx. Distinct from `.errorBar`, which replaces the reader: this sits
+ * with the footer and leaves the book on screen. */
+/* --- the way back from a jump ----------------------------------------
+   Deliberately NOT `.notice`. That one is amber and waits to be dismissed,
+   because it reports something that did not work; this reports something that
+   did, and offers to undo it. Muted rather than amber, and it fades on its own
+   — see RETURN_HINT_MS. */
+.returnHint {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-24);
+  font-size: var(--text-ui);
+  animation: returnHintIn var(--motion-hint);
+}
+
+.returnHintGo {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.returnHintGo:hover {
+  color: var(--ink);
+}
+
+/* The key, so the reader learns it once rather than being told every time.
+   `--ink-2` rather than a fainter invention: the token set is ink / ink-2 /
+   muted, and adding a fourth for one span is how a design system stops being
+   one. Muted is already the line's own colour, so the key sits one step in. */
+.returnHintKey {
+  color: var(--ink-2);
+  font-size: var(--text-small);
+}
+
+@keyframes returnHintIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.notice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  padding: var(--space-8) var(--space-24);
+  font-size: var(--text-ui);
+  color: var(--amber);
+}
+
+.noticeDismiss {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--text-small);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* --- footer ---------------------------------------------------------- */
+
+.footer {
+  flex: 0 0 auto;
+  position: relative;
+  height: var(--row-book);
+  /* The control's lane, reserved on BOTH sides — see `.bookmarkToggle`. */
+  padding: 0 calc(var(--space-20) + var(--control-pill) + var(--space-8));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-12);
+  font-size: var(--text-small);
+  color: var(--muted);
+  transition: opacity var(--motion-chrome);
+}
+
+/* THE CHROME FADES TO NOTHING AND MUST STOP TAKING CLICKS WITH IT.
+ *
+ * The footer was a readout until it carried a control, so its fade could be
+ * pure opacity: there was nothing there to press. A button at `opacity: 0` is
+ * still a button — it takes the pointer, it keeps its place in the tab order,
+ * and it reports a state nobody can see. Faded means gone. */
+.footer[data-visible='false'] {
+  pointer-events: none;
+}
+
+/* The bookmark toggle, out of the centred readout's flow.
+ *
+ * ANCHORED TO THE EDGE rather than laid out beside the chapter and the
+ * percentage, because those two change width constantly — the chapter label is
+ * whatever the book calls this section — and a control that slides along the
+ * footer on every page turn is a control the reader has to look for each time
+ * they want it. */
+/* The readout is centred in the footer and the control is taken out of its
+   flow, so a long chapter label ran underneath the button. The footer reserves
+   the control's lane on both sides — both, so the readout stays centred in what
+   is left rather than being pushed off-centre by a control on one side. */
+.footer > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bookmarkToggle {
+  position: absolute;
+  inset-inline-start: var(--space-20);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-pill);
+  height: var(--control-pill);
+  border: none;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--motion-chrome), color var(--motion-chrome);
+}
+
+/* §07: a control that cannot act says so by looking unavailable, rather than by
+   doing nothing when pressed. Without this the toggle kept full opacity and a
+   pointer cursor while the renderer was still reporting a position. */
+.bookmarkToggle:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: default;
+}
+
+.bookmarkToggle:hover:not(:disabled) {
+  background: var(--wash);
+  color: var(--ink-2);
+}
+
+.bookmarkToggle:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--space-2));
+}
+
+/* On. The same accent the ribbon on the page is drawn in, so the control and
+   the thing it controls are visibly one state and not two. */
+.bookmarkToggle[data-on='true'] {
+  color: var(--accent);
+}
+
+/* --- the ribbon ------------------------------------------------------ */
+
+/*
+ * A bookmark, drawn as one — a ribbon over the top edge of the page, notched
+ * at the foot.
+ *
+ * AT THE TRAILING EDGE, in logical properties, so it hangs at the right of an
+ * English page and at the left of an Arabic one. A ribbon marks the outer
+ * corner of a page in every book that has ever had one, and the outer corner
+ * is not a side.
+ *
+ * IN `--accent`, NOT in the book's own colour, which is the one place this
+ * deliberately parts from the progress rule beside it. That rule is a
+ * signature: §-derived from `bookId`, unpredictable across books and constant
+ * within one. A ribbon is not a signature, it is a STATE — this page is kept —
+ * and a state has to read as on. A hue derived from a hash lands on the page
+ * background often enough that some books would have had an invisible one.
+ */
+/*
+ * A bookmark, drawn as one — a ribbon over the top edge of the page, notched
+ * at the foot.
+ *
+ * AT THE TRAILING CORNER OF THE PAGE, which is not the stage's corner and not
+ * the text column's. Both were tried and both were measured wrong in the
+ * running app: against the stage it drifted out to the window's edge as the
+ * window grew, and inside `.text` it sat 130px out over the margin track —
+ * `.text` spans the whole grid, and carries the bleed as a margin only in
+ * PAGINATED flow, so any constant offset from it is right in one flow and
+ * wrong in the other.
+ *
+ * IN CSS, FROM THE PUBLISHED TRACK VARIABLES, rather than as a number computed
+ * in the component. The arithmetic needs the stage's own padding-box width, and
+ * `100%` on an absolutely positioned child IS that width — measured by the
+ * engine rather than inferred from whichever box `useElementWidth` reports.
+ * Getting that inference wrong is exactly what put the ribbon 24px out on the
+ * previous attempt.
+ *
+ * The stage centres the grid, so from its trailing edge: half the slack, then
+ * the margin track and its gap, brings us to where the words end. The page's
+ * own edge is ONE `--page-margin` beyond them, and once only — that variable is
+ * already published as half of `pageMargins`, which is the white a page carries
+ * on BOTH sides together. `applyLayout` sizes the page as `measure +
+ * pageMargins` and centres it on the measure, so exactly half of it falls on
+ * each side.
+ *
+ * Subtracting it twice was the third wrong answer here, and the one that nearly
+ * survived: the check written to confirm it computed the page's edge with the
+ * same doubled constant, so the measurement agreed with the mistake and
+ * reported a delta of zero. Two things derived from one wrong number are not
+ * two pieces of evidence.
+ *
+ * `max()` because below the width where the tracks fit, grid stops centring and
+ * there is no slack to halve.
+ */
+.ribbon {
+  position: absolute;
+  /* THE STAGE'S BLOCK PADDING, not zero. An absolutely positioned child
+     resolves against the padding BOX, whose top is the stage's border edge —
+     while the grid, and so the page, begins one `--space-12` lower. `top: 0`
+     therefore hung the ribbon 12px above the page it marks. The horizontal
+     offset was measured in the running app and the vertical one was not; this
+     is the half that was never checked. */
+  top: var(--space-12);
+  inset-inline-end: calc(
+    max(
+      0px,
+      (
+          100% -
+            (
+              var(--track-gutter) + var(--track-measure) + var(--track-margin) + 2 *
+                var(--track-gap)
+            )
+        ) / 2
+    ) + var(--track-margin) + var(--track-gap) - var(--page-margin)
+  );
+  z-index: var(--z-chrome);
+  width: var(--space-20);
+  height: var(--space-32);
+  background: var(--accent);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 78%, 0 100%);
+  pointer-events: none;
+}
+
+/* --- empty state ----------------------------------------------------- */
+
+.empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-16);
+  padding: var(--space-40);
+  text-align: center;
+}
+
+.empty[data-dragging='true'] {
+  background: var(--accent-bg);
+}
+
+.emptyTitle {
+  font-family: var(--font-serif);
+  font-size: var(--text-display);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-display);
+  letter-spacing: var(--track-tight);
+  color: var(--ink);
+  margin: 0;
+}
+
+.emptyBody {
+  max-width: var(--prose-wide);
+  margin: 0;
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+/* §07's primary action, shared — see styles/controls.module.css. */
+.primaryButton {
+  composes: primary from '../styles/controls.module.css';
+}
+
+/* The second of two actions, when there is a shelf to go back to. Adding books
+   stops being the only thing on offer the moment the reader has some. */
+.secondaryButton {
+  composes: secondary from '../styles/controls.module.css';
+}
+
+.errorBar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  padding: var(--space-12) var(--space-24);
+}
+
+.error {
+  /* The default paragraph margins are cleared. This is applied to a <p>, so
+   * the browser's own block margins were added to the padding below and made
+   * the error bar taller than it is written to be — by a different amount in
+   * the bar than in the empty state, since the two sit in different contexts. */
+  margin: 0;
+  max-width: var(--prose-wide);
+  padding: var(--space-14);
+  border-radius: var(--radius-control);
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-line);
+  color: var(--amber);
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
+  text-align: start;
+}
+
+/*
+ * WI-14.5 — the reader's light on a FIXED-LAYOUT page.
+ *
+ * A PDF page is pixels, not a document: pdf.js paints the words onto a canvas,
+ * so there is no colour to declare and no stylesheet to declare it in. What
+ * there is, on both of foliate's renderers, is `part="filter"` on the page's
+ * iframe — and `view.js` sets `exportparts="head,foot,filter"`, which is what
+ * carries the part out through TWO closed shadow roots to here. Read out of the
+ * running app rather than inferred: `foliate-view::part(filter)` resolves.
+ *
+ * `none` FOR EVERY REFLOWABLE BOOK, and not merely as an optimisation. Those
+ * carry the theme, the brightness and the contrast in their own injected sheet,
+ * so a filter here would apply all three a second time. `Reader.tsx` decides
+ * which case this is; see `pageFilter`, which returns `none` at the defaults so
+ * an untouched reader never pays for a compositing layer.
+ */
+.text foliate-view::part(filter) {
+  filter: var(--paper-page-filter, none);
+}
+
+/* The seek's lane in the footer. The track is a shared component and has no
+   width of its own — the footer is a centred row, so this is what gives it
+   something to fill. */
+.seek {
+  /* `--col-progress` is this design system's own width for a progress track —
+     the library list uses it for the same thing. The footer is a centred row,
+     so a fixed basis keeps the chapter and the percentage where they were
+     rather than letting the track push them to the edges. */
+  flex: 0 0 var(--col-progress);
+}
+
+/* The percentage in the footer. Figures that do not jog as the number counts:
+   without this the readout jitters on every page turn, because proportional
+   digits are different widths. */
+.percent {
+  font-variant-numeric: tabular-nums;
+}

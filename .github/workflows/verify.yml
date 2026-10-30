@@ -1,0 +1,512 @@
+# The unified gate, on a clean clone. `pnpm verify` is the copy‑paste command a
+# developer runs locally; CI runs exactly the same thing so "green here" and
+# "green there" are one fact. (dev-docs/plans/phase-05-kernel-capabilities.md, K.12)
+#
+# FOUR LEGS — three since phase 20 (WI-20.38, D10), and the fourth split off on
+# 2026-09-29 — and what each one is for:
+#
+#   host     macOS — the full gate, as it always was.
+#   deletion macOS — the deletion proof, which was `host`'s last step until
+#            2026-09-29. ⚠️ **IT WAS HALF OF THAT JOB.** Measured from the green
+#            run at `d39f2df2`: `host` took 40m43s against a 45-minute bound, and
+#            `pnpm verify:without` accounted for **1242s of it — 51%**, against
+#            1099s for `pnpm verify` itself. The two prove different things and
+#            share no state, so running them in series was spending wall clock
+#            for nothing and leaving 90% of the bound consumed. **Apart, `host`
+#            measured 14.7 min** — 33% of the bound, where it had been 90% — and
+#            this one is ~21, so the wall clock is this job rather than that one.
+#   linux    Ubuntu 24.04 — the SAME `pnpm verify`, unchanged, after Tauri's
+#            system libraries. Every Tauri app surveyed runs its tests on one
+#            primary Linux runner; this is the first time this repository's
+#            gate has run anywhere but a Mac. The app's Rust tests are pure
+#            functions and the peer fixtures are "relays off, no discovery"
+#            over loopback, so nothing here needs a display.
+#   windows  check only — `cargo check --workspace --all-targets` plus the JS
+#            half of the gate. A full Windows gate is the ~33-minute leg the
+#            survey found, for a platform nothing here is yet marked Shipped
+#            on; the check is what catches a `cfg(target_os = "macos")` that
+#            leaked into shared code.
+#
+# Bundling is NOT here. It lives in `bundle.yml`, tag-triggered — a release
+# artifact is a different event from a green commit, and the surveyed apps keep
+# the two apart. ⚠️ **AND IT NO LONGER RUNS ON AN OLDER RUNNER THAN THIS ONE**:
+# it said "on the glibc floor (Ubuntu 22.04)" until 2026-09-27, when the English
+# voice engine's prebuilt ONNX Runtime forced both to 24.04. `bundle.yml` carries
+# the reasoning and what it costs.
+name: verify
+
+on:
+  push:
+    # `main` only: `ui-polish` and `kernel-carve` were merged and deleted, and
+    # every other branch reaches CI through its pull request below.
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: host (macOS, desktop target)
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        # version comes from package.json#packageManager
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # rust-toolchain.toml at the repo root pins the channel to this same
+          # version; this input is not deferral — dtolnay/rust-toolchain
+          # installs exactly what it is given — so the two must move together,
+          # and `bump`-style changes to the toolchain touch both.
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+      # ⚠️ **THE RUNNER'S DEFAULT XCODE IS TOO OLD FOR THE VOICE BRIDGE, AND THE
+      # FAILURE NAMES CLIPPY.** `swift/QwenKit` depends on `mlx-audio-swift`,
+      # which declares `swift-tools-version: 6.2` — and whose own `mlx-swift`
+      # @ 0.31.6 declares 6.3, which is the number that actually binds. Measured
+      # in CI: `macos-15` defaults to Xcode 16.4 (Swift 6.1) and its NEWEST, 26.3,
+      # is only 6.2.4, so no Xcode on that image can build this at all. The runner
+      # is `macos-26` for that reason — it carries 26.4.1, 26.5 and 26.6. `tauri-plugin-voices`'s `build.rs` runs `swift build`,
+      # so SwiftPM's refusal — "package is using Swift tools version 6.2.0 but
+      # the installed version is 6.1.0" — surfaces thirty lines above
+      # `✗ verify: cargo clippy -D warnings failed (exit 101)`, which is where
+      # anybody reading the log starts. Every push to `main` was red for this
+      # from 2026-09-25, and it passes on a developer Mac because those run 6.4.
+      #
+      # THE NEWEST INSTALLED XCODE, not a pinned path: the images rotate, and a
+      # path that stops existing is another failure that names something else.
+      # The version is then ASSERTED — when a rotation takes 6.3 away, this says
+      # so in its own words instead of dying inside a Rust step.
+      - name: A toolchain the voice bridge can build with — Swift 6.3, and Metal
+        run: |
+          set -euo pipefail
+          newest="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$newest"
+          have="$(swift -version 2>&1 | sed -nE 's/.*Apple Swift version ([0-9]+\.[0-9]+).*/\1/p' | head -1)"
+          [ -n "$have" ] || {
+            echo "could not read a version from: $(swift -version 2>&1 | head -1)"
+            exit 1
+          }
+          if [ "$(printf '%s\n' 6.3 "$have" | sort -V | head -1)" != "6.3" ]; then
+            echo "QwenKit needs Swift 6.3 or newer (mlx-swift asks for it); $newest provides $have"
+            echo "installed Xcodes:"; ls -d /Applications/Xcode_*.app
+            exit 1
+          fi
+          echo "using $newest (Swift $have)"
+          # ⚠️ **AND XCODE SHIPS NO METAL COMPILER, WHICH IS A SEPARATE 839 MB.**
+          # `AGENTS.md` records it in as many words — "every machine and CI runner
+          # that compiles this will need it" — and CI only reached the point of
+          # needing it once Swift 6.3 let `swift build` run to completion. It then
+          # did the WORST available thing: exited 0, "Build complete! (382.97s)",
+          # and wrote no `mlx-swift_Cmlx.bundle` at all, because there was no
+          # `metal` to compile the shaders the bundle exists to carry. MLX then
+          # dies at run time with "Failed to load the default metallib".
+          #
+          # No sudo, and idempotent — already-present is not an error.
+          xcodebuild -downloadComponent MetalToolchain
+          # ⚠️ **ASKED WHETHER IT RUNS, NOT WHETHER THE DOWNLOAD SAID IT WORKED.**
+          # The same shape as `actool` and `screencapture` in this tree: the exit
+          # code is not the artifact. `xcrun -f metal` resolves a path inside a
+          # cryptex mount whose name rotates, so the path proves nothing either —
+          # only running the thing does.
+          metal="$(xcrun -f metal)" || {
+            echo "no metal compiler after -downloadComponent MetalToolchain"
+            exit 1
+          }
+          "$metal" --version
+      # ⚠️ **AND THE SWIFT BUILD IS DELIBERATELY NOT CACHED, THOUGH IT IS THE
+      # LARGEST SINGLE BLOCK IN `pnpm verify`.** Measured from `d39f2df2`'s log,
+      # where the voices build script's output is captured and only the silence
+      # shows: 350s inside `cargo clippy` (00:19:57.9 to 00:25:47.4, nothing
+      # printed between) and 97s more inside `cargo test` — 447s, 41% of that
+      # step. `swift/QwenKit/.build` is 2.4 GB and caching it is the obvious move.
+      # Three reasons not to, and the first decides it:
+      #
+      #  1. A COLD SWIFT BUILD IS WHAT MAKES `build.rs`'s ASSERTIONS MEAN
+      #     ANYTHING, and a warm one would have hidden the defect that cost four
+      #     days. `--build-system native` exits 0 having compiled no `.metal`
+      #     file and written no `mlx-swift_Cmlx.bundle`; `ship_shaders` catches
+      #     exactly that by asserting the bundle carries `default.metallib`. A
+      #     restored `.build` satisfies that assertion without compiling a
+      #     shader. The gate would have been green for the whole of 2026-09-23
+      #     to 09-26 and the Linux artifact would still not build.
+      #  2. THE BUILD PLAN HOLDS AN ABSOLUTE PATH INTO A MOUNT THAT ROTATES.
+      #     SwiftPM's XCBuild plans name
+      #     `/var/run/com.apple.security.cryptexd/mnt/…MetalToolchain-v<ver>.<SUFFIX>/`,
+      #     and the suffix belongs to the MOUNT, regenerated when the cryptex is
+      #     remounted. Reproduced on a developer Mac on 2026-09-29 against a
+      #     three-day-old `.build`: `unable to spawn process '…Apk4m6/…/metal'`
+      #     while `xcrun -f metal` answered `…3Or21M` and that compiler ran fine.
+      #     A cache restored onto a runner that installs the component itself is
+      #     that failure by construction. The remedy costs 76s of Metal
+      #     recompilation (measured, 802 tasks) and the cache saves 447s, so what
+      #     is left is thin even when it works.
+      #  3. 2.4 GB against a 10 GB per-repository budget already holding three
+      #     `rust-cache` entries, with least-recently-used eviction that says
+      #     nothing when it takes the one that was saving more.
+      #
+      # The 45-minute bound was the reason to want it. Splitting the deletion
+      # proof into its own job took this one to a MEASURED 14.7 min instead —
+      # 33% of the bound — which buys more than the cache would and costs no
+      # correctness. The estimate written here first was ~19.5; the measurement
+      # replaced it on the run that produced it, which is the only honest way
+      # round.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+
+  # ⚠️ **THE DELETION PROOF WAS `host`'s LAST STEP AND IS ITS OWN JOB NOW.** The
+  # header above has the arithmetic. What belongs here is what it needs and what
+  # it does not — and the first version of this job got that wrong, so both halves
+  # are measured rather than reasoned.
+  #
+  # NOTHING HERE COMPILES, so there is no Xcode selection, no Metal component and
+  # no `rust-cache`. `verify-without.mjs`'s `COPY_STEPS` is ten `pnpm` commands
+  # and nothing else — every Cargo step is in `EXCLUDED` with its reason, because
+  # they "cost minutes on a fresh target directory, and `pnpm verify` runs them on
+  # the real tree" — so the `tauri-plugin-voices` build script, and the six-minute
+  # `swift build` inside it, are never reached. Measured on this job's first run:
+  # `circle` passed all twelve copied steps in 209.4s with no Rust installed.
+  #
+  # ⚠️ **BUT THE REMOVAL IS NOT ONE OF THOSE STEPS, AND IT NEEDS TWO RUST TOOLS.**
+  # `capability:remove` runs BEFORE the copied steps and spawns exactly three
+  # binaries — `git`, `rustfmt` and `cargo` — because it rewrites `lib.rs` and
+  # prunes `Cargo.lock`. The first run of this job shed the toolchain and died on
+  # `passages` with `rustfmt is not available`, AFTER `circle` had passed all
+  # twelve steps: `circle` is the only removable capability with no Rust crate, so
+  # it is precisely the one that cannot show this. `verify-without.test.mjs` pins
+  # that three-binary set now, so a fourth tool fails in the suite in seconds
+  # instead of here, a quarter of an hour in.
+  #
+  # ⚠️ **AND `cargo metadata --offline` NEEDS A POPULATED REGISTRY, WHICH A CLEAN
+  # RUNNER HAS NOT GOT.** Measured against an empty `CARGO_HOME`: exit 101, *"no
+  # matching package named `tauri` found … offline mode (via `--offline`) can
+  # sometimes cause surprising resolution failures"*. `cargo fetch --locked` fixes
+  # it in 13.5s and compiles nothing. `rust-cache` would also populate it and is
+  # WORSE here: its key is per-job, so a new job's first run is a miss, the
+  # offline call fails, the job fails — and a failed job saves no cache, which is
+  # a state that cannot recover on its own.
+  deletion:
+    name: deletion (every removable capability, temp checkout)
+    runs-on: macos-26
+    # 5 capabilities x ~250s = 1242s measured, so ~21 min: `circle` 266.7,
+    # `passages` 249.2, `public` 250.8, `voices` 258.8, `webhost` 208.0. The list
+    # is DERIVED, so it grows as capabilities are added — 40 leaves room for four
+    # more before anybody has to think about this number. When it does bind, the
+    # lever is the one `verify-without.mjs` already names: a CI matrix over
+    # `removableCapabilities()`, not measuring fewer of them.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      # `rustfmt` only — no `clippy`, because nothing here runs it. The version
+      # moves with `rust-toolchain.toml` and the other jobs, as `host` records.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt
+      - run: pnpm install --frozen-lockfile
+      # The registry, so the removal's `cargo metadata --offline` can resolve.
+      # `--locked` because a fetch that silently updated the lockfile would make
+      # the copy's pruning a different operation from the one this proves.
+      - name: Cargo's registry, so a lockfile can be pruned without a network
+        run: cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+      # NO ARGUMENT, DELIBERATELY. The script derives which capability it can
+      # remove — the manifest declares it, nothing `requires` it, no host
+      # imports it outside a composition root — and prints what it chose.
+      #
+      # ⚠️ **THIS LINE NAMED AN ID BY HAND AND WAS WRONG THREE TIMES.** It said
+      # `example` for months after the capability called `example` was deleted
+      # (19bac0e, "Delete the capability that existed to be deleted"), and the
+      # step failed on every push while the proof proved nothing. It then said
+      # `sync`, which `src/cli/paper.ts` imports for `openLocalJournal` — the
+      # removal succeeds and the TYPECHECK fails two steps later, naming a
+      # module rather than the argument that doomed it. It said `companion`
+      # until every AI feature was removed. A hand-written id goes stale
+      # SILENTLY: the step still runs, it just stops proving anything.
+      #
+      # `verify-without.test.mjs` holds the picker to those three conditions
+      # and refuses an empty answer, so a tree where every leaf has grown a
+      # host import fails in the suite rather than retiring this step by
+      # accident.
+      - name: Deletion is an operation (temp checkout)
+        run: pnpm verify:without
+
+  linux:
+    name: linux (Ubuntu 24.04, full gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      # Tauri 2's own list for a Debian-family host: the WebKitGTK the webview
+      # is, the appindicator the tray icon needs, and librsvg for icons.
+      # `tauri-plugin-mcp-bridge` (debug builds only, behind the `desktop`
+      # feature) carries a Linux screenshot module of its own; whether it
+      # compiles here is the one thing D10 left unverified, and this job is
+      # what answers it.
+      - name: Tauri system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+
+  # ⚠️ **THE MUTATION GATE, WHICH GATED NOTHING UNTIL NOW.**
+  #
+  # `scripts/check-mutants.mjs` says of itself that "a test that cannot fail is
+  # a red gate", that a survivor fails rather than a score, and that none may
+  # survive. It was in no `verify.mjs` step and in no workflow, so the only
+  # thing enforcing it was somebody remembering to type `pnpm mutants`. Six
+  # assertions that could not fail were found on one branch by planting the
+  # defect back by hand; that is what this exists to catch mechanically.
+  #
+  # PULL REQUESTS ONLY, and scoped to the diff. The script mutates one subject
+  # at a time against only its covering tests, so the cost is linear in the
+  # change rather than in the repository — its header measures the alternative
+  # at 8m26s without finishing. On a push to `main` the merge base is the tip,
+  # so there would be nothing to mutate and nothing to learn.
+  #
+  # ⚠️ **`fetch-depth: 0` AND `--require-base` ARE BOTH LOAD-BEARING.** A CI
+  # checkout is shallow and has everything committed, so a failed `merge-base`
+  # would leave the working tree as the whole scope — and it is clean here.
+  # Zero subjects, "nothing changed to mutate", exit 0: a gate that scanned
+  # nothing and reported success, on every pull request. The flag refuses that
+  # rather than narrowing to it.
+  #
+  # `continue-on-error` is deliberately NOT set. A gate that cannot fail is the
+  # thing these three jobs are about.
+  #
+  # ⚠️ **ONE RUNNER COULD NOT HOLD THE SWEEP, AND THE ONE JOB THAT TRIED HAD
+  # NEVER RUN** (measured 2026-09-14). `feat/looking-up` changes 79 files
+  # carrying 15 898 whole-file mutants. With nine Stryker runners on a 10-core
+  # Mac, `scripts/check-mutants.mjs` alone took 18 min 5 s and most other files
+  # 15-70 s; this was one 4-vCPU job with 45 minutes. So the sweep is planned
+  # ONCE, swept by isolated shards, and reconciled by an aggregate that is the
+  # only job able to pass it:
+  #
+  #   mutants-plan    freezes the subjects, their content hashes, covering tests,
+  #                   classes, mutant counts and shards into one manifest.
+  #   mutants-shard   one matrix job per shard, each its own checkout. Each
+  #                   re-derives the plan and REFUSES a checkout that differs,
+  #                   sweeps only its own files, and uploads one result per file
+  #                   and a receipt whether or not its sweep passed.
+  #   mutants         the aggregate, and the check that matters. It runs whatever
+  #                   the shards did, and fails unless every planned file has
+  #                   exactly one passing result and every shard left a receipt.
+  #
+  # SIZING. Sharding splits the files, never the slowest file, so no number of
+  # shards shortens the shard that holds `check-mutants.mjs`. It was measured at
+  # 18.08 min when Stryker counted 1 174 mutants in it; the change that sharded
+  # the sweep grew it to 2 941, and scaling by that count is an ESTIMATE, not a
+  # measurement: 18.08 x 2941/1174 x 9 local runners / 4 vCPUs = 102 min, doubled
+  # for a slower core and a runner count Stryker may set one lower = 204. The
+  # sweep STEP is bounded at 210 and the job at 225, so a step that times out
+  # still leaves the upload room to run. Replace the estimate with the first
+  # shard's own `durationMs` for that file once one exists. The two
+  # heaviest files by mutant count get shards of their own and the rest are
+  # balanced by mutant count over the other four — an ESTIMATE, since one mutant
+  # cost about fifteen times as much in `check-mutants.mjs` as in
+  # `check-browser-safe.mjs`. Every result records its measured duration, which
+  # is what a better balance would be built from.
+  #
+  # ⚠️ 4 vCPUs is what an `ubuntu-24.04` runner gives a PUBLIC repository; a
+  # private one's standard runner has 2, which doubles the arithmetic. Stryker
+  # prints "Creating N test runner process(es)" in every shard's log: read it on
+  # the first run before trusting the bound.
+  #
+  # ⚠️ AND THE ARITHMETIC ABOVE IS FOR ONE SWEEP PER FILE, WHICH STOPPED BEING
+  # WHAT A SWEEP COSTS. Since the merge-base comparison, a file's cost depends on
+  # whether a mutant survived in it:
+  #
+  #   no survivor          one sweep. The common path, and unchanged.
+  #   a survivor           + the merge base measured, which sweeps the file
+  #                        against EVERY test that reaches it rather than the
+  #                        nearest level — wider, so dearer than the sweep here.
+  #                        Measured 2026-09-17: session.ts 35 min quiet, 62 min
+  #                        loaded; wordSnap/flatten.ts 37 min. Capped per file by
+  #                        BASE_DEADLINE_MS (90 min), and taken ONCE per base
+  #                        file however many subjects trace to it.
+  #   a charge to take     + the subject swept again here against that wider set,
+  #                        which is refused outright when its own sweep already
+  #                        cost more than WIDEN_BUDGET_MS (20 min), so this one
+  #                        cannot double the heaviest file.
+  #
+  # So the bound below is no longer an estimate of the whole job on a branch that
+  # FAILS: one heavy file with survivors can spend most of a 210-minute step by
+  # itself. That is deliberate — every expensive path belongs to a build that was
+  # already going to be red — but it means a red branch can time out instead of
+  # reporting, which is a worse red. Re-derive from the first CI run that
+  # measures a base: every result records `durationMs`, and the aggregate prints
+  # what each base measurement cost.
+  mutants-plan:
+    name: mutants (plan)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SHARDS: 6
+      ISOLATE: 2
+    outputs:
+      count: ${{ steps.plan.outputs.count }}
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base branch has to be here for `merge-base` to resolve; see above.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The base is the PR's target, not a hard-coded `main`: a stacked branch
+      # is measured against what it will actually merge into. It reaches the
+      # shell through `env`, never spliced into the script's text.
+      #
+      # The matrix below is built from SHARDS here and the manifest records the
+      # same number, so the two cannot be edited apart: a shard refuses a count
+      # that is not its plan's, and the aggregate requires a receipt from every
+      # shard the plan has.
+      - id: plan
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          node scripts/check-mutants.mjs --plan mutants-plan/plan.json --shards "$SHARDS" --isolate "$ISOLATE" --base "origin/$BASE_REF" --require-base
+          echo "count=$SHARDS" >> "$GITHUB_OUTPUT"
+          echo "shards=[$(seq -s, 1 "$SHARDS")]" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutants-plan
+          path: mutants-plan/plan.json
+          if-no-files-found: error
+
+  mutants-shard:
+    name: mutants (shard ${{ matrix.shard }})
+    needs: mutants-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 225
+    strategy:
+      # A survivor in one shard must not cancel the others: the aggregate names
+      # every failure at once only if every shard ran to its end.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.mutants-plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A shard re-derives the plan, merge base included; see above.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: mutants-plan
+          path: mutants-plan
+      # Bounded as a STEP, below the job: a step that times out fails, and the
+      # upload after it still runs inside a job that has not.
+      - name: Sweep this shard
+        timeout-minutes: 210
+        env:
+          SHARD: ${{ matrix.shard }}/${{ needs.mutants-plan.outputs.count }}
+        run: node scripts/check-mutants.mjs --shard "$SHARD" --manifest mutants-plan/plan.json --results mutants-results
+      # Whatever the sweep did. A shard that stopped part-way still has a result
+      # for every file it finished, and no receipt — which is how the aggregate
+      # knows. `error`, because an upload of nothing is a shard that wrote
+      # nothing, and even an empty shard writes its receipt.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants-results/
+          if-no-files-found: error
+
+  mutants:
+    name: mutants (changed files only)
+    needs: [mutants-plan, mutants-shard]
+    # `always()`: a shard that failed, or never ran, is exactly what this job
+    # exists to name, so it must not be skipped with it. The event test keeps it
+    # off pushes, where the plan never ran.
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: mutants-plan
+          path: mutants-plan
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-shard-*
+          path: mutants-results
+      - run: node scripts/check-mutants.mjs --aggregate --manifest mutants-plan/plan.json --results mutants-results
+
+  windows:
+    name: windows (check only)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # pnpm runs package scripts through cmd.exe on Windows, and the scripts
+      # are written for a POSIX shell (`typecheck` begins `rm -rf .types`).
+      # Git for Windows is on every runner; this points pnpm's script shell at
+      # it, so the same scripts run rather than a second, Windows-only set.
+      npm_config_script_shell: C:\Program Files\Git\bin\bash.exe
+    steps:
+      # Every source-reading gate — the CSP test, the footprint allowlist, the
+      # ledger — compares bytes. A checkout that rewrote line endings would
+      # fail them for a reason that has nothing to do with the code.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+      # The JS half of the gate, through `build:cli`; the Cargo half is the
+      # check below. `--until` exists for this line (scripts/verify.mjs).
+      - run: pnpm verify --until build:cli
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --workspace --all-targets

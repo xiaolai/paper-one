@@ -1,0 +1,466 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import {
+  CRUISE_TIMEOUT_MS,
+  DEPCRUISE,
+  REQUIRES_RULE,
+  REQUIRES_USED_RULE,
+  cruise,
+  cruiserViolations,
+  formatViolation,
+  undeclaredRequires,
+  unusedRequires,
+} from './check-boundaries.mjs'
+import { CASES, LEGAL_TREE, caseFailure, runAll, runCli } from './check-boundaries.selftest.mjs'
+import { stripComments } from './lib/compositions.mjs'
+
+/**
+ * The boundary selftest under Vitest, so `pnpm test` proves the boundary
+ * check can fail. `check-boundaries.selftest.mjs` owns the cases and the
+ * fixture tree; this file runs them through its `runAll` — each case an
+ * IN-PROCESS cruise, not a child process; the only spawns here are `runCli`'s
+ * four — and adds what the standalone runner does not: the pure `requires`
+ * pass on hand-made module lists, and the CLI's exit code and line format end
+ * to end.
+ */
+
+/**
+ * ONE CRUISE PER CASE PER `pnpm verify`, not two.
+ *
+ * `CASES` used to run twice: once through this file's `it.concurrent.each`,
+ * and again through the selftest's own `main`, which was `verify.mjs` step 7.
+ * `boundaries:selftest` is gone from `STEPS`, and this is now the only place
+ * they run — kept over the standalone runner because `test:ledger` names
+ * TESTS: cases behind a script leave the ledger, and a deleted case then
+ * disappears exactly the way the twelve `pageTurn` tests did. The two
+ * asserted the same two conditions, so nothing narrowed.
+ *
+ * THE COUNT IS DELIBERATELY NOT WRITTEN HERE. It was "27" in four comments
+ * while the list held 28, and phase 11 took it to 35 without any of them
+ * moving — a number in prose that nothing checks is the same defect the
+ * feature ledger's path check exists for. `CASES.length` is the answer.
+ *
+ * `runAll` rather than `it.concurrent`: the cap is `defaultWidth()`, an
+ * explicit `min(6, availableParallelism())` that this repository chose, where
+ * `it.concurrent` was governed by vitest's `maxConcurrency` default while
+ * competing with every other test file in the run. `runAll` catches per case,
+ * so a case that throws fails its OWN name here rather than the hook.
+ */
+describe('every illegal edge is rejected by the rule that owns it', () => {
+  /** Case name -> result, filled once before the assertions below. */
+  let results
+
+  beforeAll(async () => {
+    results = await runAll(CASES)
+    /* 300s, not the 120s a single case used to get: this hook now runs all of
+       them. The whole set measures ~3.9s at this cap on an idle machine
+       (2026-08-23, 35 cases, three runs within 200ms of each other); the
+       21.6s this note used to quote predates both the current cap and the
+       current list. The margin is for a loaded machine, not for the set. */
+  }, 300_000)
+
+  it.each(CASES.map((c) => [c.name, c]))('%s', (_name, testCase) => {
+    const result = results[CASES.indexOf(testCase)]
+    expect(caseFailure(result, testCase) ?? 'ok').toBe('ok')
+  })
+})
+
+describe('undeclaredRequires', () => {
+  const manifest = {
+    capabilities: [
+      { id: 'alpha', ts: 'alpha-dir', platforms: ['desktop'], requires: ['beta'] },
+      { id: 'beta', ts: 'beta', platforms: ['desktop'] },
+    ],
+  }
+  const edge = (source, resolved) => ({ source, dependencies: [{ resolved }] })
+
+  it('accepts an edge to a required capability, keyed by the ts directory, not the id', () => {
+    expect(undeclaredRequires([edge('src/capabilities/alpha-dir/lib/x.ts', 'src/capabilities/beta/index.ts')], manifest)).toEqual([])
+  })
+
+  it('rejects an edge to a capability the importer does not require', () => {
+    const out = undeclaredRequires([edge('src/capabilities/beta/index.ts', 'src/capabilities/alpha-dir/index.ts')], manifest)
+    expect(out).toEqual([
+      {
+        rule: REQUIRES_RULE,
+        from: 'src/capabilities/beta/index.ts',
+        to: 'src/capabilities/alpha-dir/index.ts',
+        message: 'beta does not list alpha in requires',
+      },
+    ])
+  })
+
+  it('rejects an edge from or to a capability directory the manifest does not list', () => {
+    const from = undeclaredRequires([edge('src/capabilities/ghost/index.ts', 'src/capabilities/beta/index.ts')], manifest)
+    expect(from.map((v) => v.message)).toEqual(['src/capabilities/ghost has no manifest entry'])
+    const to = undeclaredRequires([edge('src/capabilities/beta/index.ts', 'src/capabilities/ghost/index.ts')], manifest)
+    expect(to.map((v) => v.message)).toEqual(['src/capabilities/ghost has no manifest entry'])
+  })
+
+  it('judges only edges to another capability INDEX — internals are the cruiser rule, own files are not another capability', () => {
+    const modules = [
+      edge('src/capabilities/beta/index.ts', 'src/capabilities/alpha-dir/lib/internal.ts'),
+      edge('src/capabilities/beta/index.ts', 'src/capabilities/beta/lib/own.ts'),
+      edge('src/capabilities/beta/index.ts', 'src/kernel/index.ts'),
+      edge('src/kernel/core/x.ts', 'src/capabilities/beta/index.ts'),
+    ]
+    expect(undeclaredRequires(modules, manifest)).toEqual([])
+  })
+
+  it('accepts index.tsx as an index too', () => {
+    expect(undeclaredRequires([edge('src/capabilities/alpha-dir/index.ts', 'src/capabilities/beta/index.tsx')], manifest)).toEqual([])
+  })
+})
+
+/**
+ * The same question from the other end — see `unusedRequires`.
+ *
+ * ⚠️ **THE DEFECT THIS RULE EXISTS FOR PASSED EVERY CHECK IN THE TREE FOR FOUR
+ * PHASES.** `webhost` declared `requires: ['peer']` for the envelope, the
+ * envelope moved to the kernel, and nothing asked again — because
+ * `capability-requires-declared` reads permission→import and never
+ * import→permission. The first case below is that shape exactly.
+ */
+describe('unusedRequires', () => {
+  const manifest = {
+    capabilities: [
+      { id: 'alpha', ts: 'alpha-dir', platforms: ['desktop'], requires: ['beta'] },
+      { id: 'beta', ts: 'beta', platforms: ['desktop'] },
+    ],
+  }
+  const edge = (source, resolved) => ({ source, dependencies: resolved === undefined ? [] : [{ resolved }] })
+  /* Every case needs `beta` to have been cruised too, or the fail-closed check
+     fires first and hides what the case is about. `beta` requires nothing, so
+     one module of it is enough and it can never itself be a violation. */
+  const betaSeen = edge('src/capabilities/beta/index.ts', 'src/kernel/index.ts')
+
+  it('reports a required capability the declarer imports nothing from', () => {
+    const out = unusedRequires([edge('src/capabilities/alpha-dir/index.ts', 'src/kernel/index.ts'), betaSeen], manifest)
+    expect(out).toEqual([
+      {
+        rule: REQUIRES_USED_RULE,
+        from: 'capabilities.manifest.json',
+        to: 'src/capabilities/beta',
+        message: 'alpha lists beta in requires and imports nothing from it',
+      },
+    ])
+  })
+
+  it('accepts an edge to the required capability’s index', () => {
+    const modules = [edge('src/capabilities/alpha-dir/index.ts', 'src/capabilities/beta/index.ts'), betaSeen]
+    expect(unusedRequires(modules, manifest)).toEqual([])
+  })
+
+  it('accepts a DEEPER edge as a use, so the two rules never ask for opposite repairs', () => {
+    /* An edge to another capability's internals is `cap-to-other-cap-internal`,
+       the cruiser's own violation. Counting it as "not a use" here would add
+       "so delete the requires" on top — advice that would make the cruiser's
+       violation worse rather than better. */
+    const modules = [edge('src/capabilities/alpha-dir/lib/x.ts', 'src/capabilities/beta/lib/deep.ts'), betaSeen]
+    expect(unusedRequires(modules, manifest)).toEqual([])
+  })
+
+  it('does not count a capability’s edges to ITSELF or to the kernel as using anything', () => {
+    const modules = [
+      edge('src/capabilities/alpha-dir/index.ts', 'src/capabilities/alpha-dir/lib/own.ts'),
+      edge('src/capabilities/alpha-dir/lib/own.ts', 'src/kernel/index.ts'),
+      betaSeen,
+    ]
+    expect(unusedRequires(modules, manifest).map((v) => v.message)).toEqual([
+      'alpha lists beta in requires and imports nothing from it',
+    ])
+  })
+
+  it('says nothing about a capability that requires nothing', () => {
+    expect(unusedRequires([betaSeen], { capabilities: [manifest.capabilities[1]] })).toEqual([])
+  })
+
+  it('REFUSES rather than reports when the declarer was not cruised at all', () => {
+    /* "It imports nothing" and "nothing of it was read" are the same absence in
+       the data, and only one of them means the declaration is wrong. Reading
+       the second as the first would turn a wrong `--root`, or a cruise that
+       silently skipped a directory, into a demand to delete a live grant. */
+    expect(() => unusedRequires([betaSeen], manifest)).toThrow(
+      /no module under src\/capabilities\/alpha-dir was cruised, so alpha's requires cannot be judged/u,
+    )
+  })
+
+  it('names a requires whose id resolves to no entry without indexing blindly', () => {
+    /* `loadManifest` validates before this runs, so an unresolvable id cannot
+       reach here in the real check — but a guard that would print `undefined`
+       into a violation is worse than one that stays quiet, and this pins which
+       it does. */
+    const ghosted = { capabilities: [{ id: 'alpha', ts: 'alpha-dir', platforms: ['desktop'], requires: ['ghost'] }] }
+    expect(unusedRequires([edge('src/capabilities/alpha-dir/index.ts', 'src/kernel/index.ts')], ghosted)).toEqual([])
+  })
+})
+
+describe('cruiserViolations', () => {
+  it('carries the rule name and spells a cycle out', () => {
+    const out = cruiserViolations({
+      summary: {
+        violations: [
+          { from: 'a.ts', to: 'b.ts', rule: { severity: 'error', name: 'no-circular' }, cycle: [{ name: 'b.ts' }, { name: 'a.ts' }] },
+          { from: 'c.ts', to: 'd.ts', rule: { severity: 'error', name: 'x' } },
+        ],
+      },
+    })
+    expect(out.map(formatViolation)).toEqual(['no-circular a.ts -> b.ts (cycle: a.ts -> b.ts -> a.ts)', 'x c.ts -> d.ts'])
+  })
+})
+
+describe('the CLI', () => {
+  it('exits 0 on the legal tree and says what it cruised', async () => {
+    const { code, out, err } = await runCli({})
+    expect(err).toBe('')
+    expect(code).toBe(0)
+    expect(out).toMatch(/^check-boundaries: \d+ modules, \d+ dependencies, 0 violations\n$/)
+  }, 120_000)
+
+  it('exits 1 on a violation and prints it as one line naming the rule and the edge', async () => {
+    const { code, out } = await runCli({
+      'src/kernel/core/other.ts': "import { alpha } from '../../capabilities/alpha/index.ts'\nexport const other = alpha\nexport type OtherType = { m: number }\n",
+    })
+    expect(code).toBe(1)
+    const lines = out.trimEnd().split('\n')
+    expect(lines).toContain('no-kernel-to-capabilities src/kernel/core/other.ts -> src/capabilities/alpha/index.ts')
+    expect(lines.at(-1)).toMatch(/^check-boundaries: \d+ modules, \d+ dependencies, [1-9]\d* violations$/)
+  }, 120_000)
+
+  it('exits 2 when the manifest cannot be trusted, rather than passing with an unchecked requires', async () => {
+    const { code, err } = await runCli({ 'capabilities.manifest.json': '{ "capabilities": [ { "id": "alpha" } ] }' })
+    expect(code).toBe(2)
+    expect(err).toMatch(/capabilities\.manifest\.json is invalid/)
+  }, 120_000)
+
+  it('exits 2 when the tree has no kernel — a run that saw the wrong root must not pass', async () => {
+    const files = Object.fromEntries(Object.keys(LEGAL_TREE).filter((k) => k.startsWith('src/kernel/')).map((k) => [k, null]))
+    const { code, err } = await runCli(files)
+    expect(code).toBe(2)
+    expect(err).toMatch(/nothing under src\/kernel\/ was cruised/)
+  }, 120_000)
+})
+
+/**
+ * EVERY RULE HAS A CASE, enforced rather than requested.
+ *
+ * `.dependency-cruiser.cjs`'s own header says "a rule added here needs a
+ * fixture there" — and nothing checked it. Two rules had none: the browser
+ * client's kernel allow-list, and the rule keeping `@tauri-apps` out of the
+ * web build, which did not exist at all until it was tested by hand. A rule
+ * nobody has watched fail is a comment, which is the sentence the selftest
+ * opens with.
+ *
+ * `REQUIRES_RULE` is checked by `check-boundaries.mjs` over the cruise's JSON
+ * rather than by the cruiser, so it is named here as the one rule whose case
+ * carries it as a value.
+ */
+describe('the rule list and the case list', () => {
+  it('has a case for every rule the cruiser config declares', async () => {
+    const config = await import('../.dependency-cruiser.cjs')
+    const declared = (config.default ?? config).forbidden.map((rule) => rule.name)
+    /* NOT EMPTY. A config that failed to load, or a shape that changed, would
+       make every assertion below vacuous — which is how a completeness check
+       stops checking completeness. */
+    expect(declared.length).toBeGreaterThan(10)
+
+    const covered = new Set(CASES.flatMap((one) => one.expect))
+    const uncovered = declared.filter((name) => !covered.has(name))
+    expect(uncovered, 'every forbidden rule needs a case in check-boundaries.selftest.mjs').toEqual([])
+  })
+
+  /* AND NO CASE NAMES A RULE THAT IS GONE. A case expecting a deleted rule can
+     never pass, but one expecting a RENAMED rule fails for a reason that reads
+     as the edge being legal — which sends the next reader to the wrong file. */
+  it('names no rule the config does not declare', async () => {
+    const config = await import('../.dependency-cruiser.cjs')
+    const declared = new Set((config.default ?? config).forbidden.map((rule) => rule.name))
+    declared.add(REQUIRES_RULE)
+    const unknown = [...new Set(CASES.flatMap((one) => one.expect))].filter((name) => !declared.has(name))
+    expect(unknown, 'a case expects a rule the config no longer has').toEqual([])
+  })
+})
+
+/**
+ * THE TWO WAYS THIS CHECK HAD NEVER RUN ON WINDOWS.
+ *
+ * Both found the first time the Windows leg got far enough to reach it, and
+ * neither is visible from macOS or Linux — which is the reason they are
+ * pinned here rather than left to the platform that already agrees.
+ */
+describe('the cruiser is spawned in a way all three platforms can', () => {
+  /* REMOVED AFTERWARDS, AND NEVER FATALLY. Windows keeps a handle on a
+     directory while anything is using it and releases it on its own schedule,
+     so a removal racing a just-killed child fails `EPERM`. A leftover
+     temporary directory is free; a red gate over one is not. */
+  /* A directory nothing here deletes, so the child may hold it open freely. */
+  const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
+  const scratch = []
+  afterAll(() => {
+    for (const dir of scratch.splice(0)) {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {
+        /* The OS will have it. */
+      }
+    }
+  })
+
+  it('runs the package entry through node, never the .bin shim', () => {
+    /* pnpm writes an EXTENSIONLESS shell script at `node_modules/.bin/depcruise`
+       beside the `.CMD`. `existsSync` finds it and `spawn` cannot execute it on
+       Windows, so the step failed with `ENOENT` on every run. A `.mjs` handed
+       to `process.execPath` has no shim, no shell and no quoting. */
+    expect(DEPCRUISE.endsWith('.mjs')).toBe(true)
+    expect(DEPCRUISE).not.toContain(`${path.sep}.bin${path.sep}`)
+  })
+
+  it('gives up on a cruiser that never answers, rather than waiting out the timeout', async () => {
+    /* WHAT THIS HOLDS, precisely, because the neighbouring defect is closed by
+       construction rather than by a test. `spawn`'s own `timeout` option arms
+       a timer it does not clear when the SPAWN ITSELF fails — measured at 1 ms
+       for the error and 3002 ms for the exit against a 3 s timeout, which at
+       five minutes is what the Windows leg did after printing its `ENOENT`.
+       That path is now unreachable: the thing spawned is `process.execPath`,
+       which exists wherever node is running, and the test above is what keeps
+       it so.
+
+       This one holds the other half. Under `spawn`'s timeout a cruiser that
+       never answers was killed and then reported as `did not answer in JSON
+       (exit null)` — a parse failure, naming the wrong cause, for a run that
+       simply ran long. A timeout says it timed out. */
+    const dir = mkdtempSync(path.join(tmpdir(), 'paper-cruise-'))
+    /* AND THE REMOVAL IS DEFERRED AND FORGIVING — see `scratch` above. Recorded
+       the moment it exists: pushed after the assertions below, it was left
+       behind by exactly the run in which one of them failed. */
+    scratch.push(dir)
+    const never = path.join(dir, 'never-answers.mjs')
+    writeFileSync(never, 'setTimeout(() => {}, 60_000)\n')
+    const started = Date.now()
+    /* THE CHILD'S WORKING DIRECTORY IS THE REPOSITORY, NOT `dir`, and that is
+       load-bearing on Windows. `cruise` passes its root as the child's `cwd`,
+       and a process's current directory is an OPEN HANDLE there: killing the
+       child does not release it synchronously, so removing `dir` immediately
+       afterwards failed `EPERM` — `force: true` does not help, because the
+       directory is in use rather than read-only. On POSIX, unlinking a
+       directory a live process sits in is legal, which is why this passed on
+       both other legs and only appeared under the `scripts` project's own
+       concurrency, where the kill and the remove land closest together.
+       `dir` holds the fake binary and nothing holds `dir`. */
+    await expect(cruise(REPO_ROOT, { bin: never, timeoutMs: 200 })).rejects.toThrow(/did not answer within 200 ms/)
+    expect(Date.now() - started).toBeLessThan(10_000)
+  })
+
+  it('keeps a real timeout far above what one cruise costs', () => {
+    expect(CRUISE_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000)
+  })
+})
+
+/**
+ * ⚠️ **THE CRUISER WAS BUILDING A TYPESCRIPT PROGRAM OVER THE WHOLE REPOSITORY
+ * ON EVERY CRUISE, AND NOTHING COULD SEE IT.**
+ *
+ * `options.tsConfig` pointed at `tsconfig.base.json`, which declares
+ * `compilerOptions` and NO `files` or `include`. TypeScript's default when a
+ * config names neither is every file under the config's own directory — so
+ * each cruise of a ten-file fixture parsed `src/`, `scripts/`, `coverage/`,
+ * every `dist` directory, `.types/` and whatever `src-tauri/target/` happened
+ * to contain. (Naming that glob with a star and a slash inside a block comment
+ * ends the comment — which is how this paragraph first failed to parse.)
+ *
+ * MEASURED 2026-09-02, one cruise of the standard fixture: **22,671 ms before,
+ * 481 ms after** — 45×. The graph is IDENTICAL either way (677 modules, 2578
+ * dependencies, 0 violations, both configs), because dependency-cruiser feeds
+ * the compiler its own file list and wants this config only for
+ * `compilerOptions` — `paths`, `jsx`, `moduleResolution`. There was never a
+ * file set to supply.
+ *
+ * WHAT IT COST, and why it was invisible: this is the longest file in the
+ * suite and therefore the run's critical path. At ~35 fixture cruises it held
+ * a worker for 90 s alone and 242 s under `--coverage`, and a worker held that
+ * long is the starvation window behind `[vitest-worker]: Timeout calling
+ * "onTaskUpdate"` — the intermittent red gate with every test passing that two
+ * earlier sessions attributed to CPU contention and tried to fix by moving
+ * pool size and fan-out. Both levers were measured; both were green sometimes
+ * and red sometimes, which is what said the mechanism had not been found. It
+ * had not: a slow cruise looks exactly like a fast one, and this one had been
+ * getting slower with every file added to the repository since it was written.
+ * The comment on `cruise` still said "most of a second of TypeScript start-up"
+ * — true when written, 20× wrong by the time anybody read it back.
+ *
+ * These are the assertions that stop it returning, because the next person to
+ * repoint this at a config with a file set would see nothing but a slow gate.
+ */
+describe('the cruiser is not handed a file set to compile', () => {
+  const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
+  const cruiserConfig = JSON.parse(readFileSync(path.join(REPO_ROOT, 'tsconfig.cruiser.json'), 'utf8'))
+
+  it('points at a tsconfig that names no files of its own', () => {
+    /* The mechanism, asserted directly rather than through a stopwatch. An
+       empty `files` with no `include` is a config that supplies OPTIONS and
+       nothing else, which is exactly what dependency-cruiser wants. */
+    expect(cruiserConfig.files).toEqual([])
+    expect(cruiserConfig.include).toBeUndefined()
+    expect(cruiserConfig.extends).toBe('./tsconfig.base.json')
+  })
+
+  it('uses that config and not the base, which globs the repository', () => {
+    const config = readFileSync(path.join(REPO_ROOT, '.dependency-cruiser.cjs'), 'utf8')
+    expect(config).toContain('tsconfig.cruiser.json')
+    /* `[{]` rather than `\{`: under the `u` flag an escaped brace is not a
+       valid identity escape, and the file then fails to parse at all. */
+    expect(config).not.toMatch(/tsConfig:\s*[{]\s*fileName:.*tsconfig\.base\.json/u)
+  })
+
+  it('still keeps the compiler options the boundary rules resolve through', () => {
+    /* ⚠️ **A CONFIG THAT LOST `paths` WOULD LEAVE `@/*` AND
+       `virtual:paper-composition` UNRESOLVED**, and an unresolved edge is an
+       edge no rule can judge — the gate would go green by seeing less. The
+       cases above already prove every rule still fires; this names the reason
+       they can. */
+    /* ⚠️ **THIS MATCHED THE FILE'S TEXT, AND STRYKER REWRITES THAT FILE**
+       (found 2026-09-19, the first time the mutation gate was pointed at this
+       module). `tsconfig.base.json` is JSONC and carries `//` comments, which
+       `JSON.parse` refuses — so the assertions were substrings, pinned to one
+       spelling: `'"@/*": ["src/*"]'`, that object on one line. Stryker's
+       TSConfig preprocessor PARSES every tsconfig into its sandbox and
+       re-serialises it, which drops the comments and puts `paths` over several
+       lines. Every assertion here then failed in the sandbox, the dry run
+       failed with them, and the subject was skipped with no score — which this
+       gate reports as "Stryker did not finish", not as a pass, so it was loud.
+       It was also a FALSE failure: nothing about the config had changed, only
+       its formatting.
+
+       The comments are strippable — `stripComments` is string-aware, and JSONC
+       has only `"` strings — so the values are asserted instead of their
+       spelling. That is stronger as well as sandbox-proof: a `paths` moved
+       somewhere meaningless would have satisfied the substring. */
+    const base = JSON.parse(stripComments(readFileSync(path.join(REPO_ROOT, 'tsconfig.base.json'), 'utf8')))
+    expect(base.compilerOptions.paths['@/*']).toEqual(['src/*'])
+    expect(base.compilerOptions.paths).toHaveProperty('virtual:paper-composition')
+    expect(base.compilerOptions.jsx).toBe('react-jsx')
+    /* And the base still names no file set of its own — which is WHY it must
+       not be the cruiser's config, and is left alone rather than "fixed":
+       `tsc -b` builds through the referenced projects, each of which brings
+       its own `include`. */
+    expect(base).not.toHaveProperty('include')
+    expect(base).not.toHaveProperty('files')
+  })
+
+  /* ⚠️ **A STOPWATCH WAS TRIED HERE AND DELETED, BECAUSE IT COULD NOT FAIL.**
+   * The obvious assertion is "one cruise costs under ten seconds" — 481 ms
+   * fixed against 22,671 ms broken looks like an enormous margin. It is not:
+   * the broken cost is dominated by FIRST-READ filesystem work, and warms.
+   * Measured in one process, same broken config, four cruises in a row:
+   * 22,671 / 22,484 / 8,540 / 5,998 ms. Planting the defect back with the
+   * timing test in place failed the two config assertions above and PASSED the
+   * stopwatch, which is the whole reason it is not here: a test that goes
+   * green against the defect it was written for is worse than no test, because
+   * it is counted.
+   *
+   * The three assertions above are deterministic, name the mechanism exactly,
+   * and cannot be warmed. */
+})

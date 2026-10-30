@@ -1,0 +1,25 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = """
+Paper's own window may build and query the passage index.
+
+Every command here is local: the index is built from books already on this
+device and nothing is sent anywhere. The commands that WRITE are reachable only
+from Paper's own window — a web session reaches the index through the service
+table's `passage.search` row, which is a different door with its own audience
+and its own grant.
+"""
+permissions = [
+  "allow-passages-put",
+  "allow-passages-note",
+  "allow-passages-flush",
+  "allow-passages-forget",
+  "allow-passages-rekey",
+  "allow-passages-pending",
+  "allow-passages-indexed",
+  "allow-passages-rebuild",
+  "allow-passages-retry",
+  "allow-passages-status",
+  "allow-passages-search",
+]

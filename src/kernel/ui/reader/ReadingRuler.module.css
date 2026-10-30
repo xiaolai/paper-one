@@ -1,0 +1,44 @@
+/* The BAND is not here any more. §12 puts it at layer 0 — behind the text —
+ * which the host cannot reach at any z-index: the book is an iframe whose
+ * document paints an opaque background, so anything drawn behind it is simply
+ * not visible, and the band's parent (`.gutter`) is a stacking context besides.
+ * It used to be drawn ABOVE the text and tinted with `mix-blend-mode: multiply`
+ * to compensate. It is now injected into the book document, where a negative
+ * z-index puts it genuinely underneath — see `rulerBand.ts` and the
+ * `.paper-ruler-band` rule in `bookCss.ts`.
+ *
+ * The hint stays here. It is chrome BESIDE the text, it belongs in the gutter
+ * the book's iframe does not cover, and it has to be clickable. */
+
+/* §12 layer 8: the hint lives in the gutter, outside the text. */
+.hint {
+  position: absolute;
+  z-index: var(--z-ruler-hint);
+  left: 0;
+  /* Wraps inside the gutter rather than running out of it. The lane is 56px
+   * and this string is about twice that at 11px, so `nowrap` put it straight
+   * across the first words of the line the ruler was pointing at — the one
+   * place it must not cover. */
+  right: 0;
+  font-size: var(--text-caption);
+  line-height: var(--leading-ui);
+  color: var(--muted);
+  text-wrap: pretty;
+  cursor: pointer;
+  /* The gutter lane is pointer-events:none so the book keeps its clicks; the
+   * hint is the one thing in there that is interactive. */
+  pointer-events: auto;
+}
+
+/* A collapsed gutter has no room for it.
+ *
+ * `left: 0; right: 0` in a zero-width parent does not make the box disappear —
+ * it makes it one character wide, and the text then overflows onto the first
+ * words of every line it is sitting beside, which is the one place the ruler's
+ * own chrome must never be. Hidden entirely below the width where the string
+ * can be read; the band in the book is unaffected and goes on working. */
+@container gutter (max-width: 40px) {
+  .hint {
+    display: none;
+  }
+}

@@ -1,0 +1,54 @@
+[package]
+name = "tauri-plugin-passages"
+version = "0.1.0"
+description = "Paper's library-wide passage index: the text a book is made of, and the postings over it"
+authors = ["Paper"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.91"
+publish = false
+# `tauri-plugin` requires this to equal the package name: it is how the
+# permission generator finds the crate whose commands it is writing grants for.
+links = "tauri-plugin-passages"
+# Not a crates.io crate: a workspace member of the app, reached by path.
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2"
+# `tauri_plugin_log` is what carries these to `~/Library/Logs/.../Paper.log`,
+# which is the only way a release build says anything at all.
+log = "0.4"
+# The postings. BM25, positions, and a reader that can be reloaded while a
+# writer is still adding — which is what lets a search answer over a partial
+# index while the backfill is still running.
+#
+# `default-features = false`, then `mmap` alone re-enabled by name. What that
+# leaves out is deliberate rather than minimal for its own sake:
+#
+#  - `stemmer` — a stemmer is pinned to ONE language, and this index is built
+#    from whatever a reader's shelf holds. It also changes what a query means:
+#    a reader typing `whale` would be shown `whales`, which is right for a web
+#    search and wrong for *find this in my books*. See `tokenize.rs`.
+#  - `stopwords` — dropping `the` would make the commonest English phrase query
+#    there is, `"the whale"`, unanswerable.
+#  - `lz4-compression` / `columnar-zstd-compression` — a compression backend
+#    with a C build, for documents this plugin does not store.
+tantivy = { version = "0.26", default-features = false, features = ["mmap"] }
+# The plugin surface. `default-features = false` for the same reason the peer
+# and voices plugins do it: the app's own crate picks the Tauri features, and a
+# plugin that turned them on would decide for every host that links it.
+tauri = { version = "2.11.3", default-features = false }
+
+# Keeping `passages/` out of Time Machine — one `setxattr` in `paths.rs`.
+# macOS ONLY: Linux and Windows have no per-item backup exclusion, so there is
+# nothing to name there. Already in the tree through tokio and tauri, so this
+# adds no compilation.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[build-dependencies]
+tauri-plugin = { version = "2.6", features = ["build"] }
+
+[dev-dependencies]
+tempfile = "3"

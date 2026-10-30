@@ -1,0 +1,2913 @@
+import { messageOf } from '../core/messageOf'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useOccasion } from './hooks/useOccasion'
+import { buildCommands } from './commands'
+import { ContributedScreen } from './screens/ContributedScreen'
+import { isContributedScreenId } from '../core/uiTypes'
+import { coverIn } from '../core/coverArt'
+import { offeredFaces } from '../core/typefaces'
+import { presentFaces } from './fontProbe'
+import { canKeepPlace, resolveAccel, resolvePageKey } from './accel'
+import { DEFAULT_STEP_IDX, applyMetrics, paneTakesTrack } from '../core/metrics'
+import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from '../core/bookFiles'
+import { positionRecorder, type PositionRecorder } from '../core/positionRecorder'
+import { createGenerations } from '../core/generations'
+import { writeClipboard } from './clipboard'
+import type { DiagnosticLog } from '../core/diagnosticsLog'
+import { createOpenRollback } from './openRollback'
+import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
+import { useImportRun } from './hooks/useImportRun'
+import { useArchives } from './hooks/useArchives'
+import { requestWindowClose, useWindowClose } from './hooks/useWindowClose'
+import { takeOpened, type OpenRequests } from './openedFiles'
+import { closePrepare } from './closeWindow'
+import { openExternal } from './openExternal'
+import { hasOpenLayer, readerTakesInput, screenJump, useAppState } from './state'
+import { useTagPrefs } from './hooks/useTagPrefs'
+import type { KernelServices } from '../core/services'
+import type { Composition } from '../core/registry'
+import { useBook } from './hooks/useBook'
+import { useBookIntake } from './hooks/useBookIntake'
+import { useEnrichment } from './hooks/useEnrichment'
+import { flushBeforeClose, onBeforeClose, onBeforeDrain, settleBeforeDrain } from '../core/beforeClose'
+import { useFileDrop, type DropHaul } from './hooks/useFileDrop'
+import { useLibrary } from './hooks/useLibrary'
+import { useCards } from './hooks/useCards'
+import { useMarks } from './hooks/useMarks'
+import { useMarking } from './hooks/useMarking'
+import { useBookmarking } from './hooks/useBookmarking'
+import { useOverlays } from './hooks/useOverlays'
+import { useReanchor } from './hooks/useReanchor'
+import { useJumps, type JumpTarget } from './hooks/useJumps'
+import { useResumeAt } from './hooks/useResumeAt'
+import { locationToOpen, overrideSpent, type Place } from '../core/jumpStack'
+import { useOpenPassage } from './hooks/useOpenPassage'
+import type { ExternalLinkDetail } from 'foliate-js/view.js'
+import type { FootnoteRender } from './reader/footnotes'
+import type { PlateDetail } from './reader/plate'
+import { extensionFor, isMissingFile, readOwnedBook, storedBookName } from '../core/bookVault'
+import type { IndexedBook } from '../core/bookIndex'
+import type { IndexFs } from '../core/bookIndex'
+import { contentPathIn } from '../core/bookFolder'
+import {
+  MAX_FILES,
+  SHELVE_BATCH,
+  importFolder,
+  keepOwnCopy,
+  summarise,
+  type ImportOutcome,
+} from '../core/importFolder'
+import { BookSwitcher } from './overlays/BookSwitcher'
+import { CommandPalette } from './overlays/CommandPalette'
+import { OverlaySheet } from './overlays/OverlaySheet'
+import { listTrash, type TrashedBook } from '../core/bookTrash'
+import { TrashSheet } from './overlays/TrashSheet'
+import { TitleBar } from './shell/TitleBar'
+import { WindowShell } from './shell/WindowShell'
+import { Library } from './screens/Library'
+import { Reader } from './screens/Reader'
+import { TagEditor } from './screens/TagEditor'
+import { tagCounts } from '../core/library'
+import { SidePane } from './pane/SidePane'
+import { parseBook } from './reader/parseBook'
+import { chapterSteps } from './tocOrder'
+import { useSpeech } from './reader/useSpeech'
+import { useAutoAdvance } from './reader/useAutoAdvance'
+import { documentLang } from './reader/speech'
+import { NO_GOOD_VOICE, voiceFor } from './reader/voiceChoice'
+import { engineVoiceFor, missingPackNotice } from './reader/engineVoice'
+import { useVoicePacks } from './hooks/useVoicePacks'
+import { useVoices } from './hooks/useVoices'
+import { audiobookSourceOf, useAudiobook } from './hooks/useAudiobook'
+
+
+/**
+ * The tag sheet's books when no book is being read — which is never drawn: the
+ * sheet renders only over a book the shelf holds. A constant rather than an
+ * inline `[]` so that fact sits on a line of its own.
+ */
+// Stryker disable next-line ArrayDeclaration: read only while no book is being read, when the sheet it would fill is not rendered.
+const NO_BOOKS: readonly IndexedBook[] = Object.freeze([])
+
+export interface AppProps {
+  /**
+   * The window of diagnostics this run has recorded, for the Developer panel.
+   *
+   * HANDED IN, NOT BUILT HERE, for `services`' own reason one paragraph down:
+   * `main.tsx` creates the log before the first render because the boot steps
+   * write to it, and a second one built here would show an empty window beside
+   * a file that has the answers.
+   *
+   * Optional, and absent is a real state rather than a missing wire: a build
+   * with diagnostics off records nothing, and the panel says so instead of
+   * drawing an empty list that looks like a quiet run.
+   */
+  diagnosticLog?: DiagnosticLog | undefined
+  /**
+   * Told after the Developer panel clears the window, so the file can catch up.
+   *
+   * `diagnostics.jsonl` is a PROJECTION of the window, rewritten whole — so a
+   * clear that did not reach the spool left the file holding entries the app no
+   * longer has, and a harness reading it over ssh read the past.
+   */
+  onDiagnosticsCleared?: (() => void) | undefined
+  /**
+   * The kernel's services — the shelf, the marks, the cards, the settings —
+   * built ONCE by the composition root (`main.tsx`) over the store and the
+   * filesystem it resolved before the first render, and handed in rather than
+   * built here: the hooks below are adapters over these instances, and
+   * anything else that will hold them (a service answering a peer) must hold
+   * the same ones.
+   */
+  services: KernelServices
+  /**
+   * The library's filesystem, or null outside Tauri.
+   *
+   * Still taken here as well as inside the services, because this component
+   * reads books and imports folders through it directly.
+   */
+  fs: IndexFs | null
+  /**
+   * The shelf could not be READ, which is not the same as having no books.
+   *
+   * `loadShelf` failing used to hand back an empty list, and the reader was told
+   * their library was empty while it sat on disk. The two states look identical
+   * from here, so the one that is alarming and wrong has to be labelled at the
+   * only place that can tell them apart.
+   */
+  shelfUnread?: boolean
+  /**
+   * What boot found wrong with the store, in one sentence — a damaged file
+   * moved aside, a disk it could not open — or null. Shown in the shelf's
+   * foot until dismissed, because the console it used to go to is not where
+   * a reader looks for their cards and settings (WI-20.36).
+   */
+  bootNotice?: string | null
+  /**
+   * What the composed capabilities contributed — panes for the side pane,
+   * commands for the palette — as `composeCapabilities` returned it. Built
+   * by the composition root, like `services`, and read here; the kernel
+   * itself puts nothing in it.
+   */
+  composition: Composition
+  /**
+   * What must happen before the window closes, when the composition root has
+   * more to tear down than the kernel knows about — the same teardown the
+   * quit handshake runs: hand over, drain, end the capabilities, close the
+   * sync journal, tell the shell. Absent, the kernel flushes and drains its
+   * own queue and no more, which is right for a host with nothing composed.
+   */
+  beforeWindowClose?: () => Promise<unknown>
+  /**
+   * Books the launch carried — a double-click in the Finder, a path on the
+   * command line, a second launch the first absorbed — as the shell hands
+   * them over. Absent for a host with no shell (a browser tab). See
+   * `openedFiles.ts` for the queue and why the root, not this component,
+   * tells the shell when it may release it.
+   */
+  openRequests?: OpenRequests
+}
+
+/**
+ * How long a one-line notice about the library stays on screen, in ms.
+ *
+ * It shares the status bar's single work slot with the background parse
+ * pass, so this is also how long that pass can be prevented from reporting.
+ */
+const NOTICE_MS = 12_000
+
+/**
+ * The desktop shell — and at well over two thousand lines, the largest component
+ * in the tree. An audit called it a god component and proposed extracting
+ * `useBookOpening`, `useImportCommands`, `useTrashController` and `useAppKeyboard`.
+ *
+ * WHAT WAS WRONG IN IT IS FIXED IN PLACE, and it was not the size. The keyboard
+ * map was reinstalled on every page turn because five effects and callbacks
+ * depended on the whole `book` (see `pages`); jackets were read around the
+ * injected filesystem; the export was offered before the book could be walked; a
+ * failed path read threw away its cause; one predicate was restated three times;
+ * one notice mechanism was written twice. Each of those was a dependency or a
+ * duplicate, and each is local now.
+ *
+ * WHAT IS LEFT IS STRUCTURE, AND THE PROPOSED SEAMS DO NOT HOLD IT. The
+ * candidates share state they cannot own: opening a book reads the intake, the
+ * jump history, the rollback and the library; the keyboard reads the layers, the
+ * marks, the pane rules and the opener; the imports read the opener and the
+ * notice. Extracted, each hook takes most of this component's state as
+ * arguments and hands most of it back — the same coupling, spread across files
+ * that can each be read without the others and understood only with them. The
+ * seam worth cutting is the one a second shell needs, and none does yet: the
+ * phone and the browser mount their own roots.
+ */
+export function App({
+  services,
+  fs,
+  shelfUnread = false,
+  bootNotice: bootSaid = null,
+  composition,
+  beforeWindowClose,
+  openRequests,
+  diagnosticLog,
+  onDiagnosticsCleared,
+}: AppProps) {
+  const platform = usePlatform()
+  /* Probed once for the app's lifetime: which fonts this machine has cannot
+     change while it is running. Shared by the settings panel and the palette so
+     the two cannot come to offer different lists. */
+  // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it — the probe runs once, at mount, either way.
+  const offeredHere = useMemo(() => offeredFaces(presentFaces()), [])
+  const prefersDark = usePrefersDark()
+  /* The one thing that can stop a page turn sliding. Not a setting — see the
+   * hook, which explains why there is deliberately no control for it. */
+  const reducedMotion = usePrefersReducedMotion()
+  const [state, dispatch] = useAppState(services.settings, composition.panes)
+  /* The downloadable voices: what this device has, and the engine the reading
+   * uses when a pack can read the book on screen. Empty and null in a build
+   * with no voices capability — a phone, a browser client — where everything
+   * below reads exactly as it did before. */
+  const {
+    packs: voicePacks,
+    engine: voiceEngine,
+    findClip: findVoiceClip,
+    holdClips: holdVoiceClips,
+  } = useVoicePacks(services)
+  /* ⚠️ IT SUBSCRIBES TO THE FLAG, NOT TO THE VALUES, and that is the whole
+     point. `persistent` flips the first time the store's write is REFUSED, and
+     that refusal happens after `values` has already changed and been published
+     — so a values snapshot is byte-identical either side of it and
+     `useSyncExternalStore` correctly does not re-render. Reading the flag
+     itself is what makes the panel's notice appear on the write that failed
+     rather than on the next one that worked.
+
+     This used to read "a SECOND subscription" and point at a values snapshot
+     directly above it. That snapshot existed to resolve the `Look up` mode and
+     went with it; the sentence outlived it by one commit and was caught by
+     audit. */
+  /* ONE READER FOR BOTH SNAPSHOTS. The second is read only when a server
+     render is hydrated, which this window never is, so as an arrow of its own
+     it was a function nothing could call — a mutation sweep said so
+     (2026-09-15). The sentence used to cite `workLine.line` beside it as the
+     other example; that port was the model download's and went with the AI
+     features (2026-09-19). */
+  const readPersistent = () => services.settings.persistent
+  const settingsPersistent = useSyncExternalStore(services.settings.subscribe, readPersistent, readPersistent)
+  /* The open book lives here, not in the reader: Contents and Search read
+   * from it and they are panels of the side pane now. */
+  const book = useBook()
+  /* Marks outlive the open book — the Marginalia panel browses every book's — so the
+   * store is keyed by book rather than owned by one. Every write to a book's
+   * folder goes through the ONE queue the services share — see
+   * `createKernelServices` — which is what gives the close something to hold for. */
+  const marks = useMarks(services.marks, book.bookId)
+  const cards = useCards(services.cards)
+  const marking = useMarking(book, marks)
+  /* Beside marking, not inside it. Marking acts on a selection and
+   * bookmarking acts on a place — see `useBookmarking`. */
+  const bookmarking = useBookmarking(book, marks)
+  /* Whether the reader is actually LOOKING at the book. The reader screen stays
+   * mounted under the library — see `Reader.inert` — so nothing downstream of
+   * it can be trusted to say which screen is on top.
+   *
+   * DECLARED ONCE, because asking it a second time as `state.screen ===
+   * 'reader'` is the defect the keyboard map's note records about its own
+   * copy. */
+  /* Every overlay, as ONE value — see the keyboard effect's dependency list. */
+  const anyLayerOpen = hasOpenLayer(state)
+  const onReader = state.screen === 'reader'
+  /**
+   * The shelf's jackets, read through the filesystem this App was GIVEN.
+   *
+   * ⚠️ **THIS WAS `coverIn(tauriVaultFs, …)`, BOUND AT MODULE SCOPE, AND IT
+   * IGNORED THE `fs` PROP.** On the desktop that prop is
+   * `countingFs(libraryFs)` — the wrapper every other read goes through so the
+   * app can account for its I/O — so the covers of 1 961 rows were read around
+   * the one instrument meant to see them, and a host that injected a different
+   * filesystem would have had its records read from one backend and its jackets
+   * from another. Off Tauri there is no `fs` and so no jackets, rather than a
+   * call into a plugin that is not there.
+   *
+   * ⚠️ **STILL ONE IDENTITY, WHICH IS WHY IT WAS AT MODULE SCOPE.** `BookCover`
+   * lists `coverFor` in its effect's dependencies — it has to, or it captures the
+   * first one forever — so a new function per render would refetch and revoke an
+   * object URL for every row, every render. `fs` is fixed at boot, so this is
+   * made once.
+   */
+  const coverFor = useCallback(
+    (bookId: string): Promise<string | null> => (fs ? coverIn(fs, bookId) : Promise.resolve(null)),
+    // Stryker disable next-line ArrayDeclaration: the one host that passes `fs` — `main.tsx` — renders this window once, from `bootApp`'s result, and never again, so `fs` cannot change under it and an empty list rebuilds this equally often.
+    [fs],
+  )
+  /* Pins, colours, hidden subjects and saved views — the reader's decisions
+     ABOUT their tags, as opposed to which books carry them. See `tagPrefs`. */
+  const tagPrefs = useTagPrefs(services.storage)
+  /* The import walks the reader's OWN filesystem, so it needs the absolute
+   * directory reader rather than the app-relative one the shelf scan uses. They
+   * are different operations and were one name, which is how the shelf came up
+   * empty with ten books on disk. */
+  /* NAMED, not assembled here. The library's filesystem and an import's differ
+   * in exactly one member — whether `readDir` walks the app's data directory or
+   * the reader's own disk — and building the second out of the first at the call
+   * site is what let an `as unknown as DirFs` assert a `readOutside` that was
+   * never there. Both are declared in `bookFiles`, where the difference can be
+   * stated once. */
+  const importFs = useMemo(
+    () => (fs ? tauriImportFs : null),
+    // Stryker disable next-line ArrayDeclaration: `fs` is a prop fixed by the composition root for the window's life, so the first answer is the only one.
+    [fs],
+  )
+  const library = useLibrary(services.library)
+  /* Reading aloud follows the spine document and turns its pages: the session
+   * is the paging — `next`, in reading order — and `doc` is what is read. */
+  const speechPrefs = useMemo(
+    () => ({
+      voices: state.readingVoice,
+      rate: state.readingRate,
+      sentenceGapMs: state.sentenceGapMs,
+      paragraphGapMs: state.paragraphGapMs,
+      notesAloud: state.readingNotesAloud,
+    }),
+    [
+      state.readingVoice,
+      state.readingRate,
+      state.sentenceGapMs,
+      state.paragraphGapMs,
+      state.readingNotesAloud,
+    ],
+  )
+  /**
+   * The paging the reading needs, and a chapter step over the book's contents.
+   *
+   * ⚠️ **THE STEP ALWAYS COMES, AND ANSWERS FOR ITSELF.** This returned no
+   * `chapter` at all where neither direction went anywhere, on the ground that
+   * the transport read its PRESENCE — but the transport reads `can` per
+   * direction now, and a step whose `can` says no in both is the same answer as
+   * an absent one. The early return was a second statement of it, and no test
+   * could tell the two apart. `chapterSteps` holds the whole decision, with every
+   * branch reachable, including the step that declines.
+   *
+   * A reader can be in a spine item no contents entry points at: `chapterHref`
+   * is then `''`, which `stepChapter` finds in no list of places, so both
+   * directions answer no without a guard here saying so first.
+   */
+  const speechPaging = useMemo(
+    () => ({
+      next: book.next,
+      /* ⚠️ **IN READING ORDER, SO NOT `goLeft`** — the same rule `next` states:
+         in a right-to-left book, back is to the right. `book.prev` is the
+         session's own, and is what the arrow key runs. */
+      prev: book.prev,
+      chapter: chapterSteps(book.toc, book.position.chapterHref, book.goTo),
+    }),
+    [book.next, book.prev, book.goTo, book.toc, book.position.chapterHref],
+  )
+  /**
+   * Which book and section the reading is in, so a render can be addressed.
+   *
+   * ⚠️ **`book.docSection` AND NOT `book.position.sectionIndex` — MEASURED IN THE
+   * RUNNING APP, 2026-09-30.** The position's index is documented as null *"when
+   * that cannot be told yet"* and was exactly that: the reader was in section 8,
+   * the renderer knew it, and the position answered null. The host spelled that
+   * `?? -1`, the plugin's `u32` refused a negative, and every Listen died at the
+   * IPC boundary with *"This chapter could not be made into audio"* — invisible
+   * to 3 007 tests, every one of which supplied a section.
+   *
+   * `docSection` is the index the renderer reported WITH the document, which is
+   * also the index `sectionTexts` counts in — so the reading and the audiobook
+   * export name the same section, which is what makes WI-34.4 more than a
+   * sentence.
+   */
+  const speechPlace = useMemo(
+    () => ({ bookId: book.bookId, sectionIndex: book.docSection }),
+    [book.bookId, book.docSection],
+  )
+  const speech = useSpeech(book.doc, speechPaging, speechPrefs, voiceEngine, speechPlace)
+  /**
+   * The book turning itself, at the pace the time-left estimate uses.
+   *
+   * ⚠️ **DECLARED AFTER `speech` BECAUSE IT DEFERS TO IT.** Read aloud already
+   * turns the page, so the two together double-advance; `useAutoAdvance` refuses
+   * to start while a reading speaks and gives the book up if one starts under
+   * it. One pace at a time.
+   */
+  // Stryker disable next-line ObjectLiteral: wiring — five values straight from `useBook` and `useSpeech`; the hook's own cases hold every rule they feed.
+  const autoAdvance = useAutoAdvance({
+    step: book.step,
+    pace: book.pace,
+    speaking: speech.speaking,
+    /* The reader stays mounted behind the library and every contributed screen,
+       so without this the book turned itself where nobody could see it. */
+    onReader,
+    /* The chain belongs to the BOOK. `App` never unmounts, so this is the only
+       thing that tells it the book it was advancing has been replaced. */
+    generation: book.generation,
+  })
+  /* What the Voice group in Settings needs that app state cannot answer: the
+     language of the book on screen, and what this machine can actually say.
+     `documentLang` is the same fact the utterance is given, read from the same
+     place, so the picker offers voices for the language the reading will ask
+     for rather than for the interface's. */
+  const voices = useVoices()
+  /* ⚠️ **THE CATALOGUE IS PART OF THIS, AND ITS ABSENCE WAS A ROW THAT LIED.**
+     Measured in the running app on 2026-09-23: with the English pack installed
+     the Voice row said *"None — no high-quality voice is available here"* while
+     Heart was reading the book. The picker asked only `voiceFor`, which refuses
+     every voice a Mac's WebView offers — so on a Mac it answered `none` however
+     many packs had been downloaded. Passed live rather than as a snapshot, for
+     the reason `speakerRouting` gives: a reader who downloads a pack mid-chapter
+     should see it in the picker without relaunching. */
+  const narration = useMemo(
+    () => ({ lang: book.doc ? documentLang(book.doc) : null, voices, packs: voicePacks }),
+    [book.doc, voices, voicePacks],
+  )
+  /* ⚠️ **THE SAME ANSWER THE SPEAKER WILL REACH, ASKED BEFORE THE PRESS.** The
+     floor refuses every voice a Mac's WebView offers (see `voiceChoice.ts`), so
+     the Listen control says so up front rather than starting a reading that
+     stops at its first sentence. Same function, same list, same language and
+     same stored choice as `Speaker.speak` — so the control cannot promise a
+     reading the speaker then refuses, or refuse one it would have read. */
+  /**
+   * Why this book cannot be read aloud, or `null` when it can.
+   *
+   * ⚠️ **THE DOWNLOADED VOICES ARE ASKED FIRST, AND THE FLOOR IS UNCHANGED
+   * BEHIND THEM.** `voiceFor` refuses every platform voice below Enhanced
+   * wherever the tier is legible, which on a Mac is all of them; a pack is not
+   * subject to that and does not need to be, since its voices are in the
+   * catalogue because the owner listened to them. So a book a pack can read is
+   * never refused, whatever the platform offers.
+   *
+   * And where nothing can read it, the sentence says what would: a pack that
+   * exists for the language names itself and its size. That is advice a reader
+   * can act on, which *"install a system voice"* would not have been — macOS
+   * withholds the good ones from this app however they are installed.
+   */
+  const listenRefusal = useMemo((): string | null => {
+    if (engineVoiceFor(voicePacks, narration.lang, state.readingVoice)) return null
+    if (voiceFor(narration.voices, narration.lang, state.readingVoice).kind !== 'none') return null
+    return missingPackNotice(voicePacks, narration.lang) ?? NO_GOOD_VOICE
+  }, [voicePacks, narration.voices, narration.lang, state.readingVoice])
+
+  /* One file picker for the window. The reader's empty state, the palette and
+   * the switcher all ask for books, and one input serves all three rather than
+   * each surface growing its own. */
+
+  /**
+   * Open a book AND go to it.
+   *
+   * Every route in — a drop on the window, the switcher, the picker, a cover on
+   * the shelf — goes through here. Only the shelf used to switch screens, so a
+   * book opened any other way loaded into a reader the library was still
+   * covering: the shelf sat there unchanged while the book it had been asked
+   * for finished loading out of sight, which reads as the click having done
+   * nothing at all.
+   */
+  /* EVERY OPEN SUPERSEDES A PENDING ONE — see `core/generations.ts`. The counter
+   * this replaces was advanced only by the stored-book route, so a shelf read
+   * still in flight stayed "fresh" however many books the reader picked or
+   * dropped afterwards, and landed on top of the one they had chosen. */
+  const openGenerations = useRef(createGenerations())
+
+  /**
+   * What to undo if the open now starting never lands — see the arming site
+   * in `goToJump`, the fuller note above `openFailed`, and `openRollback.ts`,
+   * which holds the three transitions and the reasons each has been wrong.
+   *
+   * DECLARED HERE, above `openBook`, because every open OWNS this slot for its
+   * own duration: an open that starts arms it, and doing so retires whatever
+   * the last one left.
+   */
+  const undoOpen = useRef(createOpenRollback())
+
+  const openBook = useCallback(
+    (source: File | string, path: string | null = null, undo: (() => void) | null = null) => {
+      /* ⚠️ **BOTH OF THESE ARE BELT AND BRACES, and a mutation sweep is what
+         says so.** Every route here claims the generation and arms the same
+         rollback one line earlier, in the same turn — `openStored` at its
+         `fresh`, `addAndOpen` before it opens what it added — and each checks
+         that claim before reaching this function. So the claim below is of a
+         generation nothing else can have taken, and the arm is of the rollback
+         already held. They stay, because the next caller will not necessarily
+         do either (2026-09-14). */
+      // Stryker disable next-line CallExpression: see above — every caller claims first, and this claim supersedes nothing its own `fresh()` has not already refused.
+      openGenerations.current.claim()
+      /* A direct open RETIRES the rollback a pending open armed — runs it,
+       * rather than dropping it: the state a superseded jump committed is
+       * still committed. `undo` is how `openStored` carries its own rollback
+       * through the origin fallback, which is the one re-entry that is the
+       * same open continuing. See `openRollback.ts`. */
+      // Stryker disable next-line CallExpression: arming the rollback the caller armed one line earlier is `arm`'s no-op case — it fires a stale one only where the two differ, and here they never do.
+      undoOpen.current.arm(undo)
+      dispatch({ type: 'goScreen', screen: 'reader' })
+      /* Handed over WITH its source rather than set directly, so the effect that
+       * notices the new source is the single place the path is decided. Set here
+       * alone, it survived a route that does not come through this function. */
+      /* ⚠️ `intake` IS NOT IN THE DEPENDENCIES, and cannot be: it is declared
+       * two hundred lines below this, because `useBookIntake` needs the open
+       * book's id, meta and source, and those come from `book`. Listing it
+       * here would read the binding during render, before it exists.
+       *
+       * What makes that safe is that `noteOpen` and `noteRemoval` are stable
+       * for the hook's whole life. That used to be an accident of how the hook
+       * was written — `useCallback(…, [])` in a file nothing here points at —
+       * and `useBookIntake.stability.test.tsx` now asserts it, so the day it
+       * stops being true a test goes red instead of this callback quietly
+       * closing over a stale one. */
+      intake.noteOpen(source, path)
+      book.open(source)
+    },
+    // Stryker disable next-line ArrayDeclaration: everything this reads is stable for the window's life — `book.open` and `dispatch` are, and so is `intake.noteOpen` (asserted in `useBookIntake.stability.test.tsx`) — so the first closure and the latest are the same function.
+    /* `book.open`, not `book`: the whole object changes on every page turn, and
+       this reads one stable callback of it. */
+    [book.open, dispatch],
+  )
+
+
+  const { add, addMany, remove, positionOf, rekeyBook, keepContent, rememberPosition, setFinished } = library
+
+  /**
+   * Put what an import produced onto the shelf.
+   *
+   * Every route in goes through here — today that is the folder import, and it
+   * is one function rather than a step inside it because the same shelving has
+   * been needed by every import route this app has had.
+   */
+  /* THROUGH `addMany`, NOT A LOOP OVER `add`, and that is the whole of what
+   * stops a large import losing its tail — see `Library.addMany`. This loop
+   * used to call `add` once per book in one synchronous pass, which put a
+   * write chain per book on the queue in a single tick; the writes at the end
+   * of the burst failed, and a failed record write silently drops the row. It
+   * also let every failure go: `add` through the hook is fire-and-forget, so
+   * the count below had nowhere to come from. */
+  const shelveImported = useCallback(
+    async (outcomes: readonly ImportOutcome[]): Promise<number> => {
+      /* Every non-failed outcome, including duplicates. `add` folds into an
+       * existing record rather than replacing it, so a book already on the
+       * shelf keeps its tags and its place — and a book whose bytes are in the
+       * library with no record gets one, which is the case that was invisible
+       * forever before. */
+      const entries = outcomes
+        .filter((one) => one.status !== 'failed' && one.bookId && one.name)
+        .map((one) => ({
+          bookId: one.bookId!,
+          record: {
+            /* The FILENAME, until the book is opened. Parsing three hundred books
+             * to learn three hundred titles would make importing a folder as slow
+             * as reading one, and the record corrects itself on first open. */
+            title: one.name!.replace(/\.[^.]+$/, ''),
+            author: '',
+            addedAt: Date.now(),
+            /* WITHOUT THIS EVERY IMPORTED PDF IS UNOPENABLE. The bytes go to
+             * `content.pdf`, and `openStored` defaults a record with no `ext` to
+             * `.epub` — so it looks for a file that is not there. */
+            ext: extensionFor(one.name!),
+            ...(one.path ? { origin: one.path } : {}),
+          },
+          /* SPARSE — a placeholder, not a parse. Everything above except the
+           * extension is a guess from a filename, and `add` folds what it is given
+           * in as the book's own account of itself. Without this flag, re-scanning
+           * re-importing a folder overwrote the real title and author of every
+           * book in it with `moby-dick-1851` and nothing. */
+          sparse: true,
+        }))
+      return addMany(entries)
+    },
+    // Stryker disable next-line ArrayDeclaration: `addMany` is the library service's own verb, memoized over the store for the window's life — a constant dependency list holds the same function.
+    [addMany],
+  )
+
+  /**
+   * Open a book the library holds.
+   *
+   * THE VAULT FIRST, THEN THE ORIGIN. Phase 3 tried the vault, then the reader's
+   * original path, then a URL, each with its own failure handling — because a
+   * row could name any combination of the three and might be right about none of
+   * them. A book is a folder now, so the vault is where to look first and its
+   * name is the book's id; the `catch` below falls back to the book's `origin` —
+   * as a file, then as an address — only when the stored copy is MISSING, and
+   * its notes say why phase 4 deleted that too eagerly and why a copy that is
+   * there and will not read is another case. (This said "a record with no
+   * stored content" while the code fell back after any failure, and it was the
+   * code that moved — 2026-09-14, #103, round 4.)
+   *
+   * ⚠️ **THIS OPENED "THREE BRANCHES BECAME ONE" AND "EXACTLY ONE PLACE TO
+   * LOOK" UNTIL THE 2026-09-13 AUDIT**, and its first correction was appended
+   * beneath both claims and left them standing. The three places are still
+   * three; what changed is that they are tried in one order, from one failure
+   * path.
+   *
+   * The filename carries the EXTENSION, not the title. `isPdf` routes on it, so
+   * handing foliate `Moby-Dick` with no suffix sent every PDF to the wrong
+   * reader, which rejects it as an unsupported type.
+   */
+  /* Which open the reader asked for LAST. Reading a stored book takes real
+   * time — a large PDF is seconds — and two clicks in that window resolved in
+   * completion order, so the slower FIRST click could land its `openBook`
+   * after the second's and replace the book the reader most recently chose
+   * with the one they had already abandoned. Each request takes a number; a
+   * completion that is not the newest number says nothing. */
+
+  /**
+   * What to undo if the open now starting never lands.
+   *
+   * ⚠️ A CROSS-BOOK JUMP COMMITTED ITS STATE BEFORE THE OPEN SUCCEEDED.
+   * `goToJump` set the place override, started the read and answered `true` —
+   * so a book whose bytes are missing or unreadable left the reader where they
+   * were, with a "← Back to …" line offering a jump that never happened and,
+   * worse, an `openAt` override still armed. That override is spent by the
+   * next CFI to arrive, so it applied to whatever book they opened afterwards:
+   * a failed jump moved a later, unrelated open to the wrong place.
+   *
+   * A ref rather than a dependency because `openStored` is declared eight
+   * hundred lines above the state it has to undo. It is armed by the open
+   * that starts (`openStored`'s `undo` argument) and consumed by whichever
+   * settles first; the slot itself is declared above `openBook`, which see.
+   */
+  // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it, and the only thing this reads is a ref.
+  const openFailed = useCallback(() => undoOpen.current.fire(), [])
+
+  const openStored = useCallback(
+    (entry: IndexedBook, undo?: () => void) => {
+      if (!fs) return
+      const fresh = openGenerations.current.claim()
+      /* THIS open owns the rollback slot now, and taking it RETIRES whatever
+       * the last one left rather than dropping it — see `openRollback.ts`. */
+      undoOpen.current.arm(undo ?? null)
+      const name = storedBookName(entry)
+      void readOwnedBook(fs, contentPathIn(entry.bookId, name), name)
+        .then((file) => {
+          if (!fresh()) return
+          /* ⚠️ NOT RELEASED HERE. The bytes arriving is not the book landing:
+           * it still has to parse and render, and a corrupt or unsupported one
+           * fails after this line. Released this early, a jump into a book the
+           * reader was then shown an error for kept its override and its "←
+           * Back to …" line. The rollback travels with the open — see the
+           * `book.error` effect, which fires it, and the override's own
+           * spending effect, which releases it once a section has rendered. */
+          /* WHERE THIS COPY CAME FROM, handed to the intake with the bytes.
+             ⚠️ **AND IT CANNOT BE READ BACK OUT OF THE RECORD**, which is why
+             the directive below is honest: the row already carries this origin,
+             and `mergeParsed` keeps what the previous record held wherever a
+             parse supplies none. */
+          // Stryker disable next-line LogicalOperator: see above — the origin reaches the record through the library's own merge whether or not the open repeats it.
+          const origin = entry.origin ?? null
+          openBook(file, origin, undo ?? null)
+        })
+        .catch((cause: unknown) => {
+          if (!fresh()) return
+          /* FALL BACK TO THE READER'S OWN FILE, which phase 4 deleted too
+           * eagerly. One place to look was enough for a book Paper holds —
+           * and six of the ten books in a real phase-3 library never
+           * had a stored copy, because phase 3 only started keeping them near
+           * the end. Migrating those produced a record with no content, and
+           * with the path fallback gone they became unopenable.
+           *
+           * `origin` is kept for provenance, and provenance is exactly what is
+           * needed here. It is still a fallback rather than a first choice: it
+           * depends on the reader's file being where it was, which is the whole
+           * reason Paper keeps its own copy. */
+          /* ⚠️ **MISSING, AND ONLY MISSING** (2026-09-14, #103, round 4). This
+           * fell back after ANY failure. A copy that is THERE and will not read
+           * — a permission, an I/O error — is not a book Paper never kept, and
+           * opening the origin in its place logged nothing and healed nothing:
+           * the intake's `keepContent` declines when the content file exists, so
+           * every later open went to the origin again, silently, until the
+           * origin moved and the book would not open with nothing on record to
+           * say why. Absent and unreadable are different answers — see
+           * `isMissingFile`, whose miss errs towards the loud one. */
+          const original = entry.origin
+          if (original && isMissingFile(cause)) {
+            /* AN ORIGIN IS A PATH OR AN ADDRESS, and which one is not always
+             * decidable by looking. `https://…` is obvious; `/sample.epub` is
+             * not — it is a relative URL served by the app itself, and it is
+             * what the bundled sample book has been opened by all along. Read as
+             * a filesystem path it is simply absent, so pattern-matching on the
+             * scheme reported the one book most likely to still work as
+             * unopenable.
+             *
+             * So: try it as a file, and fall back to opening it as an address.
+             * The reader takes a string source directly, and a genuinely bad
+             * origin still fails — one step later, through the reader's own
+             * error path, which is where an unopenable book belongs. */
+            /* THE ROLLBACK TRAVELS WITH THE FALLBACK. This is the same open
+             * continuing by another route, not a new one replacing it — so it
+             * carries `undo` rather than retiring it, which would clear the
+             * jump's own override and land the book at its saved place instead
+             * of the mark that was clicked. */
+            if (/^https?:\/\//i.test(original)) {
+              openBook(original, null, undo ?? null)
+              return
+            }
+            void readBookAt(original)
+              .then((file) => {
+                if (fresh()) openBook(file, original, undo ?? null)
+              })
+              .catch((cause: unknown) => {
+                /* ⚠️ **THE CAUSE WAS DROPPED HERE, BEFORE THE SECOND TRY.** An
+                   origin that would not read as a path is tried as an address,
+                   and if THAT fails the reader sees the address failing — while
+                   the reason the path failed, which is usually the useful one
+                   (a moved folder, a permission, a disk that is not mounted),
+                   was discarded by an empty `catch`. It is said once here, where
+                   it is still known, and the fallback proceeds exactly as
+                   before; this does not decide anything, it only keeps the
+                   evidence. */
+                console.error('Paper: could not read the book at its saved place, trying it as an address', cause)
+                if (fresh()) openBook(original, null, undo ?? null)
+              })
+            return
+          }
+          /* MISSING, WITH NOWHERE ELSE TO LOOK: the folder is there and its
+           * content is not, which means an import that did not finish. The
+           * record stays — its tags and position are still the reader's — and
+           * they are told rather than left clicking something that does nothing.
+           *
+           * ⚠️ **A COPY THAT IS THERE AND WILL NOT READ IS NOT TOLD TO ADD IT
+           * AGAIN** (round 4), which it was: adding a book whose content file
+           * exists writes nothing — `keepOwnCopy` calls it a duplicate — so the
+           * advice sent the reader round a loop that changes nothing. */
+          console.error('Paper: could not read the stored book', entry.bookId, cause)
+          /* Nothing opened, so anything that committed on the assumption it
+             would has to come back off — see `undoOpen`. */
+          openFailed()
+          setImportNotice(
+            isMissingFile(cause)
+              ? 'That book could not be opened. Try adding it again.'
+              : 'That book could not be read from your library.',
+          )
+        })
+    },
+    // Stryker disable next-line ArrayDeclaration: all three are stable for the window's life — `fs` is a prop fixed at composition and the other two are callbacks over refs — so the first closure and the latest are the same function.
+    [openBook, fs, openFailed],
+  )
+
+  /* The drop hook now lives below `dropBooks`, which it takes as its handler —
+   * a `const` read at call time, so it has to be declared first. */
+
+  /**
+   * Fill the shelf in for the books nobody has opened.
+   *
+   * An import writes a placeholder — a filename for a title, no jacket —
+   * because parsing a folder of three hundred books at import time would make
+   * importing as slow as reading. That was always meant to be corrected on
+   * first open, and nothing ever opens most of a two-thousand-book library: the
+   * shelf built to show jackets showed almost none, and every row read like the
+   * file it came from.
+   *
+   * So the same parse, in the background, over the books that have not had one.
+   * `useEnrichment` owns the pacing; what is supplied here is the three things
+   * only this component knows — where the bytes are, what parses them, and
+   * whether the reader is currently in a book.
+   */
+  /* DECLARED HERE, above the enrichment pass, because the pass reads it —
+   * it stands down while books are arriving. It used to sit beside the import
+   * handlers three hundred lines below, which is where it is written but not
+   * where it is first needed. */
+  /* NOT SEEDED WITH THE SHELF FAILURE any more. It shared this channel with
+   * import notices, so the first folder import or failed open replaced it — and
+   * it was not dismissable, so until then it sat there permanently. The screens
+   * say it themselves now, in the place that would otherwise have claimed the
+   * library was empty.
+   *
+   * DECLARED ABOVE THE IMPORT COORDINATOR, which writes every import's notice
+   * through it.
+   *
+   * ⚠️ **A NOTICE AND A NONCE, NOT A STRING.** React bails out of a `setState`
+   * to an identical value and the expiry below is keyed on what is held, so
+   * the same failure reported twice — the second time shortly before the
+   * first one's timer ran out — did not restart the timer, and the repeat
+   * vanished almost as it appeared (2026-09-13 audit). `ReturnHint` learned
+   * this for the same reason. Every call is a new notice. */
+  /* The nonce is `useOccasion`'s — see there for why a repeat must be new. */
+  const [notice, raiseNotice, setNotice] = useOccasion<{ readonly text: string }>()
+  const importNotice = notice?.text ?? null
+  /* ⚠️ **IT SAYS SOMETHING, and it used to take `null` for "say nothing".** The
+     two are not one operation: nothing reads a notice but its text, so clearing
+     through here was a call no reader could tell from the one that did not
+     clear — and the only caller that meant it is the Dismiss button, which has
+     `setNotice` itself. */
+  const setImportNotice = useCallback(
+    (text: string) => raiseNotice({ text }),
+    // Stryker disable next-line ArrayDeclaration: `useOccasion`'s `raise` is built from an empty list, so this one and an empty one rebuild the callback equally often — never.
+    [raiseNotice],
+  )
+  /* The audiobook export, reachable from the command palette and nowhere else —
+     see `useAudiobook` for why that is the whole surface for now. */
+  const audiobookSource = useMemo(
+    () =>
+      audiobookSourceOf(
+        {
+          bookId: book.bookId,
+          doc: book.doc,
+          meta: book.meta,
+          toc: book.toc,
+          fixedLayout: book.fixedLayout,
+          sectionTexts: book.sectionTexts,
+        },
+        state.readingNotesAloud,
+      ),
+    [
+      book.bookId,
+      book.meta,
+      book.doc,
+      book.toc,
+      book.fixedLayout,
+      book.sectionTexts,
+      state.readingNotesAloud,
+    ],
+  )
+  const audiobook = useAudiobook({
+    /* The engine is macOS-only and the commands refuse elsewhere by name, so the
+       palette entry follows the same platform the rest of the app reads. */
+    available: platform === 'macos',
+    source: audiobookSource,
+    packs: voicePacks,
+    chosen: state.readingVoice,
+    rate: state.readingRate,
+    /* WI-34.4: the export asks for the reading's own audio before rendering a
+       chapter again. In a build with no voices capability this answers null,
+       which is the truth there — there is no rendered reading at all. */
+    findClip: findVoiceClip,
+    /* The lease that keeps a cached chapter from being evicted under the packer —
+       see `AudiobookPlatform.hold`. */
+    holdClips: holdVoiceClips,
+    say: setImportNotice,
+  })
+
+  /* Standing, not transient: a quarantined store is not something the app
+     did, it is something the reader has lost, and it stays until they say
+     they have read it. */
+  const [bootNotice, setBootNotice] = useState<string | null>(bootSaid)
+
+  /* THE IMPORT LIFECYCLE, ONCE — see `useImportRun`. The progress bar, the
+   * generation token, the abort handle, the handover and the settle were
+   * written out in both routes that copy books in, and had drifted apart in
+   * three ways by the time an audit read them side by side. */
+  const imports = useImportRun({ shelve: shelveImported, batch: SHELVE_BATCH, notice: setImportNotice })
+  const importing = imports.progress
+
+  const enrichment = useEnrichment({
+    books: library.books,
+    fs,
+    /* THE SCREEN, not whether a book is loaded. A book stays loaded when the
+     * reader steps back to the shelf, and the shelf is exactly where they want
+     * jackets appearing; gated on the open book, the pass would stop the first
+     * time anything was read and never start again that session. */
+    reading: onReader,
+    /* AND NOT WHILE BOOKS ARE STILL ARRIVING. The import shelves as it
+     * copies, so rows reach this pass mid-import; taking them would put a
+     * parse a second against a copy loop that wants the same thread seventy
+     * times a second. */
+    importing: importing !== null,
+    add,
+    keepJacket: library.keepJacket,
+    readBook: (entry) => {
+      // `storedBookName`, the same reconstruction `openStored` uses — the
+      // parser routes on the extension and the vault stores by hash.
+      const name = storedBookName(entry)
+      return readOwnedBook(fs!, contentPathIn(entry.bookId, name), name)
+    },
+    parse: (file) => parseBook(file),
+  })
+
+  useEffect(
+    () => {
+      applyMetrics(document.documentElement, platform)
+    },
+    // Stryker disable next-line ArrayDeclaration: the platform cannot change under a running window — `usePlatform` resolves it once, at mount — so an empty list runs this exactly as often.
+    [platform],
+  )
+
+  /* §05: the system follows the OS by default, with an explicit override in
+   * Settings. Night is the dark surface; Paper is the light default. */
+  useEffect(() => {
+    if (!state.themeFollowsOs) return
+    dispatch({ type: 'setTheme', theme: prefersDark ? 'night' : 'paper', fromOs: true })
+  }, [prefersDark, state.themeFollowsOs, dispatch])
+
+  /* Remember every book that opens, so the switcher lists what this reader has
+   * actually read rather than a fixture shelf. Keyed on the metadata arriving,
+   * because that is when there is a title worth showing. */
+  const { bookId, meta, source, cover } = book
+
+  const { rekey: rekeyMarks } = marks
+  const { rekey: rekeyCards } = cards
+
+  /* Taking a book in — the bytes, the identity migration and the record, in one
+   * ordered sequence. It was four pieces of this component: two refs, a layout
+   * effect and a hundred and fifty lines of effect, and it has produced more
+   * defects than anything else in this app. On its own it is legible; here it
+   * read as a formality. See `useBookIntake`. */
+  const intake = useBookIntake({
+    bookId,
+    meta,
+    source,
+    /* WHICH OPEN, not which source — see `BookIntakeInput.generation`. The
+       same URL opened twice is two opens and one `source`. */
+    generation: book.generation,
+    fs,
+    add,
+    keepContent,
+    rekeyBook,
+    rekeyMarks,
+    rekeyCards,
+  })
+
+
+  /* The open book's row, narrowed to the two fields the effects below depend on.
+   *
+   * PRIMITIVES rather than the row or the array, so an effect restarts only when
+   * the thing it cares about changes. Depending on `library.books` restarted an
+   * in-flight cover encode on every position save.
+   *
+   * `null` and `undefined` are deliberately different here: `undefined` means no
+   * row (removed, or not yet recorded) and `null` means a row with nothing
+   * attached yet. Collapsing them is what made removing the open book start a
+   * cover write for a book that no longer existed. */
+  const openRow = bookId ? library.books.find((one) => one.bookId === bookId) : undefined
+  /* Whether the library HAS this book, which is the only question left. Phase 3
+   * asked two more — where the bytes are and where the jacket is — and kept a
+   * field for each; a book is a folder now, so both are derived from its id. */
+  const isShelved = Boolean(openRow)
+
+  /* WI-22.A2 — the marks an import kept but could not place are walked for
+   * once per open, and a hit is WRITTEN. Here rather than inside `useMarking`,
+   * which acts on a selection: nobody selected anything, and the pass runs on
+   * a book the reader has only just opened. `openRow?.contentHash` is the
+   * cache's generation, and is legitimately absent on a build composed without
+   * `sync` — which means no cache, never an unversioned one. */
+  /* WI-22.D1 — what other readers shared in this book, already anchored here.
+     `composition.overlays` is the fourth contribution type; `book.reanchor` is
+     the resolver port the kernel hands over rather than a capability finding
+     one. Empty for a composition with no `circle`. */
+  const overlays = useOverlays({
+    contributions: composition.overlays,
+    bookId: book.bookId,
+    openGeneration: book.generation,
+    parsed: book.meta !== null,
+    resolve: book.reanchor,
+  })
+
+  useReanchor({
+    reanchor: book.reanchor,
+    parsed: book.meta !== null,
+    bookId: book.bookId,
+    openGeneration: book.generation,
+    contentHash: openRow?.contentHash,
+    unplaced: marks.unplaced,
+    ready: marks.ready,
+    place: marks.place,
+  })
+
+
+
+  /**
+   * The native picker. Returns paths, which is the entire difference.
+   *
+   * PICKING FIVE BOOKS USED TO ADD ONE. The loop called `openBook` on every file
+   * in turn, and opening a book REPLACES the open one — so React saw a single
+   * source, the last, and the intake effect that shelves a book ran once. The
+   * other four were selected, reported as nothing, and never arrived.
+   *
+   * The button says "Add books", so all of them are added: each is copied into
+   * its own folder and put on the shelf, exactly as a folder import does, and
+   * then ONE is opened. The reader asked to add several and to be reading; both
+   * happen, and neither is inferred from the other.
+   */
+
+  /**
+   * Add every book, then open one — the shared half of picking and dropping.
+   *
+   * EXTRACTED BECAUSE THERE ARE NOW TWO CALLERS, and the drop path had been
+   * quietly missing this behaviour entirely: it opened `files.item(0)` and
+   * discarded the rest, which is the very defect the note above records as
+   * fixed for the picker. Written a second time in the drop handler, the two
+   * would drift on exactly the details that already went wrong once — which
+   * book opens, whether duplicates are reported, whether the shelf is told.
+   *
+   * `path` is nullable here where `PickedBook` requires one, because a drop has
+   * no path to give: the webview is handed bytes and a filename, not a location
+   * on disk. Nothing downstream needs it — `keepOwnCopy` derives the
+   * destination from the content hash — so the honest type is the one that
+   * admits the difference rather than inventing a path to satisfy a signature.
+   */
+  const addAndOpen = useCallback(
+    /* `note` rides along to the FINAL notice. The drop path knows things the
+     * batch cannot — how many items were unreadable, whether the walk was
+     * truncated — and setting them as their own notice up front meant the
+     * progress bar covered them and `summarise` then overwrote them: the one
+     * warning that books were silently missing was itself silently missing. */
+    async (picked: readonly { file: File; path: string | null }[], note?: string) => {
+      if (picked.length === 0) return
+      // The last, because that is the one the previous version happened to
+      // open — the same book opens as before, and now the rest arrive too.
+      const opening = picked[picked.length - 1]!
+      /* The note reaches the reader on EVERY path. The batch path folds it
+       * into the final summary below; the single-book path and the no-`fs`
+       * path (a plain browser tab, where nothing is shelved) have no summary,
+       * so the note stands alone — dropped there, a truncated or partly
+       * unreadable drop was reported only when persistence happened to be
+       * available, which is not what the warning was about. */
+      if (note && (picked.length === 1 || !fs)) setImportNotice(note)
+
+      /* SUPERSEDED BY EVERY INTAKE, not only by a multi-book one.
+       *
+       * The token used to be taken inside the branch below, so a single-file
+       * pick or drop advanced nothing. A folder walk already running was
+       * therefore still `current()` when it finished, and its closing
+       * `openBook` ran AFTER the single book the reader had just asked for —
+       * leaving them in the older book. One book is as much an intake as a
+       * thousand, and the thing being superseded is "which book opens last",
+       * which every intake decides. */
+      /* ⚠️ AND THE ONE IT REPLACED IS NAMED, not dropped in silence.
+       *
+       * The two ways in disagree about what a second intake means, and each is
+       * defensible on its own: `addFolder` REFUSES while one is running,
+       * because ⌘K during a walk once started two of them; this one
+       * SUPERSEDES, because dropping books is the reader saying "these now".
+       * What was not defensible is the seam between them. A drop during a
+       * folder walk aborted that walk, and the walk's own notice is guarded by
+       * a generation token this line has just advanced — so it returned
+       * without a word and the reader lost an import in progress with nothing
+       * on screen to say it had happened. */
+      /* ASKED OF `supersede` ITSELF, which answers as of now. This read
+         `imports.busy` — the last render's — so a run started in the same turn
+         was replaced in silence (2026-09-13 audit, #98, round 3). */
+      if (imports.supersede()) setImportNotice('That replaced the import already running.')
+      /* ⚠️ **AND IT SUPERSEDES A PENDING OPEN, BECAUSE IT IS ONE.** Every intake
+       * ends in `openBook`, so from here on it is an open the reader is waiting
+       * for — and the import's token is not the open's. They were two counters,
+       * so: start a multi-book import, open another book off the shelf, and the
+       * import finishing landed its `openBook` on top of the book chosen since
+       * (2026-09-13 audit). Claimed here — with whatever rollback a superseded
+       * open armed RETIRED, not left loaded; see `openRollback.ts` — and asked
+       * again below, before the book is opened. The shelving is not asked: it
+       * finishes whatever happens, as it always did. */
+      const fresh = openGenerations.current.claim()
+      undoOpen.current.arm(null)
+
+      /* Whether this intake was still the current one when it finished — a
+         superseded one must not open its book over the one asked for since.
+         The hook's answer, taken once the settle is over; a single pick runs
+         nothing and is current by construction. */
+      const current = await (async (): Promise<boolean> => {
+        if (!(picked.length > 1 && fs)) return true
+        const bytes = fs
+        /* THE LIFECYCLE IS `useImportRun`'s — the token, the signal, the
+         * progress bar, the handover chained one batch behind the copying, the
+         * settle the notice waits on, and the order the last two happen in.
+         * All six were written out here AND in the folder route, and had
+         * already drifted apart in three separate ways. What is left below is
+         * the WORK: copy each picked file, and say what happened to it. */
+        /* Asked again once the settle is over: a drop landing during the shelf
+           writes supersedes this run after the work last looked. */
+        return imports.run(
+          async (run) => {
+            // Stryker disable next-line ArrayDeclaration: the only reader is `summarise`, which counts by `status`; Stryker's filler has none, so it changes no count — and the one branch that reads the LENGTH ("no books found") belongs to a run that has been superseded and says nothing.
+            const outcomes: ImportOutcome[] = []
+            for (const [index, { file, path }] of picked.entries()) {
+              /* `break`, NOT `return`: the settle is unconditional, and
+                 returning walked straight past the write chain it waits for. */
+              if (!run.current()) break
+              run.report({ done: index, total: picked.length })
+              try {
+                /* WITH THE RUN'S SIGNAL, so a superseded run stops between the
+                 * hash and the write instead of finishing a copy nobody wants.
+                 * This said "neither the picker nor a drop has anything to stop"
+                 * and passed none — but either can be superseded, and
+                 * `keepOwnCopy` checks the signal at exactly that point
+                 * (2026-09-13 audit). `null` is that stop, not an outcome. */
+                const kept = await keepOwnCopy(bytes, file, path, run.signal)
+                if (kept) {
+                  outcomes.push(kept)
+                  run.shelve(kept)
+                }
+              } catch (cause) {
+                console.error('Paper: could not add', path ?? file.name, cause)
+                // Stryker disable next-line LogicalOperator: nothing reads a FAILED outcome's path — `summarise` counts by status and `shelveImported` filters failures out — so which of the two names it carries cannot be seen.
+                outcomes.push({ path: path ?? file.name, status: 'failed', name: file.name })
+              }
+            }
+            return outcomes
+          },
+          {
+            summarise: (outcomes, unsaved) => {
+              const summary = summarise(outcomes, unsaved)
+              return note ? `${summary} ${note}` : summary
+            },
+            onFailure: (cause) => {
+              console.error('Paper: the import failed', cause)
+              setImportNotice('Those books could not be added.')
+            },
+          },
+        )
+      })()
+      /* Both tokens: the import's says whether this intake was superseded by
+         another, the open's whether any open has been asked for since. */
+      if (!current || !fresh()) return
+      openBook(opening.file, opening.path)
+    },
+    // Stryker disable next-line ArrayDeclaration: `openBook` and `fs` are stable, and the only members of `imports` this reads — `supersede` and `run` — are stable callbacks over refs, however often the object around them is rebuilt.
+    [openBook, fs, imports],
+  )
+
+  const addBooks = useCallback(
+    () => {
+      void pickBooks()
+        .then((picked) =>
+          /* ITS OWN CATCH, so the sentence matches the stage. One catch over
+           * both used to answer a rejected ADD with "The file picker failed" —
+           * files had been selected and partly copied, and the reader was sent
+           * to re-pick them. */
+          addAndOpen(picked).catch((cause: unknown) => {
+            console.error('Paper: could not add the picked books', cause)
+            setImportNotice('Those books could not be added.')
+          }),
+        )
+        .catch((cause: unknown) => {
+          /* SAID, not only logged. A cancelled picker resolves empty, so
+           * reaching here is a real failure — and a reader whose "Add books"
+           * produced nothing at all cannot tell a broken picker from a click
+           * that did not land. */
+          console.error('Paper: the book picker failed', cause)
+          setImportNotice('The file picker failed — nothing was added.')
+        })
+    },
+    // Stryker disable next-line ArrayDeclaration: `addAndOpen`'s own dependencies are stable for the window's life, so an empty list holds the same function this one does.
+    [addAndOpen],
+  )
+
+  /**
+   * Books dropped on the window, treated exactly as picked ones.
+   *
+   * A drop used to be the one route in that could not report on itself: it
+   * opened a book and said nothing, so dropping a folder of forty did nothing
+   * at all and dropping five added one, with no notice either way. It goes
+   * through the same path as the picker now, so the shelf fills, duplicates are
+   * named, and failures are counted in the same sentence.
+   */
+  const dropBooks = useCallback(
+    ({ books, unreadable, truncated }: DropHaul) => {
+      /* SAYS WHICH KIND OF NOTHING IT WAS. The drop is filtered to the formats
+       * Paper reads, so a dropped `.txt` or a folder with no books in it yields
+       * an empty list — and a drag that produces no response is
+       * indistinguishable from a frozen window. But "no books here" and "the
+       * books are there and unreadable" are different facts, and reporting the
+       * first for the second is the more alarming of the two told as the
+       * milder. The haul distinguishes them; so does this. */
+      if (books.length === 0) {
+        setImportNotice(
+          unreadable > 0
+            ? `Nothing in that drop could be read — ${unreadable} ${unreadable === 1 ? 'item' : 'items'} failed.`
+            : 'Nothing Paper can open was in that drop.',
+        )
+        return
+      }
+      /* The ceilings are announced rather than applied quietly — a reader who
+       * drops six thousand books and is shown five thousand, or whose drop
+       * held three unreadable files among forty good ones, has otherwise been
+       * told something untrue by omission. AS PART OF THE FINAL NOTICE, not
+       * before the batch: set up front, the progress bar covered it and the
+       * batch summary then replaced it. */
+      const notes = [
+        truncated ? `That drop held more than ${MAX_FILES} books — took the first ${MAX_FILES}.` : null,
+        unreadable > 0
+          ? `${unreadable} ${unreadable === 1 ? 'item' : 'items'} could not be read.`
+          : null,
+      ].filter((one): one is string => one !== null)
+      /* ⚠️ **A BACKSTOP THAT CANNOT BE REACHED FROM HERE, AND IT STAYS.**
+         `addAndOpen` is handed files this drop produced, and every await inside
+         it is caught where it happens: the import's own `run` never rejects and
+         `openBook` cannot throw on a `File`. So a sweep would be measuring a
+         rejection nobody can make — while the lines themselves are for the one
+         a later change could (2026-09-14). */
+      // Stryker disable BlockStatement: unreachable — see the note above.
+      void addAndOpen(
+        books.map((file) => ({ file, path: null })),
+        notes.length ? notes.join(' ') : undefined,
+      ).catch((cause: unknown) => {
+        /* SAID, like every other route in. The drop was the one intake whose
+         * failure went to the console alone — the silent-failure shape this
+         * callback's own header says it exists to remove. */
+        // Stryker disable StringLiteral,CallExpression: unreachable with the block above — neither call can be observed, nor either sentence read back.
+        console.error('Paper: could not add what was dropped', cause)
+        setImportNotice('Those books could not be added.')
+      })
+    },
+    // Stryker restore BlockStatement,StringLiteral,CallExpression
+    // Stryker disable next-line ArrayDeclaration: what `addAndOpen` calls is stable for the window's life — `openBook`, `fs`, and `imports.supersede` and `imports.run` — so a first `addAndOpen` does what every later one does.
+    [addAndOpen],
+  )
+
+  /* Window-wide, not just over the empty state. A file dropped anywhere the
+   * app does not intercept NAVIGATES the webview to it — the interface is
+   * replaced by WebKit's PDF viewer with no error and no way back. */
+  const { dragging } = useFileDrop(dropBooks)
+
+  /* Books the LAUNCH carried, through the picker's route with the path kept —
+   * a double-clicked book is one the shelf should be able to reopen. The
+   * subscription is the root's: it registers the shell listener and only then
+   * tells the shell it may release what it held (`openedFiles.ts`). */
+  /* ⚠️ **THE HANDLER RIDES IN A REF, so the subscription below depends on the
+   * STABLE `openRequests` and nothing else.**
+   *
+   * `addAndOpen` is a `useCallback` over `[openBook, fs, imports]`, and
+   * `imports` changes identity while an import runs. With it in the effect's
+   * dependencies, the effect tore down and rebuilt on every one of those
+   * ticks, and each rebuild cost two things the comments here already say
+   * matter:
+   *
+   *   - the native listener was removed and re-registered, and `openedFiles.ts`
+   *     answers only the FIRST readiness — so a book double-clicked in that
+   *     window reached no listener at all and was silently dropped;
+   *   - `chain` is a local, so the "one launch at a time" ordering restarted
+   *     from resolved, which is exactly the concurrency the paragraph below
+   *     exists to prevent.
+   *
+   * Subscribing once per `openRequests` — that is, once for the window's
+   * lifetime — is what the comment above already describes as the intent. */
+  const openLaunched = useRef(addAndOpen)
+  /* FILLED DURING RENDER, as `rememberRef` is below — NOT BY AN EFFECT, which
+     this was. Every value `addAndOpen` reads is stable for the window's life
+     (see the directive on `dropBooks`' dependencies), so a ref never refreshed
+     cannot be told from one that is, and the effect doing the refreshing was a
+     call no test could see removed — two directives and a surviving mutant
+     said so (2026-09-15). The refresh stays: that stability is a property of
+     `useImportRun` and `useBook` this file must not depend on silently. */
+  openLaunched.current = addAndOpen
+
+  useEffect(
+    () => {
+      if (!openRequests) return
+      /* IN ORDER, one launch at a time. Two deliveries close together — the
+       * reader double-clicks A, then B — used to run concurrently, and a slow
+       * A (a big PDF off a network volume) could finish its `addAndOpen` AFTER
+       * B's, leaving A open when B was the later ask. The chain survives a
+       * failure: one launch that cannot be read must not dam the next. */
+      let chain: Promise<void> = Promise.resolve()
+      return openRequests.subscribe((paths) => {
+        chain = chain
+          .then(() =>
+            takeOpened(paths, {
+              addAndOpen: (books, note) => openLaunched.current(books, note),
+              notice: setImportNotice,
+            }),
+          )
+          .catch((cause: unknown) => {
+            console.error('Paper: could not open what the launch carried', cause)
+          })
+      })
+    },
+    // Stryker disable next-line ArrayDeclaration: `openRequests` is a prop the composition root hands over once, for the window's life — see the note above — so subscribing on mount and subscribing on its change are the same subscription.
+    [openRequests],
+  )
+
+  /**
+   * Add a whole folder.
+   *
+   * The books are copied into the vault and the shelf fills from what landed —
+   * NOT by opening each one, which would mean parsing three hundred books to
+   * learn three hundred titles. A row appears with the filename and gains its
+   * real metadata and cover the first time it is actually read.
+   *
+   * Progress is reported per book rather than as a spinner, and failures are
+   * named individually: "4 of 300 failed" tells a reader nothing they can act
+   * on.
+   */
+
+  /**
+   * A notice is TRANSIENT, and it was not.
+   *
+   * Nothing ever cleared this, so "1,959 added" — or a tag-import error from
+   * twenty minutes ago — stayed on screen for the rest of the session. That
+   * was survivable while the line had a row of its own above the shelf. It is
+   * not survivable now the line shares the status bar's one work slot with
+   * the enrichment pass: a notice that never goes away is a parse pass that
+   * can never report, and the reader is left with no way to tell whether the
+   * app is still doing something.
+   *
+   * Long enough to read a sentence twice; the notices are one line and say
+   * one thing. Nothing acts on the notice, so nothing is lost by it going —
+   * every failure it reports is also on the console, and every count it
+   * reports is visible in the shelf itself.
+   */
+  /* KEYED ON THE NOTICE, NOT ITS TEXT — see `notice`: a repeat is a new one
+     and gets the whole of its time. */
+  /* ⚠️ **NO `notice === null` GUARD, AND THERE WAS ONE** (2026-09-15). With no
+     notice up the timer sets null over null, which React discards without
+     rendering, and the next notice's run clears it first — so the guard saved
+     one idle timer and changed nothing anybody could see, which a mutation
+     sweep said. */
+  useEffect(() => {
+    const timer = setTimeout(() => setNotice(null), NOTICE_MS)
+    return () => clearTimeout(timer)
+  }, [notice])
+
+  /* THE READER'S FILING AND THEIR MARGINALIA, out to a file and back — see
+   * `useArchives`. Four handlers and a hundred and seventy lines of the same
+   * errand (pick, plan, write, say what happened), none of which touches the
+   * position, the screen or the keyboard map this component coordinates. */
+  const archives = useArchives({ library, marks, cards, notice: setImportNotice })
+
+  const addFolder = useCallback(
+    () => {
+      /* REFUSES TO RE-ENTER. The toolbar button carried `disabled={importing
+       * !== null}` and that was the whole guard — so when the control moved to
+       * the empty state and the ⌘K palette, the palette had none and ⌘K during
+       * an import started a second one: two walks, two progress streams into
+       * one bar, two notices overwriting each other.
+       *
+       * Guarded HERE rather than only in the palette, because a guard that
+       * lives in one caller is a guard the next caller has to remember. The
+       * palette also omits the command while importing, so the reader is not
+       * offered something that would refuse — but this is what makes it true.
+       *
+       * ⚠️ **A RESERVATION, TAKEN BEFORE THE PICKER AND SPENT WITH THE WALK**
+       * (2026-09-13 audit, #98). This read `imports.busy` here and again after
+       * the picker — first as the callback captured it, then through a ref
+       * refreshed each render — and both were the LAST RENDER's answer. Two
+       * choices landing in one turn both read the render from before either had
+       * started, and the second superseded the walk the first had been admitted
+       * to. While a reservation is held no second folder route gets a picker, and
+       * its own `run` checks again in the same turn as the walk it starts. */
+      const reservation = imports.reserve()
+      if (reservation === null) return
+      /* THE TERMINAL CATCH. `run` reports its own failures through `onFailure`,
+       * but its settle — the shelving handover — used to reject past that, and a
+       * detached IIFE turned it into an unhandled rejection with no notice
+       * anywhere.
+       *
+       * THE SETTLE IS HANDLED INSIDE `run` NOW, which is where it belonged:
+       * catching it here said the right sentence but left the progress bar up and
+       * `imports.busy` true forever, so this route refused every later import.
+       * This stays as the backstop it should always have been — a detached IIFE
+       * with no catch is a rejection nobody hears.
+       *
+       * ⚠️ **AND IT CANNOT BE REACHED FROM HERE, WHICH IS WHY IT HAS A NAME.**
+       * Everything the run below awaits is caught where it happens — the picker
+       * has its own `catch`, `run` promises never to reject, and nothing between
+       * them throws — so no test can put a rejection into it and a sweep would be
+       * measuring a failure nobody can make. Named so the directive has something
+       * to sit on; kept because the next await added here will not necessarily be
+       * caught (2026-09-14). */
+      // Stryker disable BlockStatement,CallExpression,StringLiteral: unreachable — see the note above.
+      const settleFailed = (cause: unknown) => {
+        /* And the reservation, if the throw came before it was spent. */
+        reservation.release()
+        console.error('Paper: the folder import failed to settle', cause)
+        setImportNotice('That folder could not be imported.')
+      }
+      // Stryker restore BlockStatement,CallExpression,StringLiteral
+      void (async () => {
+        /* A rejected picker is a FAILURE, not a cancellation — cancelling
+         * resolves null — and swallowing it into the same null made a broken
+         * dialog look like a change of mind: the reader clicked Import, nothing
+         * happened, nothing was said anywhere. */
+        const folder = await pickFolder().catch((cause: unknown) => {
+          console.error('Paper: the folder picker failed', cause)
+          setImportNotice('The folder picker failed — nothing was imported.')
+          return null
+        })
+        if (!folder || !importFs) {
+          reservation.release()
+          return
+        }
+        const bytes = importFs
+        /* THE LIFECYCLE IS `useImportRun`'s, THE SAME ONE THE DROP ROUTE USES —
+         * so the two supersede each other rather than only themselves, and the
+         * progress bar, the token, the signal and the settle cannot disagree
+         * between them. They already did, in three separate ways. */
+        const walking = reservation.run(
+          (run) =>
+            importFolder(bytes, folder, {
+              onProgress: run.report,
+              /* UNCONDITIONAL: a walk that has been superseded still copied
+               * these bytes, and a copy with no record is invisible to the shelf
+               * and to removal alike. The token governs the notice, never the
+               * bookkeeping. */
+              onCopied: (copied) => {
+                for (const one of copied) run.shelve(one)
+              },
+              signal: run.signal,
+            }),
+          {
+            summarise,
+            onFailure: (cause) => {
+              console.error('Paper: the folder import failed', cause)
+              setImportNotice('That folder could not be imported.')
+            },
+          },
+        )
+        /* REFUSED WHEN ANOTHER IMPORT STARTED WHILE THE READER CHOSE — the drop
+         * route supersedes rather than reserving, so one can — and SAID: the
+         * reader chose a folder, and a choice that silently does nothing is what
+         * every notice on this route exists to prevent (2026-09-13 audit). */
+        if (walking === null) {
+          setImportNotice('Another import started while you were choosing — that folder was not imported.')
+          return
+        }
+        await walking
+      })().catch(settleFailed)
+    },
+    // Stryker disable next-line ArrayDeclaration: `importFs` follows a prop fixed for the window's life, and the one member of `imports` this reads, `reserve`, is a stable callback over refs.
+    [importFs, imports],
+  )
+
+
+  /**
+   * Take a book off the shelf.
+   *
+   * ONE RENAME, into the trash. Phase 3's removal touched three places — a row,
+   * the bytes, the cover — any of which could fail alone, and two of which did.
+   * A book is a folder, so removing it is moving that folder.
+   *
+   * THE PROMISE IS EXACT and unchanged: the file the reader imported is not
+   * touched. What moves is Paper's own copy, along with the tags, the position
+   * and the marks that live beside it — recoverable, because a trash is a
+   * visible directory rather than hidden state, and because re-adding the same
+   * bytes lands on the same folder name.
+   */
+  const removeBook = useCallback(
+    (entry: IndexedBook) => {
+      /* Stable for the hook's life, and asserted — see `openBook`. */
+      intake.noteRemoval(entry.bookId)
+      remove(entry.bookId)
+    },
+    // Stryker disable next-line ArrayDeclaration: `remove` is the library service's own memoized verb and `intake.noteRemoval` is stable (see `openBook`), so the first closure is the latest.
+    [remove],
+  )
+
+  /**
+   * THE TRASH, READ ONLY WHILE THE SHEET IS OPEN.
+   *
+   * `listTrash` walks `trash/` and opens a `book.json` per folder, which is
+   * work proportional to everything ever removed — so it runs when the reader
+   * asks and not on every render of a shelf they are only scrolling.
+   *
+   * RE-READ AFTER A RESTORE rather than filtered in place: `restore` can come
+   * back `partial`, and a row removed from a local array would claim a success
+   * the disk did not give. The disk is the answer; this only shows it.
+   */
+  const [trashRows, setTrashRows] = useState<readonly TrashedBook[] | null>(null)
+  /* WHY IT COULD NOT BE READ, kept apart from "there is nothing in it".
+     `listTrash` throws for a trash directory that exists and will not read —
+     on purpose, so unreadable is never reported as empty — and turning that
+     into `[]` put "Nothing removed" in front of a reader whose book was
+     sitting right there. */
+  const [trashError, setTrashError] = useState<string | null>(null)
+  /* A SECOND SLOT, because one could not hold both. A restore reported its
+     failure into `trashError` and then refreshed the list, and the refresh
+     begins by clearing that field — so the message a reader needed was gone
+     in the same tick it was written. Each slot is owned by exactly one
+     thing: the list read clears its own, the action clears its own. */
+  const [restoreError, setRestoreError] = useState<string | null>(null)
+  /* ONE NOW FOR THE WHOLE SHEET, read when it opens. A hundred rows each
+     calling `Date.now()` would be a hundred slightly different nows, and two
+     books removed in the same second could report different days left. The
+     same reasoning the shelf's own `now` carries; it does not ride here
+     because the shelf recomputes on a minute tick and a fortnight does not
+     need one. */
+  const [trashNow, setTrashNow] = useState(0)
+  /* WHICH SCAN IS ALLOWED TO ANSWER. A scan returns a cleanup that the
+     effect uses, and the post-restore call discarded it — so an older scan
+     could still be in flight across a close-and-reopen and overwrite the
+     newer one's rows. A counter settles it without the caller having to
+     remember a cleanup it has nowhere to put. */
+  const trashScan = useRef(0)
+  /** The newest scan's `done` — what a superseded scan's `done` waits for. */
+  const latestScan = useRef<Promise<void>>(Promise.resolve())
+  /**
+   * Read the trash into state. `done` settles once the rows are set or the
+   * failure recorded — a restore awaits it, so its row is not re-enabled over
+   * a list that has not caught up and offered for a second restore. `cancel`
+   * is the effect's cleanup; `trashScan` is what stops a superseded read from
+   * answering either way.
+   */
+  const scanTrash = useCallback(
+    (): { readonly done: Promise<void>; readonly cancel: () => void } => {
+      if (!fs) {
+        setTrashRows([])
+        // Stryker disable next-line CallExpression: only a scan can set this, and a scan needs a filesystem — with none there has never been a failure to clear.
+        setTrashError(null)
+        // Stryker disable next-line ObjectLiteral: both members are the empty answer already — `done` is awaited by a restore with nothing to wait for, and `cancel` is an effect cleanup with no scan to stop.
+        return { done: Promise.resolve(), cancel: () => {} }
+      }
+      // Stryker disable next-line UpdateOperator: the scan's number is only ever compared with the counter it was taken from, so counting down names every scan as uniquely as counting up.
+      const scan = ++trashScan.current
+      let live = true
+      setTrashError(null)
+      const applied = listTrash(fs)
+        .then((rows) => {
+          if (!live || scan !== trashScan.current) return
+          /* Newest first — the book a reader came here for is the one they just
+             lost, and it is almost never at the bottom of a fortnight's list.
+             An entry with no readable stamp sorts last rather than as 1970: it
+             is not old, it is unknown. */
+          setTrashRows(
+            [...rows].sort((a, b) => (b.removedAt ?? -Infinity) - (a.removedAt ?? -Infinity)),
+          )
+        })
+        .catch((thrown: unknown) => {
+          if (!live || scan !== trashScan.current) return
+          setTrashRows([])
+          setTrashError(messageOf(thrown))
+        })
+      /* SUPERSEDED IS NOT DONE. A scan a newer one overtook resolved `done`
+         having set nothing, so a restore awaiting it re-enabled its row over a
+         list that had not caught up — and while the newer scan was still
+         pending, the same book could be restored a second time. A superseded
+         scan is done when the scan that superseded it is: what its awaiter
+         wanted was the list as it is now, and only the newest scan can say. */
+      const done: Promise<void> = applied.then(() => (scan === trashScan.current ? undefined : latestScan.current))
+      latestScan.current = done
+      return {
+        done,
+        /* EVERY LATE ANSWER THIS STOPS IS STOPPED BY SOMETHING ELSE TOO. A scan
+           cancelled by the sheet closing answers into a sheet that is not drawn,
+           and reopening resets rows and failure before the next scan starts, in
+           the same commit; a scan overtaken by a newer one is refused by
+           `scan !== trashScan.current` first. What is left is the unmount, where
+           there is nothing to see. */
+        // Stryker disable next-line BlockStatement: see above.
+        cancel: () => {
+          // Stryker disable next-line BooleanLiteral: see above.
+          live = false
+        },
+      }
+    },
+    // Stryker disable next-line ArrayDeclaration: `fs` is a prop fixed by the composition root for the window's life, and every mount the tests make hands it over once — so the first scan's filesystem is every scan's.
+    [fs],
+  )
+
+  useEffect(() => {
+    if (!state.trashOpen) return
+    setTrashRows(null)
+    // Stryker disable next-line CallExpression: the scan below clears it in the same effect — `scanTrash` resets the failure before it reads, and with no filesystem there has never been one.
+    setTrashError(null)
+    setRestoreError(null)
+    setTrashNow(Date.now())
+    /* THE SCAN'S OWN CLEANUP, returned. A `readTrash` stood between the two,
+       a callback over `scanTrash` whose one reader was this effect — so its
+       dependency list could only ever be as stable as `scanTrash` itself, and
+       a mutation sweep said so (2026-09-15). */
+    return scanTrash().cancel
+  }, [state.trashOpen, scanTrash])
+
+  const restoreBook = useCallback(
+    (bookId: string) => {
+      /* RETURNED, so the row can disable itself while this runs — and CAUGHT,
+         because `restore` rejects on a filesystem fault and an unhandled
+         rejection was a button that reported nothing either way: the row
+         stayed, the book did not come back, and the only trace was in the
+         console. The message goes where the list's own failure goes. */
+      setRestoreError(null)
+      return services.library
+        .restore(bookId)
+        .then((outcome) => {
+          /* A PARTIAL RESTORE IS NOT A SUCCESS. `restoreBook` moves file by
+             file and a name already live wins, so some of the book can come
+             back while the rest stays behind; saying nothing would leave the
+             reader believing they had it. */
+          if (outcome.state === 'partial') {
+            setRestoreError('Some of that book could not be moved back. It is still here.')
+          } else if (outcome.state === 'absent') {
+            setRestoreError('That book is no longer in the trash.')
+          }
+        })
+        .catch((thrown: unknown) => {
+          setRestoreError(messageOf(thrown))
+        })
+        .finally(() =>
+          /* The shelf learns about the restore itself through the library
+             subscription; this is only the trash list catching up — AWAITED,
+             so the row is re-enabled over the list as it is now, not the list
+             as it was. `trashScan` is what stops a superseded read from
+             answering; there is nowhere here to hang the cleanup. */
+          scanTrash().done,
+        )
+    },
+    // Stryker disable next-line ArrayDeclaration: both are fixed for the window's life — `services` is built once by the composition root, and `scanTrash` follows only `fs`, which the root resolves before the first render — and every mount the tests make hands over each once.
+    [services.library, scanTrash],
+  )
+
+  /* Where to resume, from the book's own record — `useResumeAt`, which says
+     why the record outranks the index and why the previous open's answer is
+     cleared before the next open's read lands. */
+  const resumeAt = useResumeAt(bookId, fs)
+  /**
+   * Open the NEXT book at a place, rather than where it was last left.
+   *
+   * "Open at a place" is not a new path — it is the path every reopen takes.
+   * `lastLocation` below is read exactly ONCE, when the book finishes parsing
+   * (`FoliateView` holds it in a ref; `session.ts` passes it to
+   * `view.init({ lastLocation })`), so a jump into another book only has to
+   * make that one read answer differently.
+   *
+   * KEYED BY `bookId`, NOT A FLAG. The id is derived from the file's content
+   * and arrives a few milliseconds after `open`, and the read happens at parse
+   * completion — so matching on it is exact, and an override left over from an
+   * open the reader abandoned cannot be applied to whatever they opened
+   * instead. `useBook`'s `generationRef` guards the same class of race, and its
+   * comment says what happens without one: every late callback from a book
+   * being closed wrote itself back over the book that replaced it.
+   *
+   * DECLARED HERE rather than beside `goToJump`, which is the only writer.
+   * `lastLocation` reads it, `lastLocation` is computed during render, and a
+   * `const` referenced above its own declaration is a temporal dead zone, not
+   * a hoist.
+   */
+  const [openAt, setOpenAt] = useState<Place | null>(null)
+
+  const lastLocation = locationToOpen(bookId, openAt, resumeAt, positionOf(bookId))
+
+  /**
+   * Spend the override once the reader has landed.
+   *
+   * ON THE POSITION, not on the id alone. The id resolves within a few
+   * milliseconds of the open and long before the section renders, so clearing
+   * on `bookId` would drop the override before `lastLocation` was ever read —
+   * the jump would open the right book at the wrong place, which is the failure
+   * this whole item is about. A published CFI means a section has rendered,
+   * which means the read has happened.
+   *
+   * AND IT IS ALSO WHERE THE OPEN LANDS. A section rendered in the book the
+   * jump asked for is the whole of what "it worked" means, so the rollback is
+   * released in the same breath the override is spent — see `openRollback.ts`
+   * for why releasing it any earlier was wrong.
+   */
+  useEffect(() => {
+    if (!overrideSpent(bookId, openAt, book.position.cfi)) return
+    setOpenAt(null)
+    undoOpen.current.release()
+  }, [openAt, bookId, book.position.cfi])
+
+  /**
+   * A book whose bytes arrived and which would not open is a failed open.
+   *
+   * ⚠️ THE ROLLBACK USED TO BE RELEASED WHEN THE BYTES LANDED, which is before
+   * anything has parsed. So a jump into a corrupt, DRM-locked or unsupported
+   * book cleared its own undo, showed the reader an error, and left the place
+   * override armed and the "← Back to …" line offering a jump that never
+   * happened. `book.error` is the reader's terminal open failure — `fail` is
+   * generation-guarded, so this is about the book on screen — and it is the
+   * signal this half was missing.
+   */
+  useEffect(() => {
+    if (book.error !== null) openFailed()
+  }, [book.error, openFailed])
+
+  /* HOLD THE WINDOW SHUT UNTIL EVERYTHING HAS LANDED — see `useWindowClose`.
+   * A whole errand with its own lifetime failure modes, and both defects it
+   * has had were lifetime defects. The composition's teardown when there is
+   * one; the kernel's own flush-and-drain when there is not. */
+  // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it.
+  const reportClose = useCallback((message: string, cause: unknown) => console.error(message, cause), [])
+  /* ⚠️ **THE IMPORT IS STOPPED BEFORE THE DRAIN, AND IT USED TO BE IGNORED
+   * ALTOGETHER** (2026-09-13 audit, #96). Both preparations end in a DRAIN of
+   * the write queue, and a queue can only drain what it has been given: an
+   * import still copying goes on copying while the window closes, and its
+   * handover runs one batch BEHIND the copying, so a book already on disk could
+   * have its shelf write queued after the drain had finished — or never. Bytes
+   * with no record are a book the library cannot see and `paper book remove`
+   * cannot reach.
+   *
+   * `imports.stop()` aborts the copying and resolves once every run's handover
+   * has settled, which is the point at which there is something for the drain
+   * to find.
+   *
+   * ⚠️ **REGISTERED, NOT AWAITED HERE — AWAITED HERE IT COVERED THE WINDOW'S
+   * CLOSE AND NOT EVERY QUIT.** ⌘Q on macOS reaches `app/shutdown.ts`'s teardown
+   * directly and never passes through this handler, so that path drained under
+   * a live copy; this note said so and pointed at `bootApp.ts`. Both teardowns
+   * now wait on `settleBeforeDrain` between their flush and their drain — the
+   * composed one in `shutdown.ts`, the kernel's own in `closePrepare` — and
+   * this registration is what they find there. */
+  // Stryker disable next-line ArrayDeclaration: `imports.stop` is a stable callback over refs, so registering it once is registering it for good.
+  useEffect(() => onBeforeDrain(imports.stop), [imports.stop])
+  useWindowClose(
+    useMemo(
+      () => beforeWindowClose ?? closePrepare(flushBeforeClose, settleBeforeDrain, () => services.drain(), reportClose),
+      // Stryker disable next-line ArrayDeclaration: all three are fixed for the window's life — the composition root hands `services` and `beforeWindowClose` over once, and `reportClose` is memoised over nothing — and every mount the tests make hands each over once.
+      [beforeWindowClose, services, reportClose],
+    ),
+  )
+
+  /* The book intake — bytes first, then record, one effect — lives in
+   * `useBookIntake`, where its ordering rationale is documented. */
+
+  /* File the book's own jacket, once.
+   *
+   * `cover` arrives as a Blob because the session has no business knowing where
+   * covers are kept; this is the layer that does. Downscaled on the way IN — a
+   * publisher's jacket is routinely 1600px and the shelf draws it at a couple of
+   * hundred, so decoding the full image per cell would do it on every render
+   * rather than once ever.
+   *
+   * Also no attachment step, and for the same reason: `cover.webp` inside the
+   * book's folder is a known path, so there is nothing to record and nothing
+   * that can go stale.
+   */
+  useEffect(() => {
+    if (!bookId || !cover || !isShelved || !fs) return
+    /* `keepCover`, which IS the one write path — this was its own copy of the
+     * same exists/downscale/mkdir/write sequence, written before the helper
+     * existed and left behind when it did, so the comment claiming a single
+     * path was describing an intention rather than the code. Two copies of a
+     * write is one of them missing the `exists` check later.
+     *
+     * There is no `cancelled` flag any more. It only ever guarded the write,
+     * and writing this book's jacket into this book's folder is correct whether
+     * or not the reader has since moved on — the path is derived from the id,
+     * so a late write cannot land on the wrong book. */
+    /* `keepJacket`, not `keepCover` directly: the write goes in line behind
+     * this book's record write and its removal. Called straight, it could
+     * recreate a folder that had just been moved to the trash. */
+    library.keepJacket(bookId, cover)
+  }, [bookId, cover, isShelved, fs])
+
+  /* Remember where the reader is, so the next open starts there.
+   *
+   * The recorder owns the "not on every page turn" rules — see its own file.
+   * Everything here is about the moments a position stops being reachable and
+   * must be written before it is: the window going away, and this component
+   * coming apart. `pagehide` rather than `unload`, which WebKit does not fire
+   * reliably; `visibilitychange` catches the app being hidden without closing,
+   * which on macOS is most of how an app is left. */
+  /* Through a ref, not closed over. The recorder is built once and outlives
+   * every render, so capturing `remember` directly would pin whichever one this
+   * component first rendered with — the exact staleness FoliateView's handler
+   * refs exist to prevent. It happens to be stable today; that is a property of
+   * `useLibrary` this file must not depend on silently. */
+  const rememberRef = useRef(rememberPosition)
+  rememberRef.current = rememberPosition
+
+  const saver = useRef<PositionRecorder | null>(null)
+  if (saver.current === null) {
+    saver.current = positionRecorder({
+      // The library's own verb — identity-guarded and clamped there, once,
+      // for this writer and for a peer's.
+      write: (id, at, fraction) => rememberRef.current(id, at, fraction),
+    })
+  }
+
+  useEffect(
+    () => {
+      /* NEVER NULL HERE, and it was guarded as though it could be: the ref is
+         filled during render, above, before any effect of this component runs.
+         The guard was the only branch of this effect nothing could take, and a
+         mutation sweep is what said so (2026-09-15). */
+      const recorder = saver.current!
+      const flush = () => recorder.flush()
+      const onHidden = () => {
+        if (document.visibilityState === 'hidden') flush()
+      }
+      /* AND THE CLOSE PATH. The close handler runs `flushBeforeClose()` before
+       * draining the queue — that is the whole design: hand over what memory
+       * holds, then drain — but the throttled position was never REGISTERED
+       * with it. So the last two seconds of reading rode on `pagehide`, which
+       * Tauri fires after the close request has already drained the queue: the
+       * flush wrote into a queue nothing would run, and quitting mid-page lost
+       * the place the reader quit at. */
+      const offBeforeClose = onBeforeClose(flush)
+      window.addEventListener('pagehide', flush)
+      document.addEventListener('visibilitychange', onHidden)
+      return () => {
+        // Stryker disable next-line CallExpression: a registration left behind calls a recorder that has just been flushed — nothing is pending, so nothing is written, and the registry is not something the window can be asked about.
+        offBeforeClose()
+        window.removeEventListener('pagehide', flush)
+        document.removeEventListener('visibilitychange', onHidden)
+        // In that order: whatever is outstanding is written, and only then is the
+        // timer that would have written it dropped.
+        recorder.flush()
+        // Stryker disable next-line CallExpression: `stop` only clears the timer, and the `flush` above has already cleared it.
+        recorder.stop()
+      }
+    },
+    // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it.
+    [],
+  )
+
+  const { cfi, fraction } = book.position
+  useEffect(() => {
+    /* The fraction travels WITH the CFI, on the same throttled write. Saving it
+     * separately would put a progress bar and the position it describes on two
+     * different cadences, and they would disagree for as long as the reader kept
+     * reading. */
+    /* Filled during render — see the effect above. */
+    saver.current!.record(bookId, cfi, fraction)
+  }, [bookId, cfi, fraction])
+
+  /* The book being read, AS THE SHELF KNOWS IT — the row the tag editor edits.
+   * Null on the library, and null for a `?book=` the shelf does not hold, so
+   * neither ⌘T nor the palette offers to tag a book that has no record to
+   * write the tag into. FROM `openRow`, which is the same lookup made once
+   * above — this ran its own scan of the shelf beside it. */
+  const readingBook = onReader ? (openRow ?? null) : null
+  /* Memoized as the one-element list `TagEditor` takes, or a fresh `[book]`
+   * inline at the render defeated every books-keyed memo inside it. */
+  const readingBooks = useMemo(() => (readingBook ? [readingBook] : NO_BOOKS), [readingBook])
+  const openTags = useCallback(
+    () => dispatch({ type: 'toggleLayer', layer: 'tagsOpen' }),
+    // Stryker disable next-line ArrayDeclaration: `dispatch` is `useReducer`'s, the same function for the component's whole life.
+    [dispatch],
+  )
+
+  /**
+   * Where the reader is, as a `Place` — the session's answer, paired with the
+   * book's identity.
+   *
+   * `book.placeHere()` rather than `book.position.cfi`, and the difference is
+   * not cosmetic: the host's copy of the CFI is a React commit behind the
+   * session's, and pairing the two is what once produced a bookmark describing
+   * two different pages. Null when the place cannot be pinned down, or before
+   * the content-derived id has resolved — a jump stack entry with no book id
+   * names nothing.
+   */
+  const placeHere = useCallback((): Place | null => {
+    const here = book.placeHere()
+    const id = book.bookId
+    return here && here.cfi && id ? { bookId: id, cfi: here.cfi } : null
+    /* Not `book` — see `pages`. `placeHere` asks the SESSION for its live
+       position, so a stable callback still answers where the reader is now. */
+  }, [book.placeHere, book.bookId])
+
+  /**
+   * "← Back to Loomings" — the line that tells a reader the key is worth
+   * pressing.
+   *
+   * A JUMP IS THE ONLY THING THAT CAN BE INVISIBLE. Every other way of moving
+   * through a book is something the reader did to the page in front of them;
+   * a jump replaces it, and without a word the reader has no reason to think
+   * anything is recoverable. ⌘[ existed for an afternoon before this and was
+   * a key nobody had been told about.
+   *
+   * NAMED BY CHAPTER, NOT BY PAGE. The plan's sketch said "back to p. 148" and
+   * a page number is the one thing an EPUB does not have — foliate only offers
+   * one where the book ships a page list, which most do not. The chapter is
+   * what the reader just left and what they would say themselves.
+   *
+   * Set only when a jump ACTUALLY happened: `jumpTo` returns false for a
+   * refused one, and offering a way back from a jump that did not occur is a
+   * worse lie than saying nothing.
+   *
+   * A LABEL AND A NONCE, not a label. Two jumps out of one chapter carry the
+   * same chapter name, React bails out of a `setState` to an identical value,
+   * and the reader's fade timer therefore never restarted — the second hint
+   * ran out on the first one's clock. See `ReturnHint`.
+   */
+  /* MINTED IN ONE PLACE — `useOccasion`, which the import notice shares — so the
+     nonce cannot be forgotten by the third call site. The held value is exactly
+     `ReturnHint`'s shape, `{ label, nonce }`. */
+  const [returnTo, raiseReturn, setReturnTo] = useOccasion<{ readonly label: string }>()
+  const raiseReturnHint = useCallback(
+    (label: string) => raiseReturn({ label }),
+    // Stryker disable next-line ArrayDeclaration: as above — another `useOccasion` `raise`, built once.
+    [raiseReturn],
+  )
+  /* DECLARED ABOVE `goToJump`, which clears it when a cross-book open fails.
+     A refused jump and a jump whose book would not open are the same lie to
+     the reader, and only the first was being caught. */
+
+  /** Go where a jump asks, and say whether it was accepted — see `JumpsDeps`. */
+  const goToJump = useCallback(
+    (target: JumpTarget, revert: () => void): boolean => {
+      if (typeof target === 'string') {
+        book.goTo(target)
+        return true
+      }
+      if (target.bookId === book.bookId) {
+        /* ⚠️ **A JUMP IS A REQUEST TO BE THERE, SO IT SHOWS THE READER.** A
+           jump into another book reaches `openBook`, which switches screens;
+           one within the open book called `goTo` and nothing else. History and
+           Marginalia are both reachable off the reader, so ⌘[ on the shelf, or
+           a mark of the open book clicked in the shelf's Marginalia, moved a
+           book nobody could see and left the reader where they were
+           (2026-09-13 audit). Only when the reader is not already the screen:
+           `goScreen` also shuts every layer and re-fits the pane. */
+        if (state.screen !== 'reader') dispatch({ type: 'goScreen', screen: 'reader' })
+        book.goTo(target.cfi)
+        return true
+      }
+      const row = library.books.find((one) => one.bookId === target.bookId)
+      if (!row) {
+        /* The book left the shelf between the row being drawn and the row
+           being clicked. Marginalia disables such rows, so this is the race
+           rather than the ordinary case.
+
+           REFUSED, AND SAID SO. Returning false keeps the stack still — it
+           must not record a departure the reader never made — and the notice
+           is what stops this being the silent no-op the whole item exists to
+           delete. `console.warn` alone was exactly that. */
+        setImportNotice('That book is no longer on your shelf.')
+        return false
+      }
+      /* ARMED WITH THE READ, consumed if it fails. The override and the
+         "← Back to …" line are both committed here on the assumption that the
+         open lands, and it can fail seconds later — missing content, an origin
+         that has moved. Without this the override stayed armed and was spent
+         by the NEXT book the reader opened, sending it to a place from a book
+         they never reached. Handed to `openStored` rather than written to the
+         ref here, so the open that carries it is the only one that can be
+         rolled back by it. */
+      /* ⚠️ THE OPEN STARTS FIRST, AND THE ORDER IS THE POINT. Taking the
+         rollback slot RETIRES the previous open's — it runs it — and that
+         rollback's whole job is `setOpenAt(null)`. Written the other way round
+         React batches the pair and the null wins, so a jump made while an
+         earlier jump was still in flight lost its own override and opened the
+         right book at the wrong place. */
+      openStored(row, () => {
+        setOpenAt(null)
+        setReturnTo(null)
+        /* ⚠️ **AND THE STACK, which was committed on the same assumption and
+           was not taken back with the rest of it** (#94). Returning `true`
+           lets `useJumps` record the departure at once; when the open then
+           fails, everything else this rollback undoes was a lie and the stack
+           entry was too — ⌘[ offered a way back from a jump that never
+           happened, and a failed Back consumed its destination without moving.
+           Safe to call whatever has happened since: the hook reverts only the
+           stack THIS navigation left. */
+        revert()
+      })
+      setOpenAt(target)
+      return true
+    },
+    [book.bookId, book.goTo, library.books, openStored, setReturnTo, state.screen, dispatch],
+  )
+
+  const jumps = useJumps({ placeHere, navigate: goToJump })
+
+  /**
+   * The note showing in place, or null.
+   *
+   * The SESSION decides what a note contains and renders it; this only decides
+   * that one is up. Dismissing goes back through the session, because it holds
+   * the view the note was rendered into and a host that merely stopped drawing
+   * it would leave an iframe alive behind the page.
+   */
+  const [footnote, setFootnote] = useState<FootnoteRender | null>(null)
+  /* Beside the footnote, and held here for the same reason: the session
+     publishes it and the screen draws it, so the value belongs to neither. */
+  const [plate, setPlate] = useState<PlateDetail | null>(null)
+
+  const jumpTo = useCallback(
+    (target: JumpTarget) => {
+      /* Read BEFORE the jump — this is where the reader is leaving from. */
+      const leaving = book.position.chapterLabel
+      /* ⚠️ **AND ONLY FROM A PLACE THE STACK COULD RECORD** (2026-09-15). The
+         stack keeps no origin where `placeHere` answers null — a section still
+         rendering, a spread whose page is a guess — and the line was raised
+         anyway: a button naming the chapter left that went nowhere, over a ⌘[
+         that was not bound. The same question the stack asks, and before the
+         jump, where it is still the place being left. */
+      const recorded = placeHere() !== null
+      if (jumps.jumpTo(target) && leaving && recorded) raiseReturnHint(leaving)
+    },
+    [jumps, book.position.chapterLabel, placeHere, raiseReturnHint],
+  )
+
+  /**
+   * Go to a place in the open book, as a fraction.
+   *
+   * ⚠️ **`record()` AND NOT `jumpTo`, AND THE DIFFERENCE IS THE WHOLE POINT.**
+   * `jumpTo` takes a CFI or an href and performs the navigation itself; a seek
+   * has neither — it has a proportion, which only the renderer can resolve.
+   * So this records the departure and then moves, which is exactly the case
+   * `record` exists for (a link the book navigates itself is the other one).
+   * Going through `jumpTo` would navigate twice.
+   *
+   * WITHOUT THIS A SLIPPED THUMB IS PERMANENT. A seek can move a reader a
+   * thousand pages, and `⌘[` is what brings them back.
+   */
+  const seekTo = useCallback(
+    (fraction: number) => {
+      jumps.record()
+      book.goToFraction(fraction)
+    },
+    [jumps, book],
+  )
+
+  /**
+   * Open a library search hit — WI-31.6.
+   *
+   * ⚠️ **THROUGH `jumpTo`, SO IT ENTERS THE STACK.** A hit is a jump like any
+   * other panel's, and the ledger names search hits among the panels that push
+   * onto it: called with `openStored` directly, the panel would move the reader
+   * with no way back and no "← Back to" line — exactly the defect
+   * `SearchPanel`'s `onGoTo` prop was added to fix for the in-book half.
+   *
+   * Declared AFTER `jumpTo` because it uses it, and given a stable identity
+   * because the Search panel's effect lists it: a fresh function every render
+   * would restart the library search whenever anything else in the app
+   * re-rendered.
+   */
+  /* ⚠️ **READ AT RENDER TIME, NOT CAPTURED AT BOOT.** The slot is bound during
+   * the `passages` capability's `start`, which runs after this component's
+   * module is loaded; a value read once would be null for ever on the very
+   * builds that have an index. It is a stable function reference either way —
+   * the port is made once by the capability. */
+  const passageIndex = services.passages()
+
+  const openPassage = useOpenPassage({
+    fs,
+    books: library.books,
+    jumpTo,
+    onProblem: setImportNotice,
+  })
+
+  /* Spent by using it, so the line does not linger over a place the reader has
+     already gone back to. */
+  const goBackFromHint = useCallback(() => {
+    setReturnTo(null)
+    jumps.back()
+  }, [jumps])
+
+  /**
+   * A link inside the book. Record the departure and let foliate navigate.
+   *
+   * NOT `jumpTo`. foliate navigates this one itself — `#handleLinks` calls
+   * `goTo(href)` unless the `link` event is cancelled — so calling `jumpTo`
+   * would move the reader twice and stack the origin twice. `record` is the
+   * push without the navigation, which is exactly the shape this needs.
+   *
+   * The event is left UNCANCELLED, which is what makes the link work. WI-12.3
+   * cancels it for a footnote and shows the note in place instead; everything
+   * that is not a footnote goes on navigating, with ⌘[ now able to bring the
+   * reader back.
+   *
+   * AND IT SAYS SO, which it did not. `record` pushed the origin and stopped
+   * there, so following a link armed ⌘[ and showed nothing — the reader landed
+   * somewhere else with no sign that going back was on offer. That is invisible
+   * for any link and unusable for a note: the whole point of the `*` at the
+   * head of a footnote, or the `↩` at the end of an endnote, is the round trip,
+   * and half of it was silent. The hint is the same one `jumpTo` raises,
+   * because it is the same movement — non-linear, and undoable.
+   *
+   * READ BEFORE THE PUSH. `record` does not navigate — foliate does, after this
+   * returns — so the label is where the reader still is either way; taking it
+   * first is what keeps that true if `record` ever does move them.
+   */
+  const onBookLink = useCallback(() => {
+    const leaving = book.position.chapterLabel
+    /* Only where the push records an origin — see `jumpTo`. */
+    const recorded = placeHere() !== null
+    jumps.record()
+    if (leaving && recorded) raiseReturnHint(leaving)
+  }, [jumps, book.position.chapterLabel, placeHere, raiseReturnHint])
+
+  /**
+   * A link whose scheme leaves the book.
+   *
+   * CANCELLED, ALWAYS. Leaving the event alone is what let foliate hand the
+   * raw href to `globalThis.open(href, '_blank')` — and "external" under
+   * `epub.js` is any scheme but `blob:`, so `javascript:` and `data:` went the
+   * same way. A book file does not get to decide what this window does.
+   *
+   * The href then goes to the platform's own browser through a route Paper
+   * chose, and a refusal is SHOWN rather than swallowed: a link that silently
+   * does nothing is the failure this path exists to delete.
+   */
+  const onBookExternalLink = useCallback(
+    (detail: ExternalLinkDetail, event: Event) => {
+      event.preventDefault()
+      void openExternal(detail.href_).then((refusal) => {
+        if (refusal) setImportNotice(refusal)
+      })
+    },
+    // Stryker disable next-line ArrayDeclaration: a constant dependency list is a constant identity whatever is in it.
+    [],
+  )
+  /* Every tag on the shelf, for the sheet's suggestions. Only walked while the
+   * sheet is up: the shelf computes its own for its own editors. */
+  /* ⚠️ **NULL WHILE THE SHEET IS CLOSED, AND THE SHEET IS DRAWN FROM IT.** The
+     closed branch answered `[]` — a shelf with no tags — for an editor that is
+     not rendered then, so nothing could read the claim, and a surviving mutant
+     said so (2026-09-15). Null says what it is: not walked. */
+  const shelfTags = useMemo(
+    () => (state.tagsOpen ? tagCounts(library.books) : null),
+    [state.tagsOpen, library.books],
+  )
+
+  /**
+   * Mark the selection, in the tint and style the selection bar is showing.
+   *
+   * The same two settings the selection bar writes, so a mark made by ⌘D and a
+   * mark made by clicking a swatch cannot come out looking different — which
+   * is what a second default would guarantee.
+   *
+   * ONE CALLBACK FOR BOTH ROUTES. The palette row and ⌘D each built this call
+   * for themselves, and the keyboard's copy has already gone stale once — the
+   * note in its effect's dependency list records a ⌘D that marked in the
+   * PREVIOUS colour (2026-09-13 audit).
+   */
+  const markSelection = useCallback(
+    () => marking.mark('', { tint: state.markTint, style: state.markStyle }),
+    [marking, state.markTint, state.markStyle],
+  )
+
+  /**
+   * "Close the book" — and every open still on its way, with it.
+   *
+   * ⚠️ **IT WAS `book.close()` AND NOTHING ELSE.** A stored book's read takes
+   * real time, and closing did not advance the open generation, so a read
+   * started before the close landed after it and put a book back on screen:
+   * "Close the book", and then a book opening. The rollback a pending jump
+   * armed stayed loaded too. Closing is the newest thing the reader asked for,
+   * so it supersedes a pending open exactly as an open does, and retires what
+   * that open armed (2026-09-13 audit).
+   */
+  const closeBook = useCallback(
+    () => {
+      openGenerations.current.claim()
+      undoOpen.current.arm(null)
+      book.close()
+    },
+    // Stryker disable next-line ArrayDeclaration: `book.close` is a stable callback of `useBook`'s, so the first closure closes the book every later one would.
+    [book.close],
+  )
+
+  /**
+   * A capability naming a command the kernel already owns.
+   *
+   * ⚠️ **WIRED HERE BECAUSE A SURFACE WITH NO CALLER IS THE DEFECT THIS REPOSITORY
+   * KEEPS DELETING TWICE.** `buildCommands` drops the duplicate and keeps the
+   * kernel's, which is right for the reader and silent for whoever wrote the
+   * composition — so the fact goes where a release build can be asked for it, the
+   * same place a quiet circle is diagnosed from.
+   *
+   * ⚠️ **ONCE PER ID FOR THE LIFE OF THE WINDOW, AND IT WAS ONCE PER REBUILD.**
+   * `buildCommands` runs whenever the palette's list is rebuilt, and that list
+   * depends on `state` and `book` — both of which change on every page turn. So
+   * one collision in a composition wrote a warning per page, into a ring of two
+   * thousand entries that is the only thing a release build can be asked: a long
+   * reading pushed every other diagnostic out of it with copies of one fact.
+   */
+  const reportedDuplicates = useRef(new Set<string>())
+  const onDuplicateCommand = useCallback(
+    (id: string) => {
+      if (reportedDuplicates.current.has(id)) return
+      reportedDuplicates.current.add(id)
+      diagnosticLog?.record({
+        at: Date.now(),
+        level: 'warn',
+        scope: 'commands',
+        event: 'duplicate.id',
+        fields: { id },
+      })
+    },
+    // Stryker disable next-line ArrayDeclaration: the log is the composition root's, made once at boot and never replaced under a live window — and each collision is reported once per window — so a list that never updated would report into the same log.
+    [diagnosticLog],
+  )
+
+  const commands = useMemo(
+    () =>
+      buildCommands({
+        editTags: readingBook ? openTags : null,
+        jumpBack: jumps.canBack ? jumps.back : null,
+        jumpForward: jumps.canForward ? jumps.forward : null,
+        /* NULL WHERE THE BUILD CANNOT DO IT — the palette omits the row
+           rather than offering one that would refuse. `useArchives` decides,
+           because it is what knows. */
+        exportMarks: archives.exportMarks,
+        /* Handed over whole, with no rule spelled here: `reachable` is the rule
+           and `buildCommands` is what reads it, because a rule spelled in `App` is
+           a rule nothing measures — no test renders this file and reads the
+           palette back. */
+        autoAdvance,
+        /* ABSENT OFF macOS and with no book open — `useAudiobook` answers null
+           there, and the palette then omits the row rather than offering one
+           that would be refused. */
+        ...(audiobook ? { exportAudiobook: audiobook } : {}),
+        onDuplicate: onDuplicateCommand,
+        importMarks: archives.importMarks,
+        exportTags: archives.exportTags,
+        importTags: archives.importTags,
+        /* The same faces the settings panel offers — see `offeredFaces`. */
+        faces: offeredHere,
+        state,
+        dispatch,
+        hasBook: book.source !== null,
+        // Null when nothing is selected, so the palette simply does not offer
+        // a command that could not do anything.
+        /* ⚠️ `canMark`, NOT `selection !== null` — a selection with no anchor
+           is a selection `mark` refuses, and the row ran and did nothing
+           (#202). The rule is `useMarking`'s; this asks it. */
+        markSelection: marking.canMark ? markSelection : null,
+        /* Null where there is no place to keep — the palette then does not
+           offer the row at all, rather than offering one that does nothing.
+           AND ONLY ON THE READER, which is not the same condition. The reader
+           stays MOUNTED under the library so foliate is not torn down and the
+           position survives, so it goes on reporting a perfectly good place
+           the whole time the reader is browsing their shelf — and the palette
+           offered to bookmark a page nobody could see. `editTags` is guarded
+           on the screen for the same reason, three lines up. */
+        /* THE SAME RULE THE KEY USES — see `canKeepPlace`. The palette row and
+           ⌘B are one action, and the row PRINTS ⌘B, so a condition spelled
+           twice is a promise that can come apart: the row offered with the key
+           inert, or the key live with the row missing. */
+        toggleBookmark: canKeepPlace({ onReader, canBookmark: bookmarking.canBookmark })
+          ? bookmarking.toggle
+          : null,
+        bookmarked: onReader && bookmarking.here !== null,
+        openBookPicker: addBooks,
+        /* The palette is where the folder import lives now that the toolbar
+         * carries one action — see `KernelCommandContext`. */
+        importFolder: addFolder,
+        importing: importing !== null,
+        closeBook,
+        openSwitcher: () => dispatch({ type: 'toggleLayer', layer: 'switcherOpen' }),
+        contributed: composition.commands,
+        /* The panels a capability contributed, so each can be opened by name —
+           see `KernelCommandContext.contributedPanes`. */
+        contributedPanes: composition.panes,
+      }),
+    /* `bookmarking` is READ inside this builder, so it belongs here. It was
+       missing, and the memo only stayed fresh because `book` happens to change
+       on every relocation — a dependency that held by accident and would have
+       stopped holding the moment the hook's inputs changed. */
+    /* AND THE SAME OMISSION AGAIN, twice over. `jumps` supplies both jump
+       commands and their availability; the four archive callbacks close over
+       `library.books`, `marks` and `cards`. None was listed, so the palette
+       could offer a jump the stack no longer has, or export a library snapshot
+       taken several imports ago — a stale command is worse than a missing one
+       because it looks like it worked. */
+    [
+      state,
+      dispatch,
+      book,
+      marking,
+      bookmarking,
+      onReader,
+      addBooks,
+      addFolder,
+      importing,
+      readingBook,
+      openTags,
+      composition,
+      jumps,
+      archives,
+      markSelection,
+      closeBook,
+      /* ⚠️ **READ AT LINE 1934 AND OMITTED HERE.** `running` and `run` both change
+         when an export starts, and without this the palette kept the first pair:
+         selecting the row again started a second export rather than stopping the
+         first. Safe to depend on because `useAudiobook` memoises it — a fresh
+         object per render is what kept it out. */
+      audiobook,
+      onDuplicateCommand,
+    ],
+  )
+
+  /**
+   * The physical key whose first press the map took, until it comes up.
+   *
+   * ⚠️ **A REF, BECAUSE THE PRESS OUTLIVES THE HANDLER THAT TOOK IT** (2026-09-13
+   * audit, #86, round 3). ⌘D marks and clears the selection, the effect below
+   * re-runs with `marking` changed, and the repeats arrive at a NEW handler —
+   * one that had asked the map again and been told the key was unbound, so the
+   * rest of the hold went to the platform. What the first press decided is kept
+   * here, where a re-subscribed handler can still read it.
+   */
+  const taken = useRef<string | null>(null)
+
+  /**
+   * The five things the keyboard handler reads from the book, and nothing else.
+   *
+   * ⚠️ **THE EFFECT BELOW LISTED THE WHOLE `book`, AND `book` CHANGES ON EVERY
+   * PAGE TURN** — its position is one of its values, and its identity follows its
+   * values. So every turn tore down both global key listeners and added them
+   * again, for a handler whose body reads four stable callbacks (through
+   * `book[verb]`, which a search for `book.` does not find) and whether a book is
+   * open. Named here, so the list says exactly what the body uses and a turn no
+   * longer re-runs it. The four verbs are `useCallback`s with no dependencies in
+   * `useBook`, so `pages` is made once for the book's life.
+   */
+  const pages = useMemo(
+    () => ({ next: book.next, prev: book.prev, goLeft: book.goLeft, goRight: book.goRight }),
+    // Stryker disable next-line ArrayDeclaration: all four are `useBook` callbacks built from empty lists over the navigator ref, so none of them ever moves.
+    [book.next, book.prev, book.goLeft, book.goRight],
+  )
+  /* ⚠️ **THIS DIRECTIVE WAS ON THE KEYBOARD HANDLER'S `screenJump` LINE, AND
+     MOVING THE EXPRESSION HERE LEFT IT COVERING NOTHING** — `pnpm
+     directives:check` refused it as inert. The mutants it names now live on this
+     line, and its reason is unchanged: the handler reads `screenJump(...).to`,
+     which is decided by the screen alone, so whether a book is open cannot move
+     it. */
+  // Stryker disable next-line ConditionalExpression,EqualityOperator: `screenJump` decides its LABEL from whether a book is open and its destination from the screen alone, and the one reader of this reads only the destination.
+  const bookIsOpen = book.source !== null
+
+  /* §11's keyboard map. Every combo the design publishes is bound here, and
+   * nothing is bound to a layer that does not exist — ⌘K used to be left
+   * deliberately unbound for exactly that reason, and now has a palette. */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (hasOpenLayer(state)) dispatch({ type: 'dismissTop' })
+        return
+      }
+
+      /* Typing comes first. The search field, a note, and the palette all take
+       * arrow keys and a space bar, and turning the page underneath someone
+       * mid-word is worse than not binding the key at all. */
+      const target = event.target as HTMLElement | null
+      const typing =
+        // Stryker disable next-line OptionalChaining: a dispatched event always has a target — the window, when nothing nearer — so `?.` never short-circuits here.
+        target?.isContentEditable ||
+        // Stryker disable next-line OptionalChaining: see above.
+        target?.tagName === 'INPUT' ||
+        // Stryker disable next-line OptionalChaining: see above.
+        target?.tagName === 'TEXTAREA'
+
+      /* The accelerator is ⌘ on macOS and Ctrl elsewhere — not either, anywhere.
+       *
+       * Accepting both meant Control-D, Control-K and Control-\ were swallowed
+       * on macOS, where they are the system's own text-editing keys: Control-D
+       * deletes forward and Control-K kills to end of line, in every text field
+       * in the app. It also meant the combos the palette PRINTS were wrong on
+       * one platform or the other, since those always read ⌘. */
+      const accel = platform === 'macos' ? event.metaKey : event.ctrlKey
+
+      /* Reading keys belong to the reader.
+       *
+       * Guarded on the screen and on the modal layers, because the reader stays
+       * MOUNTED under the library and under every overlay — see the note at its
+       * render. Without the guard, an arrow key pressed while browsing the
+       * shelf, or with the palette open, turned pages in a book nobody could
+       * see, and the reader came back to a different place than they left. */
+      /* ⚠️ **`onReader`, NOT A SECOND COPY OF THE SAME QUESTION.** This read
+       * `state.screen !== 'library'` — and `accel.ts` had ALREADY written the
+       * lesson down, on the field it exposes for exactly this: *"Not
+       * `screen !== 'library'`: the reader stays mounted under the shelf with a
+       * live position."* The component even computes `onReader` correctly a few
+       * hundred lines above. So this was not a new mistake; it was the same one
+       * made a second time, twenty feet from its own warning.
+       *
+       * Correcting it to `=== 'reader'` would have left two expressions that
+       * can drift again. Using the one that exists is what makes a third copy
+       * impossible — with a third screen, "not the shelf" stopped meaning
+       * "reading", and every paging key drove the book mounted invisibly
+       * underneath a capability's page, persisting a position nobody saw. */
+      /* ⚠️ **AND THE SIDE PANE COUNTS, WHICH THIS DID NOT KNOW** (2026-09-13
+       * audit, #207). `Reader.onPageIntent` refuses a wheel or a swipe when the
+       * pane is a SHEET over the book rather than a track beside it; this asked
+       * the screen and the layers and stopped there, so below §06's threshold
+       * an arrow key turned the page underneath the sheet while the wheel over
+       * the same sheet was refused. `readerTakesInput` is the one question, and
+       * `onReader` is now folded into it.
+       *
+       * THE LIVE WINDOW, not a tracked width: this runs at the keystroke, where
+       * `window.innerWidth` is exact and costs nothing. `useAvailableWidth`
+       * would re-render the whole App on every resize frame for a value only
+       * this line reads. */
+      const reading = readerTakesInput(state, paneTakesTrack(window.innerWidth, state.stepIdx))
+
+      /* §11: ← → turn the page. Unbound until now, which went unnoticed
+       * because a scrolled EPUB scrolls — but a fixed-layout book, which is
+       * every PDF, does not scroll at all. These were its only way through and
+       * it had none, so it opened on one page and stayed there. */
+      /* NOT FROM A CONTROL, AND NOT AFTER SOMETHING ELSE HANDLED IT. The
+       * `typing` guard covered text entry only, so Space on a FOCUSED BUTTON —
+       * a toolbar control reached by Tab — turned the page instead of pressing
+       * the button, and an arrow key a custom control had already consumed
+       * (`defaultPrevented`) turned it again. Both are the platform's meaning
+       * of those keys being taken from under the reader's focus.
+       *
+       * THE HOST'S CONTROLS ONLY. A key pressed inside the book arrives here
+       * re-dispatched with the WINDOW as its target, so this can never see a
+       * `<select>` in an interactive EPUB; `ReaderSession.#watchKeys` decides
+       * that half where the real target is visible, and does not forward. */
+      const onControl =
+        target instanceof HTMLElement &&
+        target.closest('button, a[href], select, [role="menu"], [role="listbox"], [role="dialog"]') !== null
+      if (!accel && !typing && !onControl && !event.defaultPrevented && reading) {
+        /* THE MAP IS A PURE FUNCTION — `resolvePageKey`, beside `resolveAccel`
+         * and for the same reason. What it returns is the navigator's VERB:
+         * the arrows ask for a side (`goLeft`/`goRight`, which the book
+         * resolves from its own direction, exactly as the chevrons do), the
+         * paging keys and Space ask for an order (`next`/`prev`). The arrows
+         * were `next`/`prev` here, and in a right-to-left book the → key and
+         * the → chevron beside it moved opposite ways. Shift+arrow is left to
+         * the selection there too; ⇧Space is the one shifted key it owns.
+         *
+         * §11: Space moves on by one screen, ⇧Space back by one.
+         *
+         * In BOTH flows, which this used to refuse. It returned early unless
+         * the book was paginated, on the stated grounds that "with the ruler
+         * off, Space is the scroll the reader expects and nothing here should
+         * take it" — and there is no such scroll. foliate's scroller is a
+         * `#container` div inside the paginator's SHADOW ROOT, styled
+         * `overflow: auto` only at `:host([flow="scrolled"])`; the book's own
+         * iframe is `overflow: hidden` and does not scroll. So with focus in
+         * the book — which is where it is while reading — Space reached a
+         * document with nothing to scroll and a container that never had
+         * focus, and both Space and ⇧Space did nothing at all. Reported
+         * against ⇧Space; plain Space was equally dead.
+         *
+         * `next`/`prev` are the right call in both flows rather than a special
+         * case for one: the paginator's own `#scrollNext` branches on
+         * `this.scrolled` and scrolls by a viewport there, turning a page here.
+         *
+         * The ruler still wins when it is on. It pins and advances a single
+         * line — §06 — and marks the event handled from its own window
+         * listener, which React registers before this one because a child's
+         * effects run before its parent's. That is what `defaultPrevented`
+         * below is reading, and it is the whole reason this can be flow-blind. */
+        const verb = resolvePageKey(event)
+        if (verb) {
+          event.preventDefault()
+          pages[verb]()
+          return
+        }
+      }
+
+      if (!accel) return
+
+      /* THE MAP IS A PURE FUNCTION — see `resolveAccel`. What is left here is
+         the dispatching, which is the part that needs an effect. Every guard,
+         every repeat rule and every toggle lives there, where a test can put
+         real keys through it instead of searching this file for a literal. */
+      /* The physical key, so a Shift pressed mid-hold — which changes `key` —
+         does not change whose key it is. `key` where an engine gives no code. */
+      const pressed = event.code || event.key
+      const action = resolveAccel(event, {
+        platform,
+        screen: state.screen,
+        pane: state.pane,
+        /* "Whether ⌘D has something to mark" — which a selection with no
+           anchor is not. `canMark`, for the palette row's reason above (#202). */
+        hasSelection: marking.canMark,
+        canBookmark: bookmarking.canBookmark,
+        onReader,
+        hasBook: readingBook !== null,
+        canJumpBack: jumps.canBack,
+        canJumpForward: jumps.canForward,
+        /* THE DIGITS READ THIS. An unfinished panel's digit has to be as dead
+           as a digit for a panel this screen has not got — see `AccelContext`. */
+        developer: state.developer,
+        hiddenPanes: state.hiddenPanes,
+        /* Who took this key's first press — see `pressTaken`, and `taken`. */
+        pressTaken: event.repeat && taken.current === pressed,
+      })
+      /* ⚠️ **FOR A REPEAT TOO, AND THIS WAS FENCED OFF FROM ONE.** A repeat
+         the window took resolves to an action — its own or `held` — so it
+         writes back the key it already holds; a repeat it did not take resolves
+         to nothing and does not hold this key, so it clears nothing. The
+         exception changed no outcome, and a mutation sweep is what said so
+         (2026-09-15). */
+      if (action) taken.current = pressed
+      else if (taken.current === pressed) taken.current = null
+      if (!action) return
+      event.preventDefault()
+
+      switch (action.kind) {
+        /* ⌘⌃⌥D. The only way in, and the only way out — see
+           `KERNEL_SETTINGS.developer`. */
+        case 'toggleDeveloper':
+          dispatch({ type: 'toggleDeveloper' })
+          return
+        case 'togglePalette':
+          dispatch({ type: 'toggleLayer', layer: 'paletteOpen' })
+          return
+        case 'togglePane':
+          /* No `paneAvailable` test here any more: `resolveAccel` leaves ⌘\ to
+             the platform where there is no pane, and the reducer refuses the
+             toggle there for every dispatcher, keeping `lastPane` — see both
+             notes (2026-09-13 audit). */
+          dispatch({ type: 'togglePane' })
+          return
+        case 'toggleScreen':
+          /* `screenJump`, not a comparison of its own — see `state.ts`. The
+             titlebar advertises this shortcut in its own tooltip, and the two
+             disagreed on every screen that is neither of the kernel's. */
+          /* `bookIsOpen` decides only `screenJump`'s LABEL; the destination read
+             here comes from the screen alone. Its mutants are therefore covered
+             where it is computed — see `pages`. */
+          dispatch({ type: 'goScreen', screen: screenJump(state.screen, bookIsOpen).to })
+          return
+        case 'markSelection':
+          // The tint and style the selection bar is showing — see `markSelection`.
+          markSelection()
+          return
+        /* A held key's repeat: taken — `preventDefault` above — and nothing
+           done. `null` would have handed it to the platform; see `held`. */
+        // Stryker disable next-line StringLiteral: this case does nothing, and a case that matches nothing does the same — the switch ends and the handler returns, the key already taken above.
+        case 'held':
+          return
+        case 'toggleBookmark':
+          bookmarking.toggle()
+          return
+        case 'editTags':
+          openTags()
+          return
+        case 'stepBy':
+          dispatch({ type: 'setStepIdx', idx: state.stepIdx + action.delta })
+          return
+        case 'resetStep':
+          dispatch({ type: 'setStepIdx', idx: DEFAULT_STEP_IDX })
+          return
+        case 'openPane':
+          dispatch({ type: 'openPane', pane: action.pane })
+          return
+        case 'closePane':
+          dispatch({ type: 'closePane' })
+          return
+        case 'jumpBack':
+          jumps.back()
+          return
+        case 'jumpForward':
+          jumps.forward()
+          return
+        /* THE WINDOW'S CLOSE, not an exit: `useWindowClose` intercepts it and
+           runs the teardown the quit handshake runs, so Ctrl+Q closes the
+           journal as ⌘Q and the red button do. */
+        case 'quit':
+          requestWindowClose()
+          return
+      }
+    }
+    /* THE KEY COMES UP, and whoever took it gives it back. */
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (taken.current === (event.code || event.key)) taken.current = null
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [
+    dispatch,
+    marking,
+    pages,
+    bookIsOpen,
+    platform,
+    state.screen,
+    state.pane,
+    /* ⚠️ **THREE OF THE FOUR LAYERS WERE LISTED AND `trashOpen` WAS NOT**, so
+       closing the trash alone left the handler holding the previous layer state.
+       This array has already been bitten twice by the same shape — see the digits
+       note and the tint note below — so the fix is not a fourth entry.
+
+       The handler never reads an individual layer: they reach it only through
+       `hasOpenLayer(state)`, and through `readerTakesInput`, which calls the same
+       function. So the dependency IS that one boolean, which is exactly what is
+       read and nothing more. Adding a layer to `LAYER_ORDER` now cannot leave
+       this list stale, because there is no longer a list of layers to forget one
+       from. */
+    anyLayerOpen,
+    state.stepIdx,
+    /* ⚠️ THE DIGITS READ THESE, AND THEY WERE MISSING — the same defect the
+       tint note below records, on the day developer options landed. The handler
+       went on closing over the visibility rules as they were when the effect
+       last ran, so ⌘4 stayed dead for a whole render after Cards was revealed,
+       and stayed live after it was hidden. */
+    state.developer,
+    state.hiddenPanes,
+    /* ⌘D MARKS IN THE COLOUR THE BAR IS SHOWING, and `state.markTint` and
+       `state.markStyle` were missing here — so the handler went on closing over
+       whichever tint was current when the effect last ran. Change the colour in
+       the mark palette, select a new passage, press ⌘D: it was marked in the
+       PREVIOUS colour, and the button beside it in the new one. Nothing else in
+       this list changes when a tint does, so nothing else was rebuilding the
+       handler. The two are `markSelection`'s dependencies now, and this lists
+       the callback (2026-09-13 audit). */
+    markSelection,
+    readingBook,
+    openTags,
+    /* The whole object, because ⌘B reads two things off it — whether a place
+       can be kept, and whether it already is — and a handler closed over a
+       stale one would toggle against the previous page. */
+    bookmarking,
+    onReader,
+    /* ⌘[ AND ⌘] READ ALL FOUR OF THESE, and none was listed — so the handler
+       closed over the jump stack as it stood when the effect last ran. Follow a
+       link, then press ⌘[: whether it was offered at all came from a stale
+       `canBack`, and `back` itself could be a function bound to a stack one
+       jump behind. Exactly the `state.markTint` defect above, on a different
+       object. */
+    jumps,
+  ])
+
+  /* Titlebar metadata comes from the OPEN book, and from nothing else.
+   *
+   * It used to read BOOKS[0] unconditionally, so every book was presented as
+   * Moby-Dick; that was fixed for the open case and left in place for the
+   * empty one, where it was the same lie in a quieter voice — the titlebar
+   * named a book with a chapter position while the window behind it said the
+   * library was empty. With nothing open the chip says so. */
+  const title = book.meta?.title || (book.source ? 'Untitled' : 'Paper')
+  /* NO BOOK, NOTHING UNDER THE TITLE — and that needs no test of its own:
+     `useBook` clears the position and the metadata in the same commit as the
+     source, on a close and on every open, so with no source there is no chapter
+     and no author to name. The test it had was a second copy of that rule. */
+  const subtitle = book.position.chapterLabel || book.meta?.author || ''
+
+  return (
+    <>
+      <WindowShell
+        state={state}
+        platform={platform}
+        titleBar={
+          <TitleBar
+            state={state}
+            dispatch={dispatch}
+            platform={platform}
+            bookTitle={title}
+            bookSubtitle={subtitle}
+            speech={speech}
+            listenRefusal={listenRefusal}
+            hasBook={book.source !== null}
+            screens={composition.screens}
+          />
+        }
+        overlays={
+          <>
+            {state.paletteOpen && (
+              <CommandPalette
+                commands={commands}
+                platform={platform}
+                onDismiss={() => dispatch({ type: 'closeLayer', layer: 'paletteOpen' })}
+                /* ⚠️ **NO `onAsk`, AND THERE WAS ONE.** An unmatched query went
+                 * to the companion's panel, which said it had no model
+                 * configured rather than answering — §13 forbids producing
+                 * content about the book that is not grounded in it. The
+                 * companion is deleted, so an unmatched query is simply no
+                 * match. The prop stays OPTIONAL on the palette: it never had
+                 * an opinion about which panels exist, only about whether it
+                 * was given somewhere to send the query. */
+              />
+            )}
+            {state.switcherOpen && (
+              <BookSwitcher
+                books={library.books}
+                currentBookId={book.bookId}
+                onOpen={(entry) => {
+                  dispatch({ type: 'closeLayer', layer: 'switcherOpen' })
+                  openStored(entry)
+                }}
+                onDismiss={() => dispatch({ type: 'closeLayer', layer: 'switcherOpen' })}
+                onAddBooks={addBooks}
+                bookActions={composition.bookActions}
+              />
+            )}
+            {/* REMOVED BOOKS, over the shelf. On the library screen only:
+                it lists what this device removed, and the shelf is where a
+                reader notices one missing. Reached from ⌘K — "Removed books…",
+                which also answers to deleted, restore and undo.
+
+                IN `overlays`, WITH THE OTHER LAYERS, not beside `<Library>` in
+                the shell's children. `WindowShell` marks that subtree `inert`
+                when the pane is open on a narrow window — so the sheet
+                rendered, took the scrim, and could not be clicked or focused,
+                on the one surface whose entire purpose is a button that undoes
+                a deletion. The jsdom tests could not see it: they mount the
+                sheet directly and never build the shell around it. */}
+            {/* THE LAYER IS THE SHELF'S ALREADY: the palette offers it on the
+                library alone, and every screen change shuts every layer — so a
+                second test of the screen here was a second copy of that rule. */}
+            {state.trashOpen && (
+              <TrashSheet
+                /* Stryker disable next-line ArrayDeclaration: the fallback is reached only while `trashRows` is null, which is exactly when `loading` is true — and the sheet draws its own line then, never these rows. */
+                rows={trashRows ?? []}
+                loading={trashRows === null}
+                /* ⚠️ **TWO SLOTS, BECAUSE THEY ARE TWO FAILURES.** These were
+                   passed as one — `restoreError ?? trashError` — on the
+                   reasoning that the newer answer wins. The sheet draws `error`
+                   INSTEAD of the list, so one book that would not come back
+                   replaced every row with "The trash could not be read", a
+                   sentence about a read that had just succeeded, and took every
+                   other Restore button with it (#97). */
+                error={trashError}
+                actionError={restoreError}
+                now={trashNow}
+                onRestore={restoreBook}
+                onDismiss={() => dispatch({ type: 'closeLayer', layer: 'trashOpen' })}
+              />
+            )}
+            {/* The tag editor over the book being read — ⌘T. The same box the
+                shelf opens over a card, in a sheet, because in the reader
+                there is no card to hang it from. Drawn from `shelfTags`,
+                which is non-null exactly while `state.tagsOpen` is. */}
+            {shelfTags && readingBook && (
+              <OverlaySheet
+                label="Tags for this book"
+                onDismiss={() => dispatch({ type: 'closeLayer', layer: 'tagsOpen' })}
+              >
+                <TagEditor
+                  books={readingBooks}
+                  shelfTags={shelfTags}
+                  onAdd={library.tagBooks}
+                  onRemove={library.untagBooks}
+                  fill
+                />
+              </OverlaySheet>
+            )}
+          </>
+        }
+        pane={
+          <SidePane
+            state={state}
+            dispatch={dispatch}
+            book={book}
+            marks={marks}
+            bookmarking={bookmarking}
+            platform={platform}
+            cards={cards}
+            onGoTo={jumpTo}
+            onDeleteMark={marking.unmark}
+            markFocus={marking.focus}
+            onMarkFocusDone={marking.clearFocus}
+            markControls={composition.markControls}
+            narration={narration}
+            books={library.books}
+            /* ⚠️ **ABSENT WHERE THE LIBRARY CANNOT BE SEARCHED, not a stub that
+               answers nothing.** The kernel's slot is null on a host with no
+               `passages` capability — a browser, a phone, a tree with it cut —
+               and a stub returning an empty list would tell the reader *"nothing
+               in your library says that"*, a wrong answer rather than a missing
+               one. Absent, the Search panel draws no scope switch and is exactly
+               what it was before phase 31. */
+            {...(passageIndex
+              ? { passages: { search: passageIndex.search, onOpen: openPassage } }
+              : {})}
+            /* GROUPED BY THE PANEL THEY SERVE — see `SidePaneProps`. Eight of
+               these were flat props on a component that reads none of them. */
+            library={{
+              onRenameTag: library.renameTag,
+              onRemoveTag: library.removeTag,
+              tagPrefs,
+              lastRemoval: library.lastRemoval,
+              onUndoRemoveTag: library.undoRemoveTag,
+              onAdoptTag: library.adoptTag,
+              onTagBooks: library.tagBooks,
+            }}
+            settings={{
+              offered: offeredHere,
+              sections: composition.settings,
+              missing: composition.failures,
+              persistent: settingsPersistent,
+            }}
+            /* ⚠️ **SUPPLIED UNCONDITIONALLY — AND THIS SAID "ONLY WHILE
+               DEVELOPER OPTIONS ARE ON"**, the contract `SidePaneProps.developer`
+               has since reversed: whether the band and the panel are DRAWN is
+               `state.developer`, the one answer both read, and this is only the
+               data they draw with (corrected by the 2026-09-13 audit).
+
+               `recording` is not the same question as `developer`. Recording is
+               decided at boot by a FILE — see `diagnosticsLog.ts` — so a reader
+               can have developer options on and an empty log, and the panel has
+               to say which of the two it is looking at rather than drawing an
+               empty list. */
+            developer={{
+              ...(diagnosticLog ? { log: diagnosticLog } : {}),
+              /* NOT `state.developer`. Whether anything is RECORDING is decided
+                 at boot by a file; whether the surfaces are DRAWN is
+                 `state.developer`, which `paneFits` and the band both read.
+                 Passing this unconditionally is what stops the two becoming two
+                 answers to one question — see `SidePaneProps.developer`. */
+              recording: diagnosticLog !== undefined,
+              onCopy: writeClipboard,
+              ...(onDiagnosticsCleared ? { onCleared: onDiagnosticsCleared } : {}),
+            }}
+            contributed={composition.panes}
+          />
+        }
+        onDismissPane={() => dispatch({ type: 'closePane' })}
+      >
+        {/* The reader stays mounted under every screen. Unmounting it tears
+            foliate down mid-flight and loses the reading position — see the
+            note on Library's own stacking. */}
+        <Reader
+          libraryCount={library.books.length}
+          saveFailure={library.saveFailure}
+          onDismissSaveFailure={library.dismissSaveFailure}
+          /* WHAT AN IMPORT JUST DID, on the screen it was started from
+             (WI-21.2). `marks:import` is in the palette while reading and only
+             `Library` rendered this, so an import begun here reported into a
+             surface the reader could not see — and Stage 1 refuses a
+             name-matched book's marks, which is precisely the outcome that
+             must not be silent.
+
+             GATED ON THE SCREEN rather than passed through. The reader stays
+             mounted UNDER the library (see the note beside it), so passing it
+             unconditionally would put the same sentence in the tree twice —
+             invisible behind the shelf, and read out loud by a screen reader.
+             `Library` renders it for its own screen. */
+          importNotice={onReader ? importNotice : null}
+          onDismissImportNotice={() => setNotice(null)}
+          shelfUnread={shelfUnread}
+          onOpenLibrary={() => dispatch({ type: 'goScreen', screen: 'library' })}
+          state={state}
+          dispatch={dispatch}
+          platform={platform}
+          book={book}
+          marks={marks}
+          overlays={overlays}
+          marking={marking}
+          bookmarking={bookmarking}
+          /* Read at every render and consumed once, when the book finishes
+             parsing. It is null for the first few milliseconds of an open —
+             `bookId` is derived from the file's content — which is why the
+             reader takes it through a ref rather than at mount. */
+          plate={plate}
+          onPlate={setPlate}
+          onSeek={seekTo}
+          footnote={footnote}
+          onFootnote={setFootnote}
+          onDismissFootnote={book.closeFootnote}
+          returnTo={returnTo}
+          onReturn={goBackFromHint}
+          onReturnDone={() => setReturnTo(null)}
+          onLink={onBookLink}
+          onExternalLink={onBookExternalLink}
+          lastLocation={lastLocation}
+          reducedMotion={reducedMotion}
+          onAddBooks={addBooks}
+          dragging={dragging}
+          /* ⚠️ **ANY SCREEN THAT IS NOT THE READER, and this said
+             `=== 'library'`.** With a third screen that test stopped meaning
+             "somewhere else" and started meaning "the shelf" — so on a
+             contributed screen the reader stayed live and visible UNDERNEATH
+             it, which is exactly what the first circle screen looked like. */
+          inert={state.screen !== 'reader'}
+        />
+
+        {/* ⚠️ **A CONTRIBUTED SCREEN REPLACES BOTH OF THE KERNEL'S**, which is
+            what distinguishes it from a pane. `Reader` above stays mounted and
+            inert the way it does for the library — the book keeps its position
+            and its scroll — and the shelf simply does not draw. */}
+        {isContributedScreenId(state.screen) &&
+          (() => {
+            const shown = composition.screens.find((one) => one.id === state.screen)
+            /* ⚠️ **KEYED ON THE SCREEN, so two contributed screens are two
+             * subtrees.** Without it React reconciles them as one whenever the
+             * rendered component type matches — which it does for any two
+             * capabilities drawing the same shape — and the second screen
+             * inherits the first's form state and its `useEffect([])` lifetime.
+             *
+             * The renderer is NOT invoked here: `ContributedScreen` takes the
+             * function and calls it below its own error boundary, so a
+             * capability that throws does not unmount the window. Calling it
+             * in this expression would put the throw above the boundary. */
+            return (
+              <ContributedScreen
+                key={state.screen}
+                label={shown?.label ?? 'Not here'}
+                platform={platform}
+                id={state.screen}
+                {...(shown === undefined ? {} : { render: shown.render })}
+                /* By id, because a screen knows a book by its id and nothing
+                   else; the row is looked up here, where the shelf is.
+
+                   OFFERED ONLY WHERE IT CAN OPEN ANYTHING. `openStored` returns
+                   at once with no filesystem, and a contribution reads the
+                   callback's presence to decide whether to draw an Open
+                   control — `PaneContext.openBook` is optional for exactly
+                   that. Handed over regardless, the browser client drew
+                   links that silently did nothing. */
+                {...(!fs
+                  ? {}
+                  : {
+                      openBook: (bookId: string) => {
+                        const entry = library.books.find((one) => one.bookId === bookId)
+                        if (entry) openStored(entry)
+                      },
+                    })}
+              />
+            )
+          })()}
+
+        {state.screen === 'library' && (
+          <Library
+            coverFor={coverFor}
+            books={library.books}
+            platform={platform}
+            libraryQuery={state.libraryQuery}
+            onQueryChange={(query) => dispatch({ type: 'setLibraryQuery', query })}
+            // Opening from the library takes you to what you opened. Staying
+            // on the shelf with a book loading behind it is the one thing a
+            // reader does not want from a click on a cover.
+            onOpen={openStored}
+            onRemove={removeBook}
+            onTagBooks={library.tagBooks}
+            onUntagBooks={library.untagBooks}
+            lastRemoval={library.lastRemoval}
+            onUndoRemoveTag={library.undoRemoveTag}
+            onSetFinished={setFinished}
+            onAddFolder={addFolder}
+            importing={importing}
+            importNotice={importNotice}
+            saveFailure={library.saveFailure}
+            onDismissSaveFailure={library.dismissSaveFailure}
+            bootNotice={bootNotice}
+            onDismissBootNotice={() => setBootNotice(null)}
+            shelfUnread={shelfUnread}
+            enriching={enrichment.pending}
+            onAddBooks={addBooks}
+            bookActions={composition.bookActions}
+            bookStatuses={composition.bookStatuses}
+          />
+        )}
+
+      </WindowShell>
+
+    </>
+  )
+}

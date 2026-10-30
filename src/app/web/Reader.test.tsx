@@ -1,0 +1,1829 @@
+// @vitest-environment jsdom
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Reader } from './Reader'
+import type { ContentFacts, RemoteContent } from './content'
+import { readingPositions, type PositionStore } from './positions'
+
+/**
+ * WHICH PATH A BOOK TAKES, and what happens when the shelf cannot say.
+ *
+ * The reader itself is `FoliateView`, which has its own suite and is exercised
+ * by the desktop on every run. What is new here is the DECISION in front of it:
+ * a PDF goes through a range transport so a phone never holds the whole file,
+ * an EPUB is assembled into a `File` because a zip's directory is at the end,
+ * and a shelf that cannot measure a PDF has no length to give a transport.
+ *
+ * That last branch is the one worth having a test for. `content.locate` answers
+ * `size: null` whenever the shelf binds no size port — which the desktop app did
+ * for the whole of phase 11 — and a transport built on `null` opens an empty
+ * document with no error anywhere.
+ */
+
+/* pdf.js reads `DOMMatrix` at module scope and jsdom does not implement it.
+ * Nothing here paints — a transport moves bytes — so the stub only has to
+ * exist. Same reason `pdfRange.test.ts` carries one. */
+const globals = globalThis as { DOMMatrix?: unknown }
+globals.DOMMatrix ??= class {}
+
+/**
+ * ⚠️ **EVERY ELEMENT HAS A BOX**, and in jsdom none of them do.
+ *
+ * `useRowMenu` closes a menu whose anchor is `detached` — off screen, where its
+ * items would stay focusable and exposed to assistive technology while nobody
+ * can see them. jsdom answers every `getBoundingClientRect` with zeros, so
+ * every anchor is detached and **no menu in this repository can be opened by a
+ * test without this**: it opens and shuts inside the same commit, which reads
+ * exactly like a control that does not work.
+ *
+ * That cost an hour and a reproduction in isolation. `LibraryShelf.test.tsx`
+ * carries the same stub for the same reason.
+ */
+Element.prototype.getBoundingClientRect = function (): DOMRect {
+  return { x: 40, y: 40, top: 40, left: 40, right: 140, bottom: 72, width: 100, height: 32, toJSON: () => ({}) } as DOMRect
+}
+
+/**
+ * ⚠️ **ONE HOISTED STAND-IN, REPLACING EIGHT COPIES OF A RACY IDIOM.**
+ *
+ * Every site in this file used to do `vi.doMock` → `vi.resetModules()` →
+ * `await import('./Reader')`, and they were byte-identical apart from what they
+ * waited for afterwards. That idiom re-evaluates the module graph per test and
+ * depends on the mock winning a race against a registry the whole worker
+ * shares — so when it lost, the REAL `FoliateView` mounted, pushed nothing, and
+ * the wait sat there until the ceiling.
+ *
+ * Measured 2026-09-06: three failures at exactly whatever `asyncUtilTimeout`
+ * was (5 100 ms, 10 027 ms, 10 045 ms) against ten passes at 79–101 ms, with
+ * nothing in between — and only ever with BOTH many files and coverage, never
+ * alone, which fits a per-worker registry carrying state from what ran before.
+ *
+ * ⚠️ **THE CAUSE WAS NEVER PROVEN, AND THIS IS NOT SOLD AS A DIAGNOSIS.** What
+ * justifies it is that the pattern is fragile in a way the replacement is not:
+ * `vi.mock` is hoisted above the imports, so the `Reader` imported at the top
+ * of this file already has the stand-in — no re-evaluation, and no race to
+ * lose. Deterministic by construction rather than by argument.
+ */
+const view = vi.hoisted(() => ({
+  onProps: null as ((props: Record<string, unknown>) => void) | null,
+}))
+
+vi.mock('../../kernel/ui/reader/FoliateView', () => ({
+  FoliateView: (props: Record<string, unknown>) => {
+    view.onProps?.(props)
+    return null
+  },
+}))
+
+/** Send the stand-in's props into `captured` for the rest of this test. */
+function capturingInto(captured: Record<string, unknown>): void {
+  captured['sources'] ??= []
+  view.onProps = (props) => {
+    Object.assign(captured, props)
+    /* EVERY SOURCE, not just the last: the decision is "which one did it ever
+       hand over", and a re-render with `file: null` would otherwise erase the
+       answer. */
+    ;(captured['sources'] as unknown[]).push(props['file'])
+  }
+}
+
+/**
+ * ⚠️ **WHAT `Reader` HANDS THE READER, CAPTURED — AND IT USED TO BE INVISIBLE.**
+ *
+ * `FoliateView` mounts a custom element and cannot render in jsdom, so several
+ * tests below could only look at the surrounding chrome. That chrome is present
+ * from the first frame, which made a whole class of assertion VACUOUS: "the
+ * banner exists" was true before the decision under test had been made, and
+ * true if it was never made at all. Three tests in this file asserted exactly
+ * that and would have passed with the feature deleted.
+ *
+ * The decision is a PROP. `withView` mounts a fresh `Reader` over a stand-in
+ * that records what it is given — the same idiom the page-intent tests below
+ * already use, hoisted here so the source can be asserted rather than inferred.
+ */
+function withView(render_: (Fresh: typeof Reader) => void): Record<string, unknown> {
+  const captured: Record<string, unknown> = { sources: [] }
+  capturingInto(captured)
+  render_(Reader)
+  return captured
+}
+
+/** The sources a captured view was handed, ignoring the empty ones. */
+const sourcesOf = (captured: Record<string, unknown>) =>
+  (captured['sources'] as unknown[]).filter((f) => f !== null)
+
+afterEach(() => {
+  cleanup()
+  /* The stand-in is hoisted and permanent; what is per-test is where it SENDS
+     props. Cleared so a listener from a finished test cannot be handed props by
+     a later render and quietly fill a `captured` nobody is reading. */
+  view.onProps = null
+})
+
+function shelf(facts: Partial<ContentFacts>) {
+  const readRange = vi.fn(async () => new Uint8Array(0))
+  const fileOf = vi.fn(async (_book: string, name: string) => new File(['PK'], name))
+  const content = {
+    locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'epub', size: 10, contentHash: null, ...facts }),
+    readRange,
+    fileOf,
+  } as unknown as RemoteContent
+  return { content, readRange, fileOf }
+}
+
+/** Positions over a store the test owns, so no browser storage is touched. */
+function fakePositions(seed: Record<string, { cfi: string; at: number }> = {}) {
+  let held: string | null = Object.keys(seed).length > 0 ? JSON.stringify(seed) : null
+  const store: PositionStore = { getItem: () => held, setItem: (_k, v) => void (held = v) }
+  return readingPositions(store, () => 1)
+}
+
+const open = (content: RemoteContent, positions = fakePositions()) =>
+  render(
+    <Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} />,
+  )
+
+describe('Reader', () => {
+  it('assembles an EPUB into a file, under the name a parser routes on', async () => {
+    const { content, fileOf } = shelf({ ext: 'epub' })
+    open(content)
+    /* THE SUFFIX IS REBUILT FROM WHAT THE SHELF STORES. The shelf sends a
+       TITLE; every parser Paper uses routes on the extension, and foliate
+       rejects a name without one as an unsupported type. */
+    await waitFor(() => expect(fileOf).toHaveBeenCalledWith('one', 'Moby-Dick.epub'))
+  })
+
+  it('says so plainly when the shelf does not have the pages', async () => {
+    const { content, fileOf } = shelf({ here: false })
+    open(content)
+    await screen.findByText(/does not have this book/i)
+    expect(fileOf).not.toHaveBeenCalled()
+  })
+
+  /**
+   * A PDF THE SHELF CANNOT MEASURE FALLS BACK, and does not build a transport.
+   *
+   * pdf.js is told a length before it asks for a byte of the file. `null` is a
+   * real answer from `content.locate` — it is what a shelf with no size port
+   * says about every book — and a transport of length `null` is a document of
+   * no bytes, which opens as an empty PDF rather than as an error. Slower and
+   * correct is the right way round.
+   */
+  it('fetches a PDF whole when the shelf could not measure it', async () => {
+    const { content, fileOf, readRange } = shelf({ ext: 'pdf', size: null })
+    open(content)
+    await waitFor(() => expect(fileOf).toHaveBeenCalledWith('one', 'Moby-Dick.pdf'))
+    expect(readRange, 'no transport should have been built').not.toHaveBeenCalled()
+  })
+
+  it('keeps the name as-is when the shelf reports no extension', async () => {
+    const { content, fileOf } = shelf({ ext: null })
+    open(content)
+    await waitFor(() => expect(fileOf).toHaveBeenCalledWith('one', 'Moby-Dick'))
+  })
+
+  it('reports a failure to locate rather than rendering an empty reader', async () => {
+    const content = {
+      locate: async () => {
+        throw new Error('the shelf went away')
+      },
+    } as unknown as RemoteContent
+    open(content)
+    await screen.findByText(/the shelf went away/i)
+  })
+
+  /**
+   * THE PATH THIS WHOLE WORK ITEM EXISTS FOR.
+   *
+   * A measured PDF goes through a range transport, so pdf.js asks the shelf for
+   * the byte ranges of the page it is drawing rather than the file. The
+   * assertion is that `fileOf` is NEVER reached: falling back would work, and
+   * would download a 300 MB scanned book to show page one.
+   */
+  it('gives a measured PDF a range transport and never fetches it whole', async () => {
+    const { content, fileOf, readRange } = shelf({ ext: 'pdf', size: 614907 })
+    const captured = withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
+    )
+
+    /* ⚠️ **THIS USED TO ASSERT THAT THE BANNER EXISTED**, which is true from the
+     * first frame and true if no transport were ever built. What the work item
+     * is about is the SOURCE the reader is handed: a `{ range, name }` and not a
+     * `File`. That is a prop, so it can be looked at. */
+    /* ⚠️ THE FAILURE THIS CAN HAVE IS BIMODAL, so the message says which one.
+       Measured 2026-09-06 under `--coverage --project app`: this case either
+       passes in 79–101 ms or never completes at all, consuming exactly whatever
+       `asyncUtilTimeout` is — 5 100 ms, then 10 045 ms, then 10 027 ms across
+       three failures, with NOTHING in between across ten passes. That gap is
+       the signature of a hang rather than of slowness, and it is why raising
+       the ceiling twice did not fix it and never will.
+       The live hypothesis is that `withView`'s `doMock` + `resetModules` +
+       dynamic re-import occasionally loses the race and the REAL `FoliateView`
+       renders — which pushes nothing, so `sources` stays empty for ever. If
+       that is what happened, `captured` holds no props at all, and this message
+       says so instead of leaving the next person the mystery it left this
+       one. */
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1), {
+      onTimeout: (error) => {
+        const keys = Object.keys(captured)
+        const mocked = keys.some((k) => k !== 'sources')
+        const got = sourcesOf(captured).length
+        /* ⚠️ OBSERVATIONS FIRST, AND THE CAUSE ONLY AS A HYPOTHESIS. The first
+           version asserted "the doMock/resetModules race IS the cause", which
+           absent props do not establish — and it also read every timeout as
+           "no source arrived" when `toHaveLength` fails on too MANY just as
+           readily. Both are the same mistake this whole diagnostic exists to
+           stop: stating a conclusion the evidence does not carry. */
+        error.message +=
+          `\n\nOBSERVED: ${got} non-null source(s); the mocked FoliateView ` +
+          `${mocked ? 'DID' : 'did NOT'} render (captured keys: ${JSON.stringify(keys)}).` +
+          (got > 1
+            ? '\nThat is MORE than expected, not none — the wait timed out on an excess, so look at what re-rendered.'
+            : mocked
+              ? '\nIt rendered and was never handed a non-null source. HYPOTHESIS: look at Reader rather than at the mock.'
+              : '\nIt never rendered at all. HYPOTHESIS: withView\'s doMock/resetModules race was lost and the REAL FoliateView mounted — unproven, and worth confirming before acting on.')
+        return error
+      },
+    })
+    const source = sourcesOf(captured)[0] as { range?: unknown; name?: string }
+    expect(source.range, 'a measured PDF must reach the reader as a range transport').toBeDefined()
+    expect(source.name, 'named so pdf.js routes on the suffix').toBe('Moby-Dick.pdf')
+    expect(source, 'a File here is the whole-download fallback').not.toBeInstanceOf(File)
+
+    /* AND THE FILE WAS NEVER FETCHED. Falling back would work, and would
+       download a 300 MB scanned book to show page one. */
+    expect(fileOf).not.toHaveBeenCalled()
+    expect(readRange, 'nothing has asked for a page yet').not.toHaveBeenCalled()
+  })
+
+  /**
+   * A RANGE READ THAT FAILS HAS NOWHERE TO GO in pdf.js — it has an
+   * `onDataRange` and no `onError` — so without surfacing it the book stops on
+   * a blank page for ever.
+   *
+   * ⚠️ **THIS USED TO BUILD ITS OWN TRANSPORT AND EXERCISE THAT**, which tests
+   * `pdfRange.ts` (already covered by its own file) and says nothing about the
+   * one here. `Reader` supplies the `onFailure` that turns a dead transport into
+   * something the reader can see, and a test that builds a second transport
+   * would pass with `Reader`'s handler deleted. The transport under test is the
+   * one `Reader` handed over.
+   */
+  it('surfaces a failed range read instead of leaving the page blank', async () => {
+    const failing = {
+      locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'pdf', size: 64, contentHash: null }),
+      readRange: async () => {
+        throw new Error('the shelf went away')
+      },
+      fileOf: async () => new File([], 'x.pdf'),
+    } as unknown as RemoteContent
+    const captured = withView((Fresh) =>
+      render(<Fresh content={failing} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+
+    /* READER'S OWN TRANSPORT, asked for a range as pdf.js would. */
+    const source = sourcesOf(captured)[0] as { range: { requestDataRange: (a: number, b: number) => void } }
+    act(() => source.range.requestDataRange(0, 8))
+
+    /* THE READER IS TOLD. `Reader`'s `onFailure` sets `problem`, which reaches
+       the reading surface — a message, not a blank page waiting for ever. */
+    expect(await screen.findByText(/the shelf went away/i)).toBeTruthy()
+  })
+
+  it('goes back to the shelf, from the reader and from a book it could not open', async () => {
+    const onClose = vi.fn()
+    const { content } = shelf({ ext: 'epub' })
+    const { unmount } = render(
+      <Reader content={content} bookId="one" name="Moby-Dick" onClose={onClose} />,
+    )
+    fireEvent.click(await screen.findByRole('button', { name: /shelf/i }))
+    expect(onClose).toHaveBeenCalledOnce()
+    unmount()
+
+    /* AND FROM THE DEAD END. A book with no pages is the one screen where a
+       reader has nothing else to press. */
+    const missing = shelf({ here: false })
+    render(<Reader content={missing.content} bookId="one" name="Moby" onClose={onClose} />)
+    fireEvent.click(await screen.findByRole('button', { name: /back to the shelf/i }))
+    expect(onClose).toHaveBeenCalledTimes(2)
+  })
+
+  /* A PHONE ROTATES, and the measure is derived from the stage's width. A
+     reader that kept the portrait measure in landscape would set the page to
+     half the screen and leave the rest white. */
+  /**
+   * A PHONE ROTATES, and the measure is derived from the stage's width. A
+   * reader that kept the portrait measure in landscape would set the page to
+   * half the screen and leave the rest white.
+   *
+   * ⚠️ **THIS USED TO ASSERT THAT THE BANNER SURVIVED.** The banner is present
+   * from the first frame and survives anything that does not throw — so the
+   * test passed with the resize listener removed, which is the only thing it
+   * claimed to be about. The measure is a PROP, and a prop can be compared.
+   */
+  it('re-measures when the window changes size', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const captured = withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
+    )
+    await waitFor(() => expect(captured['measure']).toBeTypeOf('number'))
+    const portrait = captured['measure'] as number
+
+    /* NARROWER, deliberately. A measure has a MAXIMUM — `proseGrid` will not
+       set a line wider than the step's ideal however much room there is — so
+       widening the window is the direction in which nothing is supposed to
+       happen, and a test that asserted a change there would be asserting the
+       opposite of the typography. Narrowing is where the stage binds. */
+    act(() => {
+      Object.defineProperty(window, 'innerWidth', { value: 360, configurable: true })
+      window.dispatchEvent(new Event('resize'))
+    })
+
+    await waitFor(() =>
+      expect(
+        captured['measure'],
+        'the measure did not follow the window; the page keeps its old width',
+      ).not.toBe(portrait),
+    )
+    /* AND IT FOLLOWED THE RIGHT WAY. Asserting only "it changed" would pass on
+       a measure that grew when the window shrank. */
+    expect(captured['measure'] as number).toBeLessThan(portrait)
+    expect(captured['measure'] as number).toBeLessThanOrEqual(360)
+  })
+
+  /**
+   * A BOOK REOPENS WHERE IT WAS LEFT.
+   *
+   * This device's copy, in `localStorage`, is what a host with no `remote`
+   * opens at — a session with no write grant, or a shelf that is asleep. It
+   * used to be the ONLY place, because the pump granted this client
+   * `readingGrant` and every write was refused; since WI-20.30 the shelf's
+   * copy travels too (`remotePositions.ts`, below), and the device's is the
+   * fallback and the comparison. With no `remote` prop the old behaviour is
+   * exactly the behaviour.
+   */
+  it('opens a book where it was left', async () => {
+    const positions = fakePositions({ one: { cfi: 'epubcfi(/6/4!/4/2/10)', at: 1 } })
+    const { content } = shelf({ ext: 'epub' })
+    const captured = withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+
+    /* ⚠️ **THIS USED TO CHECK ONLY THAT STORAGE WAS NOT OVERWRITTEN**, which is
+     * true of a `Reader` that never reads the store at all — the feature could
+     * be deleted and the test would stay green. Restoring a position means
+     * HANDING IT TO THE READER, and that is a prop. */
+    expect(
+      captured['lastLocation'],
+      'a stored position that never reaches the reader is a position nobody has',
+    ).toBe('epubcfi(/6/4!/4/2/10)')
+    /* AND STILL NOT OVERWRITTEN: a book that re-read the store on every
+       relocate would be a book that could not be read at all. */
+    expect(positions.get('one')).toBe('epubcfi(/6/4!/4/2/10)')
+  })
+
+  it('starts at the beginning for a book it has never opened', async () => {
+    const positions = fakePositions()
+    const { content } = shelf({ ext: 'epub' })
+    const captured = withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    /* NULL, not a stale cfi from another book: `lastLocation` is what foliate
+       navigates to, and a wrong one opens the book somewhere it has never
+       been. */
+    expect(captured['lastLocation']).toBeNull()
+    expect(positions.get('one')).toBeNull()
+  })
+
+  /**
+   * A BOOK THAT CANNOT BE TURNED IS ONE PAGE.
+   *
+   * `onPageIntent` and `onNavigator` were both no-ops when this surface first
+   * shipped, so a book opened and stayed on its first page — a tap, a swipe and
+   * the arrow keys all did nothing. Found by trying to turn a page against the
+   * running shelf, which is the only place it was visible.
+   *
+   * The four intents are two pairs and are not interchangeable: a horizontal
+   * gesture names a SIDE, which foliate resolves against the book's direction,
+   * and a vertical one names a DIRECTION OF TRAVEL. Routing one through the
+   * other reverses the wheel in a right-to-left book.
+   */
+  it('routes each page intent to the navigator it was given', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const seen: string[] = []
+    const nav = {
+      next: () => seen.push('next'),
+      prev: () => seen.push('prev'),
+      goLeft: () => seen.push('goLeft'),
+      goRight: () => seen.push('goRight'),
+    }
+
+    /* Reach the props FoliateView was handed, which is where the wiring lives —
+       the component itself cannot open a book in jsdom. */
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['onNavigator']).toBeTypeOf('function'))
+
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
+    const intent = captured['onPageIntent'] as (i: string) => void
+    for (const one of ['left', 'right', 'next', 'prev']) intent(one)
+    expect(seen).toEqual(['goLeft', 'goRight', 'next', 'prev'])
+
+    /* AND AN INTENT BEFORE THE BOOK IS OPEN IS NOT A CRASH. The navigator
+       arrives when the session finishes parsing; a gesture in that window is
+       ordinary, not exceptional. */
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, null)
+    expect(() => intent('next')).not.toThrow()
+
+  })
+
+  /**
+   * THE THREE SHEETS, and the rule that only one is open.
+   *
+   * Contents, Search and Notes all cover the reading surface, so a second
+   * opened over the first would leave the reader two dismissals from the book.
+   * The Notes control is drawn only when this host HAS marks — absent, not
+   * disabled, like every other capability this client lacks.
+   */
+  it('opens one sheet at a time, and offers Notes only when there are marks', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    )
+
+    const removed: { id: string; bookId: string }[] = []
+    const marks = {
+      all: [
+        {
+          id: 'm1',
+          bookId: 'one',
+          cfi: 'epubcfi(/6/2)',
+          sectionIndex: 0,
+          text: 'the whale',
+          prefix: '',
+          suffix: '',
+          note: '',
+          kind: 'highlight',
+          tint: 'yellow',
+          style: 'fill',
+          chapter: 'One',
+          createdAt: 1,
+        },
+      ],
+      allBookmarks: [], allUnplaced: [],
+      persistent: true,
+      remove: (m: { id: string; bookId: string }) => removed.push(m),
+      setNote: async () => {},
+      loadAll: () => {},
+      subscribe: () => () => {},
+      refresh: () => {},
+      dispose: () => {},
+    }
+
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
+    render(
+      <Fresh
+        content={content}
+        bookId="one"
+        name="Moby-Dick"
+        onClose={vi.fn()}
+        positions={fakePositions()}
+        marks={marks as never}
+        titleOf={() => 'Another'}
+      />,
+    )
+    await waitFor(() => expect(captured['onToc']).toBeTypeOf('function'))
+    /* ⚠️ **INSIDE `act`, LIKE EVERY OTHER CALLBACK THIS FILE DRIVES.** These two
+       were bare, and a React state update dispatched outside `act` is SCHEDULED
+       rather than flushed. Nothing below forced it: the `findByRole('Tools')`
+       that follows resolves on its first check, because Tools is part of the
+       chrome and does not depend on the table of contents at all. So whether
+       the entry had rendered by the assertion was a race — one this suite won
+       every time it ran alone and lost under `test:coverage`, where the
+       instrumentation is enough to change the scheduling. It failed twice
+       before it was read as a mechanism rather than as load. */
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'c1.xhtml' }])
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
+
+    /* ONE SHEET, WITH TABS. The chrome carries a single control — Tools —
+       and Contents, Search and Notes are tabs at the sheet's foot. Switching a
+       tab swaps the body; there is no second sheet to leave open. */
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    expect(screen.queryByRole('button', { name: 'One' })).not.toBeNull()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Search' }))
+    expect(screen.queryByRole('button', { name: 'One' })).toBeNull()
+    expect(screen.queryByLabelText('Search this book')).not.toBeNull()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Notes' }))
+    expect(screen.queryByLabelText('Search this book')).toBeNull()
+
+    vi.unstubAllGlobals()
+  })
+
+  /* NO MARKS, NO CONTROL. A host without them draws no Notes button rather
+     than a disabled one — the convention this client uses everywhere. */
+  it('draws no Notes control when this host has no marks', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    render(<Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(screen.queryByRole('button', { name: '‹ Shelf' })).not.toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }))
+    expect(screen.queryByRole('button', { name: 'Notes' })).toBeNull()
+  })
+
+  /**
+   * THE READING PREFERENCES (WI-19.9).
+   *
+   * Mounted rather than rebuilt: `pane/Settings.tsx` with seven of its setters
+   * omitted, so a host with no ruler, no side pane and no brightness filter
+   * draws none of those rows. What it writes goes through the KERNEL'S OWN
+   * settings store over `localStorage` — the real keys and the real validators,
+   * not a second definition of what a theme may be.
+   */
+  it('applies the reader’s stored preferences, and writes a change back', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    /* jsdom HAS NO `ResizeObserver`, and `Settings`' groups measure themselves
+       to animate open. A stub that observes nothing is enough: this test is
+       about what the pane WRITES, not about how tall it is. */
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    )
+    /**
+     * ⚠️ **SEEDED WITH VALUES THAT ARE NOT THE DEFAULTS.**
+     *
+     * This started EMPTY and then asserted `theme === 'paper'` and a typeface of
+     * "any string" — which are `KERNEL_SETTINGS`' own fallbacks. So the read
+     * half was satisfied by a `Reader` that never opened the store at all: the
+     * whole persistence path could be deleted and it stayed green. A stored
+     * preference is only stored if a DIFFERENT value comes back.
+     */
+    const store: Record<string, string> = {
+      'paper.settings.v1': JSON.stringify({
+        version: 1,
+        values: {
+          'kernel.theme': 'sepia',
+          /* ⚠️ OFF, DELIBERATELY. `themeFollowsOs` defaults to TRUE and, when
+             on, the applied theme is chosen from `prefers-color-scheme` rather
+             than from the stored value — so a stored theme is invisible until
+             the reader has picked one explicitly. That is correct behaviour and
+             it is also what makes this assertion about the store rather than
+             about the OS. */
+          'kernel.themeFollowsOs': false,
+          'kernel.typeface': 'crimson',
+          'kernel.align': 'ragged',
+        },
+      }),
+    }
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store[k] ?? null,
+      setItem: (k: string, v: string) => {
+        store[k] = v
+      },
+    })
+
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['theme']).toBeTypeOf('string'))
+
+    /* THE STORED VALUES REACH THE BOOK, which is the whole point of storing
+       them — a preference the renderer never sees is a preference nobody has.
+       Each one is a value the defaults do not produce, so a reader that never
+       consulted the store answers differently. */
+    expect(captured['theme'], 'the stored theme never reached the book').toBe('sepia')
+    expect(captured['typeface'], 'the stored typeface never reached the book').toBe('crimson')
+    expect(captured['align'], 'the stored alignment never reached the book').toBe('ragged')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reading' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Night/i }))
+
+    /* AN EXPLICIT PICK TURNS OFF OS FOLLOWING — `state.ts` states the rule for
+       the desktop, and without it here the chosen theme was overridden on the
+       next render and the control did nothing you could see. */
+    const written = JSON.parse(store['paper.settings.v1'] ?? '{}') as {
+      values?: Record<string, unknown>
+    }
+    expect(written.values?.['kernel.theme']).toBe('night')
+    expect(written.values?.['kernel.themeFollowsOs']).toBe(false)
+    await waitFor(() => expect(captured['theme']).toBe('night'))
+
+    /* THE SEVEN THIS HOST CANNOT ACT ON ARE NOT DRAWN. A row for a reading
+       ruler that is not mounted would be a control that cannot act. */
+    expect(screen.queryByText('Reading ruler')).toBeNull()
+    expect(screen.queryByText('Side pane position')).toBeNull()
+    expect(screen.queryByText('Brightness')).toBeNull()
+
+    /**
+     * EVERY SETTING THIS SURFACE OFFERS WRITES ITS OWN KEY.
+     *
+     * ⚠️ **THIS USED TO CLICK EVERY CONTROL AND CHECK THAT THE STORE CHANGED
+     * AT ALL.** One working setter satisfies that, and the theme click above
+     * has already written — so the assertion was true before this block ran.
+     * Six of the seven setters could have been inert and it would have passed.
+     *
+     * Each is a SEPARATE inline setter on this surface, and a setter that
+     * stopped writing changes nothing on screen, so only the store can say. The
+     * keys are named one at a time.
+     *
+     * ⚠️ SCOPED TO THE SHEET, and the GROUP SUMMARIES are skipped. The bar's own
+     * icons are buttons too, and clicking one closes the sheet — every row after
+     * it is then detached and nothing is written. So is clicking a summary,
+     * which collapses its group. Both look identical to a pane of dead
+     * controls.
+     */
+    const sheet = () => document.querySelector('[role="dialog"]')
+    const GROUPS = /^(appearance|text|spacing|paragraphs|blocks|figures|page)$/i
+    /* ⚠️ **THE GROUPS OPEN FIRST, and the sweep used to skip them entirely.**
+     * A collapsed group renders no rows, so `kernel.spacing` — which lives
+     * under one — had no control to click and was never written. Skipping the
+     * summaries was right for the SWEEP (clicking one collapses it and detaches
+     * every row after it) and wrong as a way to reach what is inside them. */
+    for (const summary of [...(sheet()?.querySelectorAll('button') ?? [])]) {
+      if (GROUPS.test((summary.textContent ?? '').trim()) && summary.getAttribute('aria-expanded') !== 'true') {
+        fireEvent.click(summary)
+      }
+    }
+    const rows = [...(sheet()?.querySelectorAll('button') ?? [])].filter(
+      (b) => !GROUPS.test((b.textContent ?? '').trim()),
+    )
+    expect(rows.length).toBeGreaterThan(5)
+    /* ⚠️ **THE TYPEFACE IS A MENU, NOT A ROW**, and it is held out of the sweep.
+     * `FacePicker` is a button that OPENS a list, and the list does not exist
+     * until it is clicked — so a snapshot of the sheet's buttons cannot contain
+     * a face to pick. Worse, clicking it mid-sweep opens a menu that the NEXT
+     * row's click then dismisses, so the sweep left it shut and wrote nothing.
+     * The old assertion ("the store changed at all") was already satisfied by
+     * the theme click above and never noticed. Found by naming the keys. */
+    const opener = screen.getByRole('button', { name: /^Typeface:/ })
+    fireEvent.click(opener)
+    const faces = screen.getAllByRole('menuitemradio')
+    const other = faces.find((f) => f.getAttribute('aria-checked') !== 'true')
+    expect(other, 'the face menu offered nothing to change to').toBeDefined()
+    fireEvent.click(other!)
+
+    for (const one of rows) {
+      if (one !== opener && one.isConnected) fireEvent.click(one)
+    }
+
+    const keysWritten = () =>
+      Object.keys(
+        (JSON.parse(store['paper.settings.v1'] ?? '{}') as { values?: Record<string, unknown> }).values ?? {},
+      )
+    /* THE SEVEN `WEB_SETTINGS` DECLARES, derived rather than listed — a setting
+       added to that table with no control here fails this rather than being
+       noticed later by a reader whose choice does nothing. */
+    const { WEB_SETTINGS } = await import('./settings')
+    for (const setting of Object.values(WEB_SETTINGS)) {
+      expect(keysWritten(), `nothing ever wrote ${setting.key}`).toContain(setting.key)
+    }
+
+    vi.unstubAllGlobals()
+  })
+
+  /**
+   * THE TABLE OF CONTENTS (WI-19.9).
+   *
+   * `FoliateView` has raised `onToc` all along and this client passed `ignore`,
+   * so a reader on a phone could move through a book one page at a time and no
+   * other way. The pane is the kernel's own `pane/Contents.tsx` — 61 lines,
+   * browser-safe, mounted rather than reimplemented.
+   */
+  it('offers the book’s contents, and goes where one is chosen', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const went: string[] = []
+    const nav = {
+      next: () => {},
+      prev: () => {},
+      goLeft: () => {},
+      goRight: () => {},
+      goTo: (target: string) => went.push(target),
+    }
+
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['onToc']).toBeTypeOf('function'))
+
+    /* NO CONTENTS, NO TAB. A book that declares none gets no Contents tab in
+       the tools sheet — an absent capability is an absent control, never a
+       disabled one. The sheet itself is still reachable: Search and Reading
+       need no contents. */
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    expect(screen.queryByRole('button', { name: 'Contents' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }))
+
+    /* THE SAME RACE, and the same fix — see the note on the other case that
+       drives these callbacks. Three updates here, so batching them in one
+       `act` is also closer to what one relocation actually is. */
+    act(() => {
+      ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [
+        { label: 'Chapter One', href: 'c1.xhtml' },
+        { label: 'Chapter Two', href: 'c2.xhtml' },
+      ])
+      ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, {
+        cfi: 'epubcfi(/6/2)',
+        chapterHref: 'c1.xhtml',
+      })
+    })
+
+    /* The reader's chrome has ONE control — Tools — and Contents is the first
+       tab of the sheet it opens, so opening Tools lands on the contents. */
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+
+    /* WHICH ENTRY IS CURRENT comes from `chapterHref`, not the label: labels
+       repeat across a book and matching on them marks every duplicate. */
+    const one = await screen.findByRole('button', { name: 'Chapter One' })
+    expect(one.getAttribute('data-current')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Chapter Two' }).getAttribute('data-current')).toBe('false')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Chapter Two' }))
+    expect(went).toEqual(['c2.xhtml'])
+    /* AND THE SHEET CLOSES. It covers the book, so leaving it open after a
+       choice would hide the page the reader just asked for. */
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Chapter Two' })).toBeNull())
+
+  })
+
+  /**
+   * TAP TO TURN, on the book's own document.
+   *
+   * A page intent reaches the reader from ONE gesture — the wheel — and a phone
+   * has none: Playwright says "Mouse wheel is not supported in mobile WebKit",
+   * which is the device and not the harness. So the surface shipped a book that
+   * opened and could not be advanced on the one kind of device it is for.
+   *
+   * The book is in an iframe, so the listener has to live on the document
+   * `onDocument` hands over — and be REMOVED when that document goes, because
+   * foliate loads one per section and keeps neighbours alive. Without the
+   * teardown a book accumulates a listener per section read.
+   */
+  /**
+   * ⚠️ **A FAILURE THE READER CANNOT SEE IS A BLANK PAGE.**
+   *
+   * `problem` reached `SearchPanel` alone — a pane behind a centre tap and a
+   * tab — so a dropped channel or a range read that failed left the reading
+   * surface empty with its explanation folded inside a panel nobody had reason
+   * to open. The one failure this surface cannot afford to be quiet about is
+   * the one where there is nothing to look at.
+   */
+  it('says on the page when the renderer reports a failure', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['onError']).toBeTypeOf('function'))
+
+    expect(screen.queryByRole('alert')).toBeNull()
+    act(() => {
+      ;(captured['onError'] as (g: number, m: string) => void)(0, 'the shelf stopped answering')
+    })
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('the shelf stopped answering')
+
+    /* AND IT CAN BE PUT AWAY, so a transient failure does not sit over the book
+       for the rest of the session. */
+    fireEvent.click(screen.getByRole('button', { name: /dismiss/i }))
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+
+  })
+
+  it('turns the page from a tap on the book, and lets go of the document after', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const seen: string[] = []
+    const nav = {
+      next: () => seen.push('next'),
+      prev: () => seen.push('prev'),
+      goLeft: () => seen.push('goLeft'),
+      goRight: () => seen.push('goRight'),
+    }
+
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['onDocument']).toBeTypeOf('function'))
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
+
+    /* A book document, 300px wide, as foliate would hand one over. */
+    const doc = document.implementation.createHTMLDocument('a section')
+    Object.defineProperty(doc.documentElement, 'clientWidth', { value: 300, configurable: true })
+    const watch = captured['onDocument'] as (g: number, d: Document | null) => void
+    watch(0, doc)
+
+    const tapAt = (x: number, target: Element = doc.body) => {
+      target.dispatchEvent(new PointerEvent('pointerdown', { clientX: x, clientY: 100, bubbles: true }))
+      target.dispatchEvent(new PointerEvent('pointerup', { clientX: x, clientY: 100, bubbles: true }))
+    }
+
+    tapAt(10)
+    tapAt(290)
+    tapAt(150)
+    expect(seen, 'the outer thirds turn, the middle does not').toEqual(['goLeft', 'goRight'])
+
+    /* A LINK WINS — foliate is already handling it, and turning as well would
+       leave the reader somewhere they did not choose. */
+    const link = doc.createElement('a')
+    link.href = '#somewhere'
+    doc.body.append(link)
+    seen.length = 0
+    tapAt(290, link)
+    expect(seen).toEqual([])
+
+    /**
+     * ⚠️ **A RELEASE WITH NO PRESS IS NOT A TAP**, and it used to be the best
+     * possible one: `moved` fell back to `0`, which is a clean tap in the
+     * middle of the target it landed on. A release that entered the stage from
+     * outside, or arrived after the listener was attached mid-gesture, turned
+     * the page.
+     */
+    seen.length = 0
+    doc.body.dispatchEvent(new PointerEvent('pointerup', { clientX: 10, clientY: 100, bubbles: true }))
+    expect(seen, 'a pointerup with no matching pointerdown must do nothing').toEqual([])
+
+    /**
+     * AND A SECOND FINGER DOES NOT STEAL THE FIRST'S ORIGIN.
+     *
+     * The press was tracked as a bare coordinate, so a second `pointerdown`
+     * overwrote it — and the first finger's release was then measured from the
+     * second's position. A pinch that happens to end near an edge read as a
+     * tap there.
+     */
+    seen.length = 0
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 1, clientX: 150, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 2, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 2, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    expect(seen, "the second finger's release is not the first finger's tap").toEqual([])
+
+    /**
+     * ⚠️ **AND THE FIRST FINGER'S OWN RELEASE IS NOT A TAP EITHER.**
+     *
+     * The second press was merely IGNORED, which left the first still
+     * tracked: a pinch whose first finger happened to land near an edge
+     * turned the page the moment that finger came up. `pointercancel` is what
+     * would have saved it and the browser does not promise one — least of all
+     * when the finger it keeps is the second. Two pointers down means the
+     * gesture is a pinch, however it ends.
+     */
+    doc.body.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, clientX: 150, clientY: 100, bubbles: true }))
+    seen.length = 0
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 4, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 5, clientX: 150, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 4, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    expect(seen, 'a two-finger gesture must not turn the page, whichever finger lifts first').toEqual([])
+    /* Both fingers off the glass again, so what follows starts from nothing. */
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 5, clientX: 150, clientY: 100, bubbles: true }),
+    )
+
+    /* `pointercancel` IS THE BROWSER TAKING THE GESTURE OVER, and no
+       `pointerup` follows it — so an origin left behind waits to be paired with
+       an unrelated release. */
+    seen.length = 0
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 3, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 3, bubbles: true }))
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 3, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    expect(seen, 'a cancelled gesture must not turn the page').toEqual([])
+
+    /* AND THE CONTROLS A BOOK MAY CARRY. The list was `a, button, input,
+       [role="button"]`; a book is a document a stranger wrote, and choosing
+       from a `<select>` inside one turned the page at the same time. */
+    seen.length = 0
+    for (const tag of ['select', 'textarea', 'summary']) {
+      const control = doc.createElement(tag)
+      doc.body.append(control)
+      tapAt(290, control)
+    }
+    expect(seen, 'interacting with a control must not also turn the page').toEqual([])
+
+    /* AND THE DOCUMENT IS RELEASED. `onDocument(null)` is the teardown; a tap
+       after it must reach nothing. */
+    watch(0, null)
+    seen.length = 0
+    tapAt(10)
+    expect(seen, 'the listener must be gone with the document').toEqual([])
+
+  })
+
+  /**
+   * ⚠️ **NO TAP IN AN EPUB 3 BOOK TURNED A PAGE.**
+   *
+   * The control list held a bare `[role]`, on the reasoning that a role is
+   * only ever put on something meant to be interacted with. EPUB 3 puts one
+   * on every chapter: `<section role="doc-chapter">` is the structural
+   * semantics inflection the spec recommends, and `epub:type="chapter"` is
+   * mapped to it by every current authoring tool. `closest` walked up from
+   * the tapped paragraph to that section, found a role, and refused — so a
+   * book that followed the spec could be opened and never advanced.
+   *
+   * The widget roles are the ones a press already belongs to; a document role
+   * names what the text IS, and a tap on prose is a tap on prose.
+   */
+  it('turns the page from a tap inside a chapter that carries a role, and not on a widget', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const seen: string[] = []
+    const nav = {
+      next: () => seen.push('next'),
+      prev: () => seen.push('prev'),
+      goLeft: () => seen.push('goLeft'),
+      goRight: () => seen.push('goRight'),
+    }
+
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    const Fresh = Reader
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['onDocument']).toBeTypeOf('function'))
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
+
+    const doc = document.implementation.createHTMLDocument('a chapter')
+    Object.defineProperty(doc.documentElement, 'clientWidth', { value: 300, configurable: true })
+    ;(captured['onDocument'] as (g: number, d: Document | null) => void)(0, doc)
+
+    const tapAt = (x: number, target: Element) => {
+      target.dispatchEvent(new PointerEvent('pointerdown', { clientX: x, clientY: 100, bubbles: true }))
+      target.dispatchEvent(new PointerEvent('pointerup', { clientX: x, clientY: 100, bubbles: true }))
+    }
+
+    /* The shape EPUB 3 prescribes and the tools produce: the whole chapter
+       under one roled section, the reader's finger on a paragraph inside it. */
+    const chapter = doc.createElement('section')
+    chapter.setAttribute('role', 'doc-chapter')
+    const paragraph = doc.createElement('p')
+    paragraph.textContent = 'Call me Ishmael.'
+    chapter.append(paragraph)
+    doc.body.append(chapter)
+
+    tapAt(290, paragraph)
+    tapAt(10, paragraph)
+    expect(seen, 'a tap on prose inside a roled chapter is a page turn').toEqual(['goRight', 'goLeft'])
+
+    /* AND A WIDGET INSIDE THAT SAME CHAPTER STILL WINS. The narrowing must
+       not have thrown the widget roles out with the document ones. */
+    seen.length = 0
+    for (const role of ['button', 'link', 'checkbox', 'textbox', 'slider']) {
+      const widget = doc.createElement('div')
+      widget.setAttribute('role', role)
+      chapter.append(widget)
+      tapAt(290, widget)
+    }
+    expect(seen, 'a tap on an ARIA widget must not also turn the page').toEqual([])
+
+    ;(captured['onDocument'] as (g: number, d: Document | null) => void)(0, null)
+  })
+})
+
+/**
+ * ⚠️ **A FOOTNOTE LINK DID NOTHING AT ALL ON THIS SURFACE.**
+ *
+ * `ReaderSession` intercepts a note's link — `preventDefault`, so foliate does
+ * not navigate — renders the note into a view of its own, and parks that view
+ * off screen until a host says where to put it. This surface passed `ignore` to
+ * `onFootnote` and never said, so a reader tapping a superscript got no
+ * navigation, no note, and nothing to dismiss. The extraction had worked and it
+ * was rendered a hundred thousand pixels to the left.
+ */
+describe('a note the reader taps', () => {
+  /* ⚠️ **THE POPOVER MEASURES THE NOTE'S OWN DOCUMENT** — it polls
+   * `view.renderer.getContents()[0].doc.body.scrollHeight` and stays invisible
+   * until that is above zero, because a box sized before the note has laid out
+   * is a box sized wrong. A bare element reports nothing and the note never
+   * appears, which is indistinguishable from the defect under test. */
+  const note = {
+    view: Object.assign(document.createElement('div'), {
+      renderer: { getContents: () => [{ doc: { body: { scrollHeight: 44 } } }] },
+    }),
+    href: 'notes.xhtml#n1',
+    type: 'footnote',
+    at: null,
+  }
+
+  it('is given somewhere to render, and somewhere to be shown', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const mounts: (HTMLElement | null)[] = []
+    const captured = withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
+    )
+    await waitFor(() => expect(captured['onNavigator']).toBeTypeOf('function'))
+
+    /* THE SESSION'S SIDE, as the real navigator presents it. */
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, {
+      next: () => {},
+      prev: () => {},
+      goLeft: () => {},
+      goRight: () => {},
+      goTo: () => {},
+      search: async function* () {},
+      setFootnoteMount: (mount: HTMLElement | null) => mounts.push(mount),
+      closeFootnote: () => mounts.push(null),
+    })
+
+    /* ⚠️ **THE MOUNT IS THE WHOLE FIX.** Without it the session renders the note
+       into its own off-screen fallback and the reader sees nothing — which is
+       exactly what `ignore` produced. */
+    await waitFor(() =>
+      expect(
+        mounts.filter((one) => one !== null).length,
+        'nothing told the session where to render a note',
+      ).toBeGreaterThan(0),
+    )
+  })
+
+  it('is drawn once the session says it has rendered one', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const captured = withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
+    )
+    await waitFor(() => expect(captured['onFootnote']).toBeTypeOf('function'))
+
+    /* NOT `ignore`. The prop used to be a function that returns, which is
+       indistinguishable from this one until you look at what appears. */
+    await act(async () => {
+      ;(captured['onFootnote'] as (n: unknown) => void)(note)
+    })
+    expect(
+      document.querySelector('[data-footnote]') ?? screen.queryByRole('dialog'),
+      'the note was rendered and nowhere on this screen shows it',
+    ).not.toBeNull()
+  })
+})
+
+/**
+ * THE SHELF'S PLACE, both ways (WI-20.30, D7).
+ *
+ * `remotePositions.test.ts` proves the module; this proves the WIRING: the
+ * reader asks the shelf before the book is handed to the renderer, hands the
+ * renderer whichever place is newer, and reports every settled turn back.
+ */
+describe('Reader and the shelf’s copy of the position', () => {
+  const SHELF = 'epubcfi(/6/24!/4/2/12)'
+  const DEVICE = 'epubcfi(/6/4!/4/2/10)'
+
+  function remoteWith(answer: { cfi: string; progress: number; at: number } | null | Error) {
+    return {
+      read: vi.fn(async () => {
+        if (answer instanceof Error) throw answer
+        return answer
+      }),
+      write: vi.fn(),
+      flush: vi.fn(async () => {}),
+      dispose: vi.fn(),
+    }
+  }
+
+  it('opens at the shelf’s place when it is newer — desktop at chapter 12, phone opens at 12 — and follows it locally', async () => {
+    const positions = fakePositions({ one: { cfi: DEVICE, at: 1 } })
+    const remote = remoteWith({ cfi: SHELF, progress: 0.5, at: 2 })
+    const { content } = shelf({ ext: 'epub' })
+    const captured = withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBe(SHELF)
+    expect(positions.get('one')).toBe(SHELF)
+    expect(remote.read).toHaveBeenCalledWith('one')
+  })
+
+  it('opens at this device’s place when it is the newer, and tells the shelf', async () => {
+    const positions = fakePositions({ one: { cfi: DEVICE, at: 5 } })
+    const remote = remoteWith({ cfi: SHELF, progress: 0.5, at: 2 })
+    const { content } = shelf({ ext: 'epub' })
+    const captured = withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBe(DEVICE)
+    expect(remote.write).toHaveBeenCalledWith('one', DEVICE, undefined)
+  })
+
+  it('does not hand the book to the renderer until the place is decided', async () => {
+    let answer: ((place: null) => void) | null = null
+    const remote = {
+      read: vi.fn(() => new Promise<null>((resolve) => (answer = resolve))),
+      write: vi.fn(),
+      flush: vi.fn(async () => {}),
+      dispose: vi.fn(),
+    }
+    const { content } = shelf({ ext: 'epub' })
+    const captured = withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} remote={remote} />),
+    )
+    await waitFor(() => expect(remote.read).toHaveBeenCalled())
+    /* The bytes may well be here; the renderer is not given them yet. */
+    expect(sourcesOf(captured)).toHaveLength(0)
+    answer!(null)
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBeNull()
+  })
+
+  it('falls back to this device’s place when the shelf cannot be asked', async () => {
+    const positions = fakePositions({ one: { cfi: DEVICE, at: 1 } })
+    const remote = remoteWith(new Error('the link is reconnecting'))
+    const { content } = shelf({ ext: 'epub' })
+    const captured = withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBe(DEVICE)
+  })
+
+  it('reports a turn to the shelf — the phone turns a page, book.json on the shelf carries it', async () => {
+    const remote = remoteWith(null)
+    const { content } = shelf({ ext: 'epub' })
+    const captured = withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} remote={remote} />),
+    )
+    await waitFor(() => expect(captured['onRelocate']).toBeTypeOf('function'))
+    ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, { cfi: SHELF, fraction: 0.5 })
+    expect(remote.write).toHaveBeenCalledWith('one', SHELF, 0.5)
+    /* A null cfi — the fixed-layout renderer reports one — is not a place. */
+    ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, { cfi: null, fraction: 0.6 })
+    expect(remote.write).toHaveBeenCalledTimes(1)
+  })
+})
+
+/* --------------------------------------------- the library, from a browser */
+
+describe('searching the whole library from the browser reader', () => {
+  const HIT = {
+    bookId: 'two',
+    sectionIndex: 3,
+    offset: 17,
+    quote: 'the whale',
+    prefix: 'and then we saw ',
+    suffix: ' rise beside the boat',
+    score: 1.5,
+  }
+
+  /** Open the reader, wait for its chrome, and put the Search tab on screen. */
+  async function toSearchTab(extra: Record<string, unknown> = {}) {
+    const { content } = shelf({ ext: 'epub' })
+    render(
+      <Reader
+        content={content}
+        bookId="one"
+        name="Moby-Dick"
+        onClose={vi.fn()}
+        positions={fakePositions()}
+        {...extra}
+      />,
+    )
+    await waitFor(() => expect(screen.queryByRole('button', { name: '‹ Shelf' })).not.toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Search' }))
+  }
+
+  it('offers no scope switch when the shelf link cannot search', async () => {
+    /* ⚠️ **THE DEGRADED SHAPE IS THE DEFAULT HERE.** A browser gets library
+     * search only while the link is open; with none, the panel is exactly what
+     * it was before phase 31. */
+    await toSearchTab()
+    expect(screen.queryByRole('radiogroup')).toBeNull()
+  })
+
+  it('offers it, and asks the shelf, once the link can', async () => {
+    const searchLibrary = vi.fn(async () => [HIT])
+    await toSearchTab({ searchLibrary })
+    fireEvent.click(screen.getByRole('radio', { name: 'Every book' }))
+    fireEvent.change(screen.getByLabelText('Search every book'), { target: { value: 'whale' } })
+    await waitFor(() => expect(searchLibrary).toHaveBeenCalled(), { timeout: 4000 })
+    expect(await screen.findByRole('button', { name: /the whale/u })).toBeTruthy()
+  })
+
+  it('hands a hit in another book to the host, whole', async () => {
+    /* The offset travels: the landing needs it to settle an ambiguous passage,
+     * which is measured on the real library in `landPassage.ts`. */
+    const onOpenPassage = vi.fn()
+    await toSearchTab({ searchLibrary: async () => [HIT], onOpenPassage })
+    fireEvent.click(screen.getByRole('radio', { name: 'Every book' }))
+    fireEvent.change(screen.getByLabelText('Search every book'), { target: { value: 'whale' } })
+    const row = await screen.findByRole('button', { name: /the whale/u })
+    fireEvent.click(row)
+    expect(onOpenPassage).toHaveBeenCalledWith(expect.objectContaining({ bookId: 'two', offset: 17 }))
+  })
+
+  it('names the open book from what it was opened AS, and others from the host', async () => {
+    /* ⚠️ **THE OPEN BOOK IS NOT IN THIS CLIENT'S SHELF LOOKUP.** It is the one
+     * the reader is already in, so its title is the `name` it was opened with;
+     * every other id goes to the host. Without the wrapper a hit in the open
+     * book was headed with its raw id. */
+    await toSearchTab({
+      searchLibrary: async () => [
+        { ...HIT, bookId: 'one', quote: 'this whale' },
+        { ...HIT, bookId: 'two', quote: 'that whale' },
+      ],
+      titleOf: (id: string) => (id === 'two' ? 'Endurance' : undefined),
+    })
+    fireEvent.click(screen.getByRole('radio', { name: 'Every book' }))
+    fireEvent.change(screen.getByLabelText('Search every book'), { target: { value: 'whale' } })
+    await screen.findByRole('button', { name: /this whale/u })
+    /* ⚠️ **ASSERTED ON THE RAW ID, NOT ON THE TITLE.** "Moby-Dick" is also in
+     * the chrome, so finding it proves nothing; what the wrapper prevents is
+     * the group being headed with `one`. */
+    expect(screen.queryByText('one')).toBeNull()
+    expect(screen.getByText('Endurance')).toBeTruthy()
+  })
+
+  it('falls back to the id when the host names no book at all', async () => {
+    await toSearchTab({ searchLibrary: async () => [HIT] })
+    fireEvent.click(screen.getByRole('radio', { name: 'Every book' }))
+    fireEvent.change(screen.getByLabelText('Search every book'), { target: { value: 'whale' } })
+    await screen.findByRole('button', { name: /the whale/u })
+    expect(screen.getByText('two')).toBeTruthy()
+  })
+})
+
+/* ------------------------------------------- the tools sheet, tab by tab */
+
+describe('the tools sheet', () => {
+  /** A reader with a table of contents, its chrome up, ready to drive. */
+  async function opened(extra: Record<string, unknown> = {}, toc: unknown[] = [{ label: 'One', href: 'c1.xhtml' }]) {
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader
+        content={content}
+        bookId="one"
+        name="Moby-Dick"
+        onClose={vi.fn()}
+        positions={fakePositions()}
+        {...extra}
+      />,
+    )
+    await waitFor(() => expect(captured['onToc']).toBeTypeOf('function'))
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, toc)
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
+    return captured
+  }
+
+  it('says whether the sheet is open, on the control that opens it', async () => {
+    /* `aria-expanded` is the only thing that says so — the sheet is a portal
+     * and the button carries the state for a screen reader. */
+    await opened()
+    const tools = await screen.findByRole('button', { name: 'Tools' })
+    expect(tools.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(tools)
+    expect(screen.getByRole('button', { name: 'Tools' }).getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('marks exactly the tab whose panel is showing', async () => {
+    /* jsdom has no `ResizeObserver`, and the Reading tab mounts `FacePicker`,
+     * which measures itself. A stub that observes nothing is enough — this is
+     * about which tab is PRESSED, not about how tall anything is. */
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    )
+    /* ⚠️ **`aria-pressed` IS WHAT A SCREEN READER HEARS AND WHAT THE CSS KEYS
+     * ON**, and four mutants sat on those four comparisons with nothing
+     * asserting any of them. */
+    await opened()
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    const pressed = () =>
+      ['Contents', 'Search', 'Reading']
+        .filter((n) => screen.getByRole('button', { name: n }).getAttribute('aria-pressed') === 'true')
+    expect(pressed()).toEqual(['Contents'])
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+    expect(pressed()).toEqual(['Search'])
+    fireEvent.click(screen.getByRole('button', { name: 'Reading' }))
+    expect(pressed()).toEqual(['Reading'])
+    vi.unstubAllGlobals()
+  })
+
+  it('offers no Contents tab for a book that has none', async () => {
+    /* ⚠️ **AND LANDING THE SHEET ON `contents` THERE OPENED A PANE NO TAB
+     * NAMES** — a blank sheet the reader could not get out of. */
+    await opened({}, [])
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    expect(screen.queryByRole('button', { name: 'Contents' })).toBeNull()
+    /* And the sheet still opens on something that exists. */
+    expect(screen.getByRole('button', { name: 'Search' }).getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('draws the Notes panel only for a host that has marks', async () => {
+    await opened()
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    expect(screen.queryByRole('button', { name: 'Notes' })).toBeNull()
+  })
+})
+
+describe('the selection bar, and what a read-only host may do with a selection', () => {
+  /** The smallest marks store this client will accept. */
+  function marksFor() {
+    return {
+      all: [],
+      allBookmarks: [],
+      allUnplaced: [],
+      persistent: true,
+      remove: () => {},
+      setNote: async () => {},
+      loadAll: () => {},
+      subscribe: () => () => {},
+      refresh: () => {},
+      dispose: () => {},
+    } as never
+  }
+
+  /** Open the reader and hand it a live selection through the view's callback. */
+  async function withSelection(extra: Record<string, unknown> = {}) {
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader
+        content={content}
+        bookId="one"
+        name="Moby-Dick"
+        onClose={vi.fn()}
+        positions={fakePositions()}
+        {...extra}
+      />,
+    )
+    await waitFor(() => expect(captured['onSelection']).toBeTypeOf('function'))
+    act(() => {
+      /* ⚠️ **THE WHOLE `SelectionSnapshot`, NOT A PLAUSIBLE SUBSET.** A
+       * two-field object left the bar unrendered and made two cases pass for
+       * the wrong reason — one found a tint SWATCH, whose accessible name also
+       * ends in "highlight", and read it as the action. */
+      ;(captured['onSelection'] as (s: unknown) => void)({
+        cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:15)',
+        sectionIndex: 0,
+        text: 'Call me Ishmael',
+        prefix: '',
+        suffix: '.',
+      })
+    })
+    return captured
+  }
+
+  it('draws nothing until there is a selection', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    render(<Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(screen.queryByRole('button', { name: '‹ Shelf' })).not.toBeNull())
+    expect(screen.queryByRole('toolbar', { name: 'Selection' })).toBeNull()
+  })
+
+  it('offers Copy on a selection even with no marks store', async () => {
+    /* ⚠️ **THE BAR NEEDS A SELECTION, NOT A MARKS STORE.** Gated on both, a
+     * reconnect gap — stores are null between channels — took COPY away, which
+     * is the one selection verb this read-only client actually owns. */
+    await withSelection()
+    const bar = await screen.findByRole('toolbar', { name: 'Selection' })
+    /* One action and no more: Copy is the only selection verb a read-only
+     * client owns, and the bar counts its own actions in `data-count`. */
+    expect(bar.querySelector('[data-count]')?.getAttribute('data-count')).toBe('1')
+  })
+
+  it('offers no highlight to a host that cannot write, even with marks', async () => {
+    /* The write verbs still require the store they write to AND the grant. A
+     * browser session holds a READ grant, so the control must not be drawn:
+     * every press would apply optimistically, be refused, and undo itself. */
+    const bar = await (async () => {
+      await withSelection({ marks: marksFor(), canWrite: false })
+      return screen.findByRole('toolbar', { name: 'Selection' })
+    })()
+    expect(bar.querySelector('[data-count]')?.getAttribute('data-count')).toBe('1')
+  })
+
+  it('offers it to a host that can', async () => {
+    await withSelection({ marks: marksFor(), canWrite: true })
+    const bar = await screen.findByRole('toolbar', { name: 'Selection' })
+    /* Highlight and Note join Copy — three. */
+    expect(bar.querySelector('[data-count]')?.getAttribute('data-count')).toBe('3')
+  })
+})
+
+describe('the chrome, the progress footer and the Notes tab', () => {
+  function marksWith(all: unknown[] = []) {
+    return {
+      all,
+      allBookmarks: [],
+      allUnplaced: [],
+      persistent: true,
+      remove: vi.fn(),
+      setNote: async () => {},
+      loadAll: () => {},
+      subscribe: () => () => {},
+      refresh: () => {},
+      dispose: () => {},
+    } as never
+  }
+
+  async function reading(extra: Record<string, unknown> = {}) {
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} {...extra} />,
+    )
+    await waitFor(() => expect(captured['onSelection']).toBeTypeOf('function'))
+    return captured
+  }
+
+  /** Hand the view a live selection. */
+  function select(captured: Record<string, unknown>) {
+    act(() => {
+      ;(captured['onSelection'] as (s: unknown) => void)({
+        cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:15)',
+        sectionIndex: 0,
+        text: 'Call me Ishmael',
+        prefix: '',
+        suffix: '.',
+      })
+    })
+  }
+
+  /* The chrome IS driven, in the last describe of this file — through the
+     book's own document, which `onDocument` hands over. An earlier version of
+     this comment said it could not be, which was wrong. */
+
+  it('hides the progress footer behind a selection, and shows it again after', async () => {
+    /* Both halves matter: the footer sits where the selection bar goes, so a
+     * selection takes the row and the footer must give it up. */
+    const captured = await reading()
+    /* `slider`, not `progressbar`: this client passes `onSeek`, so the track
+       is operable and announces itself as one. `ProgressFooter.test.tsx` pins
+       both halves of that split. */
+    const foot = () => document.querySelector('[role="slider"]')?.closest('[data-visible]')
+    await waitFor(() => expect(foot()?.getAttribute('data-visible')).toBe('true'))
+    select(captured)
+    await waitFor(() => expect(foot()?.getAttribute('data-visible')).toBe('false'))
+    act(() => {
+      ;(captured['onSelection'] as (s: unknown) => void)(null)
+    })
+    await waitFor(() => expect(foot()?.getAttribute('data-visible')).toBe('true'))
+  })
+
+  it('draws the Notes panel for the Notes tab, and nothing else', async () => {
+    const captured = await reading({ marks: marksWith() })
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'c1.xhtml' }])
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    const notes = screen.getByRole('button', { name: 'Notes' })
+    expect(notes.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(notes)
+    expect(screen.getByRole('button', { name: 'Notes' }).getAttribute('aria-pressed')).toBe('true')
+    /* ⚠️ **THE PANEL ITSELF, NOT MERELY THE TAB.** An earlier version of this
+     * assertion fell back to the tab button with `??`, so it could not fail —
+     * the mutant that stops the panel rendering left it green. Marginalia says
+     * "Nothing kept yet" over an empty store, and that sentence comes from the
+     * panel and nowhere else. */
+    expect(await screen.findByText(/Nothing kept yet/u)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'One' })).toBeNull()
+  })
+})
+
+describe('a read-only client is read-only by default, not by being told', () => {
+  function marksHolding(all: unknown[]) {
+    return {
+      all,
+      allBookmarks: [],
+      allUnplaced: [],
+      persistent: true,
+      remove: vi.fn(),
+      setNote: async () => {},
+      loadAll: () => {},
+      subscribe: () => () => {},
+      refresh: () => {},
+      dispose: () => {},
+    } as never
+  }
+
+  const MARK = {
+    id: 'm1',
+    bookId: 'one',
+    cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:9)',
+    sectionIndex: 0,
+    text: 'the whale',
+    prefix: '',
+    suffix: '',
+    note: '',
+    kind: 'highlight',
+    tint: 'yellow',
+    style: 'fill',
+    chapter: 'One',
+    createdAt: 1,
+  }
+
+  async function reading(extra: Record<string, unknown> = {}) {
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} {...extra} />,
+    )
+    await waitFor(() => expect(captured['onSelection']).toBeTypeOf('function'))
+    return captured
+  }
+
+  it('offers no write verb when nobody said it could write', async () => {
+    /* ⚠️ **THE DEFAULT IS THE CASE THAT MATTERS**, because it is the one every
+     * host that forgets to pass the prop gets. Flipped to `true`, a browser
+     * session holding a READ grant would draw Highlight and Note — each press
+     * applying optimistically, being refused, and undoing itself, with the
+     * refusal logged to a console no reader opens. */
+    const captured = await reading({ marks: marksHolding([]) })
+    act(() => {
+      ;(captured['onSelection'] as (s: unknown) => void)({
+        cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:15)',
+        sectionIndex: 0,
+        text: 'Call me Ishmael',
+        prefix: '',
+        suffix: '.',
+      })
+    })
+    const bar = await screen.findByRole('toolbar', { name: 'Selection' })
+    expect(bar.querySelector('[data-count]')?.getAttribute('data-count')).toBe('1')
+  })
+
+  it('offers no way to delete a mark it cannot delete', async () => {
+    /* The Notes panel draws a delete control only when it is GIVEN one, and a
+     * read-only client must not be. */
+    const captured = await reading({ marks: marksHolding([MARK]) })
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'c1.xhtml' }])
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Notes' }))
+    expect(await screen.findByText(/the whale/u)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Delete mark' })).toBeNull()
+  })
+
+  it('offers one to a client that can', async () => {
+    const captured = await reading({ marks: marksHolding([MARK]), canWrite: true })
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'c1.xhtml' }])
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Notes' }))
+    expect(await screen.findByRole('button', { name: 'Delete mark' })).toBeTruthy()
+  })
+})
+
+describe('the chrome goes down on a centre tap, and takes the header out of reach', () => {
+  it('is not merely hidden — it leaves the tab order and the accessibility tree', async () => {
+    /* ⚠️ **`data-visible` ALONE LEFT THE BUTTONS TABBABLE AND ANNOUNCED.** A
+     * keyboard reader tabbed into invisible controls and a screen reader read
+     * out a bar that is not there; `inert` removes both, and the browser puts
+     * them back when it goes.
+     *
+     * ⚠️ **AND THE TAP HAS TO GO TO THE BOOK'S OWN DOCUMENT.** The book is in
+     * an iframe, so a tap on it never reaches this page — `onDocument` hands
+     * the document over and `useTapToTurn` binds there. An earlier version of
+     * this file said the toggle could not be driven at all and left the mutant
+     * alive; it can, through the same callback the view already captures. */
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />,
+    )
+    await waitFor(() => expect(captured['onDocument']).toBeTypeOf('function'))
+
+    const book = document.implementation.createHTMLDocument('chapter')
+    /* ⚠️ **A ZERO-WIDTH PAGE IS NOT A PAGE**, and jsdom reports zero for every
+     * box — `tapIntent` refuses such a tap on purpose, so without a width this
+     * drives nothing and would pass whatever the code did. */
+    Object.defineProperty(book.documentElement, 'clientWidth', { value: 900, configurable: true })
+    act(() => {
+      ;(captured['onDocument'] as (g: number, d: Document | null) => void)(0, book)
+    })
+
+    const header = () => document.querySelector('header')
+    expect(header()?.getAttribute('data-visible')).toBe('true')
+    expect(header()?.hasAttribute('inert')).toBe(false)
+
+    /* The MIDDLE THIRD: a clean press and release at the centre, which
+     * `tapIntent` refuses as a turn and which is therefore the toggle. */
+    const centre = { pointerId: 1, clientX: 450, clientY: 100 }
+    act(() => {
+      book.dispatchEvent(new window.PointerEvent('pointerdown', centre))
+      book.dispatchEvent(new window.PointerEvent('pointerup', centre))
+    })
+    await waitFor(() => expect(header()?.getAttribute('data-visible')).toBe('false'))
+    expect(header()?.hasAttribute('inert')).toBe(true)
+
+    /* And back again on the next centre tap — §06's "tap centre to show". */
+    act(() => {
+      book.dispatchEvent(new window.PointerEvent('pointerdown', centre))
+      book.dispatchEvent(new window.PointerEvent('pointerup', centre))
+    })
+    await waitFor(() => expect(header()?.getAttribute('data-visible')).toBe('true'))
+    expect(header()?.hasAttribute('inert')).toBe(false)
+  })
+})
+
+describe('the browser client can come back from a jump', () => {
+  /* ⚠️ **THIS CLIENT RECORDED ZERO DEPARTURES.** Measured 2026-09-25: a
+     Contents click, a search hit and a passage landing each moved the reader
+     with nothing to return to — and then a seek was added, which can move a
+     thousand pages on one slipped thumb. The desktop has had a jump stack
+     since phase 12; the browser simply never got one.
+
+     ⚠️ **AND A STACK WITH NO CONTROL IS A CAPABILITY WITH NO CALLER**, which
+     is how `paper/share-notes/1` answered a protocol nothing asked and
+     `PassageHit.offset` crossed the wire unread. So the cases below drive the
+     BUTTON, not the hook. */
+
+  const went: string[] = []
+
+  async function reading(extra: Record<string, unknown> = {}) {
+    went.length = 0
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = { sources: [] }
+    capturingInto(captured)
+    render(
+      <Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} {...extra} />,
+    )
+    await waitFor(() => expect(captured['onNavigator']).toBeTypeOf('function'))
+    /* ⚠️ **THE STACK ONLY MOVES FOR A NAVIGATION THAT HAPPENED.** `navigate`
+       answers false with no navigator, and the stack is right not to move —
+       so without this the back button stays lit for ever and the case times
+       out rather than failing. That boolean is load-bearing; see `JumpsDeps`. */
+    act(() => {
+      ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, {
+        goTo: (t: string) => void went.push(t),
+        goToFraction: (f: number) => void went.push(`fraction:${f}`),
+        next: vi.fn(),
+        prev: vi.fn(),
+        goLeft: vi.fn(),
+        goRight: vi.fn(),
+        /* A REAL generator, so a hit can be clicked. `vi.fn()` answers
+           undefined, which the panel cannot iterate. */
+        search: async function* () {
+          yield { cfi: 'epubcfi(/6/20!/4/2)', label: 'Chapter Nine', pre: 'the ', match: 'whale', post: ' rose' }
+        },
+      })
+    })
+    await waitFor(() => expect(captured['onSelection']).toBeTypeOf('function'))
+    return captured
+  }
+
+  const somewhere = (captured: Record<string, unknown>, cfi: string) => {
+    act(() => {
+      ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, {
+        cfi,
+        chapterHref: 'ch1.xhtml',
+        fraction: 0.2,
+        printPage: '',
+      })
+    })
+  }
+
+  const backButton = () => screen.queryByRole('button', { name: 'Back to where you were' })
+
+  it('offers no way back before the reader has gone anywhere', () => {
+    /* A permanently disabled control teaches a reader the app cannot do this,
+       so it is ABSENT rather than dead. */
+    expect(backButton()).toBeNull()
+  })
+
+  it('offers one after a seek, and takes the reader back to where they were', async () => {
+    const captured = await reading()
+    somewhere(captured, 'epubcfi(/6/4!/4/2/2)')
+    expect(backButton()).toBeNull()
+
+    const track = screen.getByRole('slider')
+    track.setPointerCapture = vi.fn()
+    track.releasePointerCapture = vi.fn()
+    track.hasPointerCapture = vi.fn(() => true)
+    track.getBoundingClientRect = vi.fn(
+      () => ({ left: 0, width: 100, top: 0, height: 3, right: 100, bottom: 3, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect,
+    )
+    fireEvent.pointerDown(track, { isPrimary: true, button: 0, clientX: 90, pointerId: 1 })
+    fireEvent.pointerUp(track, { clientX: 90, pointerId: 1 })
+
+    await waitFor(() => expect(backButton()).not.toBeNull())
+    expect(went).toContain('fraction:0.9')
+
+    act(() => backButton()!.click())
+    /* Back to the CFI the reader was at, and the offer is spent. */
+    expect(went).toContain('epubcfi(/6/4!/4/2/2)')
+    await waitFor(() => expect(backButton()).toBeNull())
+  })
+
+  it('records a Contents click too, not only a seek', async () => {
+    /* Every navigation on this screen used to be a one-way trip. */
+    const captured = await reading()
+    somewhere(captured, 'epubcfi(/6/4!/4/2/2)')
+    act(() => {
+      ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'ch1.xhtml' }])
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Contents' }))
+    fireEvent.click(screen.getByRole('button', { name: /One/u }))
+    await waitFor(() => expect(backButton()).not.toBeNull())
+  })
+
+  it('records a search hit, which is the jump that moves a reader FURTHEST', async () => {
+    /* ⚠️ **THE PANEL HAS HAD `onGoTo` ALL ALONG AND THIS CLIENT NEVER PASSED
+       IT** — its doc said the browser "has no stack to push onto", which was
+       true until this change. A hit is the jump that moves a reader FURTHEST,
+       so leaving it out made Back absent after a search, or returned the
+       reader to an older unrelated departure. Found by audit, 2026-09-25.
+
+       Asserted on the PANEL's contract rather than by driving a search: the
+       hit list needs a live search generator, and what went wrong here was a
+       prop that was never passed. */
+    const captured = await reading()
+    act(() => {
+      ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+    })
+    somewhere(captured, 'epubcfi(/6/4!/4/2/2)')
+    expect(backButton()).toBeNull()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Search' }))
+    const field = screen.getByLabelText('Search this book')
+    fireEvent.change(field, { target: { value: 'whale' } })
+
+    const hit = await screen.findByRole('button', { name: /whale/u }, { timeout: 4000 })
+    fireEvent.click(hit)
+
+    await waitFor(() => expect(backButton()).not.toBeNull())
+    expect(went).toContain('epubcfi(/6/20!/4/2)')
+  })
+
+  it('records an internal link, which foliate navigates itself', async () => {
+    /* ⚠️ `onLink` was `ignore`, so an ordinary cross-reference recorded no
+       departure. It stays UNCANCELLED — the fork performs the navigation and
+       the host only remembers where the reader was. */
+    const captured = await reading()
+    somewhere(captured, 'epubcfi(/6/4!/4/2/2)')
+    expect(backButton()).toBeNull()
+    act(() => {
+      ;(captured['onLink'] as (d: unknown, e: unknown) => void)(
+        { href: 'ch9.xhtml' },
+        { preventDefault: vi.fn() },
+      )
+    })
+    await waitFor(() => expect(backButton()).not.toBeNull())
+  })
+
+  it('records nothing from a place the stack cannot pin down', async () => {
+    /* ⚠️ A section still rendering has no CFI. Recording an origin the reader
+       never left is what puts a dead control behind a live button — the rule
+       `placeHere` states, and the reason it may answer null. */
+    const captured = await reading()
+    somewhere(captured, '')
+    const track = screen.getByRole('slider')
+    track.setPointerCapture = vi.fn()
+    track.releasePointerCapture = vi.fn()
+    track.hasPointerCapture = vi.fn(() => true)
+    track.getBoundingClientRect = vi.fn(
+      () => ({ left: 0, width: 100, top: 0, height: 3, right: 100, bottom: 3, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect,
+    )
+    fireEvent.pointerDown(track, { isPrimary: true, button: 0, clientX: 90, pointerId: 1 })
+    fireEvent.pointerUp(track, { clientX: 90, pointerId: 1 })
+    expect(backButton()).toBeNull()
+  })
+})

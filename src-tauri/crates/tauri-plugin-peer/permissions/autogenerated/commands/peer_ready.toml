@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-ready"
+description = "Enables the peer_ready command without any pre-configured scope."
+commands.allow = ["peer_ready"]
+
+[[permission]]
+identifier = "deny-peer-ready"
+description = "Denies the peer_ready command without any pre-configured scope."
+commands.deny = ["peer_ready"]

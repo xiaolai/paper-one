@@ -1,0 +1,426 @@
+/* Paper — the design system's values: colour, elevation, spacing and type.
+ *
+ * Copied verbatim from `dev-docs/design/Paper.dc.html`. The design handoff is
+ * explicit that this block is the whole colour system: every colour in the app
+ * resolves through these names, so a theme is a set of values and nothing else.
+ * Do not add a colour here that a theme does not re-value, and do not inline a
+ * hex anywhere else in the app.
+ *
+ * The amber was darkened per theme during the design pass to clear 4.5:1
+ * contrast. Do NOT revert it to #A9631C — see design system §10, which
+ * publishes measured (not estimated) ratios for five pairs across five themes.
+ *
+ * ⚠️ **AND `--muted` WAS DARKENED ON THREE THEMES ON 2026-09-18, FOR THE SAME
+ * REASON AND BY A CHECK RATHER THAN BY A DESIGN PASS.** §10's five pairs all
+ * hold. `--muted` on `--bg` was not one of the five, and it is the app's
+ * commonest pairing of all — every secondary label sits on the page:
+ *
+ *   slate  #5C6367 → #53595D    on --bg 4.29 → 4.99   --wash 3.88 → 4.51
+ *   sage   #5A6653 → #515C4B    on --bg 4.36 → 5.06   --wash 3.94 → 4.57
+ *   sepia  #7A6A54 → #6F604C    on --bg 4.38 → 5.09   --wash 3.97 → 4.61
+ *
+ * 10% toward black, which is the least that clears 4.5:1 on all three of that
+ * theme's grounds at once. Paper and Night already passed and are untouched.
+ *
+ * ⚠️ **THE CALL-SITE FIX WAS TRIED FIRST AND IT DOES NOT WORK**, which is the
+ * part worth keeping. Two rules co-declared `--muted` on `--wash`, so both were
+ * moved to `--ink-2` — and then the pairing turned out to arrive by
+ * INHERITANCE as well: a `--wash` hover background with a `--muted` child, a
+ * `--wash` field with a `--muted` placeholder. A pairing that composes across
+ * rules cannot be hunted call site by call site, and a check that looks for it
+ * in one declaration block will report clean while the app still draws it. One
+ * value per theme fixes every instance, including the ones nobody has found.
+ *
+ * `tokens.hygiene.test.ts` computes every one of these from this file now, so
+ * the ratios above are a record of a measurement rather than a claim.
+ */
+
+/* `:root` IS Paper, and `[data-theme='paper']` says so out loud.
+ *
+ * Every other theme is an attribute selector, so any element can be put into
+ * one by carrying the attribute — which is how the Appearance swatches preview
+ * a theme by BEING it rather than by copying its colours into TypeScript.
+ * Paper had no such selector, only the default, so a Paper swatch inside a
+ * Night window inherited Night and previewed the wrong thing. Two selectors on
+ * one block rather than a second copy of the values. */
+:root,
+[data-theme='paper'] {
+  --ink:#17191B; --ink-2:#3D4348; --muted:#5F666C;
+  --surface:#FFFFFF; --bg:#FBFBFA; --wash:#F2F3F1;
+  --line:#EDEEEB; --line-2:#E3E4E1; --line-3:#D6D8D3;
+  --accent:#1B3A6B; --accent-bg:#EEF1F6; --accent-line:#DDE2EA;
+  --amber:#9E5A16; --amber-bg:#FBF6EE; --amber-line:#E7D6BE;
+  --mark:#FAE8AF; --mark-rule:#D5B75A; --ok:#7C9A6B;
+  /* §01's three mark tints: a pale FILL for a band behind the words and a
+     saturated RULE for the line under them — and for the swatch that offers
+     either. Mirrored in `bookCss.ts` for the book's own document, which
+     cannot see these; that table is the one the Overlayer paints from. */
+  --mark-yellow:#FAE8AF; --mark-yellow-rule:#D5B75A;
+  --mark-green:#CAF7CA; --mark-green-rule:#88CE8A;
+  --mark-purple:#E9CCFF; --mark-purple-rule:#D1A4F3;
+  /* Destructive ink. Checked against every theme's --surface AND --wash, since a
+     danger row is read on its hover fill: 6.5 / 5.9 here; sepia 5.8 / 5.0; slate
+     and sage fell to 4.15 / 4.24 on wash — under 4.5:1 — and carry their own. */
+  --danger:#B3261E;
+  /* The edge a theme's OWN swatch is drawn with when it is the chosen one:
+     the densest line the theme has, so it reads against that theme's paper
+     rather than against the app's. */
+  --swatch-edge:#D6D8D3;
+  --tint-a:#F4F1EA; --tint-b:#EEF1F4; --tint-c:#F1F0F4; --tint-d:#EFF2F1; --tint-e:#F0E4D2;
+  --shadow-card: 0 1px 2px rgba(20,24,28,.05), 0 14px 34px -22px rgba(20,24,28,.26);
+  /* A jacket on the shelf: a tight contact shadow so it sits ON something, and a
+     longer, softer fall so it reads as lifted off the surface. Heavier than
+     `--shadow-card`, deliberately — a card is a surface a few pixels up; a book
+     stands. */
+  --shadow-jacket: 0 1px 2px rgba(20,24,28,.18), 0 6px 14px -4px rgba(20,24,28,.28), 0 18px 32px -14px rgba(20,24,28,.32);
+  --shadow-pop: 0 24px 60px -28px rgba(20,24,28,.5);
+  --shadow-pill: 0 1px 2px rgba(20,24,28,.07);
+  --scrim: rgba(20,24,28,.35);
+  --tl-red: #F4655A; --tl-amber: #F5BD4F; --tl-green: #61C555; --tl-rim: rgba(23,25,27,.14);
+}
+
+[data-theme="slate"] {
+  --ink:#1C2022; --ink-2:#3A4044; --muted:#53595D;
+  --surface:#DFE1DE; --bg:#D6D9D5; --wash:#CBCFCA;
+  --line:#C6CAC5; --line-2:#B8BDB8; --line-3:#A6ABA6;
+  --accent:#23456F; --accent-bg:#CFD7DF; --accent-line:#B4BFCB;
+  --swatch-edge:#A6ABA6;
+  --amber:#8A4C11; --amber-bg:#DDD8CB; --amber-line:#C6B79C;
+  --mark:#DCC992; --mark-rule:#B79A3B; --ok:#6A8858;
+  /* §01's three mark tints: a pale FILL for a band behind the words and a
+     saturated RULE for the line under them — and for the swatch that offers
+     either. Mirrored in `bookCss.ts` for the book's own document, which
+     cannot see these; that table is the one the Overlayer paints from. */
+  --mark-yellow:#DCC992; --mark-yellow-rule:#B79A3B;
+  --mark-green:#ACD8AD; --mark-green-rule:#6CB06E;
+  --mark-purple:#C9ADDE; --mark-purple-rule:#B388D4;
+  /* Darker than the root's: on this theme's --wash the root red measures under
+     4.5:1 (see the contrast note on --danger in :root). */
+  --danger:#9C1D16;
+  --tint-a:#D2CFC6; --tint-b:#C9D0D5; --tint-c:#CFCCD4; --tint-d:#CBD3CC; --tint-e:#D6C9AE;
+}
+
+[data-theme="sage"] {
+  --ink:#1B2419; --ink-2:#37432F; --muted:#515C4B;
+  --surface:#DDE6D8; --bg:#D3DECD; --wash:#C7D4C1;
+  --line:#C6D2BF; --line-2:#B6C4AE; --line-3:#A2B29A;
+  --accent:#2A4F6B; --accent-bg:#CDDCDE; --accent-line:#B3C6C9;
+  --swatch-edge:#A2B29A;
+  --amber:#8F5013; --amber-bg:#DDDCC3; --amber-line:#C3BE97;
+  --mark:#DDCC94; --mark-rule:#B99C3D; --ok:#5F8050;
+  /* §01's three mark tints: a pale FILL for a band behind the words and a
+     saturated RULE for the line under them — and for the swatch that offers
+     either. Mirrored in `bookCss.ts` for the book's own document, which
+     cannot see these; that table is the one the Overlayer paints from. */
+  --mark-yellow:#DDCC94; --mark-yellow-rule:#B99C3D;
+  --mark-green:#AFDAAF; --mark-green-rule:#6EB270;
+  --mark-purple:#C4A8D8; --mark-purple-rule:#B68AD6;
+  /* Darker than the root's: on this theme's --wash the root red measures under
+     4.5:1 (see the contrast note on --danger in :root). */
+  --danger:#9C1D16;
+  --tint-a:#D2D2C0; --tint-b:#C6D3D2; --tint-c:#CCCFC9; --tint-d:#C8D6C4; --tint-e:#D5CFA9;
+}
+
+[data-theme="sepia"] {
+  --ink:#2B2117; --ink-2:#4A3B2A; --muted:#6F604C;
+  --surface:#F8F0E1; --bg:#F3EAD9; --wash:#EBDFC9;
+  --line:#E5D9C2; --line-2:#DCCDB0; --line-3:#C9B694;
+  --accent:#2C5578; --accent-bg:#E7E9E4; --accent-line:#CFD6D2;
+  --swatch-edge:#C9B694;
+  --amber:#985614; --amber-bg:#F3E7D2; --amber-line:#DCC49E;
+  --mark:#ECDAA2; --mark-rule:#C7AA4C; --ok:#6E8C5C;
+  /* §01's three mark tints: a pale FILL for a band behind the words and a
+     saturated RULE for the line under them — and for the swatch that offers
+     either. Mirrored in `bookCss.ts` for the book's own document, which
+     cannot see these; that table is the one the Overlayer paints from. */
+  --mark-yellow:#ECDAA2; --mark-yellow-rule:#C7AA4C;
+  --mark-green:#BCE8BC; --mark-green-rule:#7BC07D;
+  --mark-purple:#CCB1E1; --mark-purple-rule:#C397E4;
+  --tint-a:#EEE3CE; --tint-b:#E3E5DE; --tint-c:#E9E1D5; --tint-d:#E4E6D9; --tint-e:#EDDCBB;
+}
+
+[data-theme="night"] {
+  --ink:#E9EAE8; --ink-2:#C2C7C9; --muted:#8B9196;
+  --surface:#16191C; --bg:#101315; --wash:#1E2226;
+  --line:#24282C; --line-2:#2F343A; --line-3:#3C4248;
+  --accent:#8FB4E8; --accent-bg:#1A2431; --accent-line:#2B3A4E;
+  /* WHITE, not `--line-3`. On a #16191C surface the densest line this theme
+     has is #3C4248, which is a shade of the dark it sits on — a border nobody
+     can see is not a selection. The rule is the same as the light themes',
+     which is "the edge must read against this theme's own paper"; on dark
+     paper that means going the other way. */
+  --swatch-edge:#FFFFFF;
+  --amber:#D9A25E; --amber-bg:#241C12; --amber-line:#3B2E1D;
+  --mark:#62511C; --mark-rule:#85702A; --ok:#86A874; --danger:#E5735F;
+  /* §01's three mark tints: a pale FILL for a band behind the words and a
+     saturated RULE for the line under them — and for the swatch that offers
+     either. Mirrored in `bookCss.ts` for the book's own document, which
+     cannot see these; that table is the one the Overlayer paints from. */
+  --mark-yellow:#62511C; --mark-yellow-rule:#85702A;
+  --mark-green:#325934; --mark-green-rule:#4E8050;
+  --mark-purple:#5B426D; --mark-purple-rule:#83629A;
+  --tint-a:#2A2620; --tint-b:#1F262E; --tint-c:#262330; --tint-d:#202A26; --tint-e:#2E2716;
+  /* Night is the only theme that re-values elevation: a light-theme shadow
+   * disappears on a dark page. */
+  --shadow-card: 0 1px 2px rgba(0,0,0,.5), 0 14px 34px -22px rgba(0,0,0,.75);
+  --shadow-jacket: 0 1px 2px rgba(0,0,0,.6), 0 6px 14px -4px rgba(0,0,0,.7), 0 18px 32px -14px rgba(0,0,0,.8);
+  --shadow-pop: 0 24px 60px -28px rgba(0,0,0,.9);
+  --shadow-pill: 0 1px 2px rgba(0,0,0,.55);
+  --scrim: rgba(0,0,0,.6);
+}
+
+/* ── SPACING ────────────────────────────────────────────────────────────────
+ *
+ * A CLOSED SET, named for its own value. Spacing is the one scale where naming
+ * by intent is a mistake — the same 8px is a gap between chips here and the
+ * padding of a menu row there, and a name like `--space-tight` would be argued
+ * about at every use. What a spacing token has to do is make the SET finite:
+ * you cannot write 9px, you have to pick a step, and the design stops
+ * accumulating values nobody chose.
+ *
+ * The steps are the ones the app already used. 164 spacing values across the
+ * stylesheets resolved to twenty-one distinct numbers; twelve of them accounted
+ * for 93% of the uses and are these. The other nine — 1, 5, 7, 9, 18, 26, 42,
+ * 60 — were each used once or twice, and they are what a scale exists to
+ * prevent: not one of them was a decision anybody could reconstruct.
+ *
+ * 2px steps to 16, then 4px steps. Fine-grained where the eye can tell 2px
+ * apart — inside a control — and coarse where it cannot.
+ */
+/**
+ * THE FOCUS RING, as one value.
+ *
+ * ⚠️ **IT WAS WRITTEN OUT SEVENTEEN TIMES AND THE GLOBAL DEFAULT DISAGREED
+ * WITH ALL OF THEM.** Seventeen declarations across eight stylesheets said
+ * `outline: 2px solid var(--accent)` by hand; `global.css` said `3px`. So a
+ * control that declared its own ring got 2px and a control that inherited the
+ * default got 3px, for no reason either of them stated — two ring weights in
+ * one app, decided by whether an author had happened to write a rule.
+ *
+ * `tokens.test.ts` could not see it: `outline-offset` is in its `SCALED` set
+ * and `outline` is not, so the OFFSET was policed to the space scale while the
+ * WIDTH beside it was free. That gap is closed with this token — the guard now
+ * reads `outline` and `outline-width` too.
+ *
+ * 2px, because seventeen authors who thought about it chose 2px and one
+ * default nobody revisited chose 3px. The colour rides along: a ring is a ring,
+ * and a caller that wanted a different one would be making a statement this
+ * design system does not have.
+ *
+ * ⚠️ **THE OFFSET IS DELIBERATELY NOT IN HERE.** `dev-docs/design-tokens.md`
+ * has the evidence: nineteen declarations override the global `--space-2` with
+ * six values, because the precondition breaks in two independent ways — a
+ * control that IS its own filled shape, and a control whose container would
+ * clip a ring drawn outside it. "Do not collapse the six into two tokens" is
+ * that file's own conclusion, tested on paper and refused by the data. Width is
+ * one value; offset is a decision each control owes.
+ */
+/**
+ * HOW FAINT A THING IS, as a scale.
+ *
+ * ⚠️ **§07 SAYS DISABLED IS 45%, AND FIVE CONTROLS EACH CHOSE THEIR OWN
+ * NUMBER.** `global.css`'s `[data-disabled]` had 0.45, `.citation:disabled`
+ * 0.6, `.stepperButton:disabled` and `.colourClear:disabled` 0.35, and
+ * `.bookmarkToggle:disabled` 0.4. Not one of them said why it differed. A rule
+ * that is stated in prose and written as a literal at each call site is a rule
+ * that drifts, and this is what the drift looks like: one design decision
+ * spread over four numbers.
+ *
+ * ⚠️ **`disabled` AND `dimmed` HOLD THE SAME VALUE AND ARE NOT THE SAME
+ * TOKEN.** `[data-nocopy]` on the shelf is "dimmed, not disabled" — its own
+ * comment insists on the distinction, because the events must keep flowing. It
+ * agrees with §07 today by coincidence, and collapsing them would mean a change
+ * to the disabled rule silently moved a control that is not disabled.
+ * `design-tokens.md` reached the same conclusion about the ring offsets — "do
+ * not collapse the six into two tokens" — for the same reason.
+ *
+ * `0` and `1` are not on this scale and cannot be: they are presence and
+ * absence, not a degree of it.
+ */
+:root {
+  --opacity-disabled: 0.45;
+  --opacity-dimmed: 0.45;
+  --opacity-quiet: 0.75;
+  --opacity-quieter: 0.55;
+  --opacity-fill: 0.45;
+  --opacity-fill-done: 0.28;
+}
+
+/**
+ * THE THREE WEIGHTS, because the typefaces are variable and every weight in the
+ * app is one of these three.
+ *
+ * Twenty-eight declarations wrote 600, 500 or 400 as a literal — no scale, no
+ * names, and nothing stopping a twenty-ninth from inventing 650. The faces are
+ * `@fontsource-variable`, so any number between is renderable, which is exactly
+ * why the set has to be named rather than left to whoever types next.
+ */
+:root {
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+}
+
+:root {
+  --focus-ring: 2px solid var(--accent, #1B3A6B);
+}
+
+:root {
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-10: 10px;
+  --space-12: 12px;
+  --space-14: 14px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-28: 28px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-56: 56px;
+}
+
+/* ── TYPE ───────────────────────────────────────────────────────────────────
+ *
+ * NAMED BY ROLE, which is the opposite choice from spacing and for the opposite
+ * reason: a font size IS a decision about what a piece of text is. Every use of
+ * 11px in this app is a caption; every use of 13px is a control's own words. A
+ * name that says so survives a change of value, and a size that has no role has
+ * no business existing.
+ *
+ * Derived from what was there. Naming them turned up one genuine inconsistency:
+ * the library's empty-state body was 14px and the reader's was 15px — the same
+ * sentence in the same situation, at two sizes, because nothing made them one
+ * decision. There is no 14px step; both read `--text-body`.
+ */
+:root {
+  /* A mark's kind, a tag chip — the smallest thing that is still a word. */
+  --text-micro: 10px;
+  /* Captions, group headings, the status bar: text about other text. */
+  --text-caption: 11px;
+  /* Secondary interface text — counts, sub-rows, tool labels. */
+  --text-small: 12px;
+  /* THE INTERFACE'S OWN VOICE. Rows, fields, menus, tabs. The default. */
+  --text-ui: 13px;
+  /* An empty state's sentence, a stepper's value: interface text with room. */
+  --text-body: 15px;
+  /* PROSE, and only prose — a note's own words, a typeface sample. Serif. */
+  --text-prose: 17px;
+  /* The library's empty-state heading. */
+  --text-title: 28px;
+  /* The reader's empty state — the largest type in the app. */
+  --text-display: 44px;
+}
+
+/* ── THE THREE FACES ────────────────────────────────────────────────────────
+ *
+ * §02 assigns the interface to Instrument Sans, prose to Crimson Pro and
+ * machine text to IBM Plex Mono. Those are three decisions; there were NINE
+ * declarations of them.
+ *
+ * ⚠️ **A FONT STACK IS THE WORST KIND OF LITERAL TO REPEAT**, and it is the one
+ * the guard could not see: `font-family` was not policed, so nothing noticed
+ * that the serif was written out five times and the mono three. A stack is
+ * long, so it is copied rather than retyped; it is a FALLBACK CHAIN, so a
+ * missing link fails only on the machines that needed it; and every copy has to
+ * change together when a face is added, dropped or renamed — which has already
+ * happened once here, when the variable builds arrived and `'Crimson Pro
+ * Variable'` had to go in front of `'Crimson Pro'`.
+ *
+ * The sans stack is the body default in `global.css` and is named here so all
+ * three live together; nothing else should need to declare it.
+ */
+:root {
+  --font-sans: 'Instrument Sans Variable', 'Instrument Sans', system-ui,
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-serif: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ── LEADING ────────────────────────────────────────────────────────────────
+ *
+ * NAMED BY ROLE, like type and for type's reason: how open a line box is IS a
+ * decision about what the text is. Large type is set tighter because the gaps a
+ * face builds in for 13px come apart at 44; a paragraph is set more openly than
+ * a row because the eye has to find the next line rather than the next word.
+ *
+ * ⚠️ **IT WAS EXEMPT FROM THE GUARD AS "A RATIO, NOT A QUANTITY", AND THAT IS
+ * THE ARGUMENT THAT ALREADY FAILED ONCE.** `font-weight` is a ratio by the same
+ * test and it accumulated twenty-eight hand-written values before it was named;
+ * `opacity` is a ratio and §07's one disabled rule had become five numbers.
+ * Leading went the same way: twenty-four chosen values over EIGHT unrelated
+ * numbers — 1.1, 1.2, 1.3, 1.4, 1.45, 1.5, 1.55, 1.6 — in twelve stylesheets.
+ *
+ * The proof that none of it was a decision is that the same SIZE got different
+ * answers with nothing said about why: `--text-small` was set at 1.3, 1.4, 1.45
+ * and 1.6; `--text-ui` at 1.5, 1.55 and 1.6; `--text-body` at 1.2, 1.5 and 1.6.
+ * A scale cannot be wrong about a distinction nobody was drawing.
+ *
+ * Five steps, and the collapse moves no line by more than 0.1 — the 1.5 group
+ * onto `--leading-body`, where it had no distinction from the 1.6 group to
+ * lose, and 1.45 onto `--leading-ui`. At 13px that is under 1.5px a line.
+ *
+ * `1` IS NOT ON THIS SCALE, and unlike opacity's 0 and 1 that is not because it
+ * is an absence — type set solid is a real setting. It is because the five
+ * declarations that use it all mean the same thing, "this box is exactly its
+ * glyphs", which is a structural claim about the box rather than a leading
+ * chosen for the text. The guard allows it for that reason and no other.
+ */
+:root {
+  /* The largest type in the app — the reader's empty state, at 44px. */
+  --leading-display: 1.1;
+  /* A heading, or a typeface specimen: type being LOOKED AT, not read. */
+  --leading-title: 1.2;
+  /* A compact row's own words — a title and its sub in a strip. */
+  --leading-snug: 1.3;
+  /* ONE OR TWO LINES OF INTERFACE TEXT: a caption, a hint, a margin mark. */
+  --leading-ui: 1.4;
+  /* A PARAGRAPH — an empty state's sentences, a note's own words, prose. */
+  --leading-body: 1.6;
+}
+
+/* ── A RING ─────────────────────────────────────────────────────────────────
+ *
+ * A hairline drawn as a shadow rather than a border, because it takes no space
+ * in the box — which is the whole reason a control that is already its own
+ * filled shape reaches for one.
+ *
+ * ⚠️ **THE GEOMETRY WAS COPIED EIGHT TIMES AND ONLY THE COLOUR EVER DIFFERED.**
+ * Four `0 0 0 1px` and four `inset 0 0 0 1px`, across five stylesheets. The
+ * colour is the legitimate parameter — a swatch's edge, a chip's hairline, a
+ * disc's own rule — and the four numbers in front of it are not a decision
+ * anybody was making. `box-shadow` was not policed either, so nothing said so.
+ *
+ * A PARTIAL VALUE, deliberately: the caller supplies the colour, which keeps
+ * the parameter at the call site where it belongs and composes with a real
+ * elevation beside it — `box-shadow: var(--shadow-pop), var(--ring) var(--line-2)`.
+ *
+ * ⚠️ **THE 0.5px RIM ON THE TRAFFIC LIGHTS IS NOT THIS TOKEN** and must not be
+ * folded into it. A sub-hairline is the one width that is not "the thinnest
+ * line a screen can draw" — it is a deliberate half of it, on a control whose
+ * size Apple owns, and `TitleBar.module.css` says so at the site.
+ */
+:root {
+  --ring: 0 0 0 1px;
+  --ring-inset: inset 0 0 0 1px;
+}
+
+/* ── TRACKING ───────────────────────────────────────────────────────────────
+ *
+ * Two directions and one reason each. LARGE type is tightened, because the gaps
+ * a typeface builds in for 13px are too wide once the glyphs are 28 or 44 and
+ * the word starts to come apart. SMALL CAPS are opened, because a run of
+ * uppercase at 10 or 11px sets too tight to read as words rather than as a
+ * block — the wider the setting, the more that is true.
+ *
+ * Seven separate values were in use — 0.04, 0.06, 0.08, 0.09em to open, and
+ * -0.01, -0.02em to tighten — none of them related to any other.
+ */
+:root {
+  --track-tight: -0.02em;
+  --track-snug: -0.01em;
+  --track-caps: 0.06em;
+  --track-caps-wide: 0.09em;
+}

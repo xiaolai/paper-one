@@ -1,0 +1,52 @@
+/* Every side column in Paper is this card.
+ *
+ * §05: "Contents, Companion, PDF thumbnails and library Collections are one
+ * component with different contents: --bg surface, shadow-card, and a
+ * concentric inset ... Never style one of these columns directly."
+ *
+ * The side pane is one of them. It used to be styled separately — a different
+ * background, margin and radius — which is exactly what that rule forbids.
+ *
+ * The concentric RULE is kept; the prototype's derived value is not. Its
+ * 20 − 6 = 14 was concentric with a simulated 20px window card drawn in a
+ * browser. Against a real window the parent is the OS's own corner, so the
+ * radius comes from `--radius-leading-card`, measured off macOS 26 (see
+ * metrics.ts).
+ */
+
+.card {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  border-radius: var(--radius-leading-card);
+  /* Keeps scrolling content off the rounded bottom corners. At this radius a
+   * list running flush to the edge collides with the curve. */
+  padding-bottom: var(--space-12);
+}
+
+/* macOS: the card runs the full height of the window and slides under the
+ * overlay titlebar, so its top inset clears the traffic lights.
+ *
+ * padding-top subtracts the card's own margin. The inset must clear the
+ * titlebar measured from the WINDOW's top, but padding is measured from the
+ * CARD's top — which already sits `--concentric-inset` down. Using the full
+ * titlebar height overshoots by exactly that inset and pushes the first
+ * control visibly low. */
+.card[data-platform='macos'] {
+  margin: var(--concentric-inset);
+  padding-top: calc(var(--titlebar-h) - var(--concentric-inset));
+}
+
+/* Elsewhere the titlebar is a real row above this, so there is nothing to
+ * clear — and no padding-top reset is needed, since the base rule sets none.
+ *
+ * The horizontal margin matches --concentric-inset on every platform so the
+ * card occupies exactly PANE_TRACK (PANE_W + 2 × inset). A 10px margin here
+ * made the card 410px wide while the reader always reserved 412px, drifting
+ * the layout by 2px on Windows and Linux only. */
+.card:not([data-platform='macos']) {
+  margin: 0 var(--concentric-inset) var(--space-10) var(--concentric-inset);
+}

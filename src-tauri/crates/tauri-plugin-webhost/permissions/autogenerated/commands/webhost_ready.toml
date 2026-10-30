@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-webhost-ready"
+description = "Enables the webhost_ready command without any pre-configured scope."
+commands.allow = ["webhost_ready"]
+
+[[permission]]
+identifier = "deny-webhost-ready"
+description = "Denies the webhost_ready command without any pre-configured scope."
+commands.deny = ["webhost_ready"]

@@ -1,0 +1,22 @@
+{
+  // The HOSTS: `src/hosts/<platform>/**` — the implementations of the
+  // kernel's filesystem seams for a runtime that is not the webview, and the
+  // composition roots that build `KernelServices` over them (phase 11,
+  // WI-11.2). `types: ["node"]` because that is the whole point of the
+  // directory; the kernel and the capabilities have no Node types and must
+  // not gain any.
+  //
+  // It sees the kernel through its declaration output only, so a host that
+  // leaned on something the kernel does not export fails here.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src/hosts",
+    "outDir": ".types/hosts",
+    "tsBuildInfoFile": ".types/hosts.tsbuildinfo",
+    "types": ["node"]
+  },
+  "files": [],
+  "include": ["src/hosts/**/*"],
+  "exclude": ["src/hosts/**/*.test.ts", "src/hosts/**/*.test.tsx"],
+  "references": [{ "path": "./tsconfig.kernel.json" }]
+}

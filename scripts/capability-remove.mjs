@@ -1,0 +1,453 @@
+import { spawnSync } from 'node:child_process'
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { PLATFORMS, createFsProbe, parseManifest, validateManifest } from './lib/architecture.mjs'
+import { dependencyForCrate, readCargoManifest, rustName } from './lib/cargo.mjs'
+import { compositionFile, registersPlugin } from './lib/compositions.mjs'
+import { isProcessEntry } from './lib/entry.mjs'
+import {
+  RemovalRefused,
+  removeAclGrants,
+  removeAclIdentifiers,
+  removeCargoDependency,
+  removeFromComposition,
+  removeManifestEntry,
+  removePluginRegistration,
+} from './lib/removal.mjs'
+import { readAclFiles, readOrNull } from './check-compositions.mjs'
+
+/**
+ * `pnpm capability:remove <id>` — deletion as an operation (ADR decision 7,
+ * WI-5.12).
+ *
+ * Removes one capability from every registration surface: its manifest
+ * entry; its import and array element in every `src/app/composition.*.ts`;
+ * and, when the entry names a `crate`, the app crate's dependency on it and
+ * the feature items that forward to it in `src-tauri/Cargo.toml`, the
+ * `.plugin(<crate>::init())` line in `src-tauri/src/lib.rs`, every grant
+ * under its namespace in `src-tauri/capabilities/*.json`, and (unless
+ * `--keep-files`) the directories `src/capabilities/<ts>` and
+ * `src-tauri/crates/<crate>` — through `git rm` when they are tracked.
+ *
+ * ALL OR NOTHING. Every edit is computed first, over the files as they are,
+ * through the pure functions in `scripts/lib/removal.mjs`; a surface that
+ * cannot be edited (an unrecognised shape, a residual reference, another
+ * entry that `requires` this one, an inconsistent tree) is a refusal before
+ * anything is written. Only when every edit exists are files written — each
+ * to a temporary file beside it and renamed into place — and only then are
+ * directories deleted. When the entry had a crate the lockfile is pruned
+ * afterwards with `cargo metadata --offline`, which drops the crate's
+ * packages without touching any other version.
+ *
+ * Idempotence is by refusal: a second run finds no such id and exits 1
+ * having changed nothing. `--dry-run` prints the plan and stops.
+ *
+ * Exit 0 done · 1 unknown id, refused, or a surface could not be edited ·
+ * 2 usage error or the tree could not be read.
+ */
+
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
+const USAGE = 'usage: node scripts/capability-remove.mjs <id> [--root <dir>] [--keep-files] [--dry-run] [--no-cargo] [--no-rustfmt]'
+export const MANIFEST_NAME = 'capabilities.manifest.json'
+export const CARGO_TOML = 'src-tauri/Cargo.toml'
+export const LIB_RS = 'src-tauri/src/lib.rs'
+
+export class UsageError extends Error {}
+
+/** `{ id, root, deleteFiles, dryRun, cargo, rustfmt }` or throws UsageError. */
+export function parseArgs(argv, cwd) {
+  const out = { id: undefined, root: REPO_ROOT, deleteFiles: true, dryRun: false, cargo: true, rustfmt: true }
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--root') {
+      const value = argv[i + 1]
+      if (value === undefined || value.startsWith('--')) throw new UsageError('--root needs a directory')
+      out.root = path.resolve(cwd, value)
+      i++
+    } else if (arg === '--keep-files') out.deleteFiles = false
+    else if (arg === '--dry-run') out.dryRun = true
+    else if (arg === '--no-cargo') out.cargo = false
+    else if (arg === '--no-rustfmt') out.rustfmt = false
+    else if (arg.startsWith('-')) throw new UsageError(`unknown argument ${JSON.stringify(arg)}`)
+    else if (out.id !== undefined) throw new UsageError('exactly one capability id is expected')
+    else out.id = arg
+  }
+  if (out.id === undefined) throw new UsageError('a capability id is required')
+  return out
+}
+
+/* ------------------------------------------------------------------ plan */
+
+/**
+ * The plan: every edit and deletion the removal of `id` under `root`
+ * consists of, computed and validated, nothing written.
+ *
+ *   { id, entry, edits: [{ file, text, note }], deletions: [{ dir, tracked }],
+ *     notes: string[], crate: string|null }
+ *
+ * `hooks.rustfmt(text)` formats a lib.rs text (default: the real rustfmt);
+ * `hooks.isTracked(root, rel)` answers whether git tracks a directory.
+ * Throws RemovalRefused (exit 1) or Error (exit 2).
+ */
+export function planRemoval(root, id, options = {}) {
+  const hooks = { rustfmt: runRustfmt, isTracked: gitTracks, ...options.hooks }
+  const deleteFiles = options.deleteFiles ?? true
+  const useRustfmt = options.rustfmt ?? true
+
+  const manifestText = readOrThrow(root, MANIFEST_NAME)
+  const parsed = parseManifest(manifestText)
+  const findings = parsed.findings.length > 0 ? parsed.findings : validateManifest(parsed.manifest, createFsProbe(root))
+  if (findings.length > 0) {
+    const lines = findings.map((f) => `  ${f.code} ${f.path === '' ? '(root)' : f.path}: ${f.message}`)
+    throw new RemovalRefused(`${MANIFEST_NAME} is invalid (${findings.length} findings; see pnpm architecture:check):\n${lines.join('\n')}`)
+  }
+  const manifest = parsed.manifest
+  const entry = manifest.capabilities.find((e) => e.id === id)
+  if (!entry) {
+    const known = manifest.capabilities.map((e) => e.id)
+    throw new RemovalRefused(`unknown capability ${JSON.stringify(id)}; the manifest declares ${known.length === 0 ? 'none' : known.map((k) => JSON.stringify(k)).join(', ')}`)
+  }
+
+  const edits = []
+  const notes = []
+  const deletions = []
+
+  edits.push({ file: MANIFEST_NAME, text: removeManifestEntry(manifestText, id).text, note: `remove entry ${JSON.stringify(id)}` })
+
+  for (const platform of PLATFORMS) {
+    const file = compositionFile(platform)
+    const source = readOrNull(root, file)
+    if (source === null) throw new RemovalRefused(`${file} does not exist; every platform has a static composition (pnpm compositions:check)`)
+    const result = removeFromComposition(source, entry.ts)
+    if (result.changed) {
+      edits.push({ file, text: result.text, note: `remove import of ../capabilities/${entry.ts} and ${result.names.map((n) => JSON.stringify(n)).join(', ')}` })
+    } else if (Array.isArray(entry.platforms) && entry.platforms.includes(platform)) {
+      /* Genuine drift: the manifest composes this capability on this platform,
+       * but the composition already dropped it. Removal stays tolerant (so a
+       * partial removal can be re-run), but the note SAYS it is drift rather
+       * than laundering it — `pnpm compositions:check` is where it is caught
+       * before the removal takes the manifest entry with it. */
+      notes.push(`${file}: DRIFT — the manifest composes ${JSON.stringify(id)} on ${platform} but this file does not import it (pnpm compositions:check); nothing to remove here`)
+    } else {
+      notes.push(`${file}: does not import ${entry.ts} (not composed on ${platform}); nothing to remove`)
+    }
+  }
+
+  const crate = typeof entry.crate === 'string' ? entry.crate : null
+  if (crate !== null) {
+    const cargoText = readOrThrow(root, CARGO_TOML)
+    const cargo = readCargoManifest(cargoText)
+    const dep = dependencyForCrate(cargo, crate)
+    if (dep === null) {
+      throw new RemovalRefused(`${CARGO_TOML} has no [dependencies] entry with path = "crates/${crate}"; the tree is inconsistent (pnpm compositions:check)`)
+    }
+    const cargoEdit = removeCargoDependency(cargoText, dep.name)
+    edits.push({
+      file: CARGO_TOML,
+      text: cargoEdit.text,
+      note: `remove dependency ${dep.name}${cargoEdit.removedFeatureItems.length ? ` and feature items ${cargoEdit.removedFeatureItems.join(', ')}` : ''}`,
+    })
+
+    const libText = readOrThrow(root, LIB_RS)
+    const snake = rustName(dep.name)
+    if (!registersPlugin(libText, snake)) {
+      throw new RemovalRefused(`${LIB_RS} does not call .plugin(${snake}::init()); the tree is inconsistent (pnpm compositions:check)`)
+    }
+    const libEdit = removePluginRegistration(libText, snake)
+    const formatted = useRustfmt ? hooks.rustfmt(libEdit.text, path.join(root, LIB_RS)) : libEdit.text
+    edits.push({ file: LIB_RS, text: formatted, note: `remove .plugin(${snake}::init())${useRustfmt ? ', rustfmt' : ''}` })
+
+  }
+
+  /* The ACL half runs OUTSIDE the crate branch: a capability whose plugin is
+   * a registry crate has no local `crate` yet still owns grants, and nesting
+   * this under the crate check left them dangling after removal.
+   *
+   * The ACL namespace is the plugin name with Tauri's `tauri-plugin-` prefix
+   * stripped (`tauri-plugin-peer` grants `peer:default`), NOT the crate name.
+   * Remove the manifest's EXACT declared grants when it has them — a prefix
+   * guessed from the crate misses `peer:default` and leaves it dangling. */
+  const declaredPerms = Array.isArray(entry.permissions) ? entry.permissions.filter((p) => typeof p === 'string') : []
+  if (declaredPerms.length > 0 || crate !== null || typeof entry.plugin === 'string') {
+    const aclNamespace = (typeof entry.plugin === 'string' ? entry.plugin : id).replace(/^tauri-plugin-/, '')
+    const strayed = declaredPerms.filter((p) => !p.startsWith(`${aclNamespace}:`))
+    if (strayed.length > 0) {
+      throw new RemovalRefused(
+        `${MANIFEST_NAME}: capability ${JSON.stringify(id)} declares permission(s) ${strayed.map((p) => JSON.stringify(p)).join(', ')} outside its ACL namespace "${aclNamespace}:"; the manifest is inconsistent with the plugin`,
+      )
+    }
+    for (const { file, text } of readAclFiles(root)) {
+      const acl = declaredPerms.length > 0 ? removeAclIdentifiers(text, declaredPerms) : removeAclGrants(text, aclNamespace)
+      if (acl.changed) edits.push({ file, text: acl.text, note: `remove grants ${acl.removed.map((r) => JSON.stringify(r)).join(', ')}` })
+    }
+  }
+
+  if (deleteFiles) {
+    for (const dir of deletedDirsFor(entry)) {
+      deletions.push({ dir, tracked: hooks.isTracked(root, dir) })
+    }
+  }
+
+  return { id, entry, edits, deletions, notes, crate }
+}
+
+/**
+ * Every directory removing `entry` deletes — ONE DECLARATION, because two
+ * readers need the same answer and they are in different files.
+ *
+ * ⚠️ **THE SECOND READER WAS MISSING AND A GATE UNDER-EXCUSED BECAUSE OF IT**
+ * (2026-09-19). `checkLedger` excused ledger claims under the deleted
+ * capability, and derived that directory itself as `src/capabilities/<id>` —
+ * which is wrong twice over: a capability whose `ts` differs from its `id`
+ * lives somewhere else, and one with a `crate` loses `src-tauri/crates/<crate>`
+ * too. `verify:without webhost` therefore failed on a ledger row naming the
+ * crate it had just correctly deleted. `circle` has no crate, which is why the
+ * proof had only ever been run on a capability that could not show it.
+ *
+ * `ts` rather than `id` for the same reason `verify-without.mjs`'s picker uses
+ * it: the manifest permits the two to differ, and the filesystem follows `ts`.
+ */
+export function deletedDirsFor(entry) {
+  const crate = typeof entry.crate === 'string' ? entry.crate : null
+  return [`src/capabilities/${entry.ts}`, ...(crate !== null ? [`src-tauri/crates/${crate}`] : [])]
+}
+
+/* ----------------------------------------------------------------- apply */
+
+/**
+ * Write the plan. Every edited file goes to `<file>.capability-remove.tmp`
+ * first — all of them — and only then is each renamed over its original, so a
+ * write failure leaves the originals untouched. Deletions follow; then, for a
+ * crate, the lockfile prune. Returns the lines it printed.
+ *
+ * ATOMICITY of the edits: the original bytes of every edited file are kept, so
+ * if an irreversible later step — a deletion, the Cargo prune — fails AFTER the
+ * edits are on disk, the edits are ROLLED BACK to the consistent pre-removal
+ * tree rather than left half-applied. A partially-run deletion cannot be
+ * undone, so the raised error says so; the edited registration surfaces
+ * (manifest, compositions, Cargo.toml, lib.rs, ACL) are restored regardless,
+ * so a retry starts from a known state.
+ */
+export function applyPlan(root, plan, options = {}) {
+  const hooks = { gitRm: gitRmCached, cargoPrune: cargoPruneLock, ...options.hooks }
+  const lines = []
+  const staged = []
+  const backups = []
+  try {
+    for (const edit of plan.edits) {
+      const target = path.join(root, edit.file)
+      const tmp = `${target}.capability-remove.tmp`
+      backups.push({ target, original: readFileSync(target) })
+      writeFileSync(tmp, edit.text)
+      staged.push({ tmp, target })
+    }
+  } catch (cause) {
+    for (const { tmp } of staged) rmSync(tmp, { force: true })
+    throw new Error(`could not stage edits: ${cause.message}`, { cause })
+  }
+  for (const { tmp, target } of staged) renameSync(tmp, target)
+  for (const edit of plan.edits) lines.push(`edited  ${edit.file} — ${edit.note}`)
+
+  const restoreEdits = () => {
+    /* Best-effort, but HONESTLY reported: the thrown error's claim of what
+     * was restored must not include a file whose restore itself failed. */
+    const unrestored = []
+    for (const { target, original } of backups) {
+      try {
+        writeFileSync(target, original)
+      } catch {
+        unrestored.push(path.relative(root, target))
+      }
+    }
+    return unrestored
+  }
+  try {
+    for (const { dir, tracked } of plan.deletions) {
+      if (tracked) hooks.gitRm(root, dir)
+      rmSync(path.join(root, dir), { recursive: true, force: true })
+      lines.push(`deleted ${dir}/${tracked ? ' (git rm --cached, then removed)' : ''}`)
+    }
+
+    if (plan.crate !== null && (options.cargo ?? true)) {
+      hooks.cargoPrune(root)
+      lines.push(`pruned  src-tauri/Cargo.lock (cargo metadata --offline)`)
+    }
+  } catch (cause) {
+    const unrestored = restoreEdits()
+    const restored = backups.length - unrestored.length
+    throw new Error(
+      `removal failed after the edits were written; ${restored} of ${backups.length} edited file(s) were restored to their pre-removal state${
+        unrestored.length === 0 ? '' : ` — COULD NOT RESTORE: ${unrestored.join(', ')}`
+      } (any directory deletion already run may be partial): ${cause.message}`,
+      { cause },
+    )
+  }
+  return lines
+}
+
+/* --------------------------------------------------------------- helpers */
+
+function readOrThrow(root, rel) {
+  try {
+    return readFileSync(path.join(root, rel), 'utf8')
+  } catch (cause) {
+    throw new Error(`cannot read ${rel} under ${root}: ${cause?.code ?? cause?.message}`, { cause })
+  }
+}
+
+/** Does git, from `root`, track anything under `rel`? False when `root` is
+ *  not itself the top of a work tree (a copy under /tmp must never reach a
+ *  parent repository's index). */
+export function gitTracks(root, rel) {
+  /* ⚠️ **ASKED OF GIT, NOT ANSWERED BY COMPARING PATHS.** This used to take
+   * `rev-parse --show-toplevel` and compare it with `root`, which is a
+   * question about strings dressed as a question about repositories, and
+   * Windows spells one path at least three ways: `git` answers in forward
+   * slashes, the caller holds backslashes, and a temp directory is reached as
+   * `C:\\Users\\RUNNER~1\\…` or `C:\\Users\\runneradmin\\…` depending on who
+   * resolved it. Case-folding and `path.resolve` fixed two of those and the
+   * short name defeated the third, which is how this stayed red on a CI runner
+   * after it had gone green on a developer's Windows box.
+   *
+   * `--show-prefix` is the same question with no string comparison in it: it
+   * prints where the working directory sits BELOW the top level, so an empty
+   * answer means this directory IS the top level. Nothing to normalise,
+   * nothing to spell twice.
+   *
+   * What it protects is real: a false answer here deletes a TRACKED directory
+   * without the `git rm --cached` this promises, and a true one reaches into
+   * an enclosing repository that merely contains `root`. */
+  const prefix = spawnSync('git', ['-C', root, 'rev-parse', '--show-prefix'], { encoding: 'utf8' })
+  /* A git that could not RUN is not an answer — treating it as "untracked"
+   * would delete without the promised index handling. A non-zero exit is
+   * the honest "not a repository" and stays false. */
+  if (prefix.error) throw new Error(`git could not run: ${prefix.error.message}`, { cause: prefix.error })
+  if (prefix.status !== 0) return false
+  if (prefix.stdout.trim() !== '') return false
+  const ls = spawnSync('git', ['-C', root, 'ls-files', '--error-unmatch', '--', rel], { encoding: 'utf8' })
+  if (ls.error) throw new Error(`git could not run: ${ls.error.message}`, { cause: ls.error })
+  return ls.status === 0
+}
+
+function gitRmCached(root, rel) {
+  const result = spawnSync('git', ['-C', root, 'rm', '-r', '-q', '--cached', '--', rel], { encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(`git rm --cached ${rel} failed: ${result.stderr.trim()}`)
+}
+
+/**
+ * Format a lib.rs text with the toolchain's rustfmt, through a temporary
+ * file in the same directory (so a `rustfmt.toml` up the tree still
+ * applies), before anything is written into place. A missing rustfmt is a
+ * refusal — a registration cut out by hand is right, but a `pnpm verify`
+ * that then fails `cargo fmt --check` would present the operation as
+ * broken; `--no-rustfmt` skips this for a tree without a toolchain.
+ */
+/**
+ * Whether `rustfmt` can actually run here — one answer, for the code and its tests.
+ *
+ * EXPORTED SO THERE IS ONLY ONE. The test beside this had its own copy of the
+ * question (`spawnSync('rustfmt', ['--version']).status === 0`) and chose which
+ * assertion to make from it, while `runRustfmt` decided the same thing from
+ * `result.error` alone. On any machine where the two agree — every Mac and
+ * Linux box this has run on — nothing shows. On `windows-latest`, where the
+ * rustup shim is present and the component is not, the probe said "unavailable"
+ * and the code said "refused", and the case failed on the difference between
+ * two spellings of one fact.
+ *
+ * A tool whose `--version` does not answer cannot format anything, whatever the
+ * reason, so this is the honest question in both places.
+ */
+export function rustfmtAvailable() {
+  const probe = spawnSync('rustfmt', ['--version'], { encoding: 'utf8' })
+  return probe.error === undefined && probe.status === 0
+}
+
+export function runRustfmt(text, libPath) {
+  const dir = path.dirname(libPath)
+  const tmp = path.join(dir, `.lib.rs.capability-remove.${process.pid}.rs`)
+  writeFileSync(tmp, text)
+  try {
+    /* ASKED WHETHER IT CAN RUN BEFORE BEING ASKED WHAT IT THINKS, because the
+       two answers were being confused for one another. `result.error` catches
+       only a MISSING binary, and `rustfmt` on a machine with rustup is never
+       missing — it is a shim, always present, which fails with a non-zero
+       status when the component is not installed for the active toolchain.
+       That took the second branch, so a reader with no rustfmt was told
+       "rustfmt refused the edited lib.rs" and shown a rustup message about
+       components: the tool blaming their code for its own absence.
+       `windows-latest` is exactly that machine — this repository's Windows CI
+       leg installs no `rustfmt` component, where the macOS and Linux legs do. */
+    if (!rustfmtAvailable()) {
+      throw new RemovalRefused('rustfmt is not available; install it (rustup component add rustfmt) or pass --no-rustfmt')
+    }
+    const result = spawnSync('rustfmt', ['--edition', '2021', tmp], { encoding: 'utf8' })
+    if (result.error) throw new RemovalRefused(`rustfmt is not available (${result.error.code}); install it or pass --no-rustfmt`)
+    if (result.status !== 0) throw new RemovalRefused(`rustfmt refused the edited lib.rs:\n${result.stderr.trim()}`)
+    return readFileSync(tmp, 'utf8')
+  } finally {
+    rmSync(tmp, { force: true })
+  }
+}
+
+/** Drop the removed crate's packages from Cargo.lock without a network. */
+export function cargoPruneLock(root) {
+  const manifest = path.join(root, CARGO_TOML)
+  const result = spawnSync('cargo', ['metadata', '--offline', '--format-version', '1', '--manifest-path', manifest], {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  })
+  if (result.error) throw new Error(`cargo is not available (${result.error.code}); the edits are applied, run \`cargo metadata --offline --manifest-path ${CARGO_TOML}\` to prune Cargo.lock`)
+  if (result.status !== 0) throw new Error(`cargo metadata --offline failed after the edits (Cargo.lock not pruned):\n${result.stderr.trim()}`)
+}
+
+/* ------------------------------------------------------------------ main */
+
+export function describePlan(plan) {
+  const lines = [`capability-remove: ${plan.id}${plan.crate ? ` (crate ${plan.crate})` : ''}`]
+  for (const edit of plan.edits) lines.push(`  edit    ${edit.file} — ${edit.note}`)
+  for (const { dir, tracked } of plan.deletions) lines.push(`  delete  ${dir}/${tracked ? ' (tracked: git rm --cached)' : ''}`)
+  for (const note of plan.notes) lines.push(`  keep    ${note}`)
+  return lines
+}
+
+function main(argv) {
+  let args
+  try {
+    args = parseArgs(argv, process.cwd())
+  } catch (cause) {
+    process.stderr.write(`capability-remove: ${cause.message}\n${USAGE}\n`)
+    return 2
+  }
+  if (!existsSync(args.root) || !statSync(args.root).isDirectory()) {
+    process.stderr.write(`capability-remove: ${args.root} is not a directory\n`)
+    return 2
+  }
+  let plan
+  try {
+    plan = planRemoval(args.root, args.id, { deleteFiles: args.deleteFiles, rustfmt: args.rustfmt })
+  } catch (cause) {
+    if (cause instanceof RemovalRefused) {
+      process.stderr.write(`capability-remove: refused — ${cause.message}\n`)
+      return 1
+    }
+    throw cause
+  }
+  process.stdout.write(`${describePlan(plan).join('\n')}\n`)
+  if (args.dryRun) {
+    process.stdout.write('capability-remove: dry run, nothing written\n')
+    return 0
+  }
+  const done = applyPlan(args.root, plan, { cargo: args.cargo })
+  process.stdout.write(`${done.map((l) => `  ${l}`).join('\n')}\ncapability-remove: ${plan.id} removed from ${plan.edits.length} files${plan.deletions.length ? `, ${plan.deletions.length} directories deleted` : ''}\n`)
+  return 0
+}
+
+if (isProcessEntry(import.meta)) {
+  try {
+    process.exitCode = main(process.argv.slice(2))
+  } catch (cause) {
+    process.stderr.write(`capability-remove: ${cause?.message ?? String(cause)}\n`)
+    process.exitCode = 2
+  }
+}

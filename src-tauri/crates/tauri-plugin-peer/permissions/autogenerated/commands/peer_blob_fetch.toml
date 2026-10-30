@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-blob-fetch"
+description = "Enables the peer_blob_fetch command without any pre-configured scope."
+commands.allow = ["peer_blob_fetch"]
+
+[[permission]]
+identifier = "deny-peer-blob-fetch"
+description = "Denies the peer_blob_fetch command without any pre-configured scope."
+commands.deny = ["peer_blob_fetch"]

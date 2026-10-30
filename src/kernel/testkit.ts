@@ -1,0 +1,40 @@
+/**
+ * THE KERNEL'S TEST-ONLY ENTRY.
+ *
+ * `fakeFs` is a deliberately behaviour-divergent stand-in for a real
+ * filesystem — its `readDir` decides a name is a directory by whether it
+ * contains a dot, its `exists` is a prefix match, and neither is what a disk
+ * does. It belongs in tests and nowhere else.
+ *
+ * It used to be re-exported from `src/kernel/index.ts`, the PRODUCTION public
+ * entry, which put it in the supported API and in the generated declarations
+ * beside `createKernelServices`. Tree-shaking meant it cost a build nothing,
+ * which is a fact about bundle size and not about whether somebody can import
+ * it — and the boundary rules could not tell the difference, because it came
+ * through the one door everything is allowed to use.
+ *
+ * A second entry makes the difference nameable: `kernel-testkit-in-tests-only`
+ * in `.dependency-cruiser.cjs` refuses an edge to this file from anything that
+ * is not a test or another testkit, so importing it in production code is a
+ * gate failure rather than an oversight.
+ */
+
+export { fakeFs } from './core/indexFsFake.testkit'
+/** The fake that is a `TrashFs` as well — for a test that runs the real
+ *  trash, presence and shelf functions over one in-memory tree. */
+export { fakeFs as fakeTrashFs } from './core/fakeFs.testkit'
+/* The size port's conformance fixture — one library, asked of every host. See
+   that module's header for the two-walks-one-contract defect it exists for. */
+export { BOOKS_ONLY_BYTES, LIBRARY_FIXTURE, LIBRARY_FIXTURE_BYTES } from './core/librarySizes.testkit'
+
+/* WI-22.A1's brand, mintable from a bare string — for session tests whose
+   anchors are readable sentinels rather than real paths. That module's header
+   says why this is not a second production minting site, and names the
+   boundary rule that keeps it from becoming one. */
+export { resolvedCfiForTesting } from './core/resolvedCfi.testkit'
+
+/* The error a promise rejected with, for the assertion `rejects.toThrow()`
+   cannot make. That module's header carries the measurement: the pattern form
+   passes on a rejection of `undefined`, so neither form can tell a refusal from
+   a crash. */
+export { refusalOf } from './core/refusal.testkit'

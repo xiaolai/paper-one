@@ -1,0 +1,122 @@
+/* The note popover.
+   Positioned against the REFERENCE by `FootnotePopover`, which computes the
+   offsets — this file owns only what it looks like. */
+
+.popover {
+  position: absolute;
+  z-index: var(--z-figure);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  box-sizing: border-box;
+  /* WIDTH AS WELL AS MAX-WIDTH. The note is an iframe with no intrinsic
+     width, so an absolutely positioned box shrinks to its chrome — measured at
+     106px, which is a popover the size of its own Close button. */
+  width: var(--footnote-max-w);
+  max-width: var(--footnote-max-w);
+  padding: var(--space-12) var(--space-16);
+  border: 1px solid var(--line-2);
+  /* `--shadow-pop` and `--radius-card` are the command palette's, which is the
+     nearest thing in the app: a surface that appears over the reading and goes
+     away again. Taken rather than matched by eye — `tokens.test.ts` refuses a
+     raw value in any property that has a scale, and it is right to. */
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+}
+
+/* What the book called it on the left, what can be done with it on the right.
+   ONE ROW, and it exists even when the book declared no type: the controls
+   belong at the top of the box whether or not there is a label beside them,
+   and a row that appears and disappears with the label would move them. */
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  /* The height of a control, so the row does not collapse around a label that
+     is shorter than the buttons in it. */
+  min-height: var(--control-sm);
+}
+
+/* What the book called it, when it said. Absent for a book that declared
+   nothing, which is most of them — see `heading`. */
+.label {
+  color: var(--muted);
+  font-size: var(--text-small);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+}
+
+/* PUSHED RIGHT BY ITS OWN MARGIN, not only by `justify-content`. With no label
+   the row has one child, and `space-between` would leave it on the left. */
+.tools {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+/* The same control the selection popup uses — see `SelectionTools.module.css`.
+   Matched by taking its shape rather than by eye: these two are the app's only
+   surfaces that appear over the page and go away again, and a reader meets
+   them within seconds of each other. */
+.tool {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    background var(--motion-popover),
+    color var(--motion-popover);
+}
+
+.tool:hover,
+.tool:focus-visible {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+.tool:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--space-2));
+}
+
+/* The WINDOW onto the note. `FootnotePopover` sets an inline height once it
+   knows how tall the note is; until then this is the full box, and the popover
+   is invisible so that full box is never painted — see `Fit`.
+
+   IT CLIPS, IT DOES NOT SCROLL, and it never resizes what is inside it. The
+   view below is always `--footnote-max-h` tall, so showing a 44px note means
+   showing the top 44px of a 320px view and hiding the rest. Nothing the iframe
+   owns changes size, which is the whole point: three earlier attempts at
+   fitting the box resized the VIEW, and a resized iframe laid out correctly,
+   reported the right geometry, and then would not paint.
+
+   A note taller than the box is not truncated — it is in scrolled flow (see
+   `session.ts`), so its overflow lives inside the view and scrolls there. */
+.body {
+  height: var(--footnote-max-h);
+  max-height: var(--footnote-max-h);
+  overflow: hidden;
+}
+
+/* The rendered `foliate-view`. It has NO intrinsic size — it is an iframe — so
+   both dimensions come from here.
+
+   A FIXED HEIGHT, NOT `100%`. `100%` made the view follow the container, which
+   is exactly the resize that would not repaint; and an inline `height: 100%`
+   against an auto-height parent resolves to zero, which rendered the note
+   perfectly into a box 72px tall. This changes for nothing. */
+.body > * {
+  display: block;
+  width: 100%;
+  height: var(--footnote-max-h);
+  border: none;
+}

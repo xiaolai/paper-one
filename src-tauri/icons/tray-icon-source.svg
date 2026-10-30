@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Paper — menu-bar (tray) mark.
+
+  This is the design's OUTLINE variant, not the filled app icon. At menu-bar
+  size a filled square reads as a blob; the outline keeps the gutter rule and
+  ribbon legible at 16pt.
+
+  A macOS template image is pure BLACK on TRANSPARENT — the system derives the
+  light and dark menu-bar appearances from the alpha channel and ignores colour
+  entirely. So the design's #17191B becomes #000000 and the page fill is
+  dropped. The 0.55 opacity on the rule is kept: template images honour alpha,
+  and that is what preserves the rule/ribbon contrast the design intends.
+
+  The file must be exported as `tray-iconTemplate@2x.png`. The `Template`
+  suffix is what triggers the auto-tint; `tray-icon@2x.png` would be rendered
+  as-is, in full colour, and would not adapt to the menu bar.
+
+  The mark is 640 units inside a 720-unit canvas, so 40 units of nothing sit on
+  every side. That margin is the ONLY size control there is: `tray-icon` scales
+  whatever bitmap it is handed to exactly 18pt tall, so exporting a bigger or
+  smaller PNG changes the resolution and not the size. Drawn edge to edge the
+  mark came out 18pt — the tallest thing in the menu bar, a point above the
+  circles beside it and two above the boxed input-source glyph, which is the
+  same rounded-rectangle outline this is. 640/720 renders it at 16pt and puts
+  it back among its neighbours.
+
+  Export at 36x36 for `@2x` and 18x18 for `@1x` — 18pt at each scale, so the
+  bitmap lands on the backing store one pixel to one and nothing is resampled.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="720" viewBox="-40 -40 720 720" fill="none">
+  <!-- Frame. -->
+  <rect x="14" y="14" width="612" height="612" rx="130" fill="none" stroke="#000000" stroke-width="28"/>
+  <!-- Gutter rule, held back so the ribbon reads as the figure. -->
+  <rect x="152" y="168" width="34" height="304" rx="17" fill="#000000" fill-opacity="0.55"/>
+  <!-- Ribbon. -->
+  <path d="M468 170V276H358L380 223L358 170H468Z" fill="#000000"/>
+</svg>

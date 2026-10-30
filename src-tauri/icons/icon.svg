@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Paper — application icon.
+
+  Geometry lifted verbatim from the design handoff (`Paper Icon.dc.html`): a
+  navy gutter rule with a coral ribbon beside it, both starting at y=168 on a
+  640 artboard. Its three colours are pinned literals, not tokens — an icon
+  sits on wallpaper and must not move when the reader changes theme.
+
+  The 640 artboard is placed inside a 1024 canvas as an 824x824 squircle with
+  exactly 100px of transparent gutter on every side. macOS has not auto-masked
+  app PNGs since Big Sur, so a full-bleed 1024 icon renders ~12% larger than
+  every HIG-conformant app beside it in the Dock. 100px is Apple's absolute
+  figure for a 1024 canvas, not a percentage.
+
+  rx=185 is 22.5% of 824 — the same 22.5% the design applies to its own
+  artboard, and the rounded-rect approximation of the continuous-corner
+  squircle. The shape is really a superellipse; pixel-exact fidelity needs a
+  Bezier-traced path from Apple's own template.
+
+  Scale: 824 / 640 = 1.2875.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <clipPath id="squircle">
+      <rect x="100" y="100" width="824" height="824" rx="185" ry="185"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <!-- Page. The bg token's value in the Paper theme, as a literal. -->
+    <rect x="100" y="100" width="824" height="824" fill="#FBFBFA"/>
+
+    <g transform="translate(100 100) scale(1.2875)">
+      <!-- Gutter rule. The accent navy. -->
+      <rect x="152" y="168" width="34" height="304" rx="17" fill="#1B3A6B"/>
+      <!-- Ribbon. The traffic-light coral, not the amber: the icon is not
+           companion output. -->
+      <path d="M468 170V276H358L380 223L358 170H468Z" fill="#F4655A"/>
+    </g>
+  </g>
+</svg>

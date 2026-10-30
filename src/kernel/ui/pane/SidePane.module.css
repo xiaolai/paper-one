@@ -1,0 +1,1555 @@
+/* The single side pane: a title, one panel, and the tab bar at the foot. §03
+ * puts the bar at the head; it sits at the foot here because it is the pane's
+ * own navigation rather than the window's, and because the panel title plus a
+ * 34px target per panel does not fit across 400px on one row. The registry in
+ * lib/panes.ts is the count — it has changed once already since this comment
+ * claimed there were seven.
+ *
+ * The rail is rendered last in the DOM as well as painted last, so tab order
+ * runs title → content → tabs. */
+
+.rail {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--pane-tab-h);
+  margin: var(--space-8) var(--space-12) 0;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-card);
+  background: var(--wash);
+}
+
+.railButton {
+  width: var(--control-pill);
+  height: var(--control-pill);
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.railButton:hover {
+  color: var(--ink);
+}
+
+.railButton[data-on='true'] {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: var(--shadow-pill);
+}
+
+/* Its height is published as `--pane-title-row` so the library's own heading
+   can be the same row and sit level with this one — see `.head` there. Kept as
+   `min-height` + centring rather than padding arithmetic, so the number and
+   the layout cannot disagree. */
+.paneTitle {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  min-height: var(--pane-title-row);
+  padding: 0 var(--space-16);
+  font-size: var(--text-ui);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--track-snug);
+  color: var(--ink);
+}
+
+/*
+ * THE PANE SCROLLS WITHOUT RESERVING A LANE FOR SAYING SO.
+ *
+ * `global.css` styles `::-webkit-scrollbar`, and styling it at all opts the
+ * element out of the platform's overlay scrollbars — so the bar takes real
+ * layout width, 15px of it, the moment the content overflows. In a card of a
+ * fixed 400px that is not a bar appearing, it is every row in the panel moving:
+ * measured, switching Flow to Scrolled adds two rows to Settings, overflows the
+ * body by 36px, and shifts the whole panel's right edge from 1418 to 1403.
+ *
+ * The pane cannot do what the shelf does about this. `Library.module.css` pays
+ * for the same 15px by adding `--scrollbar-w` to its own padding, which works
+ * there because the grid is centred in a wide, variable space and nobody can
+ * see that the right padding is larger. Here the card is narrow and fixed, and
+ * a permanent lane down one side of it would read as the panel being off
+ * centre — which is the state this is fixing, made permanent instead of
+ * intermittent.
+ *
+ * So the bar goes. Scrolling does not: the wheel, the trackpad, the arrow keys
+ * and Page Up/Down all still work, which is the same argument §06 already makes
+ * for the READER's scrollbar being off by default. What is lost is the standing
+ * hint that a panel continues below the fold, and the long ones — Contents,
+ * Notes — lose it too.
+ */
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+  display: flex;
+  flex-direction: column;
+}
+
+/* `scrollbar-width` is the standard property and WebKit honours it, but the
+   global `::-webkit-scrollbar` rule sets a width of its own and would otherwise
+   go on claiming those pixels. Both spellings, for the same reason the book's
+   hyphenation carries both. */
+.body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.panel {
+  padding: var(--space-4) var(--space-14) var(--space-28);
+}
+
+.panelMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: 0 var(--space-6) var(--space-12);
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+.filters {
+  display: flex;
+  gap: var(--space-6);
+  padding: 0 var(--space-6) var(--space-12);
+  flex-wrap: wrap;
+}
+
+/*
+ * Two filter groups on ONE line, with a rule between them.
+ *
+ * Marginalia filters on two independent axes — what kind of thing, and whose
+ * book — and as words its seven chips wrapped to three lines of chrome above
+ * the list at the pane's 400px. As icons they are one line with room to spare:
+ * seven controls at `--control-sm` plus their gaps come to roughly 230px inside
+ * a 372px content box.
+ *
+ * The rule is not decoration. Seven identical round buttons in a row read as
+ * one question with seven answers, and these are two questions with five and
+ * two — a reader has to be able to see that picking Notes does not un-pick This
+ * book. The groups keep their own `role="group"` and label for the same reason.
+ */
+.filterBar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: 0 var(--space-6) var(--space-12);
+}
+
+/* The groups give up their own padding to the bar, and stop wrapping: the
+   point of the icons is that they do not have to. */
+.filterBar .filters {
+  padding: 0;
+  flex-wrap: nowrap;
+}
+
+/* `--line-3`, not `--line-2`, which is what the chips' own borders are drawn
+   in — a divider in the same value reads as one more chip edge rather than as
+   the thing separating two groups. One step darker is the whole difference. */
+.filterDivider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: var(--space-16);
+  background: var(--line-3);
+}
+
+.filter {
+  height: var(--control-sm);
+  padding: 0 var(--space-12);
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  font-family: inherit;
+  font-size: var(--text-small);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.filter[data-on='true'] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+}
+
+/*
+ * Which books a search asks — the phase-31 scope switch.
+ *
+ * SHAPED LIKE `.filter` AND NOT THE SAME CLASS, because it answers a different
+ * kind of question. A filter chip is one of several independent toggles, any
+ * number of which may be on; these two are mutually exclusive and exactly one
+ * is always chosen. Reusing `.filter` would have made them look like toggles
+ * that happen to be wired together, which is the reading the `.filterBar` rule
+ * above exists to prevent between its own two groups.
+ *
+ * `data-chosen` rather than `data-on` for the same reason: a reader of the DOM
+ * can tell a radio from a toggle.
+ */
+.scopeOption {
+  height: var(--control-sm);
+  padding: 0 var(--space-12);
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  font-family: inherit;
+  font-size: var(--text-small);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.scopeOption[data-chosen='true'] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+}
+
+/* An icon chip is square rather than pill-shaped — there is no word to give it
+   a length, so the padding that sizes a text chip would make it a lozenge
+   around a 12px glyph. */
+.filter[data-icon='true'] {
+  width: var(--control-sm);
+  padding: 0;
+}
+
+/* --- contents -------------------------------------------------------- */
+
+.tocList {
+  flex: 1;
+  min-height: 0;
+  padding: 0 var(--space-12) var(--space-20);
+}
+
+.tocRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  width: 100%;
+  height: var(--row-compact);
+  padding: 0 var(--space-10);
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--text-ui);
+  color: var(--ink-2);
+  text-align: start;
+  cursor: pointer;
+}
+
+.tocRow:hover {
+  background: var(--wash);
+}
+
+/* A grouping heading — a nav entry with no destination. Not §07's disabled
+ * treatment: it is not a control that has been switched off, it is a label,
+ * and dimming it to 45% would hide the structure it exists to show.
+ *
+ * ⚠️ **THIS SELECTOR WAS `.tocRow:disabled`, AND THE COMMENT ABOVE IS WHY THAT
+ * WAS WRONG.** It said plainly that a heading is a label, while the markup
+ * rendered one as `<button disabled>` — which announces itself to a screen
+ * reader as a control that cannot be used right now, a different and false
+ * claim. A heading is a `div` now, and this styles it. */
+.tocRow[data-heading] {
+  cursor: default;
+  font-weight: var(--weight-semibold);
+  color: var(--muted);
+}
+
+.tocRow[data-heading]:hover {
+  background: transparent;
+}
+
+/* A row that genuinely IS a switched-off control: the pane was given no way to
+ * navigate. §07's treatment applies here, because that is what it describes. */
+.tocRow:disabled {
+  cursor: default;
+  opacity: var(--opacity-disabled);
+}
+
+.tocRow:disabled:hover {
+  background: transparent;
+}
+
+/* Selected is persistent, unlike hover, and reads as a raised card.
+ *
+ * §07 specifies "a left rule and a raised card" for a selected list row. The
+ * rule is dropped here: against a floating card the lift already separates
+ * selection from hover, and the accent bar was doing the same job twice. */
+.tocRow[data-current='true'] {
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+  box-shadow: var(--shadow-pill);
+}
+
+.tocLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Nested TOC entries step in by one control unit per level. */
+.tocRow[data-depth='1'] { padding-left: calc(var(--space-10) + var(--toc-indent)); }
+.tocRow[data-depth='2'] { padding-left: calc(var(--space-10) + 2 * var(--toc-indent)); }
+
+/* --- notes ----------------------------------------------------------- */
+
+/* A container, not a control: the passage, the note and the delete action are
+ * each independently operable, and nesting them inside one button would make
+ * the whole row a single ambiguous target. */
+.note {
+  display: block;
+  position: relative;
+  width: 100%;
+  text-align: start;
+  padding: var(--space-12) var(--space-14);
+  margin-bottom: var(--space-8);
+  border: 1px solid transparent;
+  border-radius: var(--radius-card);
+  background: transparent;
+  font-family: inherit;
+}
+
+.note:hover {
+  background: var(--wash);
+}
+
+/* THE MARK'S OWN TINT, down the leading edge. A reader who marks agreements in
+ * green and questions in purple has categorised the passages; a list of notes
+ * that shows none of it makes them re-open each one to find out which is which.
+ * A bar rather than a tinted row: the row's background is spoken for, and two
+ * meanings on one surface is one meaning nobody can read. */
+.note::before {
+  content: '';
+  position: absolute;
+  inset-block: var(--space-12);
+  inset-inline-start: var(--space-4);
+  width: var(--track-w);
+  border-radius: var(--radius-pill);
+  background: var(--mark-yellow-rule);
+}
+
+.note[data-tint='green']::before {
+  background: var(--mark-green-rule);
+}
+
+.note[data-tint='purple']::before {
+  background: var(--mark-purple-rule);
+}
+
+/* The marked passage, and the control that jumps to it. */
+.noteJump {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: start;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.noteJump:disabled {
+  cursor: default;
+}
+
+.noteJump:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--space-2);
+  border-radius: var(--radius-mark);
+}
+
+.noteBody {
+  font-family: var(--font-serif);
+  font-size: var(--text-prose);
+  line-height: var(--leading-body);
+  color: var(--ink);
+}
+
+/* §07 disabled: a mark from a book that is not open cannot be jumped to, and
+ * says so by looking unavailable rather than by doing nothing when pressed. */
+.noteJump:disabled .noteBody {
+  color: var(--muted);
+}
+
+.noteComment {
+  display: block;
+  width: 100%;
+  padding: var(--space-8) 0 0;
+  border: none;
+  background: none;
+  text-align: start;
+  font-family: inherit;
+  font-size: var(--text-small);
+  line-height: var(--leading-body);
+  color: var(--muted);
+  cursor: text;
+}
+
+.noteInput {
+  width: 100%;
+  margin-top: var(--space-8);
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: var(--text-small);
+  line-height: var(--leading-body);
+  resize: vertical;
+  min-height: var(--space-56);
+}
+
+.noteInput:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.noteSource {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  padding-top: var(--space-8);
+  font-size: var(--text-caption);
+  color: var(--muted);
+}
+
+.noteDelete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-xs);
+  height: var(--control-xs);
+  border: none;
+  border-radius: var(--radius-chip);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.noteDelete:hover {
+  background: var(--line);
+  color: var(--ink-2);
+}
+
+.noteDelete:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--space-2));
+}
+
+/* The row Notes was asked to reveal. A tint rather than a border, so the row
+ * does not change size and shift everything under it. */
+.note[data-focused='true'] {
+  background: var(--wash);
+}
+
+.noteKind {
+  font-size: var(--text-caption);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* --- bookmarks -------------------------------------------------------- */
+
+/* A bookmark row is the note row's shape, and it borrows the whole of it —
+ * `.note`, `.noteJump`, `.noteBody`, `.noteSource`, `.noteDelete`. Those are
+ * the parts of a row in this pane, not anything specific to an annotation, and
+ * a second set under other names would be the same rules drifting apart.
+ *
+ * ONE THING HAS TO GO, and it is the tint bar. `.note::before` paints the
+ * mark's own colour down the leading edge and falls back to yellow for a row
+ * that carries none — so a list of bookmarks, which carry none by
+ * construction, came out as a column of yellow rules saying something about
+ * marks that were not there. Suppressed by attribute rather than by a rival
+ * class, so the row keeps every other rule automatically. */
+.note[data-place='true']::before {
+  display: none;
+}
+
+/* The chapter, which is the coordinate a reader holds a place by.
+ *
+ * NOT `.noteKind`, which is uppercased small caps for a category word —
+ * Companion, Excerpt, Idea. A chapter is a title, and titles set in caps stop
+ * being readable as titles: "LOOMINGS" is a label about the row, and "Loomings"
+ * is the name of the place. */
+/* The work a cross-book row belongs to — smaller and quieter than the chapter,
+   because it is context rather than the thing the reader is scanning for. */
+.placeBook {
+  display: block;
+  padding-bottom: var(--space-2);
+  font-size: var(--text-caption);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.placeChapter {
+  display: block;
+  font-size: var(--text-small);
+  color: var(--ink-2);
+}
+
+/* --- search ---------------------------------------------------------- */
+
+.searchField {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  height: var(--control-pill);
+  margin: 0 var(--space-6) var(--space-12);
+  padding: 0 var(--space-12);
+  border-radius: var(--radius-pill);
+  background: var(--wash);
+}
+
+.result {
+  display: block;
+  width: 100%;
+  text-align: start;
+  padding: var(--space-10) var(--space-14);
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.result:hover {
+  background: var(--wash);
+}
+
+.resultAt {
+  font-size: var(--text-caption);
+  color: var(--muted);
+  padding-left: var(--space-6);
+}
+
+.resultSnippet {
+  padding-top: var(--space-4);
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
+  color: var(--ink-2);
+}
+
+.hit {
+  background: var(--mark);
+  box-shadow: inset 0 -1px 0 var(--mark-rule);
+}
+
+/* --- library ---------------------------------------------------------- */
+
+/* The collection view: rows that narrow the shelf, counts that describe it.
+   The row is `.settingRow`'s shape — same radius, same hover, same padding —
+   at a tighter 36px rather than settings' 46px, since a scope list is scanned
+   and a settings list is read one row at a time; the difference that matters
+   is the trailing number and the ON state, which is a scope in force rather
+   than a value being shown. */
+.libraryPanel {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-4) var(--space-6) var(--space-12);
+}
+
+.scopeRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  width: 100%;
+  height: var(--row-compact);
+  padding: 0 var(--space-10);
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--text-ui);
+  color: var(--ink);
+  text-align: start;
+  cursor: pointer;
+}
+
+.scopeRow:hover {
+  background: var(--wash);
+}
+
+/* ON is a scope in force — persistent state, not hover — so it keeps the wash
+   and takes the accent, the same way a rail tab does. */
+.scopeRow[data-on='true'] {
+  background: var(--wash);
+  color: var(--accent);
+}
+
+.scopeLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The count: muted, tabular, and it does not take the accent when the row is
+   on — a number is a fact about the shelf, not part of the selection. */
+.scopeCount {
+  flex: 0 0 auto;
+  font-size: var(--text-small);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+/* A tag row: the scope button, and beside it the row menu for a tag the reader
+   can change. The button takes the row's width; the ellipsis sits outside it,
+   because a button in a button is invalid and browsers resolve it by dropping
+   the inner one. */
+.tagRow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.tagRow > .scopeRow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* A drag carrying books is over the row: the ring the shelf draws on a
+   selected jacket, at the row's own radius, so the two ends of the gesture
+   agree about what "this one" looks like. */
+.tagRow[data-over='true'] {
+  border-radius: var(--radius-control);
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--space-2));
+  background: var(--accent-bg);
+}
+
+/* EXCLUDED — `-tag:X`. Struck through, because that is what it means, and
+   muted rather than accented: it is a scope in force, but a negative one, and
+   lighting it the same as ON would say the opposite of what it does. */
+.scopeRow[data-excluded='true'] {
+  color: var(--muted);
+}
+
+.scopeRow[data-excluded='true'] .scopeLabel {
+  text-decoration: line-through;
+}
+
+/* The Tags heading with its one control beside it: `.groupTitle`'s row, laid
+   out so the sort toggle sits at the trailing edge on the heading's baseline. */
+.groupTitleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-inline-end: var(--space-4);
+}
+
+.groupTitleRow > .groupTitle {
+  flex: 1 1 auto;
+}
+
+/* The heading element around a group's toggle (#137). No look of its own — the
+   toggle inside is what is styled — and it takes the row's slack, as the toggle
+   did when it stood in the row alone. */
+.groupHeading {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font: inherit;
+}
+
+/* The sort toggle: the row menu's `⋯` shape, since it is the same kind of
+   thing — a quiet mark until it is wanted. */
+.groupTool {
+  composes: more from '../styles/controls.module.css';
+  /* The heading takes the row's slack; the tool keeps its width. A flex item
+     shrinks below its own `width` by default, and the heading beside this one
+     asks for 100% — so without this the sort mark was squeezed thinner than
+     the icon inside it. Same rule as `.paper-cap-button`. */
+  flex: 0 0 auto;
+}
+
+/* The count on a collapsible group's heading, so a closed group still says
+   how much it holds. */
+.groupCount {
+  margin-inline-start: auto;
+  font-weight: var(--weight-regular);
+  letter-spacing: normal;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Narrowing a long tag list by name. The rename field's shape, in the row's
+   inset, so it reads as part of the list rather than as a second search box. */
+.tagFilter {
+  width: calc(100% - 2 * var(--space-10));
+  height: var(--control-sm);
+  margin: 0 var(--space-10) var(--space-6);
+  padding: 0 var(--space-8);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-chip);
+  background: var(--surface);
+  font: inherit;
+  font-size: var(--text-small);
+  color: var(--ink);
+}
+
+.tagFilter:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* What the last collection-wide remove did, and the way back. A quiet line
+   in the list's own inset — `.scopeHint`'s voice — with the one control that
+   is not a scope. */
+/* Shared with the tag editor — see `controls.module.css`. Composed rather than
+   restated so the two surfaces that offer an undo cannot come to word or weigh
+   it differently. */
+.undoLine {
+  composes: undoLine from '../styles/controls.module.css';
+}
+
+.undoText {
+  composes: undoText from '../styles/controls.module.css';
+}
+
+.undoButton {
+  composes: undoButton from '../styles/controls.module.css';
+}
+
+/* Rename, in place: the row's label becomes a field the same size, so nothing
+   around it moves while the reader types. */
+.tagRename {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  height: var(--row-compact);
+  padding: 0 var(--space-10);
+  color: var(--ink);
+}
+
+.tagRenameInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--control-sm);
+  padding: 0 var(--space-8);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-chip);
+  background: var(--surface);
+  font: inherit;
+  font-size: var(--text-ui);
+  color: var(--ink);
+}
+
+/* An empty shelf, stated once and quietly. Not the shelf's own empty state,
+   which says what to do; just the fact, so the pane is not a blank. */
+.scopeHint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  padding: var(--space-10);
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+/* The background parse, while there is one. `.scopeHint`'s shape — it is the
+   same kind of thing, a quiet fact rather than a control — with a rule above
+   it, because it is a note ABOUT the list rather than another row in it. */
+
+
+/* --- settings -------------------------------------------------------- */
+
+.groupTitle {
+  padding: var(--space-16) var(--space-10) var(--space-6);
+  font-size: var(--text-caption);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--track-caps-wide);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.settingRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  width: 100%;
+  height: var(--row-book);
+  padding: 0 var(--space-10);
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--text-ui);
+  color: var(--ink);
+  text-align: start;
+  cursor: pointer;
+}
+
+.settingRow:hover {
+  background: var(--wash);
+}
+
+.settingValue {
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+/* A row that holds its own controls rather than being one. `.settingRow` is a
+   button everywhere else, and inheriting its pointer and hover would promise a
+   click target that is not there — the two steppers are the targets. */
+.settingStatic {
+  cursor: default;
+}
+
+/* The picker in a setting row — see `SelectRow`, and `.devScope`, which is the
+   app's other select and the shape this follows.
+
+   `--ink` rather than the `--muted` the developer pane uses: this is a reader's
+   own choice being reported, not a diagnostic filter, so it carries the same
+   weight as the value on every other row. `max-width` keeps a long voice name
+   from pushing the label off the row in a 400px pane; the name truncates
+   instead, and the full list is one click away. */
+.settingSelect {
+  height: var(--control-sm);
+  max-width: 60%;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: var(--text-small);
+  padding: 0 var(--space-8);
+}
+
+.settingStatic:hover {
+  background: transparent;
+}
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* A CIRCLE HOLDING AN `A`, one small and one large. The two letters are the
+   control: they say what grows, which `−` and `+` beside a numeral do not —
+   there they read as a numeric field and the reader has to work out what the
+   number counts. Round, so the pair reads as two of one thing. */
+.stepperButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  border: none;
+  /* Round, so the pair reads as two of one thing rather than two keys. */
+  border-radius: var(--radius-pill);
+  background: var(--wash);
+  font-family: inherit;
+  line-height: 1;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+/* The two A's. Their sizes are the message, so they are the type scale's
+   smallest and largest interface steps rather than two numbers chosen to look
+   different. Set solid and centred, so neither shifts its circle. */
+.stepperSmall,
+.stepperLarge {
+  line-height: 1;
+  font-weight: var(--weight-semibold);
+}
+
+.stepperSmall {
+  font-size: var(--text-caption);
+}
+
+.stepperLarge {
+  font-size: var(--text-body);
+}
+
+.stepperButton:hover:not(:disabled) {
+  background: var(--line-2);
+}
+
+/* Disabled, not hidden: the ends of §09's ramp are part of what the control
+   tells the reader, and a button that vanishes at the limit reads as a bug. */
+.stepperButton:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: default;
+}
+
+.stepperValue {
+  min-width: calc(var(--control-pill) + var(--space-8));
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: center;
+  color: var(--ink);
+}
+
+
+
+
+
+
+.themeGrid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-10) var(--space-4);
+}
+
+/* THE TILE IS THE THEME. It carries `data-theme`, so `--surface`, `--ink` and
+   `--muted` inside it are that theme's — the specimen and the name are drawn in
+   the colours the reader is choosing between rather than described in the
+   colours of the one they already have. */
+.themeSwatch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  /* BOTH LINES SET SOLID — `line-height: 1` on each — so this gap is the whole
+     of the space between them rather than the part left over after the
+     leading. At 2px the specimen and its name read as one smudged block; a
+     heading sits about 0.4 of its own size above its caption, which for a 15px
+     `Aa` is this. */
+  gap: var(--space-6);
+  /* A CIRCLE — square, then fully rounded. A pill takes its shape from the
+     column it happens to sit in and would change with the pane's width; a
+     circle is the same object at any size, which is what a sample of paper
+     should be. Centred in its cell rather than filling it. */
+  inline-size: var(--theme-swatch-h);
+  block-size: var(--theme-swatch-h);
+  justify-self: center;
+  padding: 0 var(--space-2);
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+/* THE CHOSEN ONE GETS AN EDGE, and only it. The other four are the colour and
+   nothing else — no border, no lift — so the one line in the row is
+   unambiguous.
+
+   `--swatch-edge` is the THEME's, not the app's: each one is the densest line
+   that theme has, so the edge reads against that theme's own paper. Night is
+   the exception the rule produces rather than an exception to it — its densest
+   line is a shade of the dark it sits on, so it goes the other way and uses
+   white. See `tokens.css`.
+
+   A shadow was tried here first and was wrong: a lift says "this one is above
+   the others", and choosing paper is not a stack. `aria-pressed` carries the
+   same state for anyone who cannot see either. */
+.themeSwatch[data-on='true'] {
+  box-shadow: var(--ring) var(--swatch-edge);
+}
+
+/* The specimen. Large enough to have colour in it — an `Aa` at caption size is
+   a grey mark rather than a sample of ink. */
+.themeAa {
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+  line-height: 1;
+  color: var(--ink);
+}
+
+.themeName {
+  font-size: var(--text-micro);
+  line-height: 1;
+  color: var(--muted);
+}
+
+/* --- empty ----------------------------------------------------------- */
+
+.empty {
+  padding: var(--space-40) var(--space-20);
+  text-align: center;
+}
+
+.emptyTitle {
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+  color: var(--ink);
+}
+
+.emptyBody {
+  padding-top: var(--space-8);
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+/* §07's disabled rule now lives in global.css. It never belonged here: CSS
+ * Modules localizes CLASS selectors and leaves bare attribute selectors alone,
+ * so a rule written in this file was silently applying to every
+ * `data-disabled` control in the app — the titlebar's Listen button, the
+ * library's entries, the book switcher's rows — from a stylesheet none of them
+ * import. It happened to be the behaviour §07 asks for, which is exactly why
+ * it survived: the effect was right and the mechanism was accidental, and it
+ * would have vanished the moment this pane stopped being rendered. */
+
+/* --- how the book is set ---------------------------------------------- */
+
+/* The face and the size on one line. The picker takes the slack so the two A's
+   and the number stay pinned to the trailing edge wherever the pane is. */
+.readingRow {
+  gap: var(--space-10);
+}
+
+.facePicker {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Reads as a field rather than as a row: it opens something, and a row that
+   opens something and one that toggles a value should not look alike. */
+.faceButton {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6);
+  width: 100%;
+  height: var(--control-pill);
+  /* A PILL, like every other field in this app. The library's search and this
+     pane's own are both `--control-pill` tall with a `--line-2` border and a
+     full radius; this had the first two and a 10px radius, so a control that
+     does the same job in the same places was drawn as a different kind of
+     thing. The padding is wider at the leading edge because a round end eats
+     into where the text would start. */
+  padding: 0 var(--space-10) 0 var(--space-14);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.faceButton:hover,
+.faceButton[data-open='true'] {
+  background: var(--wash);
+}
+
+/* SET IN THE FACE IT NAMES, at the size that face needs to look like the
+   others — see `--face-scale`, which is the same correction the book gets. A
+   picker that shows eight faces at one nominal size shows eight sizes, and
+   size is not what a reader is choosing here. */
+.faceName {
+  min-width: 0;
+  overflow: hidden;
+  font-size: calc(var(--text-ui) * var(--face-scale, 1));
+  color: var(--ink);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The width comes from the field, measured — see `FacePicker`. `min-width` is
+   dropped with it: a fixed minimum would fight the measured width the moment
+   the pane was narrower than it. */
+.faceMenu {
+  composes: menu from '../styles/controls.module.css';
+  min-width: 0;
+  max-height: var(--sheet-max-h);
+  overflow-y: auto;
+}
+
+/* What a reader is choosing between, said once per group instead of once per
+   row. */
+.faceGroup {
+  padding: var(--space-8) var(--space-10) var(--space-4);
+  font-size: var(--text-caption);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.faceItem {
+  composes: menuItem from '../styles/controls.module.css';
+}
+
+/* SET IN THE FACE, at the size that face needs to look like the others. On a
+   child rather than on `.faceItem` itself: that composes `menuItem`, which sets
+   a font-size of its own, and `composes` decides nothing about which of two
+   classes the bundler emits last — see the note in `controls.module.css`. */
+.faceItemLabel {
+  font-size: calc(var(--text-body) * var(--face-scale, 1));
+  line-height: var(--leading-title);
+}
+
+.faceItem[data-on='true'] {
+  color: var(--accent);
+}
+
+/* The position in a spacing scale, as pips: how much room is left in each
+   direction, which is the only thing a reader needs from this control. A
+   number would be true and useless — nobody adjusts word spacing by its em
+   value — and it would cost more width in a pane already holding four of
+   these side by side with two buttons. */
+.pips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-4);
+}
+
+.pip {
+  inline-size: var(--track-w);
+  block-size: var(--track-w);
+  border-radius: var(--radius-pill);
+  background: var(--line-3);
+}
+
+.pip[data-on='true'] {
+  background: var(--accent);
+}
+
+/* A group heading that is also its own disclosure. Built from `.groupTitle` so
+   a group that can be put away and one that cannot read as the same rank —
+   the only difference is the mark, and that it can be pressed. */
+/* WHAT THE GROUP HOLDS, INDENTED UNDER ITS HEADING.
+ *
+ * The rows were flush with the heading, so a group said nothing about where
+ * it ended: a closed group and an open one differed only in how many rows
+ * followed, and with two groups in a column the reader had to count chevrons
+ * to work out which rows belonged to which.
+ *
+ * The indent is DERIVED, not chosen — it is the chevron plus the gap after
+ * it, so a row's label starts in the same column as the heading's own label
+ * rather than under its disclosure mark. That is the alignment an accordion
+ * is read by, and taking it from the two values that actually draw the
+ * heading means it stays true if either changes. */
+.groupBody {
+  padding-inline-start: calc(var(--icon-control) + var(--space-6));
+}
+
+.groupToggle {
+  composes: groupTitle;
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  width: 100%;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: start;
+}
+
+.groupToggle:hover {
+  color: var(--ink-2);
+}
+
+.groupChevron {
+  flex: 0 0 auto;
+  transition: transform var(--motion-popover);
+}
+
+.groupChevron[data-open='true'] {
+  transform: rotate(90deg);
+}
+
+/* The colours a tag can be given, in the row's own menu. A row rather than a
+   submenu: there are three of them, they are the same three a mark can be, and
+   a nested menu to choose one of three is a second gesture for a decision that
+   fits on one line. */
+.colourRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-10);
+}
+
+.colourDot {
+  width: var(--mark-swatch);
+  height: var(--mark-swatch);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--dot);
+  cursor: pointer;
+  transition: box-shadow var(--motion-popover);
+}
+
+.colourDot[data-colour='yellow'] {
+  --dot: var(--mark-yellow-rule);
+}
+
+.colourDot[data-colour='green'] {
+  --dot: var(--mark-green-rule);
+}
+
+.colourDot[data-colour='purple'] {
+  --dot: var(--mark-purple-rule);
+}
+
+/* The chosen one is the larger dot, in its own colour — the same rule the
+   selection bar's tints follow, so a colour never needs a second colour to say
+   it was picked. */
+.colourDot[data-on='true'] {
+  box-shadow: var(--ring) var(--dot);
+}
+
+.colourDot:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--space-2);
+}
+
+.colourClear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--mark-swatch);
+  height: var(--mark-swatch);
+  padding: 0;
+  margin-inline-start: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.colourClear:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: default;
+}
+
+.colourClear:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--wash);
+}
+
+/* Why a row sits at the top. A footnote to the row, not part of its name. */
+.pinMark {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+/* "3 subjects hidden — Show all". Shares the undo line's shape because it is
+   the same kind of statement: something was done, here is the way back. */
+.hiddenLine {
+  composes: undoLine from '../styles/controls.module.css';
+}
+
+.hiddenText {
+  composes: undoText from '../styles/controls.module.css';
+}
+
+/* A saved view: the scope on the left, the way to forget it on the right. Two
+   controls in one row rather than a menu, because there are exactly two things
+   a view can do and a `⋯` for one of them is a gesture spent on nothing. */
+.viewRow {
+  display: flex;
+  align-items: center;
+}
+
+.viewButton {
+  composes: scopeRow;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.viewRemove {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-xs);
+  height: var(--control-xs);
+  margin-inline-end: var(--space-6);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-chrome), background var(--motion-chrome);
+}
+
+/* Shown on hover or focus, like the shelf's own `⋯`. A row of permanent close
+   buttons reads as a list asking to be dismantled. */
+.viewRow:hover .viewRemove,
+.viewRemove:focus-visible {
+  opacity: 1;
+}
+
+.viewRemove:hover {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+/* A `Fiction/…` group. The heading names the shared word once; the children
+   below show only their leaves, indented to the depth of a row's own glyph so
+   the names line up with the names above them rather than with the icons. */
+.tagGroupHead {
+  display: flex;
+  align-items: center;
+  height: var(--row-compact);
+  /* The row's own padding plus one glyph plus one gap, so the prefix begins
+     where the tag NAMES above it begin rather than where their `#` does. */
+  padding-inline: calc(var(--space-10) + var(--icon-control) + var(--space-10)) var(--space-10);
+  font-size: var(--text-ui);
+  color: var(--muted);
+  /* Not a button: nothing carries this prefix on its own, so there is nothing
+     to scope to. A dead control wearing a live one's clothes is worse than a
+     label — hence no hover, no pointer, no focus ring. */
+  cursor: default;
+}
+
+.tagGroupChildren {
+  /* The glyph's width plus the row's gap, so a leaf name sits under the name
+     above it. Indent by the icon, not by an arbitrary step. */
+  padding-inline-start: calc(var(--icon-control) + var(--space-10));
+}
+
+/* A CAPABILITY THAT DID NOT COMPOSE, stated where its section would have been.
+ *
+ * ADR 0001 Decision 9 lets the app run without it — a corrupt sync journal
+ * must not cost a reader their library. The cost of that is a surface that can
+ * be quietly absent, so absence is given a sentence instead. Amber, not red:
+ * nothing is broken for the reader, something is simply not here. */
+.capabilityMissing {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-10) var(--space-10);
+  font-size: var(--text-small);
+  color: var(--amber);
+}
+
+/* The counts line in Marginalia's header, taking the space the controls beside
+   it do not. Was `style={{ flex: 1 }}` — one declaration, and the only reason
+   it was inline is that it is one. */
+.countRow {
+  flex: 1;
+}
+
+/* The buttons on a note's source line. `--space-2` rather than a bare `2`,
+   which is the same number said in the scale everything else is said in — a
+   literal here is a value nothing can retune. */
+.rowActions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* A BAND OF GROUPS, under one caption — `PaneBand`.
+ *
+ * The Settings panel reached thirteen headings in one column, so `Figures` sat
+ * beside `Local models`. The band splits that scan without adding a click; the
+ * comment in `PaneBand.tsx` carries the argument.
+ *
+ * The rule is drawn on the SECTION rather than as a `<hr>` so the first band
+ * can suppress it with one attribute, and so nothing draws a line below the
+ * last group in a panel — a trailing rule reads as a heading whose contents
+ * failed to render. */
+.band[data-ruled='true'] {
+  margin-block-start: var(--space-16);
+  border-block-start: 1px solid var(--line);
+}
+
+/* QUIETER THAN A GROUP HEADING, and shaped unlike one.
+ *
+ * `.groupTitle` is uppercase, semibold and `--muted`; this sits above several
+ * of them, so matching that weight would make the band compete with its own
+ * contents for the same glance. It is the same caption size and tracking — the
+ * pane has one caption voice — at the panel's lightest ink, with the space
+ * above doing the separating that weight would otherwise have to. */
+.bandTitle {
+  margin: 0;
+  padding: var(--space-12) var(--space-10) var(--space-2);
+  font-size: var(--text-caption);
+  font-weight: var(--weight-regular);
+  letter-spacing: var(--track-caps-wide);
+  text-transform: uppercase;
+  color: var(--muted);
+  /* `--opacity-quiet`, from the scale — a literal here is what the token guard
+     in `tokens.test.ts` exists to refuse, and it caught this one. The band
+     caption wants to sit under the group headings it labels without competing
+     with them, and "quiet" is the name the scale already gives that. */
+  opacity: var(--opacity-quiet);
+}
+
+/* ── THE DEVELOPER PANEL ─────────────────────────────────────────────────
+ *
+ * The system log, and nothing about it is decorative. Every rule here exists
+ * to make a wall of structured lines scannable: a reader opens this because
+ * something went wrong and they are looking for the one line that says what.
+ *
+ * It borrows `.filterBar` and `.filter` from Marginalia rather than growing a
+ * second pill row — the question is the same shape ("narrow this list") and two
+ * vocabularies for one idea is how a panel stops being learnable. */
+.devPanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: var(--space-8);
+  padding: var(--space-12);
+}
+
+/* MONOSPACE, and this is the one place in the pane that earns it: a scope and
+   an event are identifiers, and identifiers are compared column by column. */
+.devScope {
+  height: var(--control-sm);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--text-small);
+  padding: 0 var(--space-8);
+}
+
+.devActions {
+  display: flex;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+}
+
+/* QUIET BY DEFAULT — §07's rule for a surface whose actions are all secondary.
+   Nothing here is the thing the panel is for; the panel is for the list. */
+.devButton {
+  height: var(--control-sm);
+  padding: 0 var(--space-12);
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  font-family: inherit;
+  font-size: var(--text-small);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.devButton:hover {
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+/* The window moved. Said rather than swallowed — see the component. */
+.devDropped {
+  margin: 0;
+  font-size: var(--text-micro);
+  color: var(--muted);
+  opacity: var(--opacity-quiet);
+}
+
+.devLog {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ONE RULE BETWEEN ENTRIES, not a card each: a card per line turns thirty
+   entries into thirty boxes and the eye stops finding the text. */
+.devEntry {
+  padding: var(--space-6) 0;
+  border-top: 1px solid var(--line-3);
+}
+
+.devEntry:first-child {
+  border-top: none;
+}
+
+/* ⚠️ LEVEL IS CARRIED ON THE LEFT EDGE, not on the text. A warning whose words
+   are amber reads as amber TEXT — the provenance meaning `marks.ts` reserves
+   amber for — and an error in red would say the same thing about book content
+   one panel over. A rule in the gutter colours the entry without colouring what
+   it says. */
+.devEntry[data-level='warn'] {
+  box-shadow: inset var(--kind-rule-w) 0 0 var(--amber);
+  padding-left: var(--space-8);
+}
+
+.devEntry[data-level='error'] {
+  box-shadow: inset var(--kind-rule-w) 0 0 var(--mark-rule);
+  padding-left: var(--space-8);
+}
+
+.devEntryHead {
+  display: flex;
+  gap: var(--space-8);
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+}
+
+.devTime {
+  flex: 0 0 auto;
+  color: var(--muted);
+  opacity: var(--opacity-quiet);
+}
+
+.devScopeTag {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+/* THE EVENT IS THE LINE. It is what a reader is scanning for, so it takes the
+   ink while the time and the scope stay quiet beside it. */
+.devEvent {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+/* The fields, folded small. Already redacted upstream — `createDiagnostics`
+   strips secrets, peer identities, book text and envelope bodies before any
+   sink sees them — which is why this can render them at all. */
+.devFields {
+  margin: var(--space-4) 0 0;
+  padding: var(--space-6) var(--space-8);
+  border-radius: var(--radius-chip);
+  background: var(--wash);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ⚠️ THESE FOUR WERE INLINE `style={{…}}` ON THE SEARCH PANEL, WHICH IS WHAT
+   THE TOKEN GUARD EXISTS TO PREVENT — a value in a style object is invisible to
+   `tokens.test.ts`, so `var(--space-8)` and `var(--muted)` were scattered where
+   nothing could check them. The mutation sweep priced it separately: an inline
+   object is an `ObjectLiteral` mutant and each of its values a `StringLiteral`
+   one, none of which any test can reach, so seven survivors sat here for ever. */
+
+/* The scope switch: two radios that share the row with nothing else. */
+.scopeGroup {
+  display: flex;
+  gap: var(--space-8);
+  flex: 1;
+}
+
+/* A count that takes the row it is on. */
+.metaGrow {
+  flex: 1;
+}
+
+/* The field's own glyph, which is secondary to the text beside it. */
+.searchGlyph {
+  color: var(--muted);
+}

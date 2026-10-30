@@ -1,0 +1,349 @@
+import { useCallback, useMemo, useRef, useState } from 'react'
+import { findMark } from '../../core/markMatch'
+import { isPlaced, type Annotation, type MarkAppearance, type Placed } from '../../core/marks'
+import type { SelectionSnapshot } from '../reader/session'
+import type { Book } from './useBook'
+import type { MarksView } from './useMarks'
+
+/**
+ * Making and unmaking marks from the live selection.
+ *
+ * Lifted out of the reader because two callers need it now: the reader draws
+ * the selection popup, and §11's ⌘D and the command palette both mark whatever
+ * is selected. Left in the reader, the palette would need a callback smuggled
+ * upward in state to find out whether anything was selected — which is the same
+ * coupling, wearing a disguise.
+ */
+
+/**
+ * A request to show one mark in the Marginalia panel.
+ *
+ * `edit` distinguishes the two ways a mark is reached: clicking a highlight or
+ * a margin note asks to SEE it, while choosing "Note" on a fresh selection asks
+ * to WRITE on it. Both used to do the same thing — open Notes at the top of an
+ * unfiltered list and leave the reader to find the mark they had just made,
+ * which for a book with any history means scrolling.
+ *
+ * `nonce` makes the same request twice distinguishable, so clicking the same
+ * margin note again brings it back into view instead of doing nothing.
+ */
+export interface MarkFocus {
+  readonly id: string
+  readonly edit: boolean
+  readonly nonce: number
+}
+
+export interface Marking {
+  /** The live selection in the book, or null. */
+  readonly selection: SelectionSnapshot | null
+  setSelection: (selection: SelectionSnapshot | null) => void
+  /** Live ranges by CFI for the marks foliate has drawn, for the margin. */
+  readonly ranges: ReadonlyMap<string, Range>
+  onMarkDrawn: (cfi: string, range: Range) => void
+  /** The existing mark on the current selection, if that passage is marked.
+   *  `Placed`, because it is found in `marks.current` — which by WI-22.A1 is
+   *  the placed list in its type as well as at runtime. */
+  readonly selected: Placed<Annotation> | null
+  /**
+   * Whether `mark` would lay one down for the selection in hand — a selection,
+   * WITH AN ANCHOR, in a book.
+   *
+   * ⚠️ **THE RULE `mark` REFUSES BY, SAID WHERE A SURFACE CAN READ IT**
+   * (2026-09-13 audit, #202). `view.getCFI` answers `''` for a range it cannot
+   * address and `mark` refuses that, so the selection popup's Mark and Note,
+   * ⌘D and the palette's "Mark the selection" were all offered for a passage
+   * they could do nothing with: the reader pressed, and nothing happened. Each
+   * of those asks here. A surface spelling `cfi === ''` for itself would be a
+   * second copy of this rule, and the copy is where it drifts.
+   */
+  readonly canMark: boolean
+  /**
+   * Mark the selection in the given tint and style. Returns the mark, or null
+   * if nothing was selected.
+   *
+   * `keep` leaves the selection standing instead of consuming it. §07's rule —
+   * acting on a selection consumes it — is right for a decision and wrong for a
+   * TRIAL: the mark palette redraws the passage as each choice lands, and a
+   * reader comparing a rule against a wave cannot compare anything if the first
+   * press takes the popup away.
+   */
+  mark: (note: string, appearance: MarkAppearance, keep?: boolean) => Placed<Annotation> | null
+  unmark: (target: Annotation) => void
+  /** The mark the Marginalia panel should reveal, if any. */
+  readonly focus: MarkFocus | null
+  /** Ask Notes to show a mark — and to open its editor when `edit`. */
+  focusMark: (id: string, edit?: boolean) => void
+  /**
+   * The panel's answer: the request carrying `nonce` has been honoured.
+   *
+   * A REQUEST IS CONSUMED, NOT MERELY DELIVERED. `focus` used to sit in state
+   * for the life of the session — nothing ever cleared it — so every render of
+   * the panel that re-examined it acted on it again: the editor the reader
+   * had just closed re-opened on the marks republishing after its own save,
+   * and a mark made anywhere afterwards re-opened it once more. The panel
+   * guards against a repeat itself; this is what stops a REMOUNT — switching
+   * to Contents and back — from finding the stale request and honouring it a
+   * second time.
+   *
+   * BY NONCE, because a second request can land while the first is still
+   * being scrolled to, and a clear that did not check would throw the newer
+   * one away.
+   */
+  clearFocus: (nonce: number) => void
+}
+
+export function useMarking(book: Book, marks: MarksView): Marking {
+  const [selection, setSelection] = useState<SelectionSnapshot | null>(null)
+
+  /**
+   * Replaced rather than mutated: the margin re-measures when this map's
+   * identity changes, so mutating one in place would place the first mark and
+   * silently ignore every mark after it.
+   */
+  const [ranges, setRanges] = useState<ReadonlyMap<string, Range>>(() => new Map())
+
+  const { bookId, drawMark, eraseMark, deselect, doc } = book
+  const chapter = book.position.chapterLabel
+
+  /* A section render rebuilds its overlay and re-resolves every mark in it, so
+   * ranges from the previous document are stale the moment a new one loads.
+   * Clearing is what stops a note from the last chapter being measured
+   * against this one's layout.
+   *
+   * DURING RENDER, NOT IN AN EFFECT. An effect runs after paint, so the first
+   * render that saw a new `doc` still published the OLD document's ranges and
+   * selection: children measured detached Ranges against a layout they never
+   * belonged to, and the selection popup drew for a frame over a chapter that
+   * had just been replaced. This is React's own pattern for state that
+   * follows a prop — set it while rendering and React re-renders before
+   * anything commits, so no frame carries the mismatch.
+   *
+   * And the selection with the ranges. A `SelectionSnapshot` holds a Range in
+   * the document that has just been replaced, plus the CFI and section index
+   * it was resolved under. Kept across the change it is worse than stale:
+   * marking from it writes the OLD chapter's anchor against the new chapter's
+   * label — a note that points at one passage and says it came from another. */
+  const [rangesDoc, setRangesDoc] = useState(doc)
+  if (rangesDoc !== doc) {
+    setRangesDoc(doc)
+    setRanges(new Map())
+    setSelection(null)
+  }
+
+  const onMarkDrawn = useCallback(
+    (cfi: string, range: Range) => {
+      setRanges((prev) => {
+        if (prev.get(cfi) === range) return prev
+        return new Map(prev).set(cfi, range)
+      })
+    },
+    // Stryker disable next-line ArrayDeclaration: a dependency list holding one constant never changes, so it memoises exactly as an empty one does and the callback keeps one identity either way.
+    [],
+  )
+
+  /**
+   * Drop one anchor's cached range.
+   *
+   * The map's contract is "ranges for the marks foliate has drawn", so every
+   * erase has to take the entry with it. Shared because it is needed from two
+   * places that had drifted apart: `unmark` did it, and replacing an
+   * overlapping mark in `mark` did not — leaving a Range pointing at DOM that
+   * had just been erased, which the margin then measured.
+   */
+  const forgetRange = useCallback(
+    (cfi: string) => {
+      setRanges((prev) => {
+        if (!prev.has(cfi)) return prev
+        const next = new Map(prev)
+        next.delete(cfi)
+        return next
+      })
+    },
+    // Stryker disable next-line ArrayDeclaration: as `onMarkDrawn`'s — one constant dependency memoises as none does.
+    [],
+  )
+
+  /**
+   * The mark under the selection — by OVERLAP, not by a byte-identical CFI.
+   *
+   * Byte equality asked whether the reader had reproduced an anchor exactly,
+   * which is not a question a gesture can answer: selecting part of a marked
+   * paragraph found nothing and offered to mark it again, and snapping the
+   * selection to whole words widened every anchor, putting marks made before
+   * that change out of reach of the gesture that made them. `findMark` carries
+   * the rule, and the tie-break when a selection covers two marks.
+   */
+  const selected = useMemo(
+    () =>
+      selection && bookId
+        ? findMark(marks.current, {
+            cfi: selection.cfi,
+            sectionIndex: selection.sectionIndex,
+            bookId,
+          })
+        : null,
+    [marks.current, selection, bookId],
+  )
+
+  /* THE SAME THREE FACTS `mark` GUARDS ON BELOW, in the same order — see
+     `Marking.canMark`. `mark` keeps its own guards because they are what
+     narrow `selection` and `bookId` for the compiler, and because ⌘D can land
+     between a render and the next; this is what a surface reads to decide
+     whether to offer the control at all. */
+  const canMark = selection !== null && selection.cfi !== '' && bookId !== null
+
+  /**
+   * Drawn immediately rather than waiting for the section to re-render:
+   * foliate only offers marks to an overlay when it builds one, so without
+   * this the highlight would not appear until the reader scrolled away and
+   * back.
+   */
+  const mark = useCallback(
+    (note: string, appearance: MarkAppearance, keep = false): Placed<Annotation> | null => {
+      if (!selection || !bookId) return null
+      /* ⚠️ **A SELECTION WITH NO ANCHOR IS NOT A MARK, and this guard is new
+       * with WI-22.A1.** `view.getCFI` answers `''` for a range it cannot
+       * address, and the empty string was written through as an anchor — the
+       * defect commit b1aa0dd removed on the import path and that this path
+       * still had. `isMark` refuses an empty `cfi` on the way to disk, so the
+       * row was rejected at the file while the overlay had already drawn it:
+       * a highlight on screen that no relaunch brings back.
+       *
+       * Refused BEFORE the store is asked, so nothing is written and nothing
+       * is drawn. Null is the same answer a caller already handles for "no
+       * selection", which is what this is. */
+      if (selection.cfi === '') {
+        /* SAID OUT LOUD. Returning null silently is the shape this repository
+         * names as worse than no control at all: the reader presses Mark and
+         * nothing happens, with no way to tell it from a broken app. The
+         * surface-level fix — never offering the control for a selection that
+         * cannot be anchored — was recorded here as outstanding and is now
+         * `canMark`, which every surface that offers Mark reads (#202). This
+         * stays as the trace for a route that reaches `mark` anyway. */
+        console.warn('Paper: this selection has no anchor, so it cannot be marked')
+        return null
+      }
+      const created = marks.add({
+        bookId,
+        cfi: selection.cfi,
+        sectionIndex: selection.sectionIndex,
+        text: selection.text,
+        // Captured here because here is the only place it exists. See `Mark`.
+        prefix: selection.prefix,
+        suffix: selection.suffix,
+        /* THE EXISTING NOTE SURVIVES A RE-MARK. `note` is what a NEW mark gets,
+         * and every caller that only means to change a passage's appearance
+         * passes '' — ⌘D and the palette's "Mark this passage" both do. Written
+         * verbatim, marking an already-annotated passage a second time deleted
+         * what the reader had written about it, silently and with no undo.
+         * Emptying a note deliberately goes through `marks.setNote`, which is
+         * the editor's own path and is not affected by this. */
+        note: note === '' && selected ? selected.note : note,
+        kind: 'highlight',
+        tint: appearance.tint,
+        style: appearance.style,
+        chapter,
+      })
+      /* ⚠️ **THE ASSERTION, NOT A FILTER — AND IT COMES BEFORE THE ERASE.** The
+       * guard above establishes that `created` carries a real anchor; this is
+       * what makes the compiler agree, and it is deliberately loud rather than
+       * a silent skip. Reaching the `else` would mean `createMark` dropped a
+       * cfi it was handed — a store invariant broken, not a passage that failed
+       * to resolve.
+       *
+       * It used to sit AFTER the erase below, which made the failure path
+       * destructive: the superseded mark's drawing was already gone and its
+       * cached range already dropped by the time this returned null, so a
+       * reader would have lost a highlight in exchange for nothing appearing.
+       * A check that bails out must run before the side effects it is bailing
+       * out of, even when — as here — the bail-out is thought unreachable. */
+      if (!isPlaced(created)) {
+        console.error('Paper: a mark was created with no anchor and was not drawn', created.id)
+        return null
+      }
+      /* The overlay of the mark this one replaced goes with it. The store drops
+       * the superseded row — `marks.add` resolves the same mark `selected`
+       * did, from the same selection — but foliate has already drawn it at its
+       * own anchor, and a highlight nothing in the store accounts for stays on
+       * the page until the section is rebuilt. Skipped when the anchors match,
+       * because there the new drawing lands exactly on the old one. */
+      if (selected && selected.cfi !== created.cfi) {
+        eraseMark(selected)
+        forgetRange(selected.cfi)
+      }
+      drawMark(created)
+      /* §07: acting on a selection consumes it. Leaving it up would leave the
+       * popup floating over a passage that has already been dealt with — unless
+       * the caller is still deciding, which is what `keep` says. */
+      if (!keep) {
+        deselect()
+        setSelection(null)
+      }
+      return created
+    },
+    [selection, bookId, marks, chapter, drawMark, eraseMark, selected, deselect, forgetRange],
+  )
+
+  const [focus, setFocus] = useState<MarkFocus | null>(null)
+  const nonce = useRef(0)
+  const focusMark = useCallback(
+    (id: string, edit = false) => {
+      // Stryker disable next-line AssignmentOperator: counting down mints nonces as distinct, and as far from the panel's unanswered 0, as counting up — and a nonce is only ever compared for equality.
+      nonce.current += 1
+      setFocus({ id, edit, nonce: nonce.current })
+    },
+    // Stryker disable next-line ArrayDeclaration: as `onMarkDrawn`'s — one constant dependency memoises as none does.
+    [],
+  )
+  const clearFocus = useCallback(
+    (done: number) => {
+      setFocus((current) => (current?.nonce === done ? null : current))
+    },
+    // Stryker disable next-line ArrayDeclaration: as `onMarkDrawn`'s — one constant dependency memoises as none does.
+    [],
+  )
+
+  const unmark = useCallback(
+    (target: Annotation) => {
+      /* The row always goes, and it goes from the mark's OWN book — the mark is
+       * passed whole rather than by id so the store never has to work that out
+       * from a list that may have been emptied under it. See `MarksView`.
+       *
+       * The DRAWING only goes when the mark belongs to the book on screen:
+       * `eraseMark` and the range cache both address the current renderer, and
+       * a CFI is only unique within a section of one book. Unmarking another
+       * book's note — from a list that spans books — used to erase whatever the
+       * current book happened to have at the same anchor, and drop its cached
+       * range with it. */
+      marks.remove(target)
+      if (target.bookId !== bookId) return
+      /* AN UNPLACED MARK HAS NOTHING DRAWN TO ERASE. Marginalia lists both
+       * classes and `unmark` is reachable from that list, so `target` can be a
+       * mark with no anchor here — `eraseMark` on one would ask foliate to
+       * resolve a foreign path, which is the whole state WI-21.7 built the
+       * class for. The ROW still goes, above and unconditionally; only the
+       * drawing is skipped, because there is none. */
+      if (!isPlaced(target)) return
+      eraseMark(target)
+      forgetRange(target.cfi)
+    },
+    [eraseMark, marks, bookId, forgetRange],
+  )
+
+  return useMemo<Marking>(
+    () => ({
+      selection,
+      setSelection,
+      ranges,
+      onMarkDrawn,
+      selected,
+      canMark,
+      mark,
+      unmark,
+      focus,
+      focusMark,
+      clearFocus,
+    }),
+    [selection, ranges, onMarkDrawn, selected, canMark, mark, unmark, focus, focusMark, clearFocus],
+  )
+}

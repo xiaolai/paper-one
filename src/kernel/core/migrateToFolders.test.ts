@@ -1,0 +1,920 @@
+import { describe, expect, it, vi } from 'vitest'
+import type { VaultFs } from './bookVault'
+import {
+  contentPathIn,
+  folderOf,
+  trashOf,
+  readBook,
+  readMarks,
+  writeBook,
+  writeMarks,
+} from './bookFolder'
+import {
+  DONE_FILE,
+  marksByBook,
+  migrateToFolders,
+  recordFromRow,
+  summariseMigration,
+} from './migrateToFolders'
+
+/**
+ * The one piece that runs once, against data that exists once, and whose failure
+ * mode is a reader's own writing.
+ *
+ * So the cases here are mostly about the properties rather than the happy path:
+ * that a second run changes nothing, that the old layout survives, that one bad
+ * book costs one book, and that a crash midway leaves something resumable.
+ */
+
+function fakeFs(seed: Record<string, string> = {}) {
+  const files = new Map<string, Uint8Array>()
+  for (const [k, v] of Object.entries(seed)) files.set(k, new TextEncoder().encode(v))
+  const fs: VaultFs & { files: Map<string, Uint8Array>; failWrite?: string } = {
+    files,
+    readFile: async (path) => {
+      const bytes = files.get(path)
+      if (!bytes) throw new Error(`no such file: ${path}`)
+      return bytes
+    },
+    writeFile: async (path, bytes) => {
+      if (fs.failWrite && path.startsWith(fs.failWrite)) throw new Error('disk full')
+      files.set(path, bytes)
+    },
+    /* A DIRECTORY EXISTS WHEN SOMETHING IS IN IT, which is what the real
+     * `exists` reports. An exact match made every directory look absent, so a
+     * guard that asks about one — "is this book's removed copy in the trash?" —
+     * passed here for the wrong reason and would have failed on disk. */
+    exists: async (path) =>
+      [...files.keys()].some((k) => k === path || k.startsWith(`${path}/`)),
+    mkdir: async () => {},
+    remove: async (path) => void files.delete(path),
+    removeDir: async (path) => {
+      for (const key of [...files.keys()]) {
+        if (key === path || key.startsWith(`${path}/`)) files.delete(key)
+      }
+    },
+    rename: async (from, to) => {
+      const bytes = files.get(from)
+      if (bytes) files.set(to, bytes)
+      files.delete(from)
+    },
+  }
+  return fs
+}
+
+const row = (over: Record<string, unknown> = {}) => ({
+  bookId: 'book_a',
+  title: 'Moby-Dick',
+  author: 'Herman Melville',
+  lastOpened: 1700000000000,
+  position: 'epubcfi(/6/14)',
+  progress: 0.42,
+  tags: ['Sea'],
+  vault: 'books/book_a.epub',
+  cover: 'covers/book_a.jpg',
+  path: '/Users/someone/Downloads/moby.epub',
+  ...over,
+})
+
+const legacy = {
+  'books/book_a.epub': 'WHALE',
+  'covers/book_a.jpg': 'JACKET',
+}
+
+describe('recordFromRow', () => {
+  it('carries the reader work across', () => {
+    expect(recordFromRow(row())).toMatchObject({
+      title: 'Moby-Dick',
+      position: 'epubcfi(/6/14)',
+      progress: 0.42,
+      tags: ['Sea'],
+    })
+  })
+
+  /**
+   * The old shape had ONE timestamp and the new one has two.
+   *
+   * Using it for both is the only honest answer: "when was this added" was never
+   * recorded, and inventing a date would put migrated books in an order nobody
+   * chose.
+   */
+  it('uses the one timestamp for both, rather than inventing one', () => {
+    const record = recordFromRow(row())
+    expect(record.openedAt).toBe(1700000000000)
+    expect(record.addedAt).toBe(1700000000000)
+  })
+
+  it('keeps the reader original path as provenance', () => {
+    expect(recordFromRow(row()).origin).toBe('/Users/someone/Downloads/moby.epub')
+  })
+
+  it('takes the extension from the old vault filename', () => {
+    expect(recordFromRow(row({ vault: 'books/book_a.PDF' })).ext).toBe('pdf')
+  })
+
+  it('survives a row with almost nothing on it', () => {
+    expect(recordFromRow({ bookId: 'x' })).toEqual({ title: '', author: '' })
+  })
+
+  it('clamps a nonsensical progress rather than carrying it', () => {
+    expect(recordFromRow(row({ progress: 4 })).progress).toBe(1)
+  })
+
+  /* EVERY FIELD PHASE 3 COULD HOLD, under the name phase 4 gives it — and
+     nothing else. This runs once, so a field dropped here is dropped for good. */
+  it('carries every field a phase-3 row could hold, each under its phase-4 name', () => {
+    expect(
+      recordFromRow(
+        row({
+          sortAs: 'Melville, Herman',
+          series: 'Sea Stories',
+          seriesIndex: 2,
+          publisher: 'Harper',
+          published: '1851',
+          languages: ['en'],
+          subjects: ['Whaling'],
+          finished: true,
+        }),
+      ),
+    ).toStrictEqual({
+      title: 'Moby-Dick',
+      author: 'Herman Melville',
+      sortAs: 'Melville, Herman',
+      series: 'Sea Stories',
+      seriesIndex: 2,
+      publisher: 'Harper',
+      published: '1851',
+      languages: ['en'],
+      subjects: ['Whaling'],
+      tags: ['Sea'],
+      position: 'epubcfi(/6/14)',
+      progress: 0.42,
+      finished: true,
+      openedAt: 1700000000000,
+      addedAt: 1700000000000,
+      origin: '/Users/someone/Downloads/moby.epub',
+      ext: 'epub',
+    })
+  })
+
+  /* NOT EVEN AS `undefined`. A key that is present and undefined is still a key:
+     it survives a spread over what is on disk and replaces the reader's value
+     with nothing. `toEqual` cannot see one, so the keys are what is compared. */
+  it('adds no field the row did not have', () => {
+    expect(Object.keys(recordFromRow({ bookId: 'x' }))).toEqual(['title', 'author'])
+  })
+
+  /* OLD DATA IS UNTRUSTED DATA. A value of the wrong type is not a rougher
+     version of the right one — it is dropped, and the rest of the row still
+     arrives. */
+  it('drops every value of the wrong type rather than carrying it', () => {
+    const record = recordFromRow({
+      bookId: 'x',
+      title: 42,
+      author: ['Herman Melville'],
+      seriesIndex: '2',
+      progress: Number.NaN,
+      lastOpened: 'yesterday',
+      finished: 'yes',
+      position: ['epubcfi(/6/14)'],
+      languages: ['en', 5, '', null],
+      tags: [null, 'Sea', ''],
+    })
+    expect(record).toStrictEqual({ title: '', author: '', languages: ['en'], tags: ['Sea'] })
+  })
+
+  it('bounds a title, where a stored path or position is carried whole', () => {
+    expect(recordFromRow(row({ title: 't'.repeat(5000) })).title).toBe('t'.repeat(4000))
+  })
+
+  /* An address is whole or nothing — `origin` — and one that is not a string
+     at all is no way back; the URL beside it still is. */
+  it('carries an address of exactly the bound, and falls back past one that is not an address', () => {
+    const url = 'https://example.org/moby.epub'
+    const bound = `/${'p'.repeat(7999)}`
+    expect(recordFromRow(row({ path: bound, url })).origin).toBe(bound)
+    expect(recordFromRow(row({ path: `${bound}p`, url })).origin).toBe(url)
+    expect(recordFromRow(row({ path: ['/Users/someone/moby.epub'], url })).origin).toBe(url)
+    expect(recordFromRow(row({ path: 42, url })).origin).toBe(url)
+  })
+
+  it('carries a position of exactly its bound', () => {
+    const bound = 'x'.repeat(64_000)
+    expect(recordFromRow(row({ position: bound })).position).toBe(bound)
+  })
+})
+
+describe('marksByBook', () => {
+  it('groups the shared store by book', () => {
+    const grouped = marksByBook([
+      { id: '1', bookId: 'a' },
+      { id: '2', bookId: 'b' },
+      { id: '3', bookId: 'a' },
+    ])
+    expect(grouped.get('a')).toHaveLength(2)
+    expect(grouped.get('b')).toHaveLength(1)
+  })
+
+  /* A mark with no book cannot be filed, and guessing would put somebody's note
+   * in a book they did not write it in. */
+  it('drops a mark with no book id', () => {
+    expect(marksByBook([{ id: '1' }, { id: '2', bookId: '' }]).size).toBe(0)
+  })
+
+  it('survives nonsense', () => {
+    expect(marksByBook(null).size).toBe(0)
+    expect(marksByBook('not marks').size).toBe(0)
+  })
+
+  /* One entry that is not a mark costs that entry: a null in the list, and a
+     book id that is not a string, which no folder could be named after. */
+  it('drops an entry that is not a mark, or names its book by something other than an id', () => {
+    const kept = { id: '3', bookId: 'a' }
+    const grouped = marksByBook([null, { id: '1', bookId: 5 }, kept])
+    expect([...grouped.entries()]).toEqual([['a', [kept]]])
+  })
+})
+
+describe('migrateToFolders', () => {
+  const marks = [
+    { id: 'm1', bookId: 'book_a', cfi: 'x' },
+    { id: 'm2', bookId: 'other', cfi: 'y' },
+  ]
+
+  it('moves a book into its folder with everything it owned', async () => {
+    const fs = fakeFs(legacy)
+    const out = await migrateToFolders(fs, { rows: [row()], marks })
+    expect(out).toEqual([{ bookId: 'book_a', status: 'migrated', marks: 1 }])
+
+    const record = await readBook(fs, 'book_a')
+    expect(record).toMatchObject({ title: 'Moby-Dick', tags: ['Sea'], progress: 0.42 })
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(true)
+    expect(fs.files.has(`${folderOf('book_a')}/cover.webp`)).toBe(true)
+    expect(await readMarks(fs, 'book_a')).toHaveLength(1)
+  })
+
+  /* Only this book's marks. The shared store held every book's, and filing
+   * somebody else's notes into this book would be worse than losing them. */
+  it('files only the marks belonging to that book', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row()], marks })
+    const mine = (await readMarks(fs, 'book_a')) as { id: string }[]
+    expect(mine.map((m) => m.id)).toEqual(['m1'])
+  })
+
+  /**
+   * ADDITIVE. The old layout is read and never deleted, so a migration that
+   * turns out to be wrong can be walked back.
+   */
+  it('leaves the phase-3 files exactly where they were', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row()], marks })
+    expect(fs.files.has('books/book_a.epub')).toBe(true)
+    expect(fs.files.has('covers/book_a.jpg')).toBe(true)
+  })
+
+  /**
+   * IDEMPOTENT — and this is the case that matters most, because a reader may
+   * relaunch after a crash midway. A book whose record exists is finished, and
+   * rewriting it would overwrite whatever they have done since.
+   */
+  it('changes nothing on a second run', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row()], marks })
+    // The reader tags it after migrating.
+    const record = await readBook(fs, 'book_a')
+    await writeBook(fs, 'book_a', { ...record!, tags: ['Sea', 'Mine'] })
+
+    const again = await migrateToFolders(fs, { rows: [row()], marks })
+    expect(again).toEqual([{ bookId: 'book_a', status: 'already' }])
+    expect((await readBook(fs, 'book_a'))?.tags).toEqual(['Sea', 'Mine'])
+  })
+
+  /* PER BOOK. One unreadable book costs that book and is named, or the reader
+   * is left with neither layout complete and nothing saying why. */
+  it('names the book that failed and keeps going', async () => {
+    const fs = fakeFs(legacy)
+    fs.failWrite = folderOf('book_b')
+    const out = await migrateToFolders(fs, {
+      rows: [row(), row({ bookId: 'book_b', vault: null, cover: null })],
+      marks,
+    })
+    expect(out[0]?.status).toBe('migrated')
+    expect(out[1]).toMatchObject({ bookId: 'book_b', status: 'failed' })
+    expect(out[1]?.reason).toBeTruthy()
+  })
+
+  /**
+   * A row naming a copy that is not there.
+   *
+   * Phase 3 had bugs that produced exactly this — an orphaned row, a stale
+   * cover — so a missing source is a book without its bytes rather than a failed
+   * migration. Its record and its marks still arrive.
+   */
+  it('migrates a book whose content has gone missing', async () => {
+    const fs = fakeFs({})
+    const out = await migrateToFolders(fs, { rows: [row()], marks })
+    expect(out[0]?.status).toBe('migrated')
+    expect(await readBook(fs, 'book_a')).toMatchObject({ title: 'Moby-Dick' })
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(false)
+  })
+
+  it('ignores a row with no book id', async () => {
+    expect(await migrateToFolders(fakeFs(), { rows: [{ title: 'x' }], marks: [] })).toEqual([])
+  })
+
+  it('ignores a row whose book id is not a string', async () => {
+    const fs = fakeFs(legacy)
+    expect(await migrateToFolders(fs, { rows: [row({ bookId: 42 })], marks: [] })).toEqual([])
+    expect([...fs.files.keys()].sort()).toEqual(Object.keys(legacy).sort())
+  })
+
+  /* A PDF IS KEPT AS ONE. The content's name comes from the record's own
+     extension, which is what `hasBytes` looks for on the next run — a book
+     copied to one name and looked for under another is retried for ever. */
+  it('keeps a book under the extension its stored copy had', async () => {
+    const fs = fakeFs({ 'books/book_a.pdf': 'PAGES' })
+    const out = await migrateToFolders(fs, { rows: [row({ vault: 'books/book_a.pdf', cover: null })], marks: [] })
+    expect(out).toEqual([{ bookId: 'book_a', status: 'migrated', marks: 0 }])
+    expect(fs.files.has(contentPathIn('book_a', 'book.pdf'))).toBe(true)
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(false)
+    expect((await migrateToFolders(fs, { rows: [row({ vault: 'books/book_a.pdf', cover: null })], marks: [] }))[0]?.status).toBe('already')
+  })
+
+  /* The shared store is the source only of what it holds for this book: a book
+     with none gets no `marks.json` and says so. */
+  it('files no marks for a book that had none', async () => {
+    const fs = fakeFs(legacy)
+    const out = await migrateToFolders(fs, { rows: [row()], marks: [{ id: 'm2', bookId: 'other', cfi: 'y' }] })
+    expect(out).toEqual([{ bookId: 'book_a', status: 'migrated', marks: 0 }])
+    expect(fs.files.has(`${folderOf('book_a')}/marks.json`)).toBe(false)
+  })
+
+  /* ZERO TRUST AT THE BOUNDARY. Phase 3's rows are old JSON, and a `vault` or
+     `cover` that is not a string is not a path — handed to a filesystem it is
+     whatever that filesystem makes of it. */
+  it('asks the filesystem for nothing a row names that is not a path', async () => {
+    const fs = fakeFs(legacy)
+    const asked: unknown[] = []
+    const read = fs.readFile
+    fs.readFile = async (path) => {
+      asked.push(path)
+      return read(path)
+    }
+    const out = await migrateToFolders(fs, {
+      rows: [row({ vault: 42, cover: ['covers/book_a.jpg'] }), row({ bookId: 'book_b', vault: 'books/book_a.epub', cover: null })],
+      marks: [],
+    })
+    expect(out.map((one) => one.status)).toEqual(['migrated', 'migrated'])
+    expect(asked.filter((one) => typeof one !== 'string')).toEqual([])
+    expect(asked).toContain('books/book_a.epub')
+  })
+
+  /* A copy the row names and that is not there is no copy — and with no way
+     back either, the row stays behind rather than becoming a book that cannot
+     open. */
+  it('leaves a row behind whose stored copy has gone and that has no way back', async () => {
+    const fs = fakeFs({})
+    const out = await migrateToFolders(fs, {
+      rows: [row({ vault: 'books/gone.epub', cover: null, path: null })],
+      marks: [],
+    })
+    expect(out).toEqual([
+      {
+        bookId: 'book_a',
+        status: 'skipped',
+        reason: 'no stored copy and no original path — left in the previous library',
+      },
+    ])
+    expect(fs.files.size).toBe(0)
+  })
+
+  /* And the copy is a way back on its own: a row with one and no path migrates. */
+  it('migrates a row whose only way back is the copy it stored', async () => {
+    const fs = fakeFs(legacy)
+    const out = await migrateToFolders(fs, { rows: [row({ path: null, cover: null })], marks: [] })
+    expect(out).toEqual([{ bookId: 'book_a', status: 'migrated', marks: 0 }])
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(true)
+  })
+
+  /* A failure is named by its own message — and one that brought no message
+     still names the book. */
+  it('names a failure that is not an Error in its own words', async () => {
+    const fs = fakeFs(legacy)
+    const write = fs.writeFile
+    fs.writeFile = async (path, bytes) => {
+      if (path.startsWith(folderOf('book_a'))) throw 'refused' as unknown as Error
+      return write(path, bytes)
+    }
+    const out = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(out).toEqual([{ bookId: 'book_a', status: 'failed', reason: 'could not be migrated' }])
+  })
+})
+
+describe('summariseMigration', () => {
+  it('says what happened', () => {
+    expect(
+      summariseMigration([
+        { bookId: 'a', status: 'migrated', marks: 3 },
+        { bookId: 'b', status: 'failed' },
+      ]),
+    ).toBe('1 book moved, 3 notes kept, 1 could not be moved')
+  })
+
+  /* Nothing to say when nothing moved — a reader with no phase-3 library should
+   * not be told about a migration they did not have. */
+  it('says nothing when there was nothing to do', () => {
+    expect(summariseMigration([])).toBeNull()
+    expect(summariseMigration([{ bookId: 'a', status: 'already' }])).toBeNull()
+  })
+
+  it('counts in the plural past one, and in the singular at one', () => {
+    expect(
+      summariseMigration([
+        { bookId: 'a', status: 'migrated', marks: 1 },
+        { bookId: 'b', status: 'migrated' },
+      ]),
+    ).toBe('2 books moved, 1 note kept')
+  })
+
+  /* A migration where nothing moved and something failed is not a migration
+     that did nothing — the failure is the thing to say. */
+  it('speaks when nothing moved but something could not be', () => {
+    expect(summariseMigration([{ bookId: 'a', status: 'failed' }])).toBe('0 books moved, 1 could not be moved')
+  })
+})
+
+
+/**
+ * A row Paper has no bytes for, and no way back to them.
+ *
+ * Phase 3 only began keeping its own copies near the end, so most rows in a real
+ * library have no `vault` — and phase 4 dropped the `url` that used to open
+ * those. Writing a record anyway put books on the shelf that could never open,
+ * and marked them `already` so the migration would never revisit them.
+ */
+describe('a row with nothing behind it', () => {
+  it('is left in the previous library rather than shelved', async () => {
+    const fs = fakeFs({})
+    const out = await migrateToFolders(fs, {
+      rows: [row({ vault: null, cover: null, path: null })],
+      marks: [],
+    })
+    expect(out[0]?.status).toBe('skipped')
+    expect(out[0]?.reason).toContain('no stored copy')
+    expect(fs.files.size).toBe(0)
+  })
+
+  /* Skipped rather than failed, so a later run can pick it up — and so the
+   * reader is not told something broke when nothing did. */
+  it('is retried on a later run', async () => {
+    const fs = fakeFs({})
+    const rows = [row({ vault: null, cover: null, path: null })]
+    await migrateToFolders(fs, { rows, marks: [] })
+    const again = await migrateToFolders(fs, { rows, marks: [] })
+    expect(again[0]?.status).toBe('skipped')
+  })
+
+  /* `origin` is a way back, so this one still migrates. */
+  it('migrates a row that still knows where its file was', async () => {
+    const fs = fakeFs({})
+    const out = await migrateToFolders(fs, { rows: [row({ vault: null, cover: null })], marks: [] })
+    expect(out[0]?.status).toBe('migrated')
+    expect((await readBook(fs, 'book_a'))?.origin).toBeTruthy()
+  })
+
+  it('says so in the summary, without calling it a failure', () => {
+    expect(
+      summariseMigration([
+        { bookId: 'a', status: 'migrated' },
+        { bookId: 'b', status: 'skipped' },
+      ]),
+    ).toBe('1 book moved, 1 had no stored copy')
+  })
+})
+
+describe('the record knows its own id', () => {
+  /* `safeId` is not reversible — `book:abc` lives in `book_abc` — so a rescan
+   * that read the id off the directory renamed every book, and marks are keyed
+   * by it. */
+  it('stores the canonical id, not the sanitised folder name', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row({ bookId: 'book:abc' })], marks: [] })
+    expect((await readBook(fs, 'book:abc'))?.bookId).toBe('book:abc')
+  })
+})
+
+/**
+ * Repairing what the FIRST version of this migration wrote.
+ *
+ * It wrote a record for a row it had no bytes for, and the idempotence check
+ * then reported that record `already` on every later run — so the one state
+ * needing repair was the one state guaranteed never to be looked at again. A
+ * record is finished when it has content or a path back to it, not merely when
+ * it is present.
+ */
+describe('a record left behind by the broken first run', () => {
+  const stranded = async () => {
+    const fs = fakeFs({})
+    await writeBook(fs, 'book_a', { title: 'Moby-Dick', author: 'Herman Melville' })
+    return fs
+  }
+
+  it('is retried rather than reported already done', async () => {
+    const fs = await stranded()
+    const out = await migrateToFolders(fs, { rows: [row({ vault: null, path: null })], marks: [] })
+    expect(out[0]?.status).toBe('skipped')
+  })
+
+  it('is repaired once the bytes are findable again', async () => {
+    const fs = await stranded()
+    fs.files.set('books/book_a.epub', new TextEncoder().encode('WHALE'))
+    const out = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(out[0]?.status).toBe('migrated')
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(true)
+  })
+
+  /* And the repair must not undo the reader. Anything they did to the stranded
+   * record — a tag, a rename — outlives the retry. */
+  it('keeps what the reader wrote on the stranded record', async () => {
+    const fs = await stranded()
+    await writeBook(fs, 'book_a', {
+      title: 'Moby-Dick; or, The Whale',
+      author: 'Herman Melville',
+      tags: ['Mine'],
+    })
+    fs.files.set('books/book_a.epub', new TextEncoder().encode('WHALE'))
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    const record = await readBook(fs, 'book_a')
+    expect(record?.tags).toEqual(['Mine'])
+    expect(record?.title).toBe('Moby-Dick; or, The Whale')
+  })
+
+  /* A COMPLETE record is still left alone, which is what idempotence means. */
+  it('leaves a finished record untouched', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    await writeBook(fs, 'book_a', {
+      title: 'Renamed by the reader',
+      author: 'M',
+      ext: 'epub',
+    })
+    const again = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(again[0]?.status).toBe('already')
+    expect((await readBook(fs, 'book_a'))?.title).toBe('Renamed by the reader')
+  })
+})
+
+/**
+ * A retry must not replace marks the reader has made since the first attempt.
+ *
+ * The phase-3 store is the source only for a book that has none of its own. A
+ * record retried because it had no bytes reaches the marks step a second time,
+ * and rewriting `marks.json` from the old shared store there discards every
+ * highlight made in between.
+ */
+describe('marks on a retried book', () => {
+  it('leaves an existing marks file alone', async () => {
+    /* A record stranded by the broken first run, WITH marks the reader has made
+     * since — and the bytes now findable, so this run actually migrates it. A
+     * row that is still unrecoverable would be skipped before the marks step,
+     * which is what made the first version of this test prove nothing. */
+    const fs = fakeFs(legacy)
+    await writeBook(fs, 'book_a', { title: 'Moby-Dick', author: 'M' })
+    await writeMarks(fs, 'book_a', [{ id: 'mine', bookId: 'book_a', cfi: 'later' }])
+    const out = await migrateToFolders(fs, {
+      rows: [row()],
+      marks: [{ id: 'm1', bookId: 'book_a', cfi: 'x' }],
+    })
+    expect(out[0]?.status).toBe('migrated')
+    const kept = (await readMarks(fs, 'book_a')) as { id: string }[]
+    expect(kept.map((m) => m.id)).toEqual(['mine'])
+  })
+
+  it('still files them for a book that has none', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, {
+      rows: [row()],
+      marks: [{ id: 'm1', bookId: 'book_a', cfi: 'x' }],
+    })
+    expect(await readMarks(fs, 'book_a')).toHaveLength(1)
+  })
+})
+
+/* This runs once, so a position lost here is lost for good — and `str` slices
+ * at 4000, which turns a long CFI into a string that anchors nowhere. */
+describe('a legacy row with a very long position', () => {
+  it('carries it across whole', () => {
+    const long = `epubcfi(/6/14!/4/2/${'2/'.repeat(2000)}1:0)`
+    expect(long.length).toBeGreaterThan(4000)
+    expect(recordFromRow(row({ position: long })).position).toBe(long)
+  })
+
+  it('drops an absurd one rather than carrying a broken anchor', () => {
+    expect(recordFromRow(row({ position: 'x'.repeat(70_000) })).position).toBeUndefined()
+  })
+})
+
+/**
+ * A record that is there but will not read is NOT an absent one.
+ *
+ * `readBook` answers both with null, and the retry writes the phase-3 row when
+ * it gets one — so a momentary read failure on a finished book would replace
+ * everything the reader had done since with the state it was migrated from.
+ * This runs once, so that is permanent.
+ */
+describe('a record that cannot be read', () => {
+  it('is left untouched and reported, rather than overwritten', async () => {
+    const fs = fakeFs(legacy)
+    fs.files.set(`${folderOf('book_a')}/book.json`, new TextEncoder().encode('half a write'))
+    const out = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(out[0]).toMatchObject({ bookId: 'book_a', status: 'failed' })
+    expect(new TextDecoder().decode(fs.files.get(`${folderOf('book_a')}/book.json`)!)).toBe(
+      'half a write',
+    )
+  })
+
+  /* NOR IS ONE THE READ CALLS MISSING WHILE THE FOLDER SAYS IT IS THERE. Tauri's
+     fs errors carry no code, so "missing" is read off a message — and a read
+     that failed with the wrong words must not be the licence to write the
+     phase-3 row over a finished book. */
+  it('is left untouched when the read says missing and the folder says present', async () => {
+    const fs = fakeFs(legacy)
+    const recordAt = `${folderOf('book_a')}/book.json`
+    fs.files.set(recordAt, new TextEncoder().encode('{"title":"Renamed by the reader","author":"M"}'))
+    const read = fs.readFile
+    fs.readFile = async (path) => {
+      if (path === recordAt) throw new Error(`no such file: ${path}`)
+      return read(path)
+    }
+    const out = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(out).toEqual([
+      { bookId: 'book_a', status: 'failed', reason: 'its record is there but could not be read — left untouched' },
+    ])
+    expect(new TextDecoder().decode(fs.files.get(recordAt)!)).toBe('{"title":"Renamed by the reader","author":"M"}')
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(false)
+    expect(fs.files.has(DONE_FILE)).toBe(false)
+  })
+})
+
+/**
+ * `safeId` is not injective: everything that is not alphanumeric becomes an
+ * underscore, so two phase-3 rows keyed by URL can land on one directory. The
+ * second used to find the first's record, report `already`, and have its tags,
+ * position and marks left permanently unreachable with nothing said.
+ */
+describe('two rows that want the same folder', () => {
+  it('reports the collision instead of silently swallowing the second', async () => {
+    const fs = fakeFs({ 'books/one.epub': 'A', 'books/two.epub': 'B' })
+    const out = await migrateToFolders(fs, {
+      rows: [
+        row({ bookId: 'url:x/a-b', vault: 'books/one.epub', cover: null }),
+        row({ bookId: 'url:x/a_b', vault: 'books/two.epub', cover: null }),
+      ],
+      marks: [],
+    })
+    expect(out[0]?.status).toBe('migrated')
+    expect(out[1]?.status).toBe('failed')
+    expect(out[1]?.reason).toContain('collides')
+  })
+
+  /* The default macOS volume is case-insensitive, so two names differing only
+   * in case are ONE directory. Comparing them verbatim distinguished names the
+   * filesystem does not, and let the collision straight through. */
+  it('catches one that only the filesystem would fold', async () => {
+    const fs = fakeFs({ 'books/one.epub': 'A', 'books/two.epub': 'B' })
+    const out = await migrateToFolders(fs, {
+      rows: [
+        row({ bookId: 'url:x/A', vault: 'books/one.epub', cover: null }),
+        row({ bookId: 'url:x/a', vault: 'books/two.epub', cover: null }),
+      ],
+      marks: [],
+    })
+    expect(out[0]?.status).toBe('migrated')
+    expect(out[1]?.status).toBe('failed')
+  })
+
+  it('does not mistake a row for a collision with itself on a re-run', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row(), row()], marks: [] })
+    const again = await migrateToFolders(fs, { rows: [row(), row()], marks: [] })
+    expect(again.every((one) => one.status === 'already')).toBe(true)
+  })
+})
+
+/**
+ * A book Paper only ever had an address for.
+ *
+ * Phase 3 kept `path` and `url` apart, and phase 4 dropped `url` on the
+ * reasoning that a book is its own folder. Paper only copies a `File`, though —
+ * so a book opened from a URL has no folder contents at all, and dropping its
+ * address turned it into a row that could never be opened again. Most of what a
+ * real phase-3 library turned out to contain was exactly that.
+ */
+describe('a row that only has a URL', () => {
+  it('migrates, with the URL as its way back', async () => {
+    const fs = fakeFs({})
+    const out = await migrateToFolders(fs, {
+      rows: [row({ vault: null, cover: null, path: null, url: 'https://example.org/moby.epub' })],
+      marks: [],
+    })
+    expect(out[0]?.status).toBe('migrated')
+    expect((await readBook(fs, 'book_a'))?.origin).toBe('https://example.org/moby.epub')
+  })
+
+  /* A path still wins: it is the reader's own file, and does not depend on
+   * somebody else's server still being there. */
+  it('prefers the reader own file when it has both', () => {
+    expect(
+      recordFromRow(row({ url: 'https://example.org/moby.epub' })).origin,
+    ).toBe('/Users/someone/Downloads/moby.epub')
+  })
+
+  it('carries a long URL whole rather than slicing it', () => {
+    const url = `https://example.org/${'a'.repeat(5000)}.epub`
+    expect(recordFromRow(row({ path: null, url })).origin).toBe(url)
+  })
+
+  it('is still skipped when it has neither', async () => {
+    const fs = fakeFs({})
+    const out = await migrateToFolders(fs, {
+      rows: [row({ vault: null, cover: null, path: null, url: null })],
+      marks: [],
+    })
+    expect(out[0]?.status).toBe('skipped')
+  })
+})
+
+/**
+ * A reader with more tags than the book's own subject list is allowed.
+ *
+ * `recordFromRow` shared one 64-item bound with the declared subjects, and it
+ * SLICES — so a reader with sixty-five tags lost the sixty-fifth. This runs
+ * ONCE, and a completed record reports `already` for ever after, so nothing
+ * would have gone back for them.
+ */
+describe('a heavily tagged legacy row', () => {
+  const many = Array.from({ length: 200 }, (_, i) => `tag-${i}`)
+
+  it('carries every tag across', () => {
+    expect(recordFromRow(row({ tags: many })).tags).toHaveLength(200)
+  })
+
+  /* The BOOK's declared subjects keep the tighter bound: they come from a file
+   * Paper did not write, and one listing hundreds is describing nothing. */
+  it('still bounds the subjects the book declares', () => {
+    expect(recordFromRow(row({ subjects: many })).subjects).toHaveLength(64)
+  })
+})
+
+/**
+ * Removing a migrated book did not remove it.
+ *
+ * The phase-3 store is read on every launch and never written — by design, it
+ * is the copy that lets a bad migration be walked back. But "already done" was
+ * decided by asking whether the phase-4 folder exists, and removing a book moves
+ * that folder to the trash. So the next launch found no record, copied the bytes
+ * out of the phase-3 layout again, and put the book back on the shelf. Every
+ * launch, with no failure and no race.
+ */
+describe('a book the reader removed after it was migrated', () => {
+  it('stays removed across a later migration run', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    // The removal: a book's folder is moved to the trash.
+    for (const key of [...fs.files.keys()]) {
+      if (key.startsWith(`${folderOf('book_a')}/`)) fs.files.delete(key)
+    }
+    const again = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(again[0]?.status).toBe('already')
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(false)
+  })
+
+  /* ⚠️ **AND AN UNREADABLE LIST USED TO BE AN EMPTY ONE, WHICH UNDOES EXACTLY
+     THE CASE ABOVE** — found by the 2026-09-13 audit. `readDone` swallowed
+     every failure on the reasoning that re-migrating is idempotent because the
+     folder check catches it; the folder check cannot, and the comment saying so
+     sat above the one function written because it cannot. A book migrated, then
+     removed, then swept from the trash has no folder and no trash entry: the
+     list is the only thing that remembers it, so bytes that would not parse
+     read as "nothing carried across" and copied the book back out of the
+     phase-3 store. The run then wrote its own set over the bytes it could not
+     read, so the record of every earlier migration went with it. */
+  it.each([
+    ['not JSON', 'not json', /migrated\.json is not JSON/u],
+    ['not a list', '{"book_a":true}', /migrated\.json is not a list/u],
+  ])('refuses a record of what was carried across that is %s, rather than putting the book back', async (_what, raw, clause) => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    // The removal, and the fortnight after it: no folder, and no trash entry.
+    for (const key of [...fs.files.keys()]) {
+      if (key.startsWith(`${folderOf('book_a')}/`)) fs.files.delete(key)
+    }
+    fs.files.set(DONE_FILE, new TextEncoder().encode(raw))
+
+    const cause = await migrateToFolders(fs, { rows: [row()], marks: [] }).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(clause)
+    // The book the reader removed stays removed …
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(false)
+    // … and the list is still there for whatever can repair it.
+    expect(new TextDecoder().decode(fs.files.get(DONE_FILE)!)).toBe(raw)
+  })
+
+  /* A library removed BEFORE the ledger existed. Its trash entry proves it was
+   * on the shelf once, which is the same thing the ledger records — without
+   * this, upgrading resurrects every such book exactly once. */
+  it('honours a trash entry from before the ledger existed', async () => {
+    const fs = fakeFs(legacy)
+    fs.files.set(`${trashOf('book_a')}/book.json`, new TextEncoder().encode('{"title":"M"}'))
+    const out = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(out[0]?.status).toBe('already')
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(false)
+  })
+
+  it('records what it carried across', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    const done = JSON.parse(new TextDecoder().decode(fs.files.get(DONE_FILE)!)) as string[]
+    expect(done).toContain('book_a')
+  })
+
+  /* A record that is present and complete is recorded too, so a library
+   * migrated before this existed is covered on its next launch rather than
+   * staying vulnerable forever. */
+  it('records a book that was already done before the list existed', async () => {
+    /* ALREADY DONE, which this case did not used to be: its record had no bytes
+       beside it, so the run migrated it again and the list recorded a
+       `migrated` — the `already` branch this title names was never reached.
+       A record with no `ext` is looked for under the name the copy has always
+       used. */
+    const fs = fakeFs(legacy)
+    await writeBook(fs, 'book_a', { title: 'Renamed by the reader', author: 'M' })
+    fs.files.set(contentPathIn('book_a', 'book.epub'), new TextEncoder().encode('WHALE'))
+    const out = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(out).toEqual([{ bookId: 'book_a', status: 'already' }])
+    expect((await readBook(fs, 'book_a'))?.title).toBe('Renamed by the reader')
+    const done = JSON.parse(new TextDecoder().decode(fs.files.get(DONE_FILE)!)) as string[]
+    expect(done).toContain('book_a')
+  })
+
+  /* A way back is as finished as bytes are: a record with an origin and no
+     content is done, and recorded so. */
+  it('records a book that was done with only a way back to its file', async () => {
+    const fs = fakeFs(legacy)
+    await writeBook(fs, 'book_a', { title: 'Renamed by the reader', author: 'M', origin: '/Users/someone/moby.epub' })
+    const out = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(out).toEqual([{ bookId: 'book_a', status: 'already' }])
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(false)
+    expect(JSON.parse(new TextDecoder().decode(fs.files.get(DONE_FILE)!))).toEqual(['book_a'])
+  })
+
+  /* A trash entry is a book that was carried across — recorded so too, so the
+     list outlives the fortnight the trash does. */
+  it('records a book whose removed copy is in the trash', async () => {
+    const fs = fakeFs(legacy)
+    fs.files.set(`${trashOf('book_a')}/book.json`, new TextEncoder().encode('{"title":"M"}'))
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(JSON.parse(new TextDecoder().decode(fs.files.get(DONE_FILE)!))).toEqual(['book_a'])
+  })
+
+  it('keeps what JSON said was wrong with the list, as the cause of refusing it', async () => {
+    const fs = fakeFs(legacy)
+    fs.files.set(DONE_FILE, new TextEncoder().encode('not json'))
+    const cause = await migrateToFolders(fs, { rows: [row()], marks: [] }).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toBe('migrated.json is not JSON')
+    expect((cause as Error).cause).toBeInstanceOf(SyntaxError)
+  })
+
+  /* One entry that is not an id costs that entry: it is not a book, and it is
+     not written back into the list either. */
+  it('passes over an entry in the list that is not an id, and does not write it back', async () => {
+    const fs = fakeFs(legacy)
+    fs.files.set(DONE_FILE, new TextEncoder().encode('[7, "book_x"]'))
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(JSON.parse(new TextDecoder().decode(fs.files.get(DONE_FILE)!))).toEqual(['book_x', 'book_a'])
+  })
+
+  /* BEST EFFORT, AND SAID. Failing to write the list costs a repeat, which is
+     idempotent; failing the migration over it would cost the books. */
+  it('still answers when the list cannot be written, and says so', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const fs = fakeFs(legacy)
+      fs.failWrite = DONE_FILE
+      const out = await migrateToFolders(fs, { rows: [row()], marks: [] })
+      expect(out).toEqual([{ bookId: 'book_a', status: 'migrated', marks: 0 }])
+      expect(fs.files.has(DONE_FILE)).toBe(false)
+      expect(errors.mock.calls).toEqual([['Paper: could not record which books were carried across', new Error('disk full')]])
+    } finally {
+      errors.mockRestore()
+    }
+  })
+})

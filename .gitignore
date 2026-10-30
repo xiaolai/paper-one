@@ -1,13 +1,152 @@
+
+
+# The cc-suite project config itself. Outside the managed block on purpose:
+# anything between the sentinels is regenerated on a schema bump.
+.cc-suite.md
+
+# Codex CLI debug log dumped into the working directory. Contains the ChatGPT
+# account id, so it must not be committed.
+error.log
+
+# Scratch space for companion HTML artifacts and working notes. Ignored whole,
+# with no exceptions: the manual gesture checklist was re-included here until
+# it was purged from the history, and nothing in dev-docs/ is tracked now.
+#
+# Publishing the feature ledger was set up on 2026-09-09 and REVERSED the same
+# day, before anything was committed — so the exception never existed and this
+# paragraph is again true as written. If it is tried again: `dev-docs/` has to
+# become `dev-docs/*` first, because git does not descend into an excluded
+# DIRECTORY and a `!` line under this one re-includes nothing and says nothing.
+dev-docs/
+
+# Design notes, for the same reason: working documents, not the repository's.
+# The circle's design was tracked here for three commits and taken out of
+# the index in the commit that added this line; code comments still point at
+# the files, which exist on the machine that keeps them.
+docs/
+
+# --- Application build artifacts ---
+node_modules/
+dist/
+# The browser client's bundle, built by `pnpm build:web` and embedded into
+# the shelf by tauri-plugin-webhost's build script.
+dist-web/
+# The phone's bundle, built by `pnpm build:ios` / `pnpm build:android` and
+# pointed at by `tauri.ios.conf.json` / `tauri.android.conf.json`. A separate
+# directory for the reason the other two are: all three default to `dist/`, so
+# sharing one leaves it holding whichever build went last.
+dist-mobile/
+*.tsbuildinfo
+.DS_Store
+
+# Declaration-only output of `tsc -b` (`pnpm typecheck`), one directory per
+# TS project. Nothing runs from it; `scripts/check-kernel-declarations.mjs`
+# reads `.types/kernel` to prove the kernel's type surface names no
+# capability. Rebuilt from clean on every typecheck.
+.types/
+
+# pdf.js runtime data, copied out of node_modules by
+# scripts/sync-pdfjs-assets.mjs on predev/prebuild. A copy of a dependency,
+# not authored content. Outside public/ on purpose — see vite.config.ts.
+vendor/pdfjs/
+# The inference runtime, staged by scripts/sync-inference-runtime.mjs and
+# verified against the pinned digests in that file. Four platforms of compiled
+# artifact is not a thing to keep in git history; the DIGEST TABLE is what is
+# committed and reviewed.
+vendor/inference/
+
+# Development book fixtures. The EPUB regenerates with
+# scripts/make-sample-epub.py; the PDF with `cupsfilter some.txt > sample.pdf`.
+public/sample.epub
+public/sample.pdf
+# Whatever book is dropped in for testing. Books are the user's, not the
+# repository's — none of them belong in version control.
+public/*.pdf
+public/*.epub
+# The format fixtures, copied out of tests/fixtures/ when the manual pass
+# (WI-24.A3) needs the webview to fetch them by URL rather than carry 36 KB of
+# base64 through a bridge call. The committed originals are in tests/fixtures/;
+# these are throwaway copies.
+public/*.mobi
+public/*.azw3
+public/*.cbz
+public/*.fb2
+public/*.fbz
+
+# Coverage output of `pnpm test:coverage` (`vitest run --coverage`):
+# `coverage-summary.json`, `lcov.info` and the HTML report. Rebuilt on every
+# run; `scripts/check-coverage.mjs` reads the summary and refuses an empty one.
+coverage/
+
+# The bundled `paper` CLI — `pnpm build:cli` writes it; the source is
+# `src/cli/`.
+/bin/
+
+# Python bytecode. `scripts/gen-feature-ledger.py` and `make-hostile-epub.py`
+# are run directly; a `.pyc` is a build artifact of running them and was
+# committed once by a directory-scoped `git add` before this rule existed.
+__pycache__/
+*.pyc
+.stryker-tmp
+vitest.mutants.mjs
+stryker.mutants.json
+stryker.mutants.report.json
+
+# >>> cc-suite >>>
+# cc-suite-schema: 8
+# AI assistant local state
+.claude/settings.local.json
+.claude/CLAUDE.local.md
+.claude/*.local.*
+CLAUDE.local.md
+
+# Codex CLI — local files, keep checked-in subdirs
+.codex/*
+!.codex/skills/
+!.codex/prompts/
+!.codex/hooks.json
+!.codex/hooks.cc-suite.json
+!.codex/config.toml
+
+# cc-suite-managed symlinks (created by bridge_skills.sh) — derived, not authored
+.claude/skills/cc-suite
+.agents/skills
+
+# Antigravity workspace MCP config is generated from .mcp.json and may contain
+# credentials or machine-specific paths.
+.agents/mcp_config.json
+.agents/.cc-suite-mcp.provenance.json
+
+# cc-suite tool-profile bridge (grok/opencode/qwen) — derived provenance
+# sidecars tracking which MCP servers cc-suite owns. Not authored.
+.cc-suite-*.provenance.json
+
+# cc-suite local state — what init created, and the pre-bridge CLAUDE.md backup.
+# Machine-local bookkeeping, not shared. Listed file-by-file on purpose:
+# .cc-suite/agents/ holds declared advisors and IS meant to be committed.
+.cc-suite/provenance
+.cc-suite/original-claude.md
+# Audit findings files written by /cc-suite:audit and the audit-fix loop —
+# per-run working state (findings + fix statuses), not authored content.
+.cc-suite/audits/
+
+# cc-suite: PRIVATE mode — bridge artifacts not shared
+AGENTS.md
+CLAUDE.md
+.claude/
+.agents/
+.codex/
+.mcp.json
+# <<< cc-suite <<<
+
+# The Qwen engine's Swift package builds here, and `Package.resolved` pins its
+# dependencies -- that one IS tracked, so a build is reproducible.
+src-tauri/crates/tauri-plugin-voices/swift/*/.build/
+
 # Test corpus: copyrighted books, never committed or published.
 corpus/
 
-.DS_Store
-
-# Agentic artifacts stay local: instructions, plugin settings, bridges and
-# per-tool configs for AI assistants are not project source.
-AGENTS.md
-CLAUDE.md
-CLAUDE.local.md
+# Agentic artifacts stay local.
 GEMINI.md
 .claude/
 .codex/
@@ -15,12 +154,8 @@ GEMINI.md
 .gemini/
 .grok/
 .cc-suite/
-.cc-suite.md
 .cc-suite-*.json
 .mcp.json
 opencode.json
 .english-buddy.json
 .claude-english-buddy.json
-
-# Spike fixtures (derived from corpus/)
-spikes/ts-toolkit/fixtures/

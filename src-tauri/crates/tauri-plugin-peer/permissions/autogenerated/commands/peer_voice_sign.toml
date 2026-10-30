@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-voice-sign"
+description = "Enables the peer_voice_sign command without any pre-configured scope."
+commands.allow = ["peer_voice_sign"]
+
+[[permission]]
+identifier = "deny-peer-voice-sign"
+description = "Denies the peer_voice_sign command without any pre-configured scope."
+commands.deny = ["peer_voice_sign"]

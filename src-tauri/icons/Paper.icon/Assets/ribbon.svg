@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Paper — icon layer 2 of 2: the ribbon.
+
+  Same artboard and same 1.6x scale as `rule.svg`, so the two layers stay in
+  register. Kept a separate file because a `.icon` group can only carry glass,
+  specular and shadow as a whole: one layer per group is what lets the ribbon
+  catch a different highlight from the rule instead of both being lit as one
+  flat plate.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g transform="scale(1.6)">
+    <path d="M468 170V276H358L380 223L358 170H468Z" fill="#F4655A"/>
+  </g>
+</svg>

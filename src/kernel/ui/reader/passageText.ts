@@ -1,0 +1,279 @@
+import { indexText, type TextIndex } from './reanchor'
+
+/**
+ * A book's sections as CANONICAL TEXT — the extractor half of library search.
+ *
+ * ## ⚠️ ONE CANONICAL WALK, NOT A THIRD COPY
+ *
+ * This is the single most important decision in phase 31, and it is why there is
+ * no EPUB parser in `tauri-plugin-passages`. `indexText` turns a parsed section
+ * into one canonical string; `reanchorIn` finds a quote in that same canonical
+ * form when a hit is landed. **Both ends of library search are therefore the
+ * same function**, and a quote that came out of the index is a string the
+ * resolver can find by construction.
+ *
+ * A Rust extractor would have been a SECOND implementation of that walk, and
+ * this repository has already measured what an asymmetry between two such walks
+ * costs. `reanchor.ts` records it:
+ *
+ * > ⚠️ **WITHOUT THIS, `<p>done</p><p>Start</p>` INDEXED AS `doneStart`** — two
+ * > paragraphs run together into a word that is in neither of them. … **The bug
+ * > was in the asymmetry, not in either walk alone.**
+ *
+ * At library scale that is every quote near a paragraph start failing silently,
+ * across 1 959 books.
+ *
+ * ## What the canonical form does to a paragraph break, and what that costs
+ *
+ * `indexText` emits a single SPACE at every `BLOCK_TAGS` edge — a break held
+ * exactly like a whitespace run, with a zero-width origin. So `<p>done</p>
+ * <p>Start</p>` is `done Start`, which is what makes the two walks agree.
+ *
+ * ⚠️ **THE CONSEQUENCE, STATED RATHER THAN GLOSSED: A PHRASE QUERY CAN CROSS A
+ * PARAGRAPH BREAK.** `"done start"` matches there, and in the book those are two
+ * paragraphs. It was considered and accepted rather than repaired, and the
+ * reason is the paragraph above: every repair on offer — a sentinel character,
+ * a position gap, indexing per block — makes the indexed string differ from the
+ * string the resolver searches, which is the asymmetry this whole module exists
+ * to refuse. The hit is TRUE (those words are there, in that order) and it
+ * LANDS, which are the two properties that matter. Precision loses a little;
+ * nothing fails silently.
+ *
+ * ## It is not on the reading path
+ *
+ * `parseBook.ts` already reaches `makeBook()` without rendering, for the reason
+ * its header gives — *"two thousand books are not going to be laid out one at a
+ * time"* — and this is the same posture. A cold section is 3.46 ms end to end
+ * with 1.76 ms of that in the index, so a forty-section book is ~139 ms of work
+ * that must be spent in forty pieces with the main thread handed back between
+ * them. `reanchorPass.ts` is the precedent and its `live()`/`breathe()` pair is
+ * copied here deliberately: neither has a default that skips, so a caller that
+ * supplies neither gets a walk that never yields.
+ */
+
+/** One section, extracted. */
+export interface ExtractedSection {
+  readonly index: number
+  readonly text: string
+}
+
+/** What a book yielded, and whether the walk finished. */
+export interface Extraction {
+  readonly sections: readonly ExtractedSection[]
+  /** False when `live()` went false — the caller must not record a partial book. */
+  readonly complete: boolean
+  /** Sections whose document would not parse. Reported, never silently skipped. */
+  readonly unreadable: readonly number[]
+  /**
+   * Sections cut at {@link MAX_SECTION_CHARS}.
+   *
+   * ⚠️ **THE BOUND SAID IT REPORTED THIS AND IT DID NOT.** `canonicalTextOf`
+   * returned the sliced string and nothing else, so a two-million-character
+   * section came back as a complete walk with an empty `unreadable` — the end
+   * of that chapter permanently unsearchable, with the comment above the bound
+   * claiming the opposite. A silent truncation is the same defect as a silent
+   * skip, one level down. Found by an independent audit.
+   */
+  readonly truncated: readonly number[]
+}
+
+export interface ExtractDeps {
+  /** How many spine items the book has. */
+  readonly sections: number
+  /**
+   * The document for one section, or null when there is none to parse.
+   *
+   * The same contract `reanchorPass.PassDeps` states: a CFI is a PATH, so this
+   * does not need the section rendered — `section.createDocument()` parses an
+   * unopened one.
+   *
+   * ⚠️ **AND THE CALLER MUST HAVE APPLIED `refuseBookScripts` TO THE BOOK.**
+   * This said it *"wraps every one of them"*, which is true of the READER's book
+   * and was false of every caller of this function — they call `makeBook`
+   * themselves. A `<script>` the reader's iframe never receives is a child the
+   * reader's document does not have, so text extracted from an unstripped parse
+   * belongs to a different tree from the one a hit is landed in. Found by an
+   * independent audit; both callers now strip, and this sentence says whose job
+   * it is rather than asserting it is already done.
+   */
+  readonly documentFor: (index: number) => Promise<Node | null>
+  /** False the moment this extraction stops being wanted. Asked before every section. */
+  readonly live: () => boolean
+  /** Hand the main thread back. Awaited between sections. */
+  readonly breathe: () => Promise<void>
+}
+
+/**
+ * The longest a section's canonical text may be.
+ *
+ * ⚠️ **A BOUND, BECAUSE A BOOK IS SOMEBODY ELSE'S FILE.** A single-file EPUB —
+ * they exist, and a few of them are whole novels — is one "section" of several
+ * megabytes, which would cross the IPC as one JSON string and sit in the index
+ * as one document that every query has to snippet. Truncating loses the tail of
+ * one unusual book; not bounding it makes the whole backfill's memory a number
+ * a publisher chose.
+ *
+ * ⚠️ **AND IT IS TRUNCATED, NOT DROPPED, AND THE TRUNCATION IS REPORTED** —
+ * in `Extraction.truncated`, which is where it was NOT reported until an
+ * independent audit found this sentence asserting something the code did not
+ * do. A section silently cut is a search that quietly does not cover the end of
+ * a book, which is the same defect as a silent skip one level up.
+ */
+export const MAX_SECTION_CHARS = 2_000_000
+
+/**
+ * Walk a book once and canonicalise every section.
+ *
+ * ⚠️ **AN INTERRUPTED WALK ANSWERS `complete: false` AND THE CALLER MUST NOT
+ * RECORD IT.** `reanchorPass` takes the same posture for the same reason: a
+ * partial book written to the index as though it were whole is a book whose
+ * later chapters are permanently unsearchable, with the state file saying it is
+ * done. The sections found so far are still returned, because a caller that
+ * wants to resume wants them; what is forbidden is checkpointing them.
+ */
+export async function extractSections(deps: ExtractDeps): Promise<Extraction> {
+  if (!Number.isInteger(deps.sections) || deps.sections <= 0) {
+    return { sections: [], complete: false, unreadable: [], truncated: [] }
+  }
+  const sections: ExtractedSection[] = []
+  const unreadable: number[] = []
+  const truncated: number[] = []
+  for (let index = 0; index < deps.sections; index += 1) {
+    /* ASKED BEFORE THE WORK, not after: checking afterwards still pays for the
+     * section nobody is waiting for any more. */
+    if (!deps.live()) return { sections, complete: false, unreadable, truncated }
+    if (index > 0) await deps.breathe()
+    if (!deps.live()) return { sections, complete: false, unreadable, truncated }
+
+    let doc: Node | null = null
+    try {
+      doc = await deps.documentFor(index)
+    } catch {
+      /* ⚠️ **A SECTION THAT WOULD NOT PARSE IS RECORDED, NOT SKIPPED.**
+       * `reanchorPass` abandons the whole walk here, and it is right to: a miss
+       * there means *"this passage is nowhere in the book"*, which one
+       * unreadable section makes unsayable. An INDEX is different — the rest of
+       * the book is still worth having — but the gap must be visible, because a
+       * chapter missing from search looks exactly like a chapter with no
+       * matches. */
+      unreadable.push(index)
+      continue
+    }
+    /* ⚠️ **CHECKED AFTER THE AWAIT TOO.** `documentFor` is the slow step, and
+     * there is no next iteration to catch a walk abandoned during the last
+     * section's parse. */
+    if (!deps.live()) return { sections, complete: false, unreadable, truncated }
+    /* A spine item a backend does not build — an unstyled cover, a nav document
+     * — has nothing to index and says so by answering null rather than
+     * throwing. That is not an unreadable section. */
+    if (!doc) continue
+    /* ⚠️ **A FAILED XHTML PARSE ARRIVES HERE AS A DOCUMENT, NOT AS A THROW.**
+     * The catch above only sees what `createDocument` rejects with; a malformed
+     * chapter resolves perfectly well with the browser's error message as its
+     * content. Indexed, that is a chapter of `This page contains the following
+     * errors` — true-looking hits that land nowhere, and the real chapter gone
+     * with nothing said. It belongs in the same list as a section that threw,
+     * because it is the same fact about the book. Found by an independent
+     * audit. */
+    if (parseFailed(doc)) {
+      unreadable.push(index)
+      continue
+    }
+
+    const { text, cut } = canonicalOf(doc)
+    /* AN EMPTY SECTION IS LEFT OUT rather than stored as a document with no
+     * words: an empty posting list is a document every `num_docs` counts and no
+     * query can ever reach. */
+    if (text === '') continue
+    if (cut) truncated.push(index)
+    sections.push({ index, text })
+  }
+  return { sections, complete: true, unreadable, truncated }
+}
+
+/**
+ * The node `indexText` should actually be given.
+ *
+ * ⚠️ **HANDING `indexText` A `Document` ANSWERS THE EMPTY STRING, SILENTLY.**
+ * Its walk dispatches on `nodeType` and handles only elements and text nodes; a
+ * `Document` is neither (it is 9), so the walk returns before descending and
+ * every section comes back with no words in it — an index that builds cleanly,
+ * reports success, and can never answer a query.
+ *
+ * `session.ts` already writes `doc.body ?? doc` at the one existing call site
+ * for this reason. Normalising here rather than relying on every caller to
+ * remember is the difference between a rule and a convention, and the cost of
+ * forgetting it is an entire library that quietly cannot be searched.
+ */
+export function bodyOf(root: Node): Node {
+  const body = (root as Partial<Document>).body
+  return body ?? root
+}
+
+/**
+ * One parsed document as the canonical string the resolver searches.
+ *
+ * ⚠️ **`indexText(…).text` AND NOTHING ELSE.** Every transform applied here is
+ * a transform `reanchorIn` does not know about, and a quote that has been
+ * through one is a quote the landing cannot find. The only things this adds are
+ * the body resolution above and the bound below — one a correction of what is
+ * walked, the other a decision about size. Neither touches the content.
+ */
+export function canonicalTextOf(root: Node): string {
+  return canonicalOf(root).text
+}
+
+/**
+ * The canonical text, AND whether it had to be cut.
+ *
+ * Two values because the caller needs both and a string cannot carry the
+ * second. `canonicalTextOf` stays as the one-value wrapper for every caller
+ * that is only asking what the text is.
+ */
+/**
+ * Whether this node is a PARSE FAILURE dressed as a document.
+ *
+ * ⚠️ **`DOMParser` DOES NOT THROW FOR MALFORMED XHTML — IT HANDS BACK A
+ * DOCUMENT WHOSE CONTENT IS THE ERROR MESSAGE.** So a chapter with an unescaped
+ * `&` was indexed as *"This page contains the following errors… error on line 4
+ * at column 12"*, the book was checkpointed COMPLETE with nothing recorded, and
+ * the chapter's real text was unreachable for ever at that generation. Worse,
+ * the text that WAS indexed is searchable: a reader looking for `error` or
+ * `line` gets true-looking hits into a page that does not exist, and clicking
+ * one lands nowhere. Found by an independent audit.
+ *
+ * ⚠️ **EPUB IS XHTML, SO THIS IS THE ORDINARY CASE RATHER THAN A CURIOSITY.**
+ * An HTML parse cannot fail; an XML one fails on anything a publisher's toolchain
+ * got slightly wrong, which at 1 959 books is not a rare event.
+ *
+ * Every engine spells it `<parsererror>` and each uses a namespace of its own —
+ * WebKit and Chromium the XHTML one, Firefox a namespace of its own — so the
+ * NAME is what can be matched. A book that genuinely contains an element by
+ * that name would be read as damaged, which is the safe direction: it is
+ * recorded and named to the reader rather than silently indexed as prose.
+ */
+export function parseFailed(root: Node): boolean {
+  const element = root as Partial<Element> & Partial<Document>
+  if (typeof element.localName === 'string' && element.localName.toLowerCase() === 'parsererror') {
+    return true
+  }
+  /* The engines disagree about WHERE it sits: documentElement for one, inside
+   * `<body>` for another — and `bodyOf` has already chosen between those by the
+   * time this is asked, so both have to be looked for. */
+  const found = element.getElementsByTagName?.('parsererror')
+  return found !== undefined && found.length > 0
+}
+
+export function canonicalOf(root: Node): { readonly text: string; readonly cut: boolean } {
+  const index: TextIndex = indexText(bodyOf(root))
+  if (index.text.length <= MAX_SECTION_CHARS) return { text: index.text, cut: false }
+  /* ⚠️ **NEVER BETWEEN A SURROGATE PAIR.** `slice` counts UTF-16 code units, so
+   * a cut that lands inside an astral character leaves a lone high surrogate —
+   * a string JavaScript tolerates and `JSON` carries as `\udXXX`, which serde
+   * refuses on the other side of the wire. The whole BOOK then comes back
+   * unreadable because one section ended on an emoji. One code unit back is the
+   * whole fix. Found by the second audit round. */
+  const at = index.text.charCodeAt(MAX_SECTION_CHARS - 1)
+  const splits = at >= 0xd800 && at <= 0xdbff
+  return { text: index.text.slice(0, splits ? MAX_SECTION_CHARS - 1 : MAX_SECTION_CHARS), cut: true }
+}

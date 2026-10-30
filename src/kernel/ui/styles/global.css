@@ -1,0 +1,272 @@
+/* Paper — global reset and chrome-wide rules.
+ * Ported from the `<style>` block in `dev-docs/design/Paper.dc.html`.
+ */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  /* The window must not move. Ever.
+   *
+   * A wheel gesture that reaches a scroll container with nowhere to go chains
+   * outwards, and the chain ends at the viewport — where macOS rubber-bands it,
+   * dragging the entire application sideways and springing back. Reported as the
+   * whole window "shaking" when swiping to turn a page, which is exactly what it
+   * looks like: the shell is a fixed-size layout, so any movement at all is the
+   * document bouncing rather than anything scrolling.
+   *
+   * `overscroll-behavior: none` terminates the chain here and takes the bounce
+   * with it. `overflow: hidden` is the second half: this document has nothing to
+   * scroll by design, and saying so stops it being asked. */
+  overscroll-behavior: none;
+  overflow: hidden;
+  /* The desktop shell sits on --wash; the literal is the Paper-theme value and
+   * only shows for the instant before the theme attribute is applied. */
+  background: var(--wash, #F2F3F1);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/*
+ * THE BROWSER'S BUTTON PADDING, RESET ONCE.
+ *
+ * WebKit gives every `<button>` a default `padding: 2px 6px 3px` — asymmetric
+ * top to bottom, and 6px either side. Every button in this app either declares
+ * its own padding or is a fixed-size box with an icon centred in it, so that
+ * default is never what is wanted, and where it survived it did damage of two
+ * kinds.
+ *
+ * The 1px kind: `2px` top against `3px` bottom shifts a centred icon half a
+ * pixel up in EVERY fixed-size icon button — the rail, the titlebar actions,
+ * the stepper, all of them.
+ *
+ * The visible kind: when the icon is WIDER than what the padding leaves, the
+ * centring has nothing to work with. A 24px `⋯` button keeps a 12px content
+ * box, a 15px icon does not fit in it, and an item larger than its grid area is
+ * aligned to the START rather than overflowing evenly — so it sat 6px from the
+ * left and 3px from the right. Invisible until a hover fill drew the box it was
+ * supposed to be centred in, which is how it shipped.
+ *
+ * A bare element selector, so any class that wants padding still wins whatever
+ * the source order — which matters here, because `composes` decides nothing
+ * about which of two classes comes last (see `controls.module.css`).
+ */
+button {
+  padding: 0;
+}
+
+/*
+ * The highlight overlay's two knobs, declared HERE because the Overlayer's SVG
+ * is in the view's shadow tree in this document — declared inside the book they
+ * resolve to nothing and fall back to foliate's defaults.
+ *
+ * The contract they belong to is documented once, on `Overlayer` in
+ * `src/vite-env.d.ts`. The short version: the overlay paints OVER the glyphs,
+ * so the blend mode — not the alpha — is what decides whether a mark is a
+ * highlighter or a film. `ui/reader/markBlend.test.ts` holds these values to
+ * it.
+ */
+:root {
+  --overlayer-highlight-opacity: 1;
+  --overlayer-highlight-blend-mode: multiply;
+}
+
+/*
+ * MULTIPLY IS THE WRONG OPERATOR ON A DARK PAGE, and screen is its dual.
+ *
+ * Multiply can only darken. On paper that is exactly right — it is what a real
+ * highlighter does, and it is why the glyphs survive being painted over. On a
+ * near-black page it is a disaster: the band comes out DARKER than the page it
+ * is marking. Measured on the running app before this rule existed, a #5D4D15
+ * band over Night's #17191C page rendered as #060603 — a black smear that
+ * swallowed the words instead of marking them, which is precisely the failure
+ * the blend mode is here to prevent, arriving from the other side.
+ *
+ * Screen can only lighten, so on a dark page the glyphs survive for exactly the
+ * same reason they survive multiply on a light one.
+ *
+ * The colours are generated against this: `scripts/mark-tints.mjs` hands the
+ * painter whatever, blended this way against this theme's page, produces the
+ * band the model asked for. Change the mode here and the table is wrong.
+ */
+[data-theme='night'] {
+  --overlayer-highlight-blend-mode: screen;
+}
+
+#root {
+  height: 100%;
+}
+
+/* Design system §02: Instrument Sans instructs. The prototype listed the
+ * system UI face ahead of it, but §02 assigns all interface chrome to
+ * Instrument Sans, and the handoff README makes the design system the
+ * tiebreaker where the two disagree. */
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  color: var(--ink, #17191B);
+}
+
+a {
+  color: var(--accent, #1B3A6B);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--ink, #17191B);
+}
+
+/* Scrollbars stay invisible until the pointer is over the scrolling element,
+ * so a pane at rest shows no furniture. */
+::-webkit-scrollbar {
+  width: var(--scrollbar-w);
+  height: var(--scrollbar-w);
+}
+
+::-webkit-scrollbar:horizontal {
+  display: none;
+  height: 0;
+}
+
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: var(--radius-pill);
+  border: var(--space-4) solid transparent;
+  background-clip: content-box;
+}
+
+*:hover::-webkit-scrollbar-thumb {
+  background: var(--line-3, #D6D8D3);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted, #5F666C);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::selection {
+  background: var(--accent-line, #DDE2EA);
+}
+
+/* §07: focus is on :focus-visible only, so pointer users never see it, and it
+ * sits outside the element rather than replacing the border.
+ *
+ * THE OFFSET CARRIES A PRECONDITION, and it is stated here because a control
+ * that breaks it fails silently — the ring still draws, in the wrong place, and
+ * nothing anywhere goes red.
+ *
+ *   This default assumes the control's VISIBLE EDGE IS ITS BORDER BOX, and that
+ *   there is room around it for two pixels of gap.
+ *
+ * Both halves get broken, and neither is exotic:
+ *
+ *   THE CONTROL IS ITS OWN FILL. An input that IS the filled pill —
+ *   `.paper-cap-field`, `.noteInput` — puts those two pixels outside its own
+ *   background, and the pane shows through the gap: a pill drawn around a pill.
+ *   Those inset instead.
+ *
+ *   ⚠️ THIS PARAGRAPH USED TO CITE THE COMPOSER AS THE CASE THE DEFAULT GETS
+ *   RIGHT — "bare and transparent inside a pill its PARENT draws, so the two
+ *   pixels land in the parent's fill and the whole thing reads as one focused
+ *   control". Measured, it does not: the input is 18px tall in a 44px pill and
+ *   320 wide in 376, so the ring drew 324x22 at `--radius-chip` inside a
+ *   999px-radius pill with eleven pixels of fill showing above and below. The
+ *   claim was about the OFFSET and silently generalised to the size and the
+ *   radius, which the offset says nothing about. The composer and the side
+ *   pane's search field now light their CONTAINER
+ *   (`SidePane.module.css`), the idiom `Library.module.css`'s `.searchField`
+ *   established. A bare input inside a pill someone else draws is a THIRD case,
+ *   and it belongs to the pill.
+ *
+ *   THE CONTAINER WOULD CLIP IT. An icon button in a floating toolbar or on the
+ *   reading bar has no two pixels to give — `SelectionTools .tool`,
+ *   `FootnotePopover .tool`, `.bookmarkToggle` all inset by `--space-2` for
+ *   this reason, and none of them is filled. A dense row is the milder version
+ *   of the same problem and takes a 1px hairline instead.
+ *
+ * SO THE VALUE IS NOT DERIVABLE FROM WHETHER THE CONTROL IS FILLED, and an
+ * earlier draft of this note said it was. Fill and clipping are two independent
+ * reasons and the app has controls in every combination of them. What a new
+ * control owes is a decision, not a number copied from its neighbour.
+ *
+ * `dev-docs/design-tokens.md` has the audit that finds a control which never made
+ * one — the failure is an ABSENT declaration, so no check over declarations can
+ * see it. */
+:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--space-2);
+  border-radius: var(--radius-chip);
+}
+
+/* ONE BOX, NOT TWO. A field that draws its own resting border and then takes
+ * the ring above ends up wearing both at once — a 1px border with a 2 or 3px
+ * outline a pixel outside it, which reads as a box inside a box rather than as
+ * one focused field.
+ *
+ * `border-color: transparent` rather than `border: none`, and the difference is
+ * the whole reason this works: removing the border removes its 1px of layout,
+ * so the field would shift and reflow the row around it every time focus
+ * arrived. Made transparent, the border keeps its space and the background —
+ * which paints under it, `background-clip` being `border-box` by default —
+ * fills right up to the same edge. The visible field does not move at all;
+ * only the second outline goes.
+ *
+ * Global, for the reason the disabled rule below gives: this is a design-system
+ * statement about every input in the app, not about the two that have the
+ * problem today. A field that gains a border later gains this with it.
+ *
+ * `:focus-visible`, not `:focus`, so it tracks §07 exactly — the border is
+ * hidden only when the ring that replaces it is actually being drawn. A pointer
+ * user, who never sees the ring, never loses the border either. */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  border-color: transparent;
+}
+
+/* §07 Disabled — 45% opacity, no pointer events, and the reason stated nearby
+ * rather than hidden in a title attribute alone.
+ *
+ * Global on purpose, and global HERE on purpose. It is a design-system rule
+ * that applies to every disabled control in the app, and a bare attribute
+ * selector is not localized by CSS Modules — so written inside a component's
+ * stylesheet it reaches the whole app anyway, from a file that has no business
+ * doing so and only while that component happens to be mounted. */
+[data-disabled='true'] {
+  opacity: var(--opacity-disabled);
+}
+
+/* Pointer events are removed only where the element is not ALREADY disabled.
+ *
+ * `pointer-events: none` on a `<button disabled>` also removes its tooltip, and
+ * §07 asks for the reason to be stated nearby rather than left implicit — the
+ * titlebar's Listen control carries exactly that explanation in its title, and
+ * the blanket rule made it unhoverable and so unreadable. A native disabled
+ * button already refuses clicks; this is for the elements that are not
+ * buttons, where the attribute is the only thing making them inert. */
+[data-disabled='true']:not(:disabled) {
+  pointer-events: none;
+}
+
+/* Chrome is a fade, never a slide. §08 pins it at 180ms ease. Under reduced
+ * motion everything drops except the ruler track, which §08 keeps because it
+ * is a reading aid rather than decoration. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

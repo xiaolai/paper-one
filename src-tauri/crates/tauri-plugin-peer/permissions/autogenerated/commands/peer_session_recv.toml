@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-session-recv"
+description = "Enables the peer_session_recv command without any pre-configured scope."
+commands.allow = ["peer_session_recv"]
+
+[[permission]]
+identifier = "deny-peer-session-recv"
+description = "Denies the peer_session_recv command without any pre-configured scope."
+commands.deny = ["peer_session_recv"]

@@ -1,0 +1,1975 @@
+// @vitest-environment jsdom
+import { useLayoutEffect, useState } from 'react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { KnownPerson, PersonPort, PersonStatus } from '../../peer'
+import { CAPABILITY_UI } from '../../../kernel'
+import { CirclePane } from './CirclePane'
+import type { CirclePort, FriendBook, FriendView } from '../lib/circlePort'
+import type { ListsPort, OwnListView } from '../lib/listsPort'
+
+/**
+ * Let React commit whatever the preceding line started.
+ *
+ * ⚠️ **`setTimeout(0)` IS NOT A REACT FLUSH, AND EVERY CALL SITE BELOW USED IT
+ * AS ONE.** A timer tick lets a promise settle; it does NOT guarantee React has
+ * processed the resulting state update, so an assertion after it can run
+ * against the PREVIOUS render — a stale-result test passing before the
+ * erroneous update it exists to catch has even been applied. Wrapping the same
+ * tick in `act` keeps whatever the timer was needed for and adds the guarantee
+ * that was missing.
+ */
+const flush = async (): Promise<void> => {
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 0))
+  })
+}
+
+
+/**
+ * Fire a subscription's listener, ONCE IT EXISTS.
+ *
+ * ⚠️ **`tell!()` ASSUMED THE SUBSCRIPTION HAD ALREADY HAPPENED, AND IT IS NOT
+ * WHAT THESE TESTS WAIT ON.** `tell` is assigned when the component's effect
+ * calls `subscribe`; the line above each call awaits a rendered ELEMENT, which
+ * is a different signal that can land first. When it does, the call is
+ * `TypeError: tell is not a function` — measured once in a full `pnpm verify`
+ * on 2026-09-06, and green in four isolated reruns afterwards, which is the
+ * signature of a race rather than a broken test.
+ *
+ * Waiting for the thing actually depended on costs nothing when it is already
+ * there and removes the race when it is not. Applied to every site rather than
+ * the one that fired: the other eleven are the same shape and had simply not
+ * lost the race yet.
+ */
+async function fire(get: () => (() => void) | null | undefined): Promise<void> {
+  await waitFor(() => expect(typeof get()).toBe('function'))
+  get()!()
+}
+
+
+/**
+ * The circle panel — WI-22.D3's surface.
+ *
+ * What is proven here is the panel's PROMISES, not its layout: that opening it
+ * mints nothing, that a read failure is not shown as "you have no circle", that
+ * the twelve words appear only when asked for, and that the standing custody
+ * marker says what `identity.md` requires it to say.
+ */
+
+afterEach(cleanup)
+
+const noPeople: readonly KnownPerson[] = []
+
+const status = (over: Partial<PersonStatus> = {}): PersonStatus => ({
+  personId: 'aabbccdd0011223344556677889900112233445566778899aabbccddeeff0011',
+  hasIdentity: true,
+  canShowPhrase: true,
+  role: 'home',
+  devices: 2,
+  circle: 0,
+  atRisk: false,
+  ...over,
+})
+
+const portWith = (over: Partial<PersonPort> = {}): PersonPort => ({
+  status: () => Promise.resolve(status()),
+  ensure: () => Promise.resolve('person'),
+  phrase: () => Promise.resolve('abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'),
+  forget: () => Promise.resolve(),
+  restore: () => Promise.resolve('person'),
+  people: () => Promise.resolve(noPeople),
+  devices: () => Promise.resolve(2),
+  remember: () => Promise.resolve(),
+  forgetPerson: () => Promise.resolve(),
+  /* Refused by default. A stub that admitted would make every surface test
+     pass against the happy path and none against the ordinary one. */
+  introduce: () => Promise.resolve(false),
+  revokeDevice: () => Promise.resolve(),
+  offer: () => Promise.resolve({ url: 'paper://pair?x', svg: '<svg/>', expiresAt: Date.now() + 300_000 }),
+  join: () => Promise.resolve({ sas: '123456' }),
+  confirm: () => Promise.resolve(null),
+  cancel: () => Promise.resolve(),
+  onPending: () => () => {},
+  onResult: () => () => {},
+  /* The identity lifecycle the capability subscribes to — nobody here, the pane does not. */
+  onIdentity: () => () => {},
+  ...over,
+})
+
+describe('the circle panel', () => {
+  it('mints nothing by being opened', async () => {
+    /* ⚠️ **THE PROPERTY THE WHOLE CUSTODY DESIGN RESTS ON.** A reader who never
+       shares never needs a person identity — *"a phrase shown before there is
+       any context is a phrase that gets clicked through."* A panel that minted
+       on open would delete that laziness without anybody removing it. */
+    const ensure = vi.fn(() => Promise.resolve('person'))
+    render(
+      <CirclePane
+        port={portWith({ ensure, status: () => Promise.resolve(status({ hasIdentity: false, personId: null, canShowPhrase: false, role: null })) })}
+       
+      />,
+    )
+
+    await screen.findByText(/Nothing is shared until you add somebody/u)
+    expect(ensure).not.toHaveBeenCalled()
+  })
+
+  it('offers to start one, and only then mints', async () => {
+    const ensure = vi.fn(() => Promise.resolve('person'))
+    render(
+      <CirclePane
+        port={portWith({ ensure, status: () => Promise.resolve(status({ hasIdentity: false, personId: null })) })}
+       
+      />,
+    )
+    const start = await screen.findByRole('button', { name: /Start a circle/u })
+    await act(async () => {
+      fireEvent.click(start)
+    })
+
+    expect(ensure).toHaveBeenCalledTimes(1)
+  })
+
+  it('says it could not look, rather than that there is nothing to see', async () => {
+    /* ⚠️ A failed read rendered as the empty state tells the reader they have
+       no circle — a different and much worse claim than "I could not look". */
+    render(<CirclePane port={portWith({ people: () => Promise.reject(new Error('keychain locked')) })} />)
+
+    await screen.findByText(/could not read your circle/u)
+    expect(screen.queryByText(/Nothing is shared until you add somebody/u)).toBeNull()
+  })
+
+  it('shows the standing marker when the circle lives on one device', async () => {
+    /* `identity.md`: *"'one device, no copy' is a state Paper surfaces
+       continuously — not a moment it hopes to catch."* */
+    render(<CirclePane port={portWith({ status: () => Promise.resolve(status({ atRisk: true, devices: 1 })) })} />)
+
+    await screen.findByText(/lives on this device alone/u)
+  })
+
+  it('does not show it when a second device holds the identity too', async () => {
+    // A marker that fires for everyone is wallpaper.
+    render(<CirclePane port={portWith()} />)
+
+    await screen.findByText(/holds your keys/u)
+    expect(screen.queryByText(/lives on this device alone/u)).toBeNull()
+  })
+
+  it('reads the device count from the port, so a second device takes the marker down — WI-23.A3', async () => {
+    /* ⚠️ **THE ITEM'S FALSIFIER**: pair a second device; `atRisk` must be
+       false. Unpair it; true. The status here derives `atRisk` from the count
+       it is HANDED, the way Rust's `custody` does — so a panel that still fed
+       it a hardcoded 1 would show the marker on every device a reader owns. */
+    const custody = (devices: number) => Promise.resolve(status({ devices, atRisk: devices <= 1 }))
+    const alone = render(<CirclePane port={portWith({ status: custody, devices: () => Promise.resolve(1) })} />)
+    await alone.findByText(/lives on this device alone/u)
+    cleanup()
+
+    const paired = render(<CirclePane port={portWith({ status: custody, devices: () => Promise.resolve(2) })} />)
+    await paired.findByText(/holds your keys/u)
+    expect(paired.queryByText(/lives on this device alone/u)).toBeNull()
+  })
+
+  it('keeps the twelve words hidden until they are asked for', async () => {
+    /* The one command that returns a secret, called only when a reader pressed
+       the button that says so. */
+    const phrase = vi.fn(() => Promise.resolve('abandon abandon about'))
+    render(<CirclePane port={portWith({ phrase })} />)
+    await screen.findByText(/holds your keys/u)
+
+    expect(phrase).not.toHaveBeenCalled()
+    expect(screen.queryByText(/abandon/u)).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Show my twelve words/u }))
+    })
+
+    /* ⚠️ **THE WORDS ARE SEPARATE ELEMENTS NOW, AND THAT IS THE POINT.** They
+       used to render as one `.paper-cap-code` blob, which is `user-select: all`
+       — a class written so a hundred-character pairing link could be taken in a
+       click, applied to the reader's root key. One stray click selected the
+       whole phrase, and a reader duly pasted it somewhere it should never go.
+       Numbered list items are read and transcribed, not grabbed. */
+    const words = await screen.findAllByRole('listitem')
+    expect(words.map((li) => li.textContent)).toEqual(['abandon', 'abandon', 'about'])
+    expect(phrase).toHaveBeenCalledTimes(1)
+
+    /* AND THE CAUTION COMES FIRST. It used to sit UNDER the words, so a reader
+       learned what they were holding only after it was on screen — which is a
+       description of the accident rather than a warning against it. */
+    const caution = screen.getByText(/Anyone who has these twelve words is you/u)
+    expect(
+      caution.compareDocumentPosition(words[0]!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      'the warning must precede the words',
+    ).toBeTruthy()
+    expect(screen.getByText(/not a safe place/u)).toBeTruthy()
+  })
+
+  it('takes them off screen again', async () => {
+    render(<CirclePane port={portWith()} />)
+    await screen.findByText(/holds your keys/u)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Show my twelve words/u }))
+    })
+    expect((await screen.findAllByRole('listitem')).length).toBeGreaterThan(0)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Hide them/u }))
+    })
+
+    /* Both halves go: the words AND the caution that belongs to them. */
+    await waitFor(() => expect(screen.queryAllByRole('listitem')).toHaveLength(0))
+    expect(screen.queryByText(/Anyone who has these twelve words is you/u)).toBeNull()
+  })
+
+  it('lists the people, and says what removing one does NOT do', async () => {
+    /* ⚠️ Removing somebody stops their new passages; what they already sent is
+       on this disk until a purge asks for it by name. A reader who assumed
+       otherwise would think they had deleted something they had not. */
+    const people: readonly KnownPerson[] = [
+      { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 2 }, revoked: [], devices: [] },
+    ]
+    render(<CirclePane port={portWith({ people: () => Promise.resolve(people) })} />)
+
+    await screen.findByText('Mo')
+    await screen.findByText(/What they already shared stays until you clear it/u)
+  })
+
+  it('removes somebody when asked', async () => {
+    const forgetPerson = vi.fn(() => Promise.resolve())
+    const people: readonly KnownPerson[] = [
+      { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 2 }, revoked: [], devices: [] },
+    ]
+    render(<CirclePane port={portWith({ people: () => Promise.resolve(people), forgetPerson })} />)
+    await screen.findByText('Mo')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Remove/u }))
+    })
+
+    expect(forgetPerson).toHaveBeenCalledWith('ff'.repeat(32))
+  })
+
+  it('settles instead of re-reading for ever when its port is rebuilt each render', async () => {
+    /* ⚠️ **THE HOST BUILDS THE PORT INSIDE `render()`, so a fresh object
+       arrives on every render.** With `port` in the effect's dependencies that
+       is a loop: fetch, set state, re-render, new identity, fetch again — and
+       the panel never settles, which is what "the Circle button does nothing"
+       looks like from the outside. The earlier tests all passed ONE port object
+       that never changed identity, so the fixture hid it. */
+    /* ⚠️ **TWO PORTS ACROSS ONE RERENDER IS NOT THE FEEDBACK.** This handed the
+       pane two objects by hand and allowed anything under six reads — so a pane
+       that re-read on every parent render passed, which is the shape the loop
+       is made of. The port is built INSIDE the host's render here, as the
+       screen's own `render(context)` builds it, and the host re-renders on its
+       own state five times: a fresh object each time, and the count must not
+       move. */
+    let reads = 0
+    const people = () => {
+      reads += 1
+      return Promise.resolve(noPeople)
+    }
+    const Host = () => {
+      const [ticks, bump] = useState(0)
+      return (
+        <>
+          <button type="button" onClick={() => bump((n) => n + 1)}>
+            {`render again ${ticks}`}
+          </button>
+          <CirclePane port={portWith({ people })} />
+        </>
+      )
+    }
+    render(<Host />)
+    await screen.findByText(/holds your keys/u)
+    /* Once, for the render that mounted it. */
+    expect(reads).toBe(1)
+
+    for (let tick = 0; tick < 5; tick++) {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /render again/u }))
+      })
+    }
+    expect(screen.getByRole('button', { name: /render again 5/u })).toBeTruthy()
+    /* ⚠️ **ONE READ PER PARENT RENDER, AND NOT ONE MORE.** The old bound was
+       `toBeLessThan(6)` over a single rerender — four spurious reads inside it,
+       and a runaway that happened to be slow would have passed. Six renders,
+       six reads: linear in what the parent did, which is the difference between
+       a pane that settles and one that feeds itself. */
+    expect(reads).toBe(6)
+
+    /* And nothing happens after: no render, no read. This is the claim the
+       test's name makes. */
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(reads).toBe(6)
+
+    /* ⚠️ The app does not pay even this: `personPort()` memoises per wire, so
+       the screen's `render(context)` hands the same object back every time.
+       What is held here is that a host which does NOT is still survivable. */
+  })
+
+  it('offers a way to add somebody, which is what the empty state promises', async () => {
+    /* ⚠️ **THE PANEL SAID "nothing is shared until you add somebody" AND HAD NO
+       WAY TO ADD ANYBODY.** Text naming an action the UI cannot perform is
+       worse than no text: it tells the reader they have missed a control that
+       does not exist. */
+    const offer = vi.fn(() => Promise.resolve({ url: 'paper://pair?s=abc', svg: '<svg/>', expiresAt: Date.now() + 300_000 }))
+    render(<CirclePane port={portWith({ offer })} />)
+    await screen.findByText(/holds your keys/u)
+
+    const add = screen.getByRole('button', { name: /Add somebody/u })
+    await act(async () => { fireEvent.click(add) })
+
+    expect(offer).toHaveBeenCalledTimes(1)
+    /* ⚠️ **WAS `findByText('paper://pair?s=abc')`, WHICH PINNED THE DEFECT.**
+       The offer has always carried a QR — "it is what the other device scans" —
+       and this screen printed the URL instead: a hundred percent-encoded
+       characters carrying a key and the reader's LAN addresses, laid out as if
+       it were something to read. The link is now a copy button and a picture,
+       and the raw string appears only when copying fails. */
+    await screen.findByLabelText('Pairing QR code')
+    expect(screen.getByRole('button', { name: /Copy link/u })).toBeTruthy()
+    expect(screen.queryByText('paper://pair?s=abc'), 'the URL is not for reading').toBeNull()
+  })
+
+  it('joins a friend’s link and shows the digits to compare', async () => {
+    const join = vi.fn(() => Promise.resolve({ sas: '481902' }))
+    render(<CirclePane port={portWith({ join })} />)
+    await screen.findByText(/holds your keys/u)
+
+    const field = screen.getByPlaceholderText(/paste a friend/u)
+    fireEvent.change(field, { target: { value: '  paper://pair?s=zzz  ' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Join$/u })) })
+
+    /* Trimmed: a link out of a chat app arrives with whitespace around it. */
+    expect(join).toHaveBeenCalledWith('paper://pair?s=zzz')
+    await screen.findByText('481902')
+  })
+
+  it('lets a joiner back out, because either end can stop', async () => {
+    /* ⚠️ **THIS STATE USED TO HAVE NO CONTROL OF ANY KIND.** Six digits and
+       nothing else, so a reader whose friend had walked away from the other
+       machine was stuck until they quit the app. Pairing has a human at each
+       end and either of them can change their mind; only one could say so. */
+    const join = vi.fn(() => Promise.resolve({ sas: '481902' }))
+    const cancel = vi.fn(() => Promise.resolve())
+    render(<CirclePane port={portWith({ join, cancel })} />)
+    await screen.findByText(/holds your keys/u)
+
+    fireEvent.change(screen.getByPlaceholderText(/paste a friend/u), { target: { value: 'paper://pair?s=zzz' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Join$/u })) })
+    await screen.findByText('481902')
+    /* And it says what is true while it waits: nothing has moved yet. */
+    expect(screen.getByText(/Nothing has been shared yet/u)).toBeTruthy()
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Never mind/u })) })
+    expect(cancel).toHaveBeenCalled()
+    expect(screen.queryByText('481902')).toBeNull()
+  })
+
+  it('tells the offerer that waiting is what success looks like so far', async () => {
+    /* ⚠️ **THE SCREEN SAID NOTHING WHILE IT WAITED**, which is the state a
+       reader spends the whole pairing in — and the roster's own "Nobody yet."
+       sits just below, reading as a verdict on the pairing rather than on the
+       circle. An offer nobody had used yet was indistinguishable from a failed
+       one. */
+    const offer = vi.fn(() => Promise.resolve({ url: 'paper://pair?s=abc', svg: '<svg/>', expiresAt: Date.now() + 300_000 }))
+    render(<CirclePane port={portWith({ offer })} />)
+    await screen.findByText(/holds your keys/u)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Add somebody/u })) })
+
+    expect(screen.getByText(/Nobody has used this yet/u)).toBeTruthy()
+    expect(screen.getByText(/compare six digits/u)).toBeTruthy()
+    /* The remaining life, not "a few minutes" — the reader has to decide
+       whether the link they sent is still worth waiting on. */
+    expect(screen.getByText(/It stops working in \d+:\d\d/u)).toBeTruthy()
+    /* AND A WAY TO MOVE IT THAT IS NOT SELECTING THE TEXT, which is how a
+       pairing secret ends up in a screenshot or a chat window. */
+    expect(screen.getByRole('button', { name: /Copy link/u })).toBeTruthy()
+    /* The picture is the point: two Macs cannot photograph each other, so the
+       button is the path between them — but a phone can, and the QR is what the
+       offer was built to carry. */
+    expect(screen.getByLabelText('Pairing QR code')).toBeTruthy()
+  })
+
+  it('lets the other side answer, because pairing takes two', async () => {
+    /* ⚠️ A flow that only OFFERED would work in exactly half of every pairing. */
+    let fire: ((p: unknown) => void) | null = null
+    const confirm = vi.fn(() => Promise.resolve(null))
+    const onPending = (fn: (p: never) => void) => {
+      fire = fn as (p: unknown) => void
+      return () => {}
+    }
+    render(<CirclePane port={portWith({ onPending, confirm })} />)
+    await screen.findByText(/holds your keys/u)
+
+    await act(async () => {
+      fire?.({ id: 'dev', name: 'Mo', platform: 'macos', sas: '778811', attemptId: 'a1' })
+    })
+    await screen.findByText('778811')
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /digits match/u })) })
+
+    expect(confirm).toHaveBeenCalledWith(true, 'a1')
+  })
+
+  it('does not let an older read overwrite a newer one', async () => {
+    /* ⚠️ **A SLOW FIRST READ LANDED AFTER A FAST SECOND ONE.** A refresh
+       started by a pairing result published the new person; the initial refresh
+       then resolved and put the empty roster back — along with a status
+       computed for a circle of zero. The same revision `useOverlays` keeps. */
+    const settle: ((v: readonly KnownPerson[]) => void)[] = []
+    const mo: KnownPerson = {
+      person: 'ff'.repeat(32),
+      displayName: 'Mo',
+      roster: { epoch: 1, hlc: 1 },
+      revoked: [],
+      devices: [],
+    }
+    let paired: ((event: unknown) => void) | null = null
+    const port = portWith({
+      people: () => new Promise<readonly KnownPerson[]>((r) => settle.push(r)),
+      onResult: (fn) => {
+        paired = fn as (event: unknown) => void
+        return () => {}
+      },
+    })
+    render(<CirclePane port={port} />)
+    await waitFor(() => expect(settle).toHaveLength(1))
+
+    /* A second read starts — a pairing result is what starts one — and
+       finishes FIRST. */
+    await act(async () => paired!({ ok: true, kind: 'circle' }))
+    await waitFor(() => expect(settle).toHaveLength(2))
+    await act(async () => settle[1]?.([mo]))
+    await screen.findByText('Mo')
+
+    /* The older one lands last and must not be believed. */
+    await act(async () => settle[0]?.([]))
+
+    expect(screen.queryByText('Mo')).not.toBeNull()
+  })
+
+  it('does not show a superseded identity’s words', async () => {
+    /* ⚠️ Clearing `phrase` when the identity changes did nothing to a read
+       ALREADY IN FLIGHT: press Show, restore or forget, and the old promise
+       resolved afterwards and put the previous person's twelve words on screen
+       under the new person's id.
+
+       ONE port throughout, whose identity changes between reads — swapping the
+       port instead would replace the whole component and prove nothing about
+       the in-flight read. */
+    const settle: ((v: string | null) => void)[] = []
+    let who = 'aa'.repeat(32)
+    let paired: ((event: unknown) => void) | null = null
+    const port = portWith({
+      phrase: () => new Promise<string | null>((r) => settle.push(r)),
+      status: () => Promise.resolve(status({ personId: who })),
+      onResult: (fn) => {
+        paired = fn as (event: unknown) => void
+        return () => {}
+      },
+    })
+    render(<CirclePane port={port} />)
+    await screen.findByText(/holds your keys/u)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Show my twelve words/u }))
+    })
+    await waitFor(() => expect(settle).toHaveLength(1))
+
+    /* The identity changes while that read is still out, and a pairing
+       result makes the panel look again. */
+    who = 'bb'.repeat(32)
+    await act(async () => paired!({ ok: true, kind: 'circle' }))
+    await waitFor(() => expect(screen.queryByText(new RegExp(who.slice(0, 8), 'u'))).not.toBeNull())
+
+    await act(async () => settle[0]?.('the old secret words'))
+
+    /* ⚠️ **THE WHOLE PHRASE IS NEVER ON SCREEN AS ONE STRING.**
+       `IdentitySection` renders it as an `<ol>` of one `<li>` per word, so
+       `queryByText('the old secret words')` matches NOTHING whether or not the
+       phrase is visible — and `toBeNull()` therefore passed either way. This
+       assertion could not fail. The words are what is on screen, so the words
+       are what must be absent. */
+    for (const word of 'the old secret words'.split(' ')) {
+      expect(screen.queryByText(word)).toBeNull()
+    }
+  })
+
+  it('says a pairing failed rather than showing it as finished', async () => {
+    /* ⚠️ The result callback ignored `ok`. A refusal, a bad MAC or a timeout
+       cleared the six digits and returned "Nobody yet" — the reader was told a
+       pairing had completed when it had not. */
+    const listeners: ((r: unknown) => void)[] = []
+    render(
+      <CirclePane
+        port={portWith({
+          onResult: (fn: (r: never) => void) => {
+            listeners.push(fn as (r: unknown) => void)
+            return () => {}
+          },
+        })}
+       
+      />,
+    )
+    await screen.findByText(/holds your keys/u)
+
+    await act(async () => listeners[0]?.({ ok: false, id: 'x', reason: 'bad-mac', kind: 'circle' }))
+
+    await screen.findByText(/did not complete \(bad-mac\)/u)
+  })
+
+  it('ignores a joiner probe refused no-pending rather than clearing the request on screen', async () => {
+    /* ⚠️ A joiner opens a SECOND connection beside its first, because this
+       side sends nothing at all between receiving a hello and its human
+       answering — so a joiner cannot tell "you never heard me" from "your
+       human is still deciding". This side refuses that probe `no-pending`,
+       and every successful pairing now produces one. Acted on, it cleared the
+       six digits mid-comparison and told the reader the pairing had failed
+       while it was in fact about to succeed. */
+    const pendings: ((p: unknown) => void)[] = []
+    const results: ((r: unknown) => void)[] = []
+    render(
+      <CirclePane
+        port={portWith({
+          onPending: (fn: (p: never) => void) => {
+            pendings.push(fn as (p: unknown) => void)
+            return () => {}
+          },
+          onResult: (fn: (r: never) => void) => {
+            results.push(fn as (r: unknown) => void)
+            return () => {}
+          },
+        })}
+      />,
+    )
+    await screen.findByText(/holds your keys/u)
+
+    await act(async () =>
+      pendings[0]?.({
+        attemptId: 'the-attempt-on-screen',
+        id: 'friend',
+        name: 'Ada',
+        platform: 'macos',
+        sas: '314159',
+        kind: 'circle',
+      }),
+    )
+    await screen.findByText('314159')
+
+    /* The probe: no `attemptId`, because this side never claimed the offer
+       for it — it was already claimed by the connection being shown. */
+    await act(async () => results[0]?.({ ok: false, id: 'friend', reason: 'no-pending', kind: 'circle' }))
+
+    expect(screen.getByText('314159')).toBeTruthy()
+    expect(screen.queryByText(/did not complete/u)).toBeNull()
+  })
+
+  it('stops presenting a link that has already lapsed', async () => {
+    /* ⚠️ `expiresAt` was discarded. Sending a dead link produces an `expired`
+       refusal, and the reader could not make another without first stopping
+       the one that had already lapsed. */
+    const port = portWith({
+      offer: () => Promise.resolve({ url: 'paper://dead', svg: '', expiresAt: Date.now() - 1 }),
+    })
+    render(<CirclePane port={port} />)
+    await screen.findByText(/holds your keys/u)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Add somebody/u }))
+    })
+
+    expect(screen.queryByText('paper://dead')).toBeNull()
+    /* And the way to make a live one is still there. */
+    expect(screen.getByRole('button', { name: /Add somebody/u })).toBeTruthy()
+  })
+
+  it('says a phrase read failed rather than leaving it looking hidden', async () => {
+    /* Rendering a failed keychain read as "still hidden" tells the reader the
+       button does nothing, which is the one thing that is not true. */
+    render(
+      <CirclePane
+        port={portWith({ phrase: () => Promise.reject(new Error('keychain locked')) })}
+       
+      />,
+    )
+    await screen.findByText(/holds your keys/u)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Show my twelve words/u }))
+    })
+
+    await screen.findByText(/keychain locked/u)
+  })
+
+  it('says so plainly on a composition with no peer plugin', async () => {
+    /* ⚠️ No plugin is no circle, which is a state and not an error — the
+       browser client legitimately cannot have this feature, and a panel that
+       threw would take the whole side pane down with it. */
+    render(<CirclePane port={null} />)
+
+    await screen.findByText(/needs Paper's own app/u)
+  })
+
+  it('never puts the whole person id on screen', async () => {
+    // Nobody reads a 64-hex public key, so nobody is shown one.
+    const full = status().personId ?? ''
+    render(<CirclePane port={portWith()} />)
+    await screen.findByText(/holds your keys/u)
+
+    expect(screen.queryByText(full)).toBeNull()
+    await screen.findByText(new RegExp(full.slice(0, 8), 'u'))
+  })
+})
+
+describe('the shelf switch and the Friends view — WI-23.C2 and C4', () => {
+  const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+  const circleWith = (over: Partial<import('../lib/circlePort').CirclePort> = {}): import('../lib/circlePort').CirclePort => ({
+    showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
+    cover: () => Promise.resolve(null),
+    setShowsShelf: vi.fn(() => Promise.resolve()),
+    friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
+    book: () => Promise.resolve({ people: [], alsoRead: [] }),
+    forget: vi.fn(() => Promise.resolve()),
+    subscribe: () => () => {},
+    ...over,
+  })
+
+  it('offers the switch per person, off, with copy that says what it ends', async () => {
+    const circle = circleWith()
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
+    const box = (await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })) as HTMLInputElement
+    expect(box.checked).toBe(false)
+    expect(screen.getByText(/Mo will be able to see every book in your library, including ones you have shared nothing from/u)).toBeTruthy()
+    fireEvent.click(box)
+    await waitFor(() => expect(circle.setShowsShelf).toHaveBeenCalledWith(mo.person, true))
+  })
+
+  it('says what is visible once the switch is on', async () => {
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circleWith({ showsShelf: () => Promise.resolve(true) })} />)
+    const box = (await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })) as HTMLInputElement
+    expect(box.checked).toBe(true)
+    expect(screen.getByText(/Mo can see every book in your library/u)).toBeTruthy()
+  })
+
+  it('offers holding a person back, off, saying their passages appear', async () => {
+    /* ⚠️ **THE CONTROL THAT DID NOT EXIST — WI-24.C2.** `'muted'` was modelled
+       from the start and never written by anything, so a reader who wanted one
+       person off the page had only Remove, which purges their passages AND the
+       pairing and needs a fresh SAS to undo. A quiet preference and a
+       severance were one button. */
+    const circle = circleWith({ setMuted: vi.fn(() => Promise.resolve()) })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
+    const box = (await screen.findByRole('checkbox', { name: "Hold back Mo's passages" })) as HTMLInputElement
+    expect(box.checked).toBe(false)
+    expect(screen.getByText(/Mo's passages appear in your books, where the sentence is/u)).toBeTruthy()
+    fireEvent.click(box)
+    await waitFor(() => expect(circle.setMuted).toHaveBeenCalledWith(mo.person, true))
+  })
+
+  it('says NOTHING IS DELETED once they are held back, which is what separates it from Remove', async () => {
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circleWith({ muted: () => Promise.resolve(true) })} />)
+    const box = (await screen.findByRole('checkbox', { name: "Hold back Mo's passages" })) as HTMLInputElement
+    expect(box.checked).toBe(true)
+    expect(screen.getByText(/Nothing has been deleted/u)).toBeTruthy()
+    expect(screen.getByText(/turning this off brings it back/u)).toBeTruthy()
+  })
+
+  it('shows the switches even when the friend view cannot be read', async () => {
+    /* ⚠️ **ALL THREE ANSWERS WERE COMMITTED TOGETHER.** The switch reads and
+       the friend view were awaited in one `try`, so a single unreadable shelf
+       file threw before any of them landed — and a switch the reader had just
+       moved went on showing its old position because something else had
+       failed. They commit on their own now. */
+    let on = false
+    const circle = circleWith({
+      /* The switch MOVES partway through, so a stale value is visible as a
+         stale value rather than coinciding with the initial one. */
+      showsShelf: () => Promise.resolve(on),
+      muted: () => Promise.resolve(true),
+      friend: () => Promise.reject(new Error('that shelf will not read')),
+      setShowsShelf: vi.fn(() => Promise.resolve()),
+    })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
+    /* ⚠️ **THE SHELF MUST BE EXPANDED, or `friend()` is never called and the
+       coupling cannot bite.** The first version of this test did not expand it
+       and passed with the defect in place — measured. */
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    on = true
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' }))
+    await waitFor(() => expect(circle.setShowsShelf).toHaveBeenCalled())
+    await waitFor(() =>
+      expect((screen.getByRole('checkbox', { name: 'Show my shelf to Mo' }) as HTMLInputElement).checked).toBe(true),
+    )
+  })
+
+  it('clears what the old port loaded when the circle is replaced', async () => {
+    /* ⚠️ **CLEANUP ONLY UNSUBSCRIBED.** The values the old port had loaded kept
+       being drawn as though they belonged to the new one, and reads still in
+       flight stayed eligible to commit over it. */
+    const slow = circleWith({ showsShelf: () => Promise.resolve(true), muted: () => Promise.resolve(true) })
+    const { rerender } = render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={slow} />)
+    const on = (await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })) as HTMLInputElement
+    expect(on.checked).toBe(true)
+
+    /* A port that never answers: the row must not go on showing the old one's
+       values while it waits. */
+    const silent = circleWith({ showsShelf: () => new Promise<boolean>(() => {}), muted: () => new Promise<boolean>(() => {}) })
+    rerender(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={silent} />)
+    await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Show my shelf to Mo' })).toBeNull())
+  })
+
+  it('draws a friend’s jacket beside their row once the port answers, and none for a row that names none — WI-23.C5', async () => {
+  const cover = vi.fn((_person: string, book: { readonly pub: string }) => Promise.resolve(book.pub === 's1' ? 'data:image/jpeg;base64,AAAA' : null))
+  const circle = circleWith({
+    friend: () =>
+      Promise.resolve({
+        shelf: [
+          { pub: 's1', title: 'Moby-Dick', author: 'Herman Melville', language: 'en', own: null, device: 'd1', cover: 'ab'.repeat(32) },
+          { pub: 's2', title: 'Dune', author: 'Frank Herbert', language: 'en', own: null, device: 'd1', cover: null },
+        ],
+        recent: [],
+        lists: [],
+      }),
+    cover,
+  })
+  const { container } = render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+  await screen.findByText(/Dune/u)
+  await waitFor(() => expect(container.querySelector('img[data-jacket="s1"]')).not.toBeNull())
+  expect(container.querySelector('img[data-jacket="s1"]')?.getAttribute('src')).toBe('data:image/jpeg;base64,AAAA')
+  expect(container.querySelector('img[data-jacket="s2"]')).toBeNull()
+  /* Asked only for the row that names a digest. */
+  expect(cover).toHaveBeenCalledTimes(1)
+  expect(cover.mock.calls[0]![1]).toMatchObject({ pub: 's1' })
+  })
+
+  it('links exactly the books this reader also has — the falsifier — and opens them', async () => {
+    const openBook = vi.fn()
+    const circle = circleWith({
+      friend: () =>
+        Promise.resolve({
+          shelf: [
+            { pub: 's1', title: 'Moby-Dick', author: 'Herman Melville', language: 'en', own: 'book:moby', device: null, cover: null },
+            { pub: 's2', title: 'Ulysses', author: 'James Joyce', language: 'en', own: null, device: null, cover: null },
+            { pub: 's3', title: 'Dune', author: 'Frank Herbert', language: 'en', own: 'book:dune', device: null, cover: null },
+          ],
+          recent: [{ kind: 'rate', bookId: 'book:moby', title: 'Moby-Dick', value: '4 of 5', at: 'stamp' as never }],
+          lists: [],
+        }),
+    })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} openBook={openBook} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText(/Ulysses/u)
+    const links = screen.getAllByRole('button', { name: /^Open your copy of/u })
+    expect(links).toHaveLength(2)
+    expect(links.map((one) => one.getAttribute('aria-label'))).toEqual(['Open your copy of Moby-Dick', 'Open your copy of Dune'])
+    fireEvent.click(links[1]!)
+    expect(openBook).toHaveBeenCalledWith('book:dune')
+    /* And what they did lately, as a named sentence — never a number alone. */
+    expect(screen.getByText(/Mo rated Moby-Dick 4 of 5/u)).toBeTruthy()
+  })
+
+  it('removes through the circle when it has one, which clears their files, and says so', async () => {
+    const circle = circleWith()
+    const forgetPerson = vi.fn(() => Promise.resolve())
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]), forgetPerson })} circle={circle} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(circle.forget).toHaveBeenCalledWith(mo.person))
+    expect(forgetPerson).not.toHaveBeenCalled()
+    expect(screen.getByText(/clears what they shared from this device. It cannot take back what you shared with them/u)).toBeTruthy()
+  })
+
+  it('draws no switch and no shelf without the circle’s port', async () => {
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} />)
+    await screen.findByText('Mo')
+    expect(screen.queryByRole('checkbox')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Their shelf' })).toBeNull()
+  })
+})
+
+describe('the reader’s own lists, on the Circle screen — WI-23.E1', () => {
+  const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+  const circleWith = (over: Partial<CirclePort> = {}): CirclePort => ({
+    showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
+    cover: () => Promise.resolve(null),
+    setShowsShelf: () => Promise.resolve(),
+    friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
+    book: () => Promise.resolve({ people: [], alsoRead: [] }),
+    forget: () => Promise.resolve(),
+    subscribe: () => () => {},
+    ...over,
+  })
+  const listsWith = (own: OwnListView[], over: Partial<ListsPort> = {}): ListsPort => ({
+    lists: () => Promise.resolve(own),
+    create: vi.fn(() => Promise.resolve('new1')),
+    retitle: vi.fn(() => Promise.resolve()),
+    place: vi.fn(() => Promise.resolve()),
+    takeOff: vi.fn(() => Promise.resolve()),
+    delete: vi.fn(() => Promise.resolve()),
+    subscribe: () => () => {},
+    ...over,
+  })
+  const sea: OwnListView = {
+    id: 'aa',
+    title: 'Sea books',
+    items: [
+      { pub: 'i1', title: 'Moby-Dick', author: 'Herman Melville', position: 1, note: 'start here', bookId: 'book:moby' },
+      { pub: 'i2', title: 'Emma', author: 'Jane Austen', position: 2, note: '', bookId: null },
+    ],
+  }
+  const port = () => portWith({ people: () => Promise.resolve([]) })
+
+  it('renames only once the title differs, deletes, keeps a note, takes an item off, and opens the reader’s copy', async () => {
+    const lists = listsWith([sea])
+    const openBook = vi.fn()
+    render(<CirclePane port={port()} circle={circleWith()} lists={lists} openBook={openBook} />)
+    const title = (await screen.findByLabelText('Title of Sea books')) as HTMLInputElement
+    expect(title.value).toBe('Sea books')
+    expect(screen.queryByRole('button', { name: 'Rename' })).toBeNull()
+    fireEvent.change(title, { target: { value: 'Sea books' } })
+    expect(screen.queryByRole('button', { name: 'Rename' })).toBeNull()
+    fireEvent.change(title, { target: { value: ' Whales ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Rename' }))
+    await waitFor(() => expect(lists.retitle).toHaveBeenCalledWith('aa', 'Whales'))
+
+    const note = screen.getByLabelText('Note on Moby-Dick') as HTMLInputElement
+    expect(note.value).toBe('start here')
+    expect(screen.queryByRole('button', { name: 'Keep note on Moby-Dick' })).toBeNull()
+    fireEvent.change(note, { target: { value: 'read it twice' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Keep note on Moby-Dick' }))
+    await waitFor(() => expect(lists.place).toHaveBeenCalledWith('aa', 'book:moby', 'read it twice'))
+    /* A book no longer on the shelf cannot be re-placed, so its note is read-only. */
+    expect((screen.getByLabelText('Note on Emma') as HTMLInputElement).disabled).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open your copy of Moby-Dick' }))
+    expect(openBook).toHaveBeenCalledWith('book:moby')
+    expect(screen.queryByRole('button', { name: 'Open your copy of Emma' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Take Emma off Sea books' }))
+    await waitFor(() => expect(lists.takeOff).toHaveBeenCalledWith('aa', 'i2'))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Sea books' }))
+    await waitFor(() => expect(lists.delete).toHaveBeenCalledWith('aa'))
+  })
+
+  it('starts a list here too, says when there are none, and re-reads when told', async () => {
+    let tell: (() => void) | null = null
+    let own: OwnListView[] = []
+    const lists = listsWith([], {
+      lists: () => Promise.resolve(own),
+      subscribe: (listener) => {
+        tell = listener
+        return () => {}
+      },
+    })
+    render(<CirclePane port={port()} circle={circleWith()} lists={lists} />)
+    await screen.findByText(/No lists yet/u)
+    expect(screen.getByText(/Deleting one is for good/u)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('New list'), { target: { value: 'Whales' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Start list' }))
+    await waitFor(() => expect(lists.create).toHaveBeenCalledWith('Whales'))
+    own = [sea]
+    await fire(() => tell)
+    await screen.findByLabelText('Title of Sea books')
+    expect(screen.queryByText(/No lists yet/u)).toBeNull()
+  })
+
+  it('draws no lists section without the port', async () => {
+    render(<CirclePane port={port()} circle={circleWith()} />)
+    await screen.findByText(/Nobody yet/u)
+    expect(document.querySelector('[data-own-lists]')).toBeNull()
+  })
+
+  it('shows a friend’s lists with their notes, and links what the reader has', async () => {
+    const openBook = vi.fn()
+    const circle = circleWith({
+      friend: () =>
+        Promise.resolve({
+          shelf: [{ pub: 's1', title: 'Moby-Dick', author: 'Herman Melville', language: 'en', own: 'book:moby', device: null, cover: null }],
+          recent: [],
+          lists: [
+            {
+              id: 'aa',
+              title: 'Sea books',
+              items: [
+                { pub: 'i1', title: 'Moby-Dick', author: 'Herman Melville', note: 'start here', own: 'book:moby' },
+                { pub: 'i2', title: 'Emma', author: 'Jane Austen', note: '', own: null },
+              ],
+            },
+            { id: 'bb', title: 'Nothing yet', items: [] },
+          ],
+        }),
+    })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} openBook={openBook} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText('Sea books')
+    expect(screen.getByText(/Moby-Dick — Herman Melville · “start here”/u)).toBeTruthy()
+    expect(screen.getByText(/Emma — Jane Austen/u)).toBeTruthy()
+    expect(screen.getByText('Nothing yet')).toBeTruthy()
+    expect(screen.getAllByText('Nothing on it yet.')).toHaveLength(1)
+    /* Two links: the shelf's Moby-Dick and the list's. */
+    expect(screen.getAllByRole('button', { name: 'Open your copy of Moby-Dick' })).toHaveLength(2)
+  })
+})
+
+describe('every clause of the person row, the Friends view and the reader’s lists — one row each', () => {
+  const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+  const circleWith = (over: Partial<CirclePort> = {}): CirclePort => ({
+    showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
+    cover: () => Promise.resolve(null),
+    setShowsShelf: () => Promise.resolve(),
+    friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
+    book: () => Promise.resolve({ people: [], alsoRead: [] }),
+    forget: () => Promise.resolve(),
+    subscribe: () => () => {},
+    ...over,
+  })
+  const listsWith = (own: OwnListView[], over: Partial<ListsPort> = {}): ListsPort => ({
+    lists: () => Promise.resolve(own),
+    create: vi.fn(() => Promise.resolve('new1')),
+    retitle: vi.fn(() => Promise.resolve()),
+    place: vi.fn(() => Promise.resolve()),
+    takeOff: vi.fn(() => Promise.resolve()),
+    delete: vi.fn(() => Promise.resolve()),
+    subscribe: () => () => {},
+    ...over,
+  })
+  const withMo = () => portWith({ people: () => Promise.resolve([mo]) })
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void
+    let reject!: (cause: unknown) => void
+    const promise = new Promise<T>((yes, no) => {
+      resolve = yes
+      reject = no
+    })
+    return { promise, resolve, reject }
+  }
+  const friendView = (over: Partial<FriendView> = {}): FriendView => ({ shelf: [], recent: [], lists: [], ...over })
+
+  it('says when a friend has shown nothing, hides Lately with nothing lately, and toggles the button’s label', async () => {
+    render(<CirclePane port={withMo()} circle={circleWith()} />)
+    const button = await screen.findByRole('button', { name: 'Their shelf' })
+    fireEvent.click(button)
+    await screen.findByText('Mo has shown you no books.')
+    expect(screen.queryByText('Lately')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Hide their shelf' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Hide their shelf' }))
+    expect(screen.queryByText('Mo has shown you no books.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Remove' }).className).toContain('danger')
+  })
+
+  it('draws each kind of recent thing in its own words, the author dash only with an author, and the own-book marker', async () => {
+    const circle = circleWith({
+      friend: () =>
+        Promise.resolve(
+          friendView({
+            shelf: [
+              { pub: 's1', title: 'Moby-Dick', author: 'Herman Melville', language: 'en', own: 'book:moby', device: null, cover: null },
+              { pub: 's2', title: 'Untitled', author: '', language: 'en', own: null, device: null, cover: null },
+            ],
+            recent: [
+              { kind: 'status', bookId: 'book:moby', title: 'Moby-Dick', value: 'finished', at: 'c' as never },
+              { kind: 'rate', bookId: 'book:moby', title: 'Moby-Dick', value: '4 of 5', at: 'b' as never },
+              { kind: 'review', bookId: 'book:moby', title: 'Moby-Dick', value: 'Long, and worth it.', at: 'a' as never },
+            ],
+          }),
+        ),
+    })
+    render(<CirclePane port={withMo()} circle={circle} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText('Lately')
+    expect(screen.getByText('Mo finished Moby-Dick')).toBeTruthy()
+    expect(screen.getByText('Mo rated Moby-Dick 4 of 5')).toBeTruthy()
+    expect(screen.getByText('Mo on Moby-Dick: “Long, and worth it.”')).toBeTruthy()
+    expect(screen.getByText('Moby-Dick — Herman Melville')).toBeTruthy()
+    expect(screen.getByText('Untitled').textContent).toBe('Untitled')
+    /* Without a way to open it, the own copy is marked in words, not a button. */
+    expect(screen.getByText('On your shelf').tagName).toBe('SPAN')
+    expect(document.querySelectorAll('[data-own-book="book:moby"]')).toHaveLength(1)
+    expect(document.querySelectorAll('[data-own-book]')).toHaveLength(1)
+  })
+
+  it('shows trouble when what a friend shared cannot be read, clears it on a later read, and re-reads when the circle says so', async () => {
+    let fails = true
+    let tell: (() => void) | null = null
+    const circle = circleWith({
+      friend: () => (fails ? Promise.reject(new Error('their shelf will not read')) : Promise.resolve(friendView())),
+      subscribe: (listener) => {
+        tell = listener
+        return () => {}
+      },
+    })
+    render(<CirclePane port={withMo()} circle={circle} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText(/Paper could not read what Mo shared\. their shelf will not read/u)
+    fails = false
+    await fire(() => tell)
+    await waitFor(() => expect(screen.queryByText(/could not read what Mo shared/u)).toBeNull())
+  })
+
+  it('shows trouble when the switch cannot be turned', async () => {
+    const circle = circleWith({ setShowsShelf: () => Promise.reject(new Error('the record would not write')) })
+    render(<CirclePane port={withMo()} circle={circle} />)
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' }))
+    await screen.findByText(/the record would not write/u)
+    /* In the row, with the roster still on screen — not the pane replaced
+       by its failure line. */
+    expect(screen.getByRole('checkbox', { name: 'Show my shelf to Mo' })).toBeTruthy()
+  })
+
+  it('lets a slow friend read neither overwrite nor trouble a later one', async () => {
+    const slow = deferred<FriendView>()
+    let calls = 0
+    let tell: (() => void) | null = null
+    const circle = circleWith({
+      friend: () => (++calls === 1 ? slow.promise : Promise.resolve(friendView({ shelf: [{ pub: 's1', title: 'Dune', author: '', language: 'en', own: null, device: null, cover: null }] }))),
+      subscribe: (listener) => {
+        tell = listener
+        return () => {}
+      },
+    })
+    render(<CirclePane port={withMo()} circle={circle} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await waitFor(() => expect(tell).not.toBeNull())
+    await fire(() => tell)
+    await screen.findByText('Dune')
+    slow.reject(new Error('too late'))
+    await flush()
+    expect(screen.queryByText(/too late/u)).toBeNull()
+    expect(screen.getByText('Dune')).toBeTruthy()
+  })
+
+  it('offers no Remove hint with nobody to remove', async () => {
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={circleWith()} />)
+    await screen.findByText('Nobody yet.')
+    expect(screen.queryByText(/Removing somebody/u)).toBeNull()
+  })
+
+  it('starts a list only from a real title, and clears the field after', async () => {
+    const lists = listsWith([])
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={circleWith()} lists={lists} />)
+    const field = (await screen.findByLabelText('New list')) as HTMLInputElement
+    expect(field.value).toBe('')
+    fireEvent.change(field, { target: { value: '   ' } })
+    expect((screen.getByRole('button', { name: 'Start list' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(field, { target: { value: ' Whales ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Start list' }))
+    await waitFor(() => expect(lists.create).toHaveBeenCalledWith('Whales'))
+    await waitFor(() => expect((screen.getByLabelText('New list') as HTMLInputElement).value).toBe(''))
+  })
+
+  it('offers Rename only for a real, different title, and keeps a note only once it differs', async () => {
+    const sea: OwnListView = { id: 'aa', title: 'Sea', items: [{ pub: 'i1', title: 'Moby-Dick', author: '', position: 1, note: 'n', bookId: 'book:moby' }] }
+    const lists = listsWith([sea])
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={circleWith()} lists={lists} />)
+    const title = (await screen.findByLabelText('Title of Sea')) as HTMLInputElement
+    fireEvent.change(title, { target: { value: '   ' } })
+    expect(screen.queryByRole('button', { name: 'Rename' })).toBeNull()
+    fireEvent.change(title, { target: { value: ' Sea ' } })
+    expect(screen.queryByRole('button', { name: 'Rename' })).toBeNull()
+    fireEvent.change(title, { target: { value: 'Whales' } })
+    expect(screen.getByRole('button', { name: 'Rename' }).className).toContain('primary')
+    fireEvent.click(screen.getByRole('button', { name: 'Rename' }))
+    await waitFor(() => expect(lists.retitle).toHaveBeenCalledWith('aa', 'Whales'))
+    /* Kept: the field shows what the port holds again, and the button goes. */
+    await waitFor(() => expect((screen.getByLabelText('Title of Sea') as HTMLInputElement).value).toBe('Sea'))
+    expect(screen.queryByRole('button', { name: 'Rename' })).toBeNull()
+
+    expect(screen.queryByText('Nothing on it yet.')).toBeNull()
+    expect(screen.getByText('Moby-Dick').textContent).toBe('Moby-Dick')
+    const note = screen.getByLabelText('Note on Moby-Dick') as HTMLInputElement
+    expect(note.disabled).toBe(false)
+    fireEvent.change(note, { target: { value: 'n' } })
+    expect(screen.queryByRole('button', { name: 'Keep note on Moby-Dick' })).toBeNull()
+    fireEvent.change(note, { target: { value: 'new' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Keep note on Moby-Dick' }))
+    await waitFor(() => expect(lists.place).toHaveBeenCalledWith('aa', 'book:moby', 'new'))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Keep note on Moby-Dick' })).toBeNull())
+  })
+
+  it('draws the lists again only for a new port, empties them when they cannot be read, and lets a slow read not overwrite a later one', async () => {
+    const one: OwnListView = { id: 'aa', title: 'Sea', items: [] }
+    const first = listsWith([one])
+    const view = render(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={circleWith()} lists={first} />)
+    await screen.findByLabelText('Title of Sea')
+    view.rerender(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={circleWith()} lists={listsWith([], { lists: () => Promise.reject(new Error('gone')) })} />)
+    /* A new port whose read fails: the failure is said, and nothing is called "no lists". */
+    await screen.findByText(/Paper could not read your lists\. gone/u)
+    expect(screen.queryByText(/No lists yet/u)).toBeNull()
+    cleanup()
+
+    const slow = deferred<OwnListView[]>()
+    let calls = 0
+    let tell: (() => void) | null = null
+    const racing = listsWith([], {
+      lists: () => (++calls === 1 ? slow.promise : Promise.resolve([{ id: 'bb', title: 'Deserts', items: [] }])),
+      subscribe: (listener) => {
+        tell = listener
+        return () => {}
+      },
+    })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={circleWith()} lists={racing} />)
+    await waitFor(() => expect(tell).not.toBeNull())
+    await fire(() => tell)
+    await screen.findByLabelText('Title of Deserts')
+    slow.resolve([one])
+    await flush()
+    expect(screen.queryByLabelText('Title of Sea')).toBeNull()
+    expect(screen.getByLabelText('Title of Deserts')).toBeTruthy()
+  })
+})
+
+describe('the last clauses of the Circle screen — one row each', () => {
+  const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+  const circleWith = (over: Partial<CirclePort> = {}): CirclePort => ({
+    showsShelf: () => Promise.resolve(false),
+    muted: () => Promise.resolve(false),
+    setMuted: () => Promise.resolve(),
+    cover: () => Promise.resolve(null),
+    setShowsShelf: () => Promise.resolve(),
+    friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
+    book: () => Promise.resolve({ people: [], alsoRead: [] }),
+    forget: () => Promise.resolve(),
+    subscribe: () => () => {},
+    ...over,
+  })
+  const listsWith = (own: OwnListView[], over: Partial<ListsPort> = {}): ListsPort => ({
+    lists: () => Promise.resolve(own),
+    create: vi.fn(() => Promise.resolve('new1')),
+    retitle: vi.fn(() => Promise.resolve()),
+    place: vi.fn(() => Promise.resolve()),
+    takeOff: vi.fn(() => Promise.resolve()),
+    delete: vi.fn(() => Promise.resolve()),
+    subscribe: () => () => {},
+    ...over,
+  })
+  const withMo = () => portWith({ people: () => Promise.resolve([mo]) })
+  const nobody = () => portWith({ people: () => Promise.resolve([]) })
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void
+    let reject!: (cause: unknown) => void
+    const promise = new Promise<T>((yes, no) => {
+      resolve = yes
+      reject = no
+    })
+    return { promise, resolve, reject }
+  }
+  const friendView = (over: Partial<FriendView> = {}): FriendView => ({ shelf: [], recent: [], lists: [], ...over })
+
+  it('says an own list is empty, names an item with its author, and offers to keep a note only while it differs', async () => {
+    const lists = listsWith([
+      { id: 'aa', title: 'Empty', items: [] },
+      { id: 'bb', title: 'Sea', items: [{ pub: 'i1', title: 'Moby-Dick', author: 'Herman Melville', position: 1, note: 'n', bookId: 'book:moby' }] },
+    ])
+    render(<CirclePane port={nobody()} circle={circleWith()} lists={lists} />)
+    await screen.findByLabelText('Title of Empty')
+    expect(document.querySelector('[data-own-list="aa"]')!.textContent).toContain('Nothing on it yet.')
+    expect(document.querySelector('[data-own-list="bb"]')!.textContent).not.toContain('Nothing on it yet.')
+    expect(screen.getByText('Moby-Dick — Herman Melville')).toBeTruthy()
+    const note = screen.getByLabelText('Note on Moby-Dick') as HTMLInputElement
+    fireEvent.change(note, { target: { value: 'x' } })
+    expect(screen.getByRole('button', { name: 'Keep note on Moby-Dick' })).toBeTruthy()
+    fireEvent.change(note, { target: { value: 'n' } })
+    expect(screen.queryByRole('button', { name: 'Keep note on Moby-Dick' })).toBeNull()
+  })
+
+  it('lets a slow failing lists read not empty a later one', async () => {
+    const slow = deferred<OwnListView[]>()
+    let calls = 0
+    let tell: (() => void) | null = null
+    const lists = listsWith([], {
+      lists: () => (++calls === 1 ? slow.promise : Promise.resolve([{ id: 'bb', title: 'Deserts', items: [] }])),
+      subscribe: (listener) => {
+        tell = listener
+        return () => {}
+      },
+    })
+    render(<CirclePane port={nobody()} circle={circleWith()} lists={lists} />)
+    await waitFor(() => expect(tell).not.toBeNull())
+    await fire(() => tell)
+    await screen.findByLabelText('Title of Deserts')
+    slow.reject(new Error('too late'))
+    await flush()
+    expect(screen.getByLabelText('Title of Deserts')).toBeTruthy()
+  })
+
+  it('lets a slow friend read that finally lands not overwrite a later one', async () => {
+    const slow = deferred<FriendView>()
+    let calls = 0
+    let tell: (() => void) | null = null
+    const circle = circleWith({
+      friend: () => (++calls === 1 ? slow.promise : Promise.resolve(friendView({ shelf: [{ pub: 's1', title: 'Dune', author: '', language: 'en', own: null, device: null, cover: null }] }))),
+      subscribe: (listener) => {
+        tell = listener
+        return () => {}
+      },
+    })
+    render(<CirclePane port={withMo()} circle={circle} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await waitFor(() => expect(tell).not.toBeNull())
+    await fire(() => tell)
+    await screen.findByText('Dune')
+    slow.resolve(friendView({ shelf: [{ pub: 's9', title: 'Stale', author: '', language: 'en', own: null, device: null, cover: null }] }))
+    await flush()
+    expect(screen.queryByText('Stale')).toBeNull()
+    expect(screen.getByText('Dune')).toBeTruthy()
+  })
+
+  it('draws the shelf marker on the reader’s own book only, no Lists heading without lists, and each list item by its own words', async () => {
+    const openBook = vi.fn()
+    const circle = circleWith({
+      friend: () =>
+        Promise.resolve(
+          friendView({
+            shelf: [
+              { pub: 's1', title: 'Moby-Dick', author: '', language: 'en', own: 'book:moby', device: null, cover: null },
+              { pub: 's2', title: 'Ulysses', author: '', language: 'en', own: null, device: null, cover: null },
+            ],
+            lists: [
+              {
+                id: 'aa',
+                title: 'Sea',
+                items: [
+                  { pub: 'i1', title: 'Moby-Dick', author: '', note: '', own: 'book:moby' },
+                  { pub: 'i2', title: 'Emma', author: 'Jane Austen', note: 'later', own: null },
+                ],
+              },
+              { id: 'bb', title: 'Bare', items: [] },
+            ],
+          }),
+        ),
+    })
+    render(<CirclePane port={withMo()} circle={circle} openBook={openBook} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText('Lists')
+    expect(document.querySelector('[data-own-book="book:moby"]')!.textContent).toContain('Moby-Dick')
+    expect(screen.getByText('Ulysses').closest(`.${CAPABILITY_UI.row}`)!.textContent).toBe('Ulysses')
+    expect(document.querySelector('[data-friend-list="bb"]')!.textContent).toContain('Nothing on it yet.')
+    expect(document.querySelector('[data-friend-list="aa"]')!.textContent).not.toContain('Nothing on it yet.')
+    expect(screen.getByText('Emma — Jane Austen · “later”')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Open your copy of Emma' })).toBeNull()
+    const opens = screen.getAllByRole('button', { name: 'Open your copy of Moby-Dick' })
+    expect(opens).toHaveLength(2)
+    fireEvent.click(opens[1]!)
+    expect(openBook).toHaveBeenCalledWith('book:moby')
+    cleanup()
+
+    /* Without a way to open books: the own copy is marked in words, in the right row only. */
+    render(<CirclePane port={withMo()} circle={circle} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText('Lists')
+    expect(screen.queryByRole('button', { name: /Open your copy/u })).toBeNull()
+    expect(document.querySelector('[data-friend-list="aa"]')!.textContent).toContain('Moby-DickOn your shelf')
+    expect(document.querySelector('[data-friend-list="aa"]')!.textContent).not.toContain('”On your shelf')
+    expect(document.querySelectorAll('[data-friend-list="aa"] span').length).toBeGreaterThan(0)
+    expect([...document.querySelectorAll('[data-friend-list="aa"] span')].filter((one) => one.textContent === 'On your shelf')).toHaveLength(1)
+    cleanup()
+
+    const bare = circleWith({ friend: () => Promise.resolve(friendView()) })
+    render(<CirclePane port={withMo()} circle={bare} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText('Mo has shown you no books.')
+    expect(screen.queryByText('Lists')).toBeNull()
+  })
+})
+
+describe('a new person port', () => {
+  it('is read afresh, with its own people', async () => {
+    const first = portWith({ people: () => Promise.resolve([{ person: 'aa'.repeat(32), displayName: 'Ann', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }]) })
+    const view = render(<CirclePane port={first} />)
+    await screen.findByText('Ann')
+    const second = portWith({ people: () => Promise.resolve([{ person: 'bb'.repeat(32), displayName: 'Bea', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }]) })
+    view.rerender(<CirclePane port={second} />)
+    await screen.findByText('Bea')
+    expect(screen.queryByText('Ann')).toBeNull()
+  })
+})
+
+describe('the offer’s own clock', () => {
+  /* ⚠️ **THIS USED TO END "…with no other change", AND THE SILENCE WAS THE
+   * DEFECT.** The link vanished and the screen fell back to "Add somebody"
+   * with no account of where it had gone — so a reader who had already sent
+   * one could not tell a dead link from a friend who had not got round to it.
+   * A lapsed offer says so now, and this case asserts that it does.
+   *
+   * ⚠️ AND `setInterval` IS FAKED, because the pane ticks once a second to show
+   * how long is left. Faking only `setTimeout` left the clock stopped, so the
+   * offer never expired and the assertion below could not fail for the reason
+   * it claims. A test that fakes a different timer from the one the code uses
+   * is testing nothing. */
+  it('shows the link until the moment it expires, then says it ran out', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+    try {
+      vi.setSystemTime(1_700_000_000_000)
+      const offer = vi.fn(() => Promise.resolve({ url: 'paper://pair?s=soon', svg: '<svg/>', expiresAt: Date.now() + 1_000 }))
+      render(<CirclePane port={portWith({ offer })} />)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /Add somebody/u }))
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      /* TRACKED BY THE QR, NOT THE URL. The raw link is no longer drawn — it
+         appears only when copying fails — so the picture is what "the offer is
+         on screen" now means. */
+      expect(screen.getByLabelText('Pairing QR code')).toBeTruthy()
+      /* One millisecond short: still good. */
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(999)
+      })
+      expect(screen.queryByLabelText('Pairing QR code')).not.toBeNull()
+      /* ⚠️ **AT EXPIRY, AND EXACTLY THERE.** This advanced 1 100 ms past the
+         999 — a full second past the moment being tested — so a comparison
+         that kept the offer alive AT its expiry would have been taken down by
+         the following tick and passed anyway. One millisecond is what
+         separates `>` from `>=` here. */
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1)
+      })
+      expect(screen.queryByLabelText('Pairing QR code')).toBeNull()
+      expect(screen.getByText(/ran out before anybody used it/u)).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('takes down at once a link that arrives already expired', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      vi.setSystemTime(1_700_000_000_000)
+      const offer = vi.fn(() => Promise.resolve({ url: 'paper://pair?s=old', svg: '<svg/>', expiresAt: Date.now() }))
+      render(<CirclePane port={portWith({ offer })} />)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /Add somebody/u }))
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      /* ⚠️ **THE URL IS HIDDEN WHILE AN OFFER IS LIVE TOO**, so its absence
+         says nothing at all: a pane still showing a usable QR code and a copy
+         button for an offer that expired before it was drawn would pass this.
+         What has to be gone is the offer itself, and what has to be there is
+         the sentence saying why. */
+      expect(screen.queryByText('paper://pair?s=old')).toBeNull()
+      expect(screen.queryByLabelText('Pairing QR code')).toBeNull()
+      expect(screen.queryByRole('button', { name: /Copy/u })).toBeNull()
+      expect(screen.getByText(/ran out before anybody used it/u)).toBeTruthy()
+      /* And another can be offered — an expired link is not a dead end. */
+      expect(screen.getByRole('button', { name: /Add somebody/u })).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('an act with nowhere of its own to put a failure', () => {
+  it('says so beside the controls that stay — never as a circle that could not be read', async () => {
+    /* ⚠️ A person who could not be removed used to be reported as "Paper
+       could not read your circle", over a roster that had read perfectly
+       well — and the whole panel went with it. */
+    const people: readonly KnownPerson[] = [{ person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 2 }, revoked: [], devices: [] }]
+    const forgetPerson = vi.fn(() => Promise.reject(new Error('the peer would not forget')))
+    render(<CirclePane port={portWith({ people: () => Promise.resolve(people), forgetPerson })} />)
+    await screen.findByText('Mo')
+    fireEvent.click(screen.getByRole('button', { name: /Remove/u }))
+    await screen.findByText(/That did not go through\. the peer would not forget/u)
+    expect(screen.queryByText(/could not read your circle/u)).toBeNull()
+    /* The roster stands, and so does the way to try again. */
+    expect(screen.getByText('Mo')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Remove/u })).toBeTruthy()
+  })
+
+  it('re-reads the status once the button has minted — the circle hears of the identity from the peer, not from here', async () => {
+    let minted = false
+    const ensure = vi.fn(() => {
+      minted = true
+      return Promise.resolve('person')
+    })
+    const circle = minimalCircleFor()
+    render(<CirclePane port={portWith({ ensure, status: () => Promise.resolve(minted ? status() : status({ hasIdentity: false, personId: null })) })} circle={circle} />)
+    const start = await screen.findByRole('button', { name: /Start a circle/u })
+    await act(async () => {
+      fireEvent.click(start)
+    })
+    expect(ensure).toHaveBeenCalledTimes(1)
+    await screen.findByText(/holds your keys/u)
+    expect('identityChanged' in circle).toBe(false)
+  })
+})
+
+/** A circle port with nothing in it, for a test about the pane's own acts. */
+const minimalCircleFor = (): CirclePort => ({
+  showsShelf: () => Promise.resolve(false),
+  muted: () => Promise.resolve(false),
+  setMuted: () => Promise.resolve(),
+  setShowsShelf: () => Promise.resolve(),
+  friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
+  cover: () => Promise.resolve(null),
+  book: () => Promise.resolve({ people: [], alsoRead: [] }),
+  forget: () => Promise.resolve(),
+  subscribe: () => () => {},
+})
+
+describe('the reader’s own lists, read', () => {
+  const minimalCircle = (): CirclePort =>
+    ({
+      showsShelf: () => Promise.resolve(false),
+      muted: () => Promise.resolve(false),
+      setMuted: () => Promise.resolve(),
+    cover: () => Promise.resolve(null),
+      setShowsShelf: () => Promise.resolve(),
+      friend: () => Promise.resolve({ shelf: [], recent: [], lists: [] }),
+      book: () => Promise.resolve({ people: [], alsoRead: [] }),
+      forget: () => Promise.resolve(),
+      subscribe: () => () => {},
+      dispose: () => {},
+    }) as unknown as CirclePort
+  const listsOver = (over: Partial<ListsPort>): ListsPort =>
+    ({
+      lists: () => Promise.resolve([]),
+      create: () => Promise.resolve('x'),
+      retitle: () => Promise.resolve(),
+      place: () => Promise.resolve(),
+      takeOff: () => Promise.resolve(),
+      delete: () => Promise.resolve(),
+      subscribe: () => () => {},
+      ...over,
+    }) as unknown as ListsPort
+
+  it('says a read that failed, keeps the section, and says nothing about having no lists', async () => {
+    let fail = true
+    let tell: (() => void) | null = null
+    const lists = listsOver({
+      lists: () => (fail ? Promise.reject(new Error('the folder would not read')) : Promise.resolve([{ id: 'l1', title: 'Sea', items: [] }])),
+      subscribe: (listener: () => void) => {
+        tell = listener
+        return () => {}
+      },
+    })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={minimalCircle()} lists={lists} />)
+    await screen.findByText(/Paper could not read your lists\. the folder would not read/u)
+    expect(screen.getByText('Your lists')).toBeTruthy()
+    expect(screen.queryByText(/No lists yet/u)).toBeNull()
+    /* A later read that succeeds clears the trouble. */
+    fail = false
+    await fire(() => tell)
+    await screen.findByLabelText('Title of Sea')
+    expect(screen.queryByText(/could not read your lists/u)).toBeNull()
+  })
+
+  it('lets a newer answer stand when an older read lands after it', async () => {
+    let resolveFirst: ((value: OwnListView[]) => void) | null = null
+    const first = new Promise<OwnListView[]>((resolve) => {
+      resolveFirst = resolve
+    })
+    let calls = 0
+    let tell: (() => void) | null = null
+    const lists = listsOver({
+      lists: () => (++calls === 1 ? first : Promise.resolve([{ id: 'l2', title: 'Newer', items: [] }])),
+      subscribe: (listener: () => void) => {
+        tell = listener
+        return () => {}
+      },
+    })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={minimalCircle()} lists={lists} />)
+    await screen.findByText(/holds your keys/u)
+    await fire(() => tell)
+    await screen.findByLabelText('Title of Newer')
+    resolveFirst!([{ id: 'l1', title: 'Older', items: [] }])
+    await flush()
+    expect(screen.queryByLabelText('Title of Older')).toBeNull()
+    expect(screen.getByLabelText('Title of Newer')).toBeTruthy()
+  })
+})
+
+describe('an act begun through a port the screen no longer holds', () => {
+  it('does not refresh through the old port after the new one’s read, nor put its roster back', async () => {
+    /* ⚠️ The peer restarted while a removal was out: its refresh, bound to
+       the old port, landed after the new port's read and put the old run's
+       status and roster back — with the newest generation number, so the
+       revision guard believed it. */
+    let finish: (() => void) | null = null
+    const ann: KnownPerson = { person: 'aa'.repeat(32), displayName: 'Ann', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+    const bea: KnownPerson = { person: 'bb'.repeat(32), displayName: 'Bea', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+    const first = portWith({
+      people: vi.fn(() => Promise.resolve([ann])),
+      forgetPerson: () =>
+        new Promise<void>((done) => {
+          finish = done
+        }),
+    })
+    const view = render(<CirclePane port={first} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(finish).not.toBeNull())
+    expect(first.people).toHaveBeenCalledTimes(1)
+    /* Ann is on both rosters, so her row — and the act on it — survives the swap. */
+    const second = portWith({ people: vi.fn(() => Promise.resolve([ann, bea])) })
+    view.rerender(<CirclePane port={second} />)
+    await screen.findByText('Bea')
+    await fire(() => finish)
+    await flush()
+    /* The old port was read once, at mount, and never again; the new one's roster stands. */
+    expect(first.people).toHaveBeenCalledTimes(1)
+    expect(second.people).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Bea')).toBeTruthy()
+    expect(screen.getByText('Ann')).toBeTruthy()
+  })
+})
+
+describe('a friend’s jackets, asked for when seen — WI-23.C5', () => {
+  const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+
+  it('asks only for the rows that have come into view, and once each', async () => {
+    /* ⚠️ A shelf of hundreds drew hundreds of rows and dialled for every
+       one at mount. Observed instead: a row asks when it intersects. */
+    const observed: { node: Element; tell: (entries: readonly Partial<IntersectionObserverEntry>[]) => void }[] = []
+    class FakeObserver {
+      constructor(private readonly callback: IntersectionObserverCallback) {}
+      observe(node: Element) {
+        observed.push({ node, tell: (entries) => this.callback(entries as IntersectionObserverEntry[], this as unknown as IntersectionObserver) })
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    const world = globalThis as { IntersectionObserver?: unknown }
+    const before = world.IntersectionObserver
+    world.IntersectionObserver = FakeObserver
+    try {
+      const cover = vi.fn((_person: string, book: { readonly pub: string }) => Promise.resolve(`data:image/png;base64,${book.pub}`))
+      const shelf = ['s1', 's2', 's3'].map((pub) => ({ pub, title: `Book ${pub}`, author: '', language: 'en', own: null, device: 'd1', cover: 'ab'.repeat(32) }))
+      const circle = { ...minimalCircleFor(), friend: () => Promise.resolve({ shelf, recent: [], lists: [] }), cover }
+      const { container } = render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]) })} circle={circle} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+      await screen.findByText('Book s3')
+      await flush()
+      expect(cover).not.toHaveBeenCalled()
+      expect(observed.map((one) => one.node.getAttribute('data-jacket-slot'))).toEqual(['s1', 's2', 's3'])
+      /* Not intersecting is not seen. */
+      await act(async () => observed[0]!.tell([{ isIntersecting: false }]))
+      expect(cover).not.toHaveBeenCalled()
+      /* The second row comes into view: that row, and only it. */
+      await act(async () => observed[1]!.tell([{ isIntersecting: true }]))
+      await waitFor(() => expect(container.querySelector('img[data-jacket="s2"]')).not.toBeNull())
+      expect(cover).toHaveBeenCalledTimes(1)
+      expect(cover.mock.calls[0]![1]).toMatchObject({ pub: 's2' })
+      expect(container.querySelector('img[data-jacket="s1"]')).toBeNull()
+      /* Seen once is seen: a second intersection does not ask again. */
+      await act(async () => observed[1]!.tell([{ isIntersecting: true }]))
+      expect(cover).toHaveBeenCalledTimes(1)
+    } finally {
+      if (before === undefined) delete world.IntersectionObserver
+      else world.IntersectionObserver = before
+    }
+  })
+})
+
+describe('each section acts on its own — held apart', () => {
+  const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+  const ann: KnownPerson = { person: 'aa'.repeat(32), displayName: 'Ann', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+  const listsWith = (own: OwnListView[], over: Partial<ListsPort> = {}): ListsPort => ({
+    lists: () => Promise.resolve(own),
+    create: vi.fn(() => Promise.resolve('new1')),
+    retitle: vi.fn(() => Promise.resolve()),
+    place: vi.fn(() => Promise.resolve()),
+    takeOff: vi.fn(() => Promise.resolve()),
+    delete: vi.fn(() => Promise.resolve()),
+    subscribe: () => () => {},
+    ...over,
+  })
+
+  it('holds only the row that is busy: removing Mo leaves Ann’s switch, the offer and the twelve words usable', async () => {
+    /* ⚠️ One `busy` for the whole screen disabled every control for every act. */
+    let finish: (() => void) | null = null
+    const circle = {
+      ...minimalCircleFor(),
+      forget: () =>
+        new Promise<void>((done) => {
+          finish = done
+        }),
+    }
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo, ann]) })} circle={circle} />)
+    await screen.findByRole('checkbox', { name: 'Show my shelf to Ann' })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Remove' })[0]!)
+    await waitFor(() => expect((screen.getAllByRole('button', { name: 'Remove' })[0] as HTMLButtonElement).disabled).toBe(true))
+    expect((screen.getAllByRole('button', { name: 'Remove' })[1] as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('checkbox', { name: 'Show my shelf to Ann' }) as HTMLInputElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: /Add somebody/u }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: /Show my twelve words/u }) as HTMLButtonElement).disabled).toBe(false)
+    await fire(() => finish)
+  })
+
+  it('says a list that would not rename beside that list — not beside the pairing — and leaves the other list usable', async () => {
+    const sea: OwnListView = { id: 'aa', title: 'Sea', items: [] }
+    const deserts: OwnListView = { id: 'bb', title: 'Deserts', items: [] }
+    const lists = listsWith([sea, deserts], { retitle: () => Promise.reject(new Error('the list would not write')) })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([]) })} circle={minimalCircleFor()} lists={lists} />)
+    fireEvent.change(await screen.findByLabelText('Title of Sea'), { target: { value: 'Whales' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Rename' }))
+    await screen.findByText(/That did not go through\. the list would not write/u)
+    expect(document.querySelector('[data-own-list="aa"]')!.textContent).toContain('the list would not write')
+    expect(document.querySelector('[data-own-list="bb"]')!.textContent).not.toContain('the list would not write')
+    expect((screen.getByLabelText('Title of Deserts') as HTMLInputElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: /Add somebody/u }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('keeps the roster on screen when the twelve words cannot be read', async () => {
+    /* ⚠️ A failed keychain read used to replace the whole screen with "could
+       not read your circle", over a roster that had read perfectly well. */
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]), phrase: () => Promise.reject(new Error('keychain locked')) })} />)
+    await screen.findByText('Mo')
+    fireEvent.click(screen.getByRole('button', { name: /Show my twelve words/u }))
+    await screen.findByText(/keychain locked/u)
+    expect(screen.getByText('Mo')).toBeTruthy()
+    expect(screen.queryByText(/could not read your circle/u)).toBeNull()
+  })
+
+  it('says a pairing that would not start beside the pairing, with the roster’s Remove still usable', async () => {
+    render(<CirclePane port={portWith({ people: () => Promise.resolve([mo]), offer: () => Promise.reject(new Error('no network')) })} />)
+    await screen.findByText('Mo')
+    fireEvent.click(screen.getByRole('button', { name: /Add somebody/u }))
+    await screen.findByText(/That did not go through\. no network/u)
+    expect((screen.getByRole('button', { name: 'Remove' }) as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByRole('button', { name: /Add somebody/u })).toBeTruthy()
+  })
+})
+
+describe('Start a circle begun through a port the screen no longer holds', () => {
+  it('does not read the old port’s status after its ensure lands, and keeps drawing the new port’s', async () => {
+    /* ⚠️ Two ports with no identity share the identity section's empty key,
+       so a peer restart while the button was out left the section mounted
+       under the new port with an act bound to the old one. Its refresh read
+       the OLD peer's freshly minted status and drew it as the new peer's. */
+    let finish: (() => void) | null = null
+    let minted = false
+    const first = portWith({
+      ensure: () =>
+        new Promise<string>((done) => {
+          finish = () => {
+            minted = true
+            done('person')
+          }
+        }),
+      status: vi.fn(() => Promise.resolve(minted ? status() : status({ hasIdentity: false, personId: null }))),
+    })
+    const view = render(<CirclePane port={first} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Start a circle/u }))
+    await waitFor(() => expect(finish).not.toBeNull())
+    expect(first.status).toHaveBeenCalledTimes(1)
+    /* The new port has no identity either: the same section instance, under the same key. */
+    const second = portWith({ status: vi.fn(() => Promise.resolve(status({ hasIdentity: false, personId: null }))) })
+    view.rerender(<CirclePane port={second} />)
+    await waitFor(() => expect(second.status).toHaveBeenCalledTimes(1))
+    await fire(() => finish)
+    await flush()
+    /* The old port was read once, at mount, and never again; the new port's state stands, and the button is free again. */
+    expect(first.status).toHaveBeenCalledTimes(1)
+    expect(second.status).toHaveBeenCalledTimes(1)
+    expect((screen.getByRole('button', { name: /Start a circle/u }) as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByText(/holds your keys/u)).toBeNull()
+  })
+
+  it('does not show twelve words read through the old port under the new one', async () => {
+    let finish: ((words: string) => void) | null = null
+    const who = 'aa'.repeat(32)
+    const first = portWith({
+      status: () => Promise.resolve(status({ personId: who })),
+      phrase: () =>
+        new Promise<string | null>((done) => {
+          finish = done
+        }),
+    })
+    const view = render(<CirclePane port={first} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Show my twelve words/u }))
+    await waitFor(() => expect(finish).not.toBeNull())
+    /* The same person on the new port — the same key, the same instance. */
+    const second = portWith({ status: () => Promise.resolve(status({ personId: who })), phrase: vi.fn(() => Promise.resolve('the new words')) })
+    view.rerender(<CirclePane port={second} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: /Show my twelve words/u })).toBeTruthy())
+    finish!('the old secret words')
+    await flush()
+    /* ⚠️ **THE WHOLE PHRASE IS NEVER ON SCREEN AS ONE STRING.**
+       `IdentitySection` renders it as an `<ol>` of one `<li>` per word, so
+       `queryByText('the old secret words')` matches NOTHING whether or not the
+       phrase is visible — and `toBeNull()` therefore passed either way. This
+       assertion could not fail. The words are what is on screen, so the words
+       are what must be absent. */
+    for (const word of 'the old secret words'.split(' ')) {
+      expect(screen.queryByText(word)).toBeNull()
+    }
+    expect(second.phrase).not.toHaveBeenCalled()
+  })
+})
+
+describe('a person row, held to its source — every clause mutation testing found unasked', () => {
+  const mo: KnownPerson = { person: 'ff'.repeat(32), displayName: 'Mo', roster: { epoch: 1, hlc: 1 }, revoked: [], devices: [] }
+  const withMo = () => portWith({ people: () => Promise.resolve([mo]) })
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void
+    let reject!: (cause: unknown) => void
+    const promise = new Promise<T>((yes, no) => {
+      resolve = yes
+      reject = no
+    })
+    return { promise, resolve, reject }
+  }
+  const shelfSwitch = () => screen.getByRole('checkbox', { name: 'Show my shelf to Mo' }) as HTMLInputElement
+
+  it('reads a switch back through the circle it holds NOW, not the one the write began on', async () => {
+    /* ⚠️ **THE CHECK THAT SAID IT BOUND A READ TO ITS SOURCE COMPARED A NAME
+       WITH ITSELF.** `circle === held`, where `held` had just been assigned
+       from `circle` in the same closure, so it could not fail — found
+       2026-09-15 as a surviving mutant. A write holds the read-back it was
+       begun with; when the circle was replaced while the write was out, that
+       read-back asked the OLD circle and drew its answer under the new one. */
+    let finish: (() => void) | null = null
+    const port = withMo()
+    const first: CirclePort = {
+      ...minimalCircleFor(),
+      showsShelf: () => Promise.resolve(true),
+      setShowsShelf: () =>
+        new Promise<void>((done) => {
+          finish = done
+        }),
+    }
+    const second: CirclePort = { ...minimalCircleFor(), showsShelf: vi.fn(() => Promise.resolve(false)) }
+    const view = render(<CirclePane port={port} circle={first} />)
+    const box = (await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })) as HTMLInputElement
+    expect(box.checked).toBe(true)
+    fireEvent.click(box)
+    await waitFor(() => expect(finish).not.toBeNull())
+
+    view.rerender(<CirclePane port={port} circle={second} />)
+    await waitFor(() => expect(second.showsShelf).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(shelfSwitch().checked).toBe(false))
+
+    await fire(() => finish)
+    await flush()
+    /* The circle on screen's answer stands, because the read-back asked IT — a second time. */
+    expect(shelfSwitch().checked).toBe(false)
+    expect(second.showsShelf).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads the hold-back switch back once its write has landed, as it does the shelf switch', async () => {
+    const stored = { shows: false, muted: false }
+    const circle: CirclePort = {
+      ...minimalCircleFor(),
+      showsShelf: () => Promise.resolve(stored.shows),
+      muted: () => Promise.resolve(stored.muted),
+      /* A port that does not tell its subscribers, so only the read-back can move the switch. */
+      setShowsShelf: (_person, on) => {
+        stored.shows = on
+        return Promise.resolve()
+      },
+      setMuted: (_person, on) => {
+        stored.muted = on
+        return Promise.resolve()
+      },
+    }
+    render(<CirclePane port={withMo()} circle={circle} />)
+    const held = (await screen.findByRole('checkbox', { name: "Hold back Mo's passages" })) as HTMLInputElement
+    expect(held.checked).toBe(false)
+    fireEvent.click(held)
+    await screen.findByText(/Mo's passages are not drawn in your books/u)
+    expect((screen.getByRole('checkbox', { name: "Hold back Mo's passages" }) as HTMLInputElement).checked).toBe(true)
+    fireEvent.click(shelfSwitch())
+    await screen.findByText(/Mo can see every book in your library/u)
+    expect(shelfSwitch().checked).toBe(true)
+  })
+
+  it('lets a switch read begun on a replaced circle land without drawing it', async () => {
+    const slow = deferred<boolean>()
+    const port = withMo()
+    const first: CirclePort = { ...minimalCircleFor(), showsShelf: () => slow.promise }
+    const second: CirclePort = { ...minimalCircleFor(), showsShelf: () => Promise.resolve(false) }
+    const view = render(<CirclePane port={port} circle={first} />)
+    await screen.findByRole('button', { name: 'Their shelf' })
+    view.rerender(<CirclePane port={port} circle={second} />)
+    await waitFor(() => expect(shelfSwitch().checked).toBe(false))
+    slow.resolve(true)
+    await flush()
+    expect(shelfSwitch().checked).toBe(false)
+  })
+
+  it('lets a switch read begun on a circle that has gone fail without saying so', async () => {
+    const slow = deferred<boolean>()
+    const port = withMo()
+    const view = render(<CirclePane port={port} circle={{ ...minimalCircleFor(), showsShelf: () => slow.promise }} />)
+    await screen.findByRole('button', { name: 'Their shelf' })
+    view.rerender(<CirclePane port={port} circle={null} />)
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Their shelf' })).toBeNull())
+    slow.reject(new Error('the old circle will not read'))
+    await flush()
+    expect(screen.queryByText(/could not read what Mo shared/u)).toBeNull()
+    expect(screen.getByText('Mo')).toBeTruthy()
+  })
+
+  it('says a switch that cannot be read, rather than drawing it in a position nobody read', async () => {
+    const circle: CirclePort = { ...minimalCircleFor(), showsShelf: () => Promise.reject(new Error('the relationship will not read')) }
+    render(<CirclePane port={withMo()} circle={circle} />)
+    const said = await screen.findByText(/^Paper could not read what Mo shared\./u)
+    expect(said.textContent).toBe('Paper could not read what Mo shared. the relationship will not read')
+    expect(screen.queryByRole('checkbox')).toBeNull()
+  })
+
+  it('reads a friend’s shelf only once it is asked for, and draws none of the last one while the next is read', async () => {
+    const answers: Promise<FriendView>[] = [
+      Promise.resolve({ shelf: [{ pub: 's1', title: 'Dune', author: '', language: 'en', own: null, device: null, cover: null }], recent: [], lists: [] }),
+      new Promise<FriendView>(() => {}),
+    ]
+    const friend = vi.fn(() => answers.shift()!)
+    render(<CirclePane port={withMo()} circle={{ ...minimalCircleFor(), friend }} />)
+    await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })
+    await flush()
+    expect(friend).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Their shelf' }))
+    await screen.findByText('Dune')
+    fireEvent.click(screen.getByRole('button', { name: 'Hide their shelf' }))
+    await flush()
+    expect(friend).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Their shelf' }))
+    await waitFor(() => expect(friend).toHaveBeenCalledTimes(2))
+    await flush()
+    expect(screen.queryByText('Dune')).toBeNull()
+  })
+
+  it('clears the shelf and the trouble it read from a circle it no longer holds', async () => {
+    const port = withMo()
+    const silent = (): CirclePort => ({ ...minimalCircleFor(), showsShelf: () => new Promise<boolean>(() => {}), muted: () => new Promise<boolean>(() => {}) })
+    const shown = render(
+      <CirclePane
+        port={port}
+        circle={{ ...minimalCircleFor(), friend: () => Promise.resolve({ shelf: [{ pub: 's1', title: 'Dune', author: '', language: 'en', own: null, device: null, cover: null }], recent: [], lists: [] }) }}
+      />,
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText('Dune')
+    shown.rerender(<CirclePane port={port} circle={silent()} />)
+    await flush()
+    expect(screen.queryByText('Dune')).toBeNull()
+    cleanup()
+
+    const failed = render(<CirclePane port={port} circle={{ ...minimalCircleFor(), friend: () => Promise.reject(new Error('their shelf will not read')) }} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText(/could not read what Mo shared/u)
+    failed.rerender(<CirclePane port={port} circle={silent()} />)
+    await flush()
+    expect(screen.queryByText(/could not read what Mo shared/u)).toBeNull()
+  })
+
+  it('draws no switch and no friend’s shelf without a circle, not even in the commit before its reset runs', async () => {
+    /* ⚠️ **THE RESET IS AN EFFECT, SO THE COMMIT THAT TAKES THE CIRCLE AWAY STILL
+       HOLDS WHAT IT READ.** Only `circle !== null`, beside each drawing, keeps
+       that commit empty — which is a frame the webview can paint. A layout
+       effect in the parent runs after that commit and before the reset, so it
+       sees exactly what the frame would show. */
+    const commits: { readonly switches: number; readonly shelves: number }[] = []
+    const port = withMo()
+    const Probe = ({ circle }: { readonly circle: CirclePort | null }) => {
+      useLayoutEffect(() => {
+        commits.push({
+          switches: document.querySelectorAll('input[aria-label="Show my shelf to Mo"], input[aria-label="Hold back Mo\'s passages"]').length,
+          shelves: document.querySelectorAll('[data-friend-view]').length,
+        })
+      })
+      return <CirclePane port={port} circle={circle} />
+    }
+    const view = render(<Probe circle={minimalCircleFor()} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await screen.findByText('Mo has shown you no books.')
+    await screen.findByRole('checkbox', { name: 'Show my shelf to Mo' })
+    const before = commits.length
+
+    view.rerender(<Probe circle={null} />)
+    const after = commits.slice(before)
+    expect(after.length).toBeGreaterThan(0)
+    expect(after).toEqual(after.map(() => ({ switches: 0, shelves: 0 })))
+  })
+
+  it('reads the roster again once somebody is removed', async () => {
+    let people: readonly KnownPerson[] = [mo]
+    const forgetPerson = vi.fn(() => {
+      people = []
+      return Promise.resolve()
+    })
+    render(<CirclePane port={portWith({ people: () => Promise.resolve(people), forgetPerson })} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }))
+    await screen.findByText('Nobody yet.')
+    expect(forgetPerson).toHaveBeenCalledWith(mo.person)
+    expect(screen.queryByText('Mo')).toBeNull()
+  })
+
+  it('draws no trouble line in a row where nothing has failed', async () => {
+    render(<CirclePane port={withMo()} />)
+    const row = (await screen.findByText('Mo')).closest(`.${CAPABILITY_UI.row}`)!.parentElement!
+    expect(row.querySelectorAll('p')).toHaveLength(0)
+  })
+
+  it('lets a jacket go when its row changes, draws nothing a let-go request brings back, and asks nothing of a row with no device', async () => {
+    const asked: { readonly book: FriendBook; readonly signal: AbortSignal | undefined; readonly answer: ReturnType<typeof deferred<string | null>> }[] = []
+    const cover = vi.fn((_person: string, book: FriendBook, signal?: AbortSignal) => {
+      const answer = deferred<string | null>()
+      asked.push({ book, signal, answer })
+      return answer.promise
+    })
+    const dune: FriendBook = { pub: 's1', title: 'Dune', author: '', language: 'en', own: null, device: 'd1', cover: 'ab'.repeat(32) }
+    let shelf: readonly FriendBook[] = [dune]
+    let tell: (() => void) | null = null
+    const circle: CirclePort = {
+      ...minimalCircleFor(),
+      friend: () => Promise.resolve({ shelf, recent: [], lists: [] }),
+      cover,
+      subscribe: (listener) => {
+        tell = listener
+        return () => {}
+      },
+    }
+    const { container } = render(<CirclePane port={withMo()} circle={circle} />)
+    const jacket = () => container.querySelector('img[data-jacket="s1"]')
+    fireEvent.click(await screen.findByRole('button', { name: 'Their shelf' }))
+    await waitFor(() => expect(asked).toHaveLength(1))
+    expect(asked[0]!.signal?.aborted).toBe(false)
+
+    /* A new digest for the same book: the request out is let go, and what it brings back is not drawn. */
+    shelf = [{ ...dune, cover: 'cd'.repeat(32) }]
+    await fire(() => tell)
+    await waitFor(() => expect(asked).toHaveLength(2))
+    expect(asked[0]!.signal?.aborted).toBe(true)
+    asked[0]!.answer.resolve('data:image/png;base64,OLD')
+    await flush()
+    expect(jacket()).toBeNull()
+    asked[1]!.answer.resolve('data:image/png;base64,NEW')
+    await waitFor(() => expect(jacket()?.getAttribute('src')).toBe('data:image/png;base64,NEW'))
+
+    /* Another: the picture already drawn goes while the next one is out. */
+    shelf = [{ ...dune, cover: 'ef'.repeat(32) }]
+    await fire(() => tell)
+    await waitFor(() => expect(asked).toHaveLength(3))
+    await flush()
+    expect(jacket()).toBeNull()
+
+    /* A digest with no device to ask for it: nothing is asked. */
+    shelf = [{ ...dune, cover: '12'.repeat(32), device: null }]
+    await fire(() => tell)
+    await flush()
+    await flush()
+    expect(asked).toHaveLength(3)
+    expect(asked[2]!.signal?.aborted).toBe(true)
+  })
+})

@@ -1,0 +1,334 @@
+import { spawnSync } from 'node:child_process'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { isProcessEntry } from './lib/entry.mjs'
+
+/**
+ * `pnpm verify` — the unified gate (WI-5.12), one command, the same one CI
+ * runs. Every check the phase added, in an order that fails fast and cheap:
+ * the manifest, the compositions, the boundaries (and the check that every
+ * test file is in exactly one project), the types, the tests with their
+ * coverage floors — which is where the boundary selftest's own cases run, see
+ * the note beside `boundaries` below — the literal desktop build (which
+ * asserts its own bundle), the CLI's bundle (which asserts its own output),
+ * then Cargo — the lockfile, formatting, clippy, tests — for the whole
+ * workspace.
+ *
+ * Sequential, with a header per step and a stop at the first failure, whose
+ * exit code becomes this script's. There is no "continue past a red step":
+ * a summary that distinguishes "my failures" from "their failures" is
+ * bookkeeping, not a gate.
+ *
+ * `--list` prints the steps and exits; `--from <name>` starts at a step
+ * (for re-running the tail after a fix); `--until <name>` stops after one
+ * (the JS half of the gate on a platform whose Cargo half is a separate
+ * job — see `.github/workflows/verify.yml`'s Windows leg); `--only <name>`
+ * runs one.
+ */
+
+export const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
+const CARGO = ['--manifest-path', 'src-tauri/Cargo.toml']
+
+/** The steps, in order. `cmd` is argv[0], `args` the rest. */
+export const STEPS = Object.freeze([
+  { name: 'architecture:check', cmd: 'pnpm', args: ['architecture:check'] },
+  { name: 'compositions:check', cmd: 'pnpm', args: ['compositions:check'] },
+  { name: 'css:check', cmd: 'pnpm', args: ['css:check'] },
+  { name: 'css:tokens', cmd: 'pnpm', args: ['css:tokens'] },
+  { name: 'browser:check', cmd: 'pnpm', args: ['browser:check'] },
+  { name: 'directives:check', cmd: 'pnpm', args: ['directives:check'] },
+  /* THE FEATURE-LEDGER GATE CAME BACK ON 2026-09-10, IN TWO HALVES, AND ONLY
+   * ONE OF THEM RUNS EVERYWHERE.
+   *
+   * The old `features:check` read both ledgers and checked that every path
+   * claim named a file that exists. It was deleted in `a1f256f` when both
+   * ledgers moved into gitignored `dev-docs/` — correct at the time, because a
+   * gate with no input on a clean checkout that passes anyway is worse than no
+   * gate. For five weeks nothing replaced it, and the 2026-09-10 audit is what
+   * that cost: eight findings, the largest being fifteen shipped reading
+   * settings with no ledger row at all.
+   *
+   * ⚠️ **WHAT `ledger:check` BUYS, STATED NARROWLY.** It guards THE MACHINE
+   * THAT WRITES THE LEDGER — where every one of those eight findings was
+   * introduced — and it does NOT guard a clone. On a checkout without
+   * `dev-docs/` it skips and says so in one line naming `.gitignore:65`, rather
+   * than passing quietly; `pnpm ledger:check --require` turns that skip into a
+   * failure for anywhere that should have the documents. Do not read a green
+   * CI run as evidence that the ledgers are current: on CI this step SKIPS.
+   *
+   * The half that does bind CI is `scripts/surfaces.mjs`, which is tracked and
+   * whose test runs under `test:coverage` on every checkout — so a registry
+   * cannot change shape unnoticed even where no ledger exists. That split is
+   * the whole design, and it is why this is a step rather than a note.
+   */
+  { name: 'ledger:check', cmd: 'pnpm', args: ['ledger:check'] },
+  { name: 'boundaries', cmd: 'pnpm', args: ['boundaries'] },
+  /* `boundaries:selftest` IS NOT A STEP, AND THE CASES DID NOT STOP RUNNING.
+   *
+   * It ran the same `CASES` that `check-boundaries.test.mjs` runs under
+   * `test:coverage` below — the same list, through the same `runCase`,
+   * asserting the same two conditions (`missing` empty, `unexpected` empty;
+   * neither side had a third). So every `pnpm verify` cruised those fixture
+   * trees TWICE, for one gate's worth of signal, at 21.6s a pass when this
+   * was decided.
+   *
+   * The vitest run is the one kept, and the deciding argument is `test:ledger`:
+   * it names TESTS. Cases behind a standalone script are not in
+   * `tests/ledger.json`, so deleting one is invisible — which is precisely the
+   * defect that ledger was bought for, after twelve `pageTurn` tests vanished
+   * behind a rising count. Independence, the argument for keeping this step,
+   * protects against vitest being broken, and that failure is loud.
+   *
+   * `pnpm boundaries:selftest` still exists and still works; it is a thing to
+   * run by hand, not a gate that duplicates one. */
+  { name: 'test:projects', cmd: 'pnpm', args: ['test:projects'] },
+  /* A DELETED TEST IS INVISIBLE TO EVERY OTHER STEP HERE. Coverage cannot see
+   * it — the lines go on being executed by whatever replaced it — and the run
+   * is green because the thing that stopped running stopped being counted at
+   * the same moment. This one names them. See scripts/check-test-ledger.mjs
+   * for the incident that bought it. */
+  { name: 'test:ledger', cmd: 'pnpm', args: ['test:ledger'] },
+  { name: 'typecheck', cmd: 'pnpm', args: ['typecheck'] },
+  { name: 'test:coverage', cmd: 'pnpm', args: ['test:coverage'] },
+  { name: 'build', cmd: 'pnpm', args: ['build'] },
+  /* THE BROWSER CLIENT IS A THIRD BUILD, and until phase 18 nothing here ran
+   * it. `build` is the DESKTOP bundle: a different Vite config, a different
+   * entry (`src/main.web.tsx`), a different composition root, and its own
+   * `assert-bundle` pass that refuses a transitive `@tauri-apps` import. None
+   * of that is exercised by `pnpm build`.
+   *
+   * WHAT THAT COST, precisely: `dist-web/` is gitignored, and
+   * `tauri-plugin-webhost/build.rs` deliberately compiles with an EMPTY asset
+   * set when it is absent. So the browser client could stop compiling, the
+   * Rust host would still build, `pnpm verify` would still be green, and the
+   * first symptom would be a phone served a 503 by a release nobody suspected.
+   * Two gates each doing their job, and the gap between them invisible to both.
+   *
+   * It costs ~2s on a warm tree. */
+  { name: 'build:web', cmd: 'pnpm', args: ['build:web'] },
+  /* THE CLI IS A SECOND BUILD, and it is gitignored — so nothing else in this
+   * list would notice it stop compiling. `bin/paper.mjs` is what
+   * `scripts/sync-scenario.sh` runs and what `package.json`'s `bin` points at;
+   * a `paper` that no longer builds is discovered by whoever next reaches for
+   * it, at the worst moment, unless it is discovered here. The build asserts
+   * its own output size, because a bundler that wrote nothing exits 0 exactly
+   * like one that wrote everything. */
+  { name: 'build:cli', cmd: 'pnpm', args: ['build:cli'] },
+  { name: 'cargo metadata --locked', cmd: 'cargo', args: ['metadata', '--locked', '--format-version', '1', ...CARGO], quiet: true },
+  { name: 'cargo fmt --check', cmd: 'cargo', args: ['fmt', ...CARGO, '--all', '--', '--check'] },
+  { name: 'cargo clippy -D warnings', cmd: 'cargo', args: ['clippy', ...CARGO, '--workspace', '--all-targets', '--', '-D', 'warnings'] },
+  /* ONE TEST THREAD, AND THE REASON IS MEASURED. `tauri-plugin-peer`'s pairing,
+   * session and blob tests stand up real iroh endpoints and wait on real
+   * sockets, and their deadlines — "an event within 2s" (`node.rs:388`), "all
+   * frames within 20s" (`session.rs:888`) — are the harness's patience, not the
+   * property under test. Under libtest's default pool those waits compete with
+   * the other 90-odd tests for the machine and lose: measured 2026-08-21 on a
+   * 10-core Mac, the parallel run failed 1–3 tests with a DIFFERENT set each
+   * time, and `--test-threads=1` passed 95/95 twice.
+   *
+   * It is close to free on a warm build: the serial step measured 15.9s inside
+   * a 135s gate. (A standalone `cargo test -p tauri-plugin-peer` reads 74s, but
+   * that figure is mostly compilation and is not what this step pays.) Even had
+   * it been dear, a gate that fails at random costs more — the first thing
+   * anyone does with one is re-run it, and the second is stop believing it.
+   *
+   * Widening the deadlines would have bought the same green by making the
+   * harness wait longer for a machine that is still oversubscribed: the number
+   * would move, the race would not. */
+  { name: 'cargo test --workspace', cmd: 'cargo', args: ['test', ...CARGO, '--workspace', '--all-targets', '--', '--test-threads=1'] },
+  /* THE RUST HALF OF THE THIRD-PARTY NOTICE, and it is LAST for a reason.
+   *
+   * `THIRD-PARTY-NOTICES.md` has to enumerate the several hundred crates the
+   * desktop binary statically links — MIT and Apache-2.0 almost throughout,
+   * and both condition permission to redistribute on the licence travelling
+   * with the copy. Answering "which crates" needs `cargo metadata` over four
+   * target triples and a populated registry, which is exactly what the steps
+   * above have just guaranteed: by here, cargo has fetched, built and tested
+   * the whole workspace.
+   *
+   * ⚠️ IT CANNOT MOVE EARLIER, AND THE REASON IS THE DEFECT IT REPLACES. The
+   * notices test used to ask cargo itself, from inside `test:coverage` —
+   * step eleven, before any cargo step — with `--offline`, which exits 101
+   * when a lockfile package is missing from the local registry. A fresh
+   * clone has that shape, and so does a CI runner restoring a rust-cache
+   * keyed on an older lockfile, so a pull request touching `Cargo.lock`
+   * could redden the gate for a reason unrelated to the change. That call is
+   * gone; `check-third-party-notices.test.mjs` now reads `Cargo.lock` and a
+   * committed manifest, and this step is the one place a lockfile bump that
+   * adds a shipping crate is caught.
+   *
+   * It costs about four seconds on a machine whose registry holds all four
+   * targets, and a minute on one that has only ever built for its own. */
+  { name: 'docs:rust-notices --check', cmd: 'pnpm', args: ['docs:rust-notices', '--check'] },
+  /* Frozen ALL THE WAY DOWN: `Object.freeze` on the array left every step
+   * object and args array mutable, so an importer could quietly rewrite what
+   * a "step" runs while the definition still read as frozen. */
+].map((step) => Object.freeze({ ...step, args: Object.freeze(step.args) })))
+
+/**
+ * Run `steps` in order with `run(step)` → exit code (0 ok), writing headers
+ * through `log`. Stops at the first non-zero code and returns it; 0 when
+ * every step passed. Pure but for the two functions it is handed, so a test
+ * can drive it with a fake runner.
+ */
+export function runSteps(steps, run, log = (line) => process.stdout.write(`${line}\n`)) {
+  const started = Date.now()
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]
+    log(`\n▶ verify [${i + 1}/${steps.length}] ${step.name} — ${[step.cmd, ...step.args].join(' ')}`)
+    const t = Date.now()
+    const code = run(step)
+    const took = `${((Date.now() - t) / 1000).toFixed(1)}s`
+    if (code !== 0) {
+      log(`\n✗ verify: ${step.name} failed (exit ${code}) after ${took}; ${i} of ${steps.length} steps had passed`)
+      return code
+    }
+    log(`✓ verify: ${step.name} passed in ${took}`)
+  }
+  log(`\n✓ verify: all ${steps.length} steps passed in ${((Date.now() - started) / 1000).toFixed(1)}s`)
+  return 0
+}
+
+/** What cmd.exe cannot misread: word characters and the handful of
+ *  punctuation the real steps use. Exported so the refusal is testable on
+ *  the platforms whose spawn never consults a shell. */
+export const plainToken = (arg) => /^[\w@:./=-]+$/.test(arg)
+
+/**
+ * Whether this command can only be STARTED through cmd.exe.
+ *
+ * `pnpm` on Windows is `pnpm.cmd`, and since Node 20.12 a `.cmd` cannot be
+ * spawned without a shell (EINVAL, by design). A command named by a full path
+ * — `process.execPath`, which the tests spawn — is an executable Node starts
+ * directly, and putting cmd.exe in front of one hands the shell arguments it
+ * was never meant to parse.
+ *
+ * ⚠️ **THE REFUSAL BELOW IS DERIVED FROM THIS, NOT FROM THE PLATFORM.** Keyed
+ * on `win32` alone it refused `node -e "process.exit(0)"` — parentheses,
+ * quotes and a space — so every `spawnStep` assertion in `verify.test.mjs`
+ * returned 126 on the Windows leg, which reaches `test:coverage` through
+ * `pnpm verify --until build:cli`. A guard that reddens the gate on every run
+ * is not a guard; it is the gate's own failure wearing the guard's name.
+ *
+ * `platform` is a parameter so both answers are reachable from one machine:
+ * the Windows arm of a Windows-only rule is otherwise asserted by nobody
+ * until CI runs it. `path.win32.isAbsolute` for the same reason — the
+ * question only ever arises about a Windows path.
+ */
+export const needsShell = (cmd, platform = process.platform) => platform === 'win32' && !path.win32.isAbsolute(cmd)
+
+/** Run one step as a child process in `cwd`, inheriting the terminal (or
+ *  discarding stdout for a `quiet` step, whose output is a JSON blob). */
+export function spawnStep(step, cwd = REPO_ROOT, extraEnv = undefined) {
+  /* THE SHELL MAKES EVERY ARGUMENT A PROMISE. Where the step runs through
+   * cmd.exe, cmd.exe interprets metacharacters in arguments — so an argument
+   * that is not a plain token is a command injection waiting for a caller to
+   * pass one. `STEPS` is all plain tokens today, but `spawnStep` is exported
+   * and `verify-without` feeds it a capability id straight from argv. Refused
+   * HERE, at the one place the shell is decided, rather than trusted to every
+   * present and future caller — and ONLY where a shell exists to misread
+   * anything: without one, arguments reach the child verbatim, which is why
+   * this is keyed on `needsShell` and not on the platform. */
+  const shell = needsShell(step.cmd)
+  if (shell) {
+    const unsafe = step.args.find((arg) => !plainToken(arg))
+    if (unsafe !== undefined) {
+      process.stderr.write(`verify: refusing to run ${step.name}: argument ${JSON.stringify(unsafe)} is not a plain token\n`)
+      return 126
+    }
+  }
+  const result = spawnSync(step.cmd, step.args, {
+    cwd,
+    stdio: step.quiet ? ['inherit', 'ignore', 'inherit'] : 'inherit',
+    /* See `needsShell`: cmd.exe for the `.cmd` shims that cannot start
+     * without it, and nothing else. A shell between this runner and the gate
+     * it runs is one more thing to trust. */
+    shell,
+    /* `extraEnv` is how `verify:without` tells the gates inside its copy which
+       capability it has just deleted — see `DELETED_ENV`. Nothing sets it on
+       the real tree, which is exactly the distinction the gates need. */
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+  })
+  if (result.error) {
+    process.stderr.write(`verify: could not start ${step.cmd}: ${result.error.message}\n`)
+    return 127
+  }
+  if (result.status === null) {
+    process.stderr.write(`verify: ${step.name} was killed by ${result.signal}\n`)
+    return 128
+  }
+  return result.status
+}
+
+/** `{ steps }` to run, or `{ error }`; `{ list: true }` for `--list`. */
+export function parseArgs(argv, steps = STEPS) {
+  let from
+  let until
+  let only
+  let list = false
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--list') list = true
+    else if (arg === '--from' || arg === '--until' || arg === '--only') {
+      const value = argv[i + 1]
+      if (value === undefined || value.startsWith('--')) return { error: `${arg} needs a step name` }
+      if (!steps.some((s) => s.name === value)) return { error: `no step named ${JSON.stringify(value)}; see --list` }
+      /* A REPEATED SELECTOR USED TO WIN SILENTLY: `--only build --only
+         typecheck` ran only typecheck, and the reader's first selector
+         vanished without a word — the same shape as `--list` winning below,
+         refused for the same reason. */
+      if ((arg === '--from' && from !== undefined) || (arg === '--until' && until !== undefined) || (arg === '--only' && only !== undefined)) {
+        return { error: `${arg} was given twice` }
+      }
+      if (arg === '--from') from = value
+      else if (arg === '--until') until = value
+      else only = value
+      i++
+    } else return { error: `unknown argument ${JSON.stringify(arg)}` }
+  }
+  /* `--list` USED TO WIN SILENTLY. `--list --only build` printed every step and
+     ran nothing, which reads as "here is what I am about to do" and is not. A
+     selector the reader typed and this ignored is the shape worth refusing. */
+  if (list) {
+    if (from !== undefined || until !== undefined || only !== undefined) {
+      return { error: '--list cannot be combined with --from, --until or --only' }
+    }
+    return { list: true }
+  }
+  let selected = [...steps]
+  if (from !== undefined) selected = selected.slice(selected.findIndex((s) => s.name === from))
+  /* INCLUSIVE, and on the already-narrowed list, so `--from a --until b` with
+     b before a is the same empty selection `--from`/`--only` already refuse
+     below — a window that names two real steps and contains none is an
+     error, not a pass. */
+  if (until !== undefined) selected = selected.slice(0, selected.findIndex((s) => s.name === until) + 1)
+  if (only !== undefined) selected = selected.filter((s) => s.name === only)
+  /* AN EMPTY SELECTION IS AN ERROR, NOT A PASS. `--from build --only typecheck`
+     names two real steps and intersects to nothing, and this used to print
+     "all 0 steps passed" and exit 0 — a gate reporting success having verified
+     literally nothing, which is the worst failure a gate has. */
+  if (selected.length === 0) {
+    const named = [from !== undefined && `--from ${JSON.stringify(from)}`, until !== undefined && `--until ${JSON.stringify(until)}`, only !== undefined && `--only ${JSON.stringify(only)}`]
+      .filter(Boolean)
+      .join(' and ')
+    return { error: `${named} select no steps; --until and --only must name a step at or after --from` }
+  }
+  return { steps: selected }
+}
+
+function main(argv) {
+  const args = parseArgs(argv)
+  if (args.error !== undefined) {
+    process.stderr.write(`verify: ${args.error}\nusage: node scripts/verify.mjs [--list] [--from <step>] [--until <step>] [--only <step>]\n`)
+    return 2
+  }
+  if (args.list) {
+    for (const step of STEPS) process.stdout.write(`${step.name.padEnd(28)} ${[step.cmd, ...step.args].join(' ')}\n`)
+    return 0
+  }
+  return runSteps(args.steps, (step) => spawnStep(step, REPO_ROOT))
+}
+
+if (isProcessEntry(import.meta)) {
+  process.exitCode = main(process.argv.slice(2))
+}

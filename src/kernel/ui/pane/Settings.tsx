@@ -1,0 +1,1369 @@
+import { useState } from 'react'
+import type { SettingsSection } from '../../core/capability'
+import {
+  BRIGHTNESS,
+  CONTRAST,
+  FIGURE_HEIGHTS,
+  FIGURE_WIDTHS,
+  MINIMUM_SIZES,
+  PARAGRAPH_GAP,
+  READING_RATE,
+  SENTENCE_GAP,
+  READING_STEPS,
+  SPACING,
+  readingStep,
+  stepAt,
+  stepIndexOf,
+} from '../../core/metrics'
+import { PANE_TITLES, THEMES } from '../panes'
+
+/* A settings section is about no book — no section reads the context, so what
+   it holds cannot be seen.
+
+   ⚠️ THIS COMMENT CARRIED A `Stryker disable next-line ObjectLiteral` AND IT
+   DISABLED NOTHING: a directive is read only where the comment BEGINS with it,
+   and there is no mutant here to disable anyway, because `as const` is what
+   stops Stryker mutating the literal. Measured both ways — 268 mutants with the
+   directive and without it, 269 with `as const` removed. */
+const NO_BOOK = { bookId: null } as const
+import type { Face } from '../../core/typefaces'
+import type { VoicePack } from '../../core/ports'
+import { FacePicker } from './FacePicker'
+import type {
+  Align,
+  PageLayout,
+  ReadingStyle,
+  ReadingStyleArgs,
+  Side,
+  SpacingIndices,
+  SpacingKey,
+  Theme,
+  Typeface,
+} from '../state'
+import {
+  ALIGNS,
+  CODE_FACES,
+  CODE_WRAPS,
+  FIDELITIES,
+  FIGURE_FRAMES,
+  FLOURISHES,
+  HEADING_SCALES,
+  NOTE_SIZES,
+  PAGE_LAYOUTS,
+  QUOTE_STYLES,
+  SEPARATIONS,
+  SIDES,
+  TABLE_FITS,
+  UNFINISHED_PANE_IDS,
+  settingsSectionOffered,
+} from '../../core/uiTypes'
+import { PaneBand } from './PaneBand'
+import { PaneGroup } from './PaneGroup'
+import { engineVoiceFor, installedPacksFor, packVoiceOf, qualify, unqualify } from '../reader/engineVoice'
+import { bestVoice, chosenVoice, voiceFor, voiceGroups, voiceKey, type ReadableTier, type VoiceFacts } from '../reader/voiceChoice'
+import { StepRow } from './StepRow'
+import styles from './SidePane.module.css'
+import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
+
+/* THERE IS NO PREVIEW TABLE HERE ANY MORE. A face's stack was written once for
+ * the book and again for its sample, so a face could be previewed in something
+ * other than what the reader would get. One registry — `typefaces.ts` — and the
+ * sample is set in the same stack the book is.
+ */
+
+/**
+ * §05 theme chips — each theme drawn in itself, because a swatch has to show
+ * the theme it offers rather than the one in use. This line said "the page
+ * colour of each theme, as a literal", which the paragraph below ended (#144).
+ *
+ * THE SWATCHES CARRY `data-theme` AND ARE DRAWN IN IT. There was a table of
+ * one hex per theme here, which is a copy of a value `tokens.css` already
+ * owns — and a copy of ONE of them: a theme is an ink, a surface, a muted and
+ * an accent, and a swatch showing only the surface could not show the thing a
+ * reader is actually choosing between, which is how the text will look on it.
+ * Every theme selector in `tokens.css` is an attribute selector, so a tile that
+ * carries the attribute resolves the whole set and previews the real pairing.
+ * Retune a theme and its swatch follows with no second edit.
+ */
+const THEME_CHIPS = THEMES
+
+/**
+ * The panel's own groups, by id.
+ *
+ * NO COLON, deliberately: a contributed section's id is `<capability>:<name>`
+ * — `sync:storage`, `peer:devices` — and both kinds share one open/closed
+ * list, so the convention is what keeps a capability from colliding with a
+ * group the kernel owns.
+ */
+const GROUP = {
+  appearance: 'appearance',
+  text: 'text',
+  spacing: 'spacing',
+  paragraphs: 'paragraphs',
+  blocks: 'blocks',
+  figures: 'figures',
+  page: 'page',
+  voice: 'voice',
+  /* ⚠️ **NO COLON, AND THESE WERE `developer:unfinished`.** A colon is the
+     CONTRIBUTED-pane and contributed-section convention — `<capability>:<name>`
+     — and these ids share one open/closed list with the sections a capability
+     contributes, so a capability named `developer` would have collided with
+     them and toggled the wrong group. They were also bare literals written
+     twice each at the call site, where a half-finished rename silently breaks
+     toggling rather than failing to compile. */
+  developerPanels: 'developerPanels',
+  developerDiagnostics: 'developerDiagnostics',
+} as const
+
+/**
+ * Which groups are open when the panel is opened.
+ *
+ * BY HOW OFTEN A READER RETURNS TO THEM, which is the only thing a default
+ * can honestly be chosen on. Appearance, Text and Page hold every setting
+ * somebody changes more than once — the theme, the face, the size, whether
+ * the book scrolls. Spacing, Devices and Storage are set once and then left
+ * for months, and the cost of a closed group is one click against a cost the
+ * open one charges every reader on every visit.
+ *
+ * EVERY HEADING IS THE SAME KIND OF THING NOW, and that is the point of
+ * having this list at all. The panel used to draw two: a plain caption over
+ * Appearance and Reading, a disclosure over Light and Spacing. They looked
+ * alike, sat in one column, and only one of them did anything — so the only
+ * way to learn which was to click both. What varies is a default, not an
+ * affordance.
+ */
+/* THE THREE WI-14.4 ADDS ARE NOT HERE, and the rule this list already states
+   is why: a group is open at rest only if a reader returns to it. Paragraphs,
+   Blocks and Figures are set once against a shelf and then left, exactly like
+   Spacing — and open, the three of them would push Flow, the ruler and the
+   side pane off the bottom of a 400px pane. */
+const OPEN_AT_REST: readonly string[] = [GROUP.appearance, GROUP.text, GROUP.page]
+
+/**
+ * Read aloud's voice and speed — ABSENT WHEN NO BOOK IS OPEN, and the whole
+ * group goes with it.
+ *
+ * The language a voice has to answer for is the BOOK's, not the interface's
+ * (`ui/reader/voiceChoice.ts` argues it), so with no book there is no question
+ * to ask: a picker offering every voice on the machine would be asking the
+ * reader to choose a voice for a language nothing has named. Same rule as the
+ * ruler row, which appears only in scrolled flow — shown where it means
+ * something rather than greyed out everywhere else.
+ */
+export interface Narration {
+  /** The open book's declared language — `documentLang`. */
+  readonly lang: string | null
+  /** Everything the engine offers, unfiltered; the picker narrows it. */
+  readonly voices: readonly VoiceFacts[]
+  /**
+   * The catalogue, so the picker can offer a DOWNLOADED voice.
+   *
+   * ⚠️ **WITHOUT THIS THE ROW SAID "None" WHILE A PACK WAS READING THE
+   * BOOK.** Measured in the running app on 2026-09-23 with the English
+   * pack installed: `engineVoiceFor` had already resolved Heart and the
+   * reading used it, while this picker — which knew only about the
+   * platform's voices, every one of them below the floor on a Mac — told
+   * the reader no high-quality voice was available. A settings row that
+   * contradicts what is being heard is worse than no row.
+   */
+  readonly packs: readonly VoicePack[]
+  readonly chosen: Readonly<Record<string, string>>
+  readonly rate: number
+  /** Silence after a sentence and after a paragraph, in ms. */
+  readonly sentenceGapMs: number
+  readonly paragraphGapMs: number
+  /** Whether a note's BODY is read — see `NOTE_BODIES` in `speechSkip.ts`. */
+  readonly notesAloud: boolean
+  readonly onVoice: (lang: string, voice: string) => void
+  readonly onRate: (rate: number) => void
+  readonly onSentenceGap: (ms: number) => void
+  readonly onParagraphGap: (ms: number) => void
+  readonly onNotesAloud: (on: boolean) => void
+}
+
+/**
+ * Only what this panel reads and changes.
+ *
+ * Taking the whole AppState and dispatch would leave it coupled to every
+ * unrelated field — extracting it into its own file without narrowing the
+ * surface just relocates the coupling.
+ */
+export interface SettingsProps {
+  theme: Theme
+  themeFollowsOs: boolean
+  pageLayout?: PageLayout | undefined
+  rulerOn?: boolean | undefined
+  scrollbarOn?: boolean | undefined
+  progressLineOn?: boolean | undefined
+  side?: Side | undefined
+  /** Index into §09's seven reading steps — see `core/metrics`. */
+  stepIdx: number
+  typeface: Typeface
+  /** The faces this machine can offer — see `offeredFaces`. */
+  offered: readonly Face[]
+  /**
+   * The sections the composed capabilities contributed (WI-C.5) — Devices
+   * from peer, Storage from sync — rendered after the kernel's own groups,
+   * in composition order, each under its own title. The registry validated
+   * ids and uniqueness; `renderContribution` narrows each opaque renderer.
+   */
+  sections: readonly SettingsSection[]
+  /**
+   * Developer options, and the unfinished panels they govern.
+   *
+   * ABSENT IS OFF. The whole band disappears with it — there is no greyed-out
+   * heading and no "turn this on" row, because the only way in is ⌘⌃⌥D and a
+   * row advertising a chord is the discoverability this feature exists not to
+   * have. See `KERNEL_SETTINGS.developer`.
+   */
+  developer?:
+    | {
+        readonly hidden: readonly string[]
+        readonly onSetHidden: (pane: string, hidden: boolean) => void
+        /** Whether the app is recording diagnostics at all — see `DevPane`. */
+        readonly recording: boolean
+      }
+    | undefined
+  /**
+   * Capabilities that did not compose — `Composition.failures`.
+   *
+   * Stated here because this is where their sections would have been. A
+   * failure is survivable now (ADR 0001 Decision 9), which is only honest if
+   * the reader can see that something is missing rather than wondering where
+   * Devices went.
+   */
+  missing?: readonly { readonly id: string }[] | undefined
+  /**
+   * Whether anything chosen here will still be chosen next launch.
+   *
+   * `false` for a browser with storage switched off, and for a store whose
+   * write has been REFUSED — a full quota, a full disk. Drawn as a sentence
+   * for the same reason the Notes and Cards panels draw theirs: a preference
+   * that is not being saved looks exactly like one that is, right up until the
+   * next launch throws it away.
+   *
+   * Defaults to `true`, so a host that has no answer says nothing rather than
+   * accusing a working store.
+   */
+  persistent?: boolean | undefined
+  narration?: Narration | undefined
+  onTheme: (theme: Theme) => void
+  onFollowOs: (follows: boolean) => void
+  /**
+   * ⚠️ THE SEVEN OPTIONAL SETTERS BELOW, and why absence is the right signal.
+   *
+   * A host that cannot do the thing does not pass its setter, and the row is
+   * not drawn — the same convention as `onAddBooks` on the shelf and `cards` in
+   * Marginalia. The browser client mounts
+   * this pane and has no reading ruler, no scroll port it owns, no side pane
+   * (a 393px screen has no side), and no brightness or contrast filter; drawing
+   * those rows would name features that host will never have.
+   *
+   * GATED ON THE SETTER, never on the value. A composition root passes all
+   * seven, so nothing about the desktop's pane changes — the only caller that
+   * loses a row is one that never had the feature.
+   */
+  onPageLayout?: ((layout: PageLayout) => void) | undefined
+  onToggleRuler?: (() => void) | undefined
+  onToggleScrollbar?: (() => void) | undefined
+  onToggleProgressLine?: (() => void) | undefined
+  onSide?: ((side: Side) => void) | undefined
+  onStepIdx: (idx: number) => void
+  spacing: SpacingIndices
+  onSpacing: (key: SpacingKey, idx: number) => void
+  align: Align
+  onAlign: (align: Align) => void
+  /** WI-14.4's fifteen — see `ReadingStyle`. */
+  style: ReadingStyle
+  /* THE CORRELATED PAIR, not a generic: see `ReadingStyleArgs` for the hole a
+     generic `K` left open here as well as in `setReadingStyle` (#212). */
+  onStyle: (...args: ReadingStyleArgs) => void
+  brightness?: number | undefined
+  onBrightness?: ((idx: number) => void) | undefined
+  contrast?: number | undefined
+  onContrast?: ((idx: number) => void) | undefined
+  onTypeface: (typeface: Typeface) => void
+}
+
+/**
+ * What each of the three states is called in the row.
+ *
+ * A RECORD RATHER THAN A TERNARY, so the compiler fails the day a fourth state
+ * is added and nobody comes back here — a cycle whose label falls through to
+ * "Justified" for an unnamed state is a control that lies about where it is.
+ *
+ * "No hyphens" rather than "Unhyphenated": the row is 400px wide with a value
+ * right-aligned in it, and the reader is choosing between three things they can
+ * see on the page, not reading a typographic term.
+ */
+const ALIGN_LABELS: Record<Align, string> = {
+  justified: 'Justified',
+  'justified-no-hyphens': 'Justified, no hyphens',
+  ragged: 'Ragged',
+}
+
+/**
+ * What each of WI-14.4's fifteen states is called in its row.
+ *
+ * RECORDS RATHER THAN TERNARIES, for the reason `ALIGN_LABELS` gives: the
+ * compiler fails the day a state is added and nobody comes back here, and a
+ * row whose label falls through is a control that lies about where it is.
+ *
+ * NAMED FOR WHAT THE READER SEES, not for the CSS. "Ruled" rather than
+ * "border-inline-start", "Scrolls" rather than "overflow-x: auto" — a reader
+ * choosing how a quotation looks is looking at the page.
+ */
+const STYLE_LABELS = {
+  separation: { space: 'Space', indent: 'Indent', both: 'Both' },
+  flourish: { none: 'None', 'drop-cap': 'Drop cap', 'small-caps': 'Small caps' },
+  headingScale: { publisher: "Publisher's", paper: "Paper's" },
+  blockquote: { indent: 'Indented', rule: 'Ruled', tint: 'Ruled and tinted' },
+  codeFace: { publisher: "Publisher's", paper: 'Monospace' },
+  codeWrap: { scroll: 'Scroll', wrap: 'Wrap' },
+  figureFrame: { none: 'None', hairline: 'Hairline', shadow: 'Shadow' },
+  wideTables: { scroll: 'Scroll', shrink: 'Shrink to fit' },
+  noteSize: { prose: "Paper's", publisher: "Publisher's" },
+  fidelity: { paper: "Paper's", publisher: "Publisher's" },
+} as const
+
+/**
+ * Labels for the rows that predate WI-14.4 and now share its components.
+ *
+ * SEVEN ROWS WERE HANDWRITTEN BESIDE THE TWO COMPONENTS. WI-14.4 introduced
+ * `CycleRow` and `ToggleRow` for its own fifteen and left the older rows as
+ * they were — which is the shape of duplication that drifts: one of them gains
+ * an `aria` attribute or a disabled end and the others silently do not. They
+ * take the shared components now, and what remains here is the only thing that
+ * genuinely differed between them, which is what each state is CALLED.
+ */
+/**
+ * What a reader is told each offered voice tier is.
+ *
+ * APPLE'S OWN WORDS — its Manage Voices sheet says Enhanced and Premium — and
+ * `unknown` is every non-Apple engine, where the tier genuinely is not known.
+ *
+ * ONLY THE TIERS AT OR ABOVE THE FLOOR, because nothing below it is ever
+ * offered (see `voiceChoice.ts`): Standard, Compact and Classic had labels here,
+ * and a heading for a tier the picker can no longer show is a promise the list
+ * does not keep. TYPED OVER `ReadableTier`, so a tier that becomes offerable
+ * without a label is a compile error rather than a blank heading — the rule
+ * `CONTRIBUTION_ICONS` states for its own map.
+ */
+const TIER_LABELS: Record<ReadableTier, string> = {
+  premium: 'Premium',
+  enhanced: 'Enhanced',
+  unknown: 'Other',
+}
+
+/** One `<optgroup>` in a [`SelectRow`], with the rows inside it. */
+interface SelectGroup {
+  readonly label: string
+  readonly options: readonly { readonly value: string; readonly label: string }[]
+}
+
+/**
+ * The groups the Voice picker offers: the downloaded packs first, then the
+ * platform's own tiers.
+ *
+ * ⚠️ **THE PACKS COME FIRST BECAUSE THE READING ASKS THEM FIRST.**
+ * `engineVoiceFor` runs in front of `voiceFor` — a pack is not subject to the
+ * floor, since its voices are in the catalogue because the owner listened to
+ * them — so a list that put the platform's voices above them would name a
+ * second-choice voice in its first row. The same drift `voiceGroups` records
+ * for the tiers, one level up.
+ *
+ * A PACK IS ITS OWN GROUP, labelled with the pack's name, because that is what
+ * a reader is choosing between: Heart and Bella are the English pack's, and
+ * saying so is how the row explains where the voice came from.
+ */
+function voicePickerGroups(narration: Narration): readonly SelectGroup[] {
+  const packs = installedPacksFor(narration.packs, narration.lang).map((pack) => ({
+    label: pack.name,
+    options: pack.voices.map((voice) => ({ value: qualify(pack.family, voice.id), label: voice.name })),
+  }))
+  const platform = voiceGroups(narration.voices, narration.lang).map((group) => ({
+    label: TIER_LABELS[group.tier],
+    options: group.voices.map((voice) => ({ value: voice.voiceURI, label: voice.name })),
+  }))
+  return [...packs, ...platform]
+}
+
+/**
+ * The value the Voice row shows — the reader's OWN choice, or `''` for the
+ * Automatic row.
+ *
+ * A stored engine choice is read back through the same two steps the reading
+ * takes, so a preference naming a pack that has since been removed falls
+ * through to Automatic here exactly as it does there, rather than selecting an
+ * option the list no longer carries.
+ *
+ * ⚠️ **EXPORTED BECAUSE THE DOM CANNOT TELL ITS ANSWERS APART.** A
+ * `<select>` handed a value no `<option>` carries reports the EMPTY STRING and
+ * shows its first row — measured, not assumed — which is exactly what the
+ * fall-through produces. So three of the four decisions below render
+ * identically, and a case driving the pane can only ever see one of them. The
+ * function is pure; it is asserted directly.
+ */
+export function voicePickerValue(narration: Narration): string {
+  /* ABSENT AND `''` ALIKE, which is the rule `chosenVoice` states for its own
+     side: `''` is what the Automatic row stores, and `unqualify` refuses it.
+     Asked as "is there one", rather than with a `?? ''` in front of it: the
+     two are the same answer here, so substituting one for the other was a
+     value no test could tell from any other. */
+  const stored = narration.chosen[voiceKey(narration.lang)]
+  if (stored !== undefined) {
+    const named = unqualify(stored)
+    if (named) {
+      const pack = installedPacksFor(narration.packs, narration.lang).find(
+        (candidate) => candidate.family === named.family,
+      )
+      if (pack?.voices.some((voice) => voice.id === named.voiceId)) return stored
+    }
+  }
+  /* Stryker disable next-line StringLiteral: a `<select>` handed a value
+     no `<option>` carries reports the empty string anyway, so the
+     fallback and any other absent value render alike. */
+  return chosenVoice(narration.voices, narration.lang, narration.chosen)?.voiceURI ?? ''
+}
+
+/**
+ * What Automatic currently means, named rather than left to the reader to
+ * guess.
+ *
+ * ⚠️ **IT ASKS THE PACKS FIRST, AND THAT IS THE DEFECT THIS EXISTS FOR.**
+ * Measured in the running app on 2026-09-23: with the English pack installed
+ * this row said *"None — no high-quality voice is available here"* while the
+ * reading was being read by Heart. The floor refuses every voice a Mac's
+ * WebView offers, so asking only `voiceFor` answers `none` on a Mac forever,
+ * however many packs are downloaded.
+ */
+function voicePickerLead(narration: Narration): string {
+  /* ⚠️ **ASKED WITH NO STORED CHOICE, BECAUSE THAT IS WHAT THIS ROW OFFERS.**
+     `engineVoiceFor` honours a stored voice, so passing `narration.chosen` made
+     the label say "Automatic (Bella)" to a reader who had explicitly CHOSEN
+     Bella — naming the choice back as though it were the automatic pick, and
+     promising the wrong voice to anybody who then selected this row. Selecting
+     it stores `''`, which is the empty record this asks with. `bestVoice`, one
+     branch below, has always been asked this way. */
+  const engine = engineVoiceFor(narration.packs, narration.lang, {})
+  const detail = engine ? packVoiceOf(narration.packs, engine) : null
+  if (detail) return `Automatic (${detail.voice.name})`
+  if (voiceFor(narration.voices, narration.lang, narration.chosen).kind === 'none') {
+    return 'None — no high-quality voice is available here'
+  }
+  const best = bestVoice(narration.voices, narration.lang)
+  return best ? `Automatic (${best.name})` : 'Automatic (system default)'
+}
+
+const FLOW_LABELS = { scrolled: 'Scrolled', paginated: 'Paged' } as const
+const SIDE_LABELS = { left: 'Left', right: 'Right' } as const
+const SHOWN_HIDDEN = { on: 'Shown', off: 'Hidden' } as const
+
+/**
+ * The label half of a settings row takes the width the control does not, which is
+ * what puts the value at the row's end.
+ *
+ * ⚠️ **ONE DEFINITION, AND STILL INLINE — BOTH ON PURPOSE.** It was
+ * `style={{ flex: 1 }}` written out in three row components, so how a row divides
+ * its width lived in three places. It was then moved to a stylesheet class, and
+ * `Settings.test.tsx` failed: the test reads `style.flexGrow`, because an inline
+ * style is the only form jsdom can observe — a CSS-module class is invisible to
+ * it, so the move traded a guarantee the suite could SEE for tidiness. Named once
+ * here, it is still inline, still observable, and no longer written three times.
+ */
+const ROW_LABEL = { flex: 1 } as const
+
+/**
+ * The next state in a closed cycle, wrapping — the ALIGNS row's own idiom.
+ *
+ * ⚠️ **THE FALLBACK WAS `states[0] as T`, WHICH IS `undefined` FOR AN EMPTY
+ * CYCLE, CAST TO LOOK LIKE A STATE.** Both indexed reads miss on an empty array,
+ * so the function returned `undefined` under a signature promising `T`, and the
+ * cast was the only thing hiding it. The type now says what the cycle must be —
+ * at least one state — so an empty one is a compile error at the call rather
+ * than an `undefined` reaching a reducer. `current` itself is the honest answer
+ * when the lookup cannot land, since it is by construction a member.
+ */
+function next<T extends string>(states: readonly [T, ...T[]], current: T): T {
+  return states[(states.indexOf(current) + 1) % states.length] ?? current
+}
+
+/**
+ * A row that cycles a closed set of states, reporting which one it is on.
+ *
+ * ELEVEN OF WI-14.4'S FIFTEEN ARE THIS ROW, and the Alignment row above was the
+ * first of them — written out longhand, as the only one of its kind. Copied
+ * eleven times it would have drifted on the label, the wrap, or the aria within
+ * a week. The three that are SCALES take `StepRow` instead, and the one that is
+ * a boolean is the same row with two states.
+ */
+function CycleRow<T extends string>({
+  label,
+  states,
+  value,
+  labels,
+  onChange,
+}: {
+  readonly label: string
+  /* NON-EMPTY BY TYPE — see `next`. Every caller passes an `as const` tuple from
+     `uiTypes.ts`, which already is one, so the requirement costs them nothing and
+     turns an empty cycle into a compile error instead of an `undefined` state. */
+  readonly states: readonly [T, ...T[]]
+  readonly value: T
+  readonly labels: Readonly<Record<T, string>>
+  readonly onChange: (value: T) => void
+}) {
+  return (
+    <button
+      type="button"
+      className={styles.settingRow}
+      onClick={() => onChange(next(states, value))}
+    >
+      <span style={ROW_LABEL}>{label}</span>
+      <span className={styles.settingValue}>{labels[value]}</span>
+    </button>
+  )
+}
+
+/**
+ * A row whose setting is one of MANY, chosen from a list.
+ *
+ * ⚠️ **A NATIVE `<select>`, WHERE `FacePicker` BUILDS ITS OWN MENU, AND THE
+ * DIFFERENCE IS THE SAMPLE.** A typeface list has to be drawn IN the typefaces
+ * — the sample is the description, which is the whole argument that component
+ * makes — and no stock control can do that. A voice list is proper nouns; there
+ * is nothing to render. What is left is a long, machine-dependent list that
+ * wants grouping, keyboard walking and type-ahead, all of which the platform
+ * control has and a hand-built menu would have to grow.
+ *
+ * `CycleRow` is wrong for the same reason in the other direction: it advances
+ * one state per press, which is fine for two flows and absurd for twenty
+ * voices.
+ *
+ * The idiom is already here — `DevPane` has the app's other `<select>`, and
+ * `global.css` styles `select:focus-visible` — so this introduces a control
+ * rather than a precedent.
+ */
+function SelectRow({
+  label,
+  value,
+  lead,
+  groups,
+  onChange,
+}: {
+  readonly label: string
+  readonly value: string
+  /**
+   * One option ABOVE the groups, for the choice that is not one of them.
+   *
+   * Ungrouped on purpose: "let the app decide" is not a member of any tier, and
+   * an `<optgroup>` holding one row states a category that does not exist.
+   */
+  readonly lead?: { readonly value: string; readonly label: string } | undefined
+  /** Rendered as `<optgroup>`s in order; a group with no rows is dropped. */
+  readonly groups: readonly SelectGroup[]
+  readonly onChange: (value: string) => void
+}) {
+  return (
+    <div className={`${styles.settingRow} ${styles.settingStatic}`}>
+      <span style={ROW_LABEL}>{label}</span>
+      <select
+        className={styles.settingSelect}
+        value={value}
+        aria-label={label}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      >
+        {lead && (
+          <option key="lead" value={lead.value}>
+            {lead.label}
+          </option>
+        )}
+        {groups.map((group, at) =>
+          /* ⚠️ **A PACK CAN BE EMPTY, SO THIS IS REACHABLE — AND IT WAS NOT.**
+             The directive here said `voiceGroups` appends a voice as it opens
+             each run, so no caller ever emits an empty group. That stopped
+             being true when the picker began offering DOWNLOADED packs:
+             `VoicePack.voices` is data from a manifest, and a pack with none
+             would draw a heading with nothing under it. Tested rather than
+             disabled now. */
+          group.options.length === 0 ? null : (
+            /* KEYED BY POSITION AS WELL AS LABEL. `voiceGroups` deliberately
+               emits non-contiguous groups from one tier — the same label twice —
+               so a label alone gave two siblings one key, and React reconciled
+               the second into the first whenever the installed voices changed. */
+            /* Stryker disable next-line StringLiteral: a React key is not in
+               the DOM, so no rendered output can tell one spelling from
+               another — what it prevents is a reconciliation, and the comment
+               above records the case. */
+            <optgroup key={`${group.label}-${at}`} label={group.label}>
+              {group.options.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </optgroup>
+          ),
+        )}
+      </select>
+    </div>
+  )
+}
+
+/**
+ * The same row for a setting that is simply on or off.
+ *
+ * ⚠️ **A SWITCH, AND IT WAS A PLAIN BUTTON** (#140). Its text flipped between
+ * "On" and "Off", so assistive technology heard a different button on every
+ * press and no state at all. `aria-checked` says the state, and the name is
+ * the label alone so it does not change under the reader's finger; the value
+ * stays on screen for the readers who read it there.
+ */
+function ToggleRow({
+  label,
+  on,
+  onChange,
+  labels = { on: 'On', off: 'Off' },
+}: {
+  readonly label: string
+  readonly on: boolean
+  readonly onChange: (on: boolean) => void
+  readonly labels?: { readonly on: string; readonly off: string }
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      className={styles.settingRow}
+      onClick={() => onChange(!on)}
+    >
+      <span style={ROW_LABEL}>{label}</span>
+      <span className={styles.settingValue}>{on ? labels.on : labels.off}</span>
+    </button>
+  )
+}
+
+export function Settings({
+  theme,
+  themeFollowsOs,
+  /* DEFAULTS FOR THE SEVEN, so a host that passes neither setter nor value
+     still renders. `pageLayout` needs one even when its own row is hidden: the
+     ruler and scrollbar rows read it to decide whether they apply at all. */
+  pageLayout = 'paginated',
+  rulerOn = false,
+  scrollbarOn = false,
+  progressLineOn = true,
+  side = 'right',
+  stepIdx,
+  typeface,
+  offered,
+  sections,
+  missing,
+  narration,
+  persistent = true,
+  onTheme,
+  onFollowOs,
+
+  onPageLayout,
+  onToggleRuler,
+  onToggleScrollbar,
+  onToggleProgressLine,
+  onSide,
+  onStepIdx,
+  spacing,
+  onSpacing,
+  align,
+  onAlign,
+  style,
+  onStyle,
+  brightness = 0,
+  onBrightness,
+  contrast = 0,
+  onContrast,
+  onTypeface,
+  developer,
+}: SettingsProps) {
+  const step = readingStep(stepIdx)
+  /* THE INDEX OF THE STEP SHOWN, which is not always the one handed in.
+     `readingStep` shows the default for an index off the scale, and the stepper
+     measured its ends from the raw index — so Larger was dead and Smaller asked
+     for a step that does not exist (#142). `StepRow` clamps for the same
+     reason. */
+  /* ⚠️ **NAMED `stepAt` UNTIL 2026-09-20, WHICH SHADOWED THE FUNCTION OF THAT
+     NAME IN `core/metrics` — a number standing in front of a helper this file
+     imports.** It cost nothing for as long as nothing here called the real one,
+     and then the Voice group did: `stepAt(READING_RATE, idx)` resolved to the
+     number and `tsc` said "Type 'Number' has no call signatures", which names
+     the symptom and not the shadow. Renamed rather than the import aliased,
+     because an alias leaves the trap for the next caller. */
+  const sizeIdx = READING_STEPS.indexOf(step)
+  /* WHETHER PAGE HAS A ROW TO SHOW (#141). Each of its rows is gated on a
+     setter, and the ruler and the scrollbar on scrolled flow as well — so a
+     phone or a browser, passing none of those setters, drew a "Page" heading
+     that opened onto nothing. The rows' own conditions, and 'a container with
+     nothing in it' holds each of them to this. */
+  const pageRowsDrawn =
+    onPageLayout !== undefined ||
+    (pageLayout === 'scrolled' && (onToggleRuler !== undefined || onToggleScrollbar !== undefined)) ||
+    onToggleProgressLine !== undefined ||
+    onSide !== undefined
+  /* THE SECTIONS THIS READER IS OFFERED, decided before the band is: a band
+     whose every section was filtered away, with nothing missing, captioned
+     nothing at all (#141). See the band for why they are filtered.
+
+     `developer?.hidden` WITH NO `?? []`: absent, the list is
+     `settingsSectionOffered`'s own default — and it is absent only with
+     developer options off, where the list is never read, so a fallback here
+     could not be told from none. */
+  const offeredSections = sections.filter((section) =>
+    settingsSectionOffered(section, developer !== undefined, developer?.hidden),
+  )
+  const appBandDrawn = offeredSections.length > 0 || (missing ?? []).length > 0
+  const [faceMenuOpen, setFaceMenuOpen] = useState(false)
+  /* ONE MECHANISM FOR EVERY GROUP, the kernel's own and the contributed ones
+     alike. There were three — a boolean for Light, a boolean for Spacing, and
+     a list for the capability sections — which is what let the panel grow two
+     kinds of heading that look alike and behave differently.
+
+     Local, like every other piece of this panel's own view state: which groups
+     a reader had open is not something the app should remember on their
+     behalf, and a panel that opens the same way every time is one they can
+     learn. */
+  const [openGroups, setOpenGroups] = useState<readonly string[]>(OPEN_AT_REST)
+  const groupOpen = (id: string) => openGroups.includes(id)
+  const toggleGroup = (id: string) =>
+    setOpenGroups((open) => (open.includes(id) ? open.filter((one) => one !== id) : [...open, id]))
+
+  /* Handed in, not probed here: `App` probes once and gives the same list to
+     this panel and to the command palette, so the two cannot come to offer
+     different faces. */
+  return (
+    <div className={styles.panel}>
+      {/* §11: say what happened and what it costs. Above the groups rather than
+          inside one, because it is true of every control below it. */}
+      {!persistent && (
+        <div className={styles.panelMeta}>
+          <span>
+            These settings are not being saved — this device&apos;s storage is unavailable. They
+            will apply until you close Paper.
+          </span>
+        </div>
+      )}
+      {/* TWO BANDS, NOT THIRTEEN HEADINGS. `PaneBand` carries the argument;
+          the short version is that `Figures` and `Local models` are not the
+          same kind of question and were siblings. Unruled here — the panel's
+          own title is already the edge above it. */}
+      <PaneBand title="Reading" ruled={false}>
+      <PaneGroup
+        title="Appearance"
+        open={groupOpen(GROUP.appearance)}
+        onToggle={() => toggleGroup(GROUP.appearance)}
+      >
+      <div className={styles.themeGrid}>
+        {THEME_CHIPS.map(({ id, label }) => (
+          <button
+            key={id}
+            type="button"
+            className={styles.themeSwatch}
+            /* Drawn IN the theme it offers — see the note above the table. */
+            data-theme={id}
+            data-on={theme === id}
+            aria-pressed={theme === id}
+            onClick={() => onTheme(id)}
+          >
+            {/* A SPECIMEN, not a colour. What a reader picks a theme for is how
+                text sits on it, and a plain fill could not show that: Sepia and
+                Sage differ far more in their ink than in their paper. The
+                interface's own face, not a book's — the typeface below is a
+                separate choice and this must not look like it previews one. */}
+            <span className={styles.themeAa} aria-hidden="true">
+              Aa
+            </span>
+            <span className={styles.themeName}>{label}</span>
+          </button>
+        ))}
+      </div>
+
+      <ToggleRow label="Follow system appearance" on={themeFollowsOs} onChange={onFollowOs} />
+
+      {/* HOW MUCH LIGHT THE APP GIVES OFF, and how hard the text sits on it.
+          IN Appearance, where they were a group of their own called "Light".
+          The distinction that group was drawn on is real — a theme is WHICH
+          palette and these two are how much of it reaches the reader — but it
+          bought a heading and a click to reveal two rows, and it put
+          "Brightness" somewhere a reader hunting for it would not look first.
+          The word Appearance covers both without straining. It was collapsed
+          for room, and the room came from elsewhere: Devices and Storage were
+          eleven always-open rows and are now two headings.
+
+          Independent of the system on purpose — dimming the display to read at
+          night dims everything else with it, and turning it back up to answer a
+          message undoes the reading setting. Both start at the theme untouched
+          and only take away, and nothing either produces can go under 4.5:1;
+          see `adjustPalette`. */}
+      {onBrightness !== undefined && (
+        <StepRow label="Brightness" scale={BRIGHTNESS} value={brightness} onChange={onBrightness} />
+      )}
+      {onContrast !== undefined && (
+        <StepRow label="Contrast" scale={CONTRAST} value={contrast} onChange={onContrast} />
+      )}
+      </PaneGroup>
+
+      {/* TEXT, not "Reading" — everything in this panel is about reading, so
+          the word named nothing. This group is how the type is SET: which
+          face, how big, and how the lines end. */}
+      <PaneGroup
+        title="Text"
+        open={groupOpen(GROUP.text)}
+        onToggle={() => toggleGroup(GROUP.text)}
+      >
+
+      {/* ONE ROW FOR HOW THE BOOK IS SET: which face, and how big. They are the
+          same decision asked twice — a reader adjusting one is looking at the
+          other — and they were a labelled row and an eight-row list a screen
+          apart. There is no "Text size" label because there is nothing to
+          label: two A's and a number beside a font's name can only be its size.
+
+          §09's seven steps, as a stepper rather than a slider: each step carries
+          its own measure and line box, so the sizes between them do not exist. A
+          row, not a <button> — a button cannot contain buttons. */}
+      <div className={`${styles.settingRow} ${styles.settingStatic} ${styles.readingRow}`}>
+        <FacePicker
+          value={typeface}
+          offered={offered}
+          onChange={onTypeface}
+          open={faceMenuOpen}
+          setOpen={setFaceMenuOpen}
+        />
+        <div className={styles.stepper}>
+          {/* A SMALL A AND A LARGE ONE, which say what grows. `−` and `+` beside
+              a number say only "more", and next to a numeral they read as a
+              numeric field — the reader has to work out what the number is of.
+              An A is the answer and the demonstration at once. */}
+          <button
+            type="button"
+            className={styles.stepperButton}
+            disabled={sizeIdx <= 0}
+            aria-label="Smaller text"
+            onClick={() => onStepIdx(sizeIdx - 1)}
+          >
+            <span className={styles.stepperSmall} aria-hidden="true">
+              A
+            </span>
+          </button>
+          {/* AT A STEADY SIZE. It used to be drawn at the size it names, which
+              made the number a demonstration — but the two A's demonstrate it
+              now, and a value that changes size makes the row change height
+              every time it is pressed. It reports; they show. */}
+          <span className={styles.stepperValue}>{step.size}</span>
+          <button
+            type="button"
+            className={styles.stepperButton}
+            disabled={sizeIdx >= READING_STEPS.length - 1}
+            aria-label="Larger text"
+            onClick={() => onStepIdx(sizeIdx + 1)}
+          >
+            <span className={styles.stepperLarge} aria-hidden="true">
+              A
+            </span>
+          </button>
+        </div>
+      </div>
+
+      {/* ONE DECISION, NOT TWO — but three states rather than two. It was
+          `justify` and `hyphenate`, two booleans and four combinations, of
+          which one is simply worse and shipping it by accident was the reason
+          they were collapsed. `ALIGNS` keeps the collapse and lists the three
+          worth having, so the reader cycles through decisions rather than
+          assembling one from parts.
+
+          THE ROW CYCLES, and it says which of the three it is on rather than
+          naming an alignment and hiding the hyphenation inside it — "Justified"
+          twice over, differing only in something invisible in the label, is a
+          control that looks broken the first time you press it.
+
+          Not "Left" and "Justified": the flush edge is on the left in English,
+          the right in Arabic and the top in vertical Japanese, and the book
+          says which. See `Align`. */}
+      <CycleRow label="Alignment" states={ALIGNS} value={align} labels={ALIGN_LABELS} onChange={onAlign} />
+
+      {/* A FLOOR UNDER THE SMALLEST TEXT — F5. The median book's smallest
+          relative size is 0.70 of the base and the 5th percentile is 0.50, so
+          at the smallest step that is 8.5px in one book in twenty. Off by
+          default, because a floor IS an override of the author's proportions;
+          in Text rather than under an "Accessibility" heading of its own,
+          because it is a size and this is where a reader looks for one. */}
+      <StepRow
+        label="Minimum size"
+        scale={MINIMUM_SIZES}
+        value={style.minimumSize}
+        onChange={(idx) => onStyle('minimumSize', idx)}
+      />
+
+      {/* THE MASTER CONTROL, and it belongs beside the face and the size
+          because it decides the same question they do: whose typography this
+          is. Paper injects its house sheet into the slot foliate appends AFTER
+          the book's own, so it has always overridden a book's links, headings
+          and quotations on source order alone — measured at 649 books of 1,957
+          for `a { text-decoration }`. Nobody chose that and until now a reader
+          could not decline it. Apple and Kindle both answer this the same way:
+          the reader wins by default, and stepping back is a named control. */}
+      <CycleRow
+        label="Typography"
+        states={FIDELITIES}
+        value={style.fidelity}
+        labels={STYLE_LABELS.fidelity}
+        onChange={(value) => onStyle('fidelity', value)}
+      />
+      </PaneGroup>
+
+      {/* THE FINE TUNING OF THE SAME TYPE, kept behind a click and kept next
+          to what it tunes: the face and size above decide what the page IS,
+          and these decide how much air it has. Rows a reader sets once and
+          then leaves for months — the four spacings and the CJK gap; open,
+          they push everything below them off a 400px pane, and that is the
+          whole argument `PaneGroup` was built on. It sits directly under Text
+          rather than at the bottom of the panel so the heading it refines is
+          the one above it.
+
+          A copy of this note's opening, "Four things, grouped", stood above
+          Alignment inside Text, over none of the rows it counted (#144). What
+          only the copy said is the first sentence here.
+
+          Nothing here touches the MEASURE. That is the size step's, and letting
+          a second control move it would make the line length depend on which
+          one was touched last. */}
+      <PaneGroup
+        title="Spacing"
+        open={groupOpen(GROUP.spacing)}
+        onToggle={() => toggleGroup(GROUP.spacing)}
+      >
+      <StepRow label="Letter" scale={SPACING.letter} value={spacing.letter}
+        onChange={(idx) => onSpacing('letter', idx)} />
+      <StepRow label="Word" scale={SPACING.word} value={spacing.word}
+        onChange={(idx) => onSpacing('word', idx)} />
+      <StepRow label="Line" scale={SPACING.line} value={spacing.line}
+        onChange={(idx) => onSpacing('line', idx)} />
+      {/* HIDDEN WHERE IT CANNOT DO ANYTHING, which is the rule the ruler and
+          scrollbar rows below already follow. Choosing `Indent` for paragraph
+          separation zeroes the space between paragraphs — see `bookVars` — so
+          this row would move the pips and nothing else. The reader's POSITION
+          on the scale is kept while it is hidden, so it is still there when
+          they choose Space again. */}
+      {style.separation !== 'indent' && (
+        <StepRow label="Paragraph" scale={SPACING.paragraph} value={spacing.paragraph}
+          onChange={(idx) => onSpacing('paragraph', idx)} />
+      )}
+
+      {/* A SPACE BETWEEN CJK AND LATIN, which is a spacing and belongs here.
+          `text-autospace`, never a script that inserts a character: every mark
+          in this app is CFI-anchored with 32 characters of context either side,
+          and inserting so much as a space invalidates them. 7 books of 1,957
+          carry substantial CJK, which is why this is one row and not a group. */}
+      <ToggleRow
+        label="Space CJK and Latin"
+        on={style.cjkSpacing}
+        onChange={(on) => onStyle('cjkSpacing', on)}
+      />
+      </PaneGroup>
+
+      {/* HOW ONE PARAGRAPH IS TOLD FROM THE ONE BEFORE IT, and how a section
+          opens. Print answers the first with a blank line or a first-line
+          indent; `Both` is offered because real books set an indent and a small
+          space together and a reader may want to match one. */}
+      <PaneGroup
+        title="Paragraphs"
+        open={groupOpen(GROUP.paragraphs)}
+        onToggle={() => toggleGroup(GROUP.paragraphs)}
+      >
+      <CycleRow
+        label="Separation"
+        states={SEPARATIONS}
+        value={style.separation}
+        labels={STYLE_LABELS.separation}
+        onChange={(value) => onStyle('separation', value)}
+      />
+      {/* Both states are pseudo-elements, which draw nothing into the document
+          — see `markSmallText`'s neighbours for why that matters. */}
+      <CycleRow
+        label="Opening"
+        states={FLOURISHES}
+        value={style.flourish}
+        labels={STYLE_LABELS.flourish}
+        onChange={(value) => onStyle('flourish', value)}
+      />
+      {/* Publisher's by default, and deliberately: Paper sets a heading's
+          weight, leading and space and has never touched its SIZE, so
+          `h1 { font-size: 2.25em }` resolves against the reader's base and the
+          author's proportions survive whole. Paper's imposes one scale, which
+          is what makes a shelf of converted books read alike. */}
+      <CycleRow
+        label="Heading sizes"
+        states={HEADING_SCALES}
+        value={style.headingScale}
+        labels={STYLE_LABELS.headingScale}
+        onChange={(value) => onStyle('headingScale', value)}
+      />
+      </PaneGroup>
+
+      {/* THE THINGS IN A BOOK THAT ARE NOT RUNNING PROSE: a quotation, a block
+          of code, a wide table, a note in its popover. Grouped because a reader
+          who cares how one of them looks usually cares about the rest. */}
+      <PaneGroup
+        title="Blocks"
+        open={groupOpen(GROUP.blocks)}
+        onToggle={() => toggleGroup(GROUP.blocks)}
+      >
+      <CycleRow
+        label="Quotations"
+        states={QUOTE_STYLES}
+        value={style.blockquote}
+        labels={STYLE_LABELS.blockquote}
+        onChange={(value) => onStyle('blockquote', value)}
+      />
+      <CycleRow
+        label="Code face"
+        states={CODE_FACES}
+        value={style.codeFace}
+        labels={STYLE_LABELS.codeFace}
+        onChange={(value) => onStyle('codeFace', value)}
+      />
+      {/* What a line too long for the measure does. Scroll is the default
+          because it alters nothing — the lines stay where the author broke
+          them — and what Paper does today is neither: an unstyled `pre` spills
+          out of the column and is cut off. */}
+      <CycleRow
+        label="Long code lines"
+        states={CODE_WRAPS}
+        value={style.codeWrap}
+        labels={STYLE_LABELS.codeWrap}
+        onChange={(value) => onStyle('codeWrap', value)}
+      />
+      <CycleRow
+        label="Wide tables"
+        states={TABLE_FITS}
+        value={style.wideTables}
+        labels={STYLE_LABELS.wideTables}
+        onChange={(value) => onStyle('wideTables', value)}
+      />
+      {/* A note at the foot of a page is subordinate to the prose it annotates
+          and print says so by shrinking it. In a popover there is no prose
+          beside it, the reason for the reduction is absent, and all it costs is
+          legibility — so matching the prose is the default. */}
+      <CycleRow
+        label="Note size"
+        states={NOTE_SIZES}
+        value={style.noteSize}
+        labels={STYLE_LABELS.noteSize}
+        onChange={(value) => onStyle('noteSize', value)}
+      />
+      </PaneGroup>
+
+      {/* A FIGURE IS NOT EVERY IMAGE — see `markFigures`. 45% of the images in
+          a real library sit beside text, and treating those as figures turns a
+          drop cap or a gaiji into a full-width plate mid-sentence. Everything
+          here reaches only the images that stand alone in their block. */}
+      <PaneGroup
+        title="Figures"
+        open={groupOpen(GROUP.figures)}
+        onToggle={() => toggleGroup(GROUP.figures)}
+      >
+      <StepRow
+        label="Width"
+        scale={FIGURE_WIDTHS}
+        value={style.figureWidth}
+        onChange={(idx) => onStyle('figureWidth', idx)}
+      />
+      <StepRow
+        label="Height"
+        scale={FIGURE_HEIGHTS}
+        value={style.figureHeight}
+        onChange={(idx) => onStyle('figureHeight', idx)}
+      />
+      <CycleRow
+        label="Frame"
+        states={FIGURE_FRAMES}
+        value={style.figureFrame}
+        labels={STYLE_LABELS.figureFrame}
+        onChange={(value) => onStyle('figureFrame', value)}
+      />
+      {/* A share of the MEASURE, or a share of the TYPE. They are different
+          questions and a reader who enlarges the text for their eyes rather
+          than for the layout is asking the second one. */}
+      <ToggleRow
+        label="Scale with text"
+        on={style.figureScalesWithText}
+        onChange={(on) => onStyle('figureScalesWithText', on)}
+      />
+      </PaneGroup>
+
+      {/* THE PAGE: how it moves, and what sits around it while it does.
+          These five rows had no heading at all. They were left over after
+          Appearance and Reading had taken theirs, and they landed BELOW two
+          collapsed groups — so with Spacing shut they read as Spacing's
+          contents, and with it open they read as nothing's. Five settings
+          floating under the last heading that happened to be printed.
+
+          They do belong together, and the run of them says why: Flow decides
+          whether the words scroll or turn, the ruler and the scrollbar exist
+          only where they scroll, the progress rule marks how far through
+          either way, and the side pane is the furniture the page is set
+          beside. One question — what does the reading surface look like and
+          how does it advance — asked five ways. */}
+      {/* Only with a row to put in it — see `pageRowsDrawn`. */}
+      {pageRowsDrawn && (
+      <PaneGroup
+        title="Page"
+        open={groupOpen(GROUP.page)}
+        onToggle={() => toggleGroup(GROUP.page)}
+      >
+
+      {onPageLayout !== undefined && (
+        <CycleRow
+          label="Flow"
+          states={PAGE_LAYOUTS}
+          value={pageLayout}
+          labels={FLOW_LABELS}
+          onChange={onPageLayout}
+        />
+      )}
+
+      {/* §06: the ruler row appears only in scrolled flow — hidden, not
+          disabled, because paged has no lines to advance. */}
+      {pageLayout === 'scrolled' && onToggleRuler !== undefined && (
+        <ToggleRow label="Reading ruler" on={rulerOn} onChange={onToggleRuler} />
+      )}
+
+      {/* Same rule as the ruler: shown only where it means something. A paged
+          book has no scroll port, so the row would name a bar that does not
+          exist in that flow whichever way it was set. */}
+      {pageLayout === 'scrolled' && onToggleScrollbar !== undefined && (
+        <ToggleRow
+          label="Scrollbar"
+          on={scrollbarOn}
+          onChange={onToggleScrollbar}
+          labels={SHOWN_HIDDEN}
+        />
+      )}
+
+      {/* NOT flow-guarded, unlike the two above. Progress through the book is
+          the same quantity whether the book is scrolled or paged — `fraction`
+          arrives on relocate either way — so a row that vanished in paged flow
+          would be hiding a working feature. */}
+      {onToggleProgressLine !== undefined && (
+        <ToggleRow
+          label="Progress rule"
+          on={progressLineOn}
+          onChange={onToggleProgressLine}
+          labels={SHOWN_HIDDEN}
+        />
+      )}
+
+      {/* STILL NO HEADING OF ITS OWN, for the reason it never had one: a
+          section is a promise of more than one thing in it, and "Side pane"
+          over a single "Position" takes two lines to say what one says. What
+          it lacked was a group to belong to, not a heading — it is in Page's
+          now, and the row still carries its whole name. */}
+      {onSide !== undefined && (
+        <CycleRow label="Side pane position" states={SIDES} value={side} labels={SIDE_LABELS} onChange={onSide} />
+      )}
+      </PaneGroup>
+      )}
+
+      {/* ⚠️ **ONLY WITH A BOOK OPEN, BECAUSE THE LANGUAGE IS THE BOOK'S.** A
+          voice has to answer for the language of what it is reading — see
+          `voiceChoice.ts` — so with nothing open there is no question to put to
+          the reader — so `bestVoice` refuses to guess one and the app keeps the
+          platform's default.
+
+          ⚠️ **THE GROUP USED TO BE HIDDEN IN THAT CASE, WHICH LEFT THE READER
+          NOTHING TO SAY.** A book with no `dc:language` is exactly where the
+          automatic pick declines, so hiding the control meant the one situation
+          the reader most needed to correct was the one with no control in it.
+          The picker offers every selectable voice there instead, and the choice
+          is stored under `voiceKey`'s `''`. */}
+      {narration && (
+      <PaneGroup
+        title="Voice"
+        open={groupOpen(GROUP.voice)}
+        onToggle={() => toggleGroup(GROUP.voice)}
+      >
+        <SelectRow
+          label="Voice"
+          /* THE VOICE THE READING WILL USE, SAID EXPLICITLY RATHER THAN LEFT
+             TO THE DOM. This was `chosen[voiceKey(lang)]`, and an audit said a
+             stored choice the machine no longer has would make the control draw
+             BLANK. Measured on 2026-09-21, it does not: a single `<select>` whose
+             value matches no option selects its FIRST option, and the first is
+             the Automatic lead — so the raw string and this rendered the same
+             row in every case. Nor can a listed voice be one the reading
+             refuses, because the options are `voiceOptions` and `chosenVoice`
+             applies the same two tests.
+
+             It is kept because the old binding was correct only by that
+             coincidence: it relied on Automatic being first. `chosenVoice` is
+             the speech path's own answer, so the picker now shows what the
+             reader will hear however the options are ordered. */
+          value={voicePickerValue(narration)}
+          /* NAMES WHAT AUTOMATIC CURRENTLY MEANS, rather than saying
+             "Automatic" and leaving the reader to guess. It is the same answer
+             the reading will reach, because both ask the packs and then the
+             floor, in that order — and where neither has anything it says so,
+             which is the one case where the reader needs to be told to go and
+             get a voice. */
+          lead={{ value: '', label: voicePickerLead(narration) }}
+          groups={voicePickerGroups(narration)}
+          onChange={(voice) => narration.onVoice(voiceKey(narration.lang), voice)}
+        />
+        <StepRow
+          label="Speed"
+          scale={READING_RATE}
+          value={stepIndexOf(READING_RATE, narration.rate)}
+          onChange={(idx) => narration.onRate(stepAt(READING_RATE, idx))}
+        />
+        {/* ⚠️ **THE PAUSES ARE ADDITIVE TO WHATEVER THE ENGINE ALREADY LEAVES**,
+            and how much that is has not been measured — see `SENTENCE_GAP`. So
+            the labels say what the reader is adding, not what they will hear in
+            total, which is the only claim that is true. */}
+        <StepRow
+          label="Pause between sentences"
+          scale={SENTENCE_GAP}
+          value={stepIndexOf(SENTENCE_GAP, narration.sentenceGapMs)}
+          onChange={(idx) => narration.onSentenceGap(stepAt(SENTENCE_GAP, idx))}
+        />
+        <StepRow
+          label="Pause between paragraphs"
+          scale={PARAGRAPH_GAP}
+          value={stepIndexOf(PARAGRAPH_GAP, narration.paragraphGapMs)}
+          onChange={(idx) => narration.onParagraphGap(stepAt(PARAGRAPH_GAP, idx))}
+        />
+        {/* ⚠️ **OFF IS THE QUIETER DEFAULT, AND IT IS A CHOICE RATHER THAN A
+            POLICY.** EPUB calls a note body SKIPPABLE — content a reading system
+            offers to leave out — and this app used to drop it with no way to ask
+            for it. Most are hidden and never reach the voice; the ones that are
+            not are a print-style block at the foot of a section, so ON means a
+            run of citations arriving mid-chapter. The label names what is added,
+            like the pauses above. */}
+        <ToggleRow
+          label="Read footnotes"
+          on={narration.notesAloud}
+          onChange={narration.onNotesAloud}
+        />
+      </PaneGroup>
+      )}
+
+      </PaneBand>
+
+      {/* The contributed sections — a capability's own settings surface,
+          under its own title, in composition order (WI-C.5).
+
+          GROUPS, LIKE EVERY OTHER GROUP HERE. These were a bare heading over
+          an always-open list, so Devices and Storage — eleven rows between
+          them, set up once and then left alone for months — pushed Flow, the
+          ruler and the side pane's position off the bottom of a 400px pane.
+          That is the exact complaint `PaneGroup` was built to answer, and
+          the kernel's own long groups already answer it; a contributed
+          section had no way to.
+
+          It also costs nothing while closed: the children are an ELEMENT, not
+          a render, so a closed group never mounts the pane — which is what
+          stops the Storage section reading the disk on every shelf write for
+          a surface nobody has opened. */}
+      {/* Only with something to hold — see `appBandDrawn`. */}
+      {appBandDrawn && (
+      <PaneBand title="The app">
+      {/* ⚠️ **FILTERED, AND IT NEVER WAS.** `UNFINISHED_PANE_IDS` hid the
+          deleted companion's PANEL and left its settings section in front of
+          every reader — settings for a surface they cannot open. The rule is
+          derived from that one list rather than restated here; see
+          `settingsSectionOffered`, which also explains why a section is matched
+          on its OWN capability and never on one it depends on, and the one flag
+          a single section can carry instead — `unfinished`. Filtered above,
+          into `offeredSections`, so the band can ask first whether it holds
+          anything. */}
+      {offeredSections.map((section) => (
+          <PaneGroup
+            key={section.id}
+            title={section.title}
+            group={section.id}
+            open={groupOpen(section.id)}
+            onToggle={() => toggleGroup(section.id)}
+          >
+            {/* The group mounts its body only while open — one gate, the group's — and a throw stops at the section. */}
+            <ContributionBoundary label={section.title} id={section.id} resetKey={section.id}>
+              <ContributionBody id={section.id} render={section.render} context={NO_BOOK} />
+            </ContributionBoundary>
+          </PaneGroup>
+        ))}
+
+      {/* INSIDE THE BAND, not after it. These name a capability that failed to
+          start, so they belong with the capabilities' own sections — floating
+          below the last band they read as a footnote to whatever happened to be
+          printed above them, which is how the five unheaded rows that became
+          the Page group went unnoticed. */}
+      {(missing ?? []).map((one) => (
+        <div key={one.id} className={styles.capabilityMissing}>
+          <span>{one.id} is not running — its settings are unavailable until the app is restarted.</span>
+        </div>
+      ))}
+      </PaneBand>
+      )}
+
+      {/* ⚠️ **THE BAND EXISTS ONLY WHILE DEVELOPER OPTIONS ARE ON**, and there
+          is deliberately no control here that turns them on. ⌘⌃⌥D is the way
+          in; a row offering it would put the chord — and the panels behind it —
+          in front of every reader who ever opens Settings, which is exactly
+          what a switch nobody can find is for.
+
+          LAST, below The app, because it is a band about the app's own
+          construction rather than about reading or about a capability. */}
+      {developer && (
+        <PaneBand title="Developer">
+          <PaneGroup
+            title="Unfinished panels"
+            open={groupOpen(GROUP.developerPanels)}
+            onToggle={() => toggleGroup(GROUP.developerPanels)}
+          >
+            <p className={styles.groupHint}>
+              These panels are drawn but do not yet answer what they promise. They are hidden from
+              every reader who has not turned developer options on.
+            </p>
+            {/* `ToggleRow` WITH THE SHELF'S OWN WORDS — `SHOWN_HIDDEN`, the
+                labels the scrollbar row uses. The question here is the same
+                one ("is this drawn?") and answering it with On/Off would give
+                the reader two vocabularies for one idea. */}
+            {UNFINISHED_PANE_IDS.map((id) => (
+              <ToggleRow
+                key={id}
+                label={PANE_TITLES[id]}
+                on={!developer.hidden.includes(id)}
+                onChange={(on) => developer.onSetHidden(id, !on)}
+                labels={SHOWN_HIDDEN}
+              />
+            ))}
+          </PaneGroup>
+
+          <PaneGroup
+            title="Diagnostics"
+            open={groupOpen(GROUP.developerDiagnostics)}
+            onToggle={() => toggleGroup(GROUP.developerDiagnostics)}
+          >
+            {/* ⚠️ **RECORDING IS DECIDED BEFORE THIS PANEL EXISTS.** It is a
+                FILE (`diagnostics.on`) rather than a setting, because the
+                decision is made at boot before the services that hold settings
+                are built — see `diagnosticsLog.ts`. So this reports rather than
+                offers: a switch here would appear to work and change nothing
+                until the next launch, which is worse than saying so. */}
+            <p className={styles.groupHint}>
+              {developer.recording
+                ? 'Diagnostics are being recorded. The Developer panel shows the window.'
+                : 'Diagnostics are not being recorded on this build. Create a file named ' +
+                  'diagnostics.on in the data directory and relaunch to turn them on.'}
+            </p>
+          </PaneGroup>
+        </PaneBand>
+      )}
+    </div>
+  )
+}

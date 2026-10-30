@@ -1,0 +1,9060 @@
+{
+ "source": "misaki/en.py (hexgrad/misaki, Apache-2.0): _s, _ed and _ing, American English",
+ "why": "Paper's endings.rs is a port of those three functions; this pins the port to them.",
+ "cases": [
+  {
+   "stem": "ɹˌiəntˌɜɹpɹətˈAʃən",
+   "plural": "ɹˌiəntˌɜɹpɹətˈAʃənz",
+   "past": "ɹˌiəntˌɜɹpɹətˈAʃənd",
+   "progressive": "ɹˌiəntˌɜɹpɹətˈAʃənɪŋ"
+  },
+  {
+   "stem": "pɹˌOlətˈɛɹiənˌIz",
+   "plural": "pɹˌOlətˈɛɹiənˌIzᵻz",
+   "past": "pɹˌOlətˈɛɹiənˌIzd",
+   "progressive": "pɹˌOlətˈɛɹiənˌIzɪŋ"
+  },
+  {
+   "stem": "ˌæntˌIsəmˈɪɾɪk",
+   "plural": "ˌæntˌIsəmˈɪɾɪks",
+   "past": "ˌæntˌIsəmˈɪɾɪkt",
+   "progressive": "ˌæntˌIsəmˈɪɾɪkɪŋ"
+  },
+  {
+   "stem": "bˈɪz",
+   "plural": "bˈɪzᵻz",
+   "past": "bˈɪzd",
+   "progressive": "bˈɪzɪŋ"
+  },
+  {
+   "stem": "ˌɛpəsˈIklɪk",
+   "plural": "ˌɛpəsˈIklɪks",
+   "past": "ˌɛpəsˈIklɪkt",
+   "progressive": "ˌɛpəsˈIklɪkɪŋ"
+  },
+  {
+   "stem": "θˈɪŋəməbˌɑb",
+   "plural": "θˈɪŋəməbˌɑbz",
+   "past": "θˈɪŋəməbˌɑbd",
+   "progressive": "θˈɪŋəməbˌɑbɪŋ"
+  },
+  {
+   "stem": "lˈʊkɪŋ",
+   "plural": "lˈʊkɪŋz",
+   "past": "lˈʊkɪŋd",
+   "progressive": "lˈʊkɪŋɪŋ"
+  },
+  {
+   "stem": "nˈutɹəli",
+   "plural": "nˈutɹəliz",
+   "past": "nˈutɹəlid",
+   "progressive": "nˈutɹəliɪŋ"
+  },
+  {
+   "stem": "dəɹˈɑɡəɾɪv",
+   "plural": "dəɹˈɑɡəɾɪvz",
+   "past": "dəɹˈɑɡəɾɪvd",
+   "progressive": "dəɹˈɑɡəɾɪvɪŋ"
+  },
+  {
+   "stem": "tɹænsfˈɔɹməɹ",
+   "plural": "tɹænsfˈɔɹməɹz",
+   "past": "tɹænsfˈɔɹməɹd",
+   "progressive": "tɹænsfˈɔɹməɹɪŋ"
+  },
+  {
+   "stem": "sˈɪstəmˌIz",
+   "plural": "sˈɪstəmˌIzᵻz",
+   "past": "sˈɪstəmˌIzd",
+   "progressive": "sˈɪstəmˌIzɪŋ"
+  },
+  {
+   "stem": "ˌʌnspˈɑɾᵻd",
+   "plural": "ˌʌnspˈɑɾᵻdz",
+   "past": "ˌʌnspˈɑɾᵻdᵻd",
+   "progressive": "ˌʌnspˈɑɾᵻdɪŋ"
+  },
+  {
+   "stem": "jˈʌnz",
+   "plural": "jˈʌnzᵻz",
+   "past": "jˈʌnzd",
+   "progressive": "jˈʌnzɪŋ"
+  },
+  {
+   "stem": "fəɹbˈɔɹ",
+   "plural": "fəɹbˈɔɹz",
+   "past": "fəɹbˈɔɹd",
+   "progressive": "fəɹbˈɔɹɪŋ"
+  },
+  {
+   "stem": "əkˌɑnəmˈɛtɹɪk",
+   "plural": "əkˌɑnəmˈɛtɹɪks",
+   "past": "əkˌɑnəmˈɛtɹɪkt",
+   "progressive": "əkˌɑnəmˈɛtɹɪkɪŋ"
+  },
+  {
+   "stem": "bəbˈul",
+   "plural": "bəbˈulz",
+   "past": "bəbˈuld",
+   "progressive": "bəbˈulɪŋ"
+  },
+  {
+   "stem": "ɹˈAlɹˌOd",
+   "plural": "ɹˈAlɹˌOdz",
+   "past": "ɹˈAlɹˌOdᵻd",
+   "progressive": "ɹˈAlɹˌOdɪŋ"
+  },
+  {
+   "stem": "mˌitˈu",
+   "plural": "mˌitˈuz",
+   "past": "mˌitˈud",
+   "progressive": "mˌitˈuɪŋ"
+  },
+  {
+   "stem": "bˈɔlzˌAk",
+   "plural": "bˈɔlzˌAks",
+   "past": "bˈɔlzˌAkt",
+   "progressive": "bˈɔlzˌAkɪŋ"
+  },
+  {
+   "stem": "dˌɪsəntˈæŋɡᵊl",
+   "plural": "dˌɪsəntˈæŋɡᵊlz",
+   "past": "dˌɪsəntˈæŋɡᵊld",
+   "progressive": "dˌɪsəntˈæŋɡᵊlɪŋ"
+  },
+  {
+   "stem": "kɹˈæb",
+   "plural": "kɹˈæbz",
+   "past": "kɹˈæbd",
+   "progressive": "kɹˈæbɪŋ"
+  },
+  {
+   "stem": "ˈʌndəɹkˌɛɹɪʤ",
+   "plural": "ˈʌndəɹkˌɛɹɪʤᵻz",
+   "past": "ˈʌndəɹkˌɛɹɪʤd",
+   "progressive": "ˈʌndəɹkˌɛɹɪʤɪŋ"
+  },
+  {
+   "stem": "ɹˈɔkəsnəs",
+   "plural": "ɹˈɔkəsnəsᵻz",
+   "past": "ɹˈɔkəsnəst",
+   "progressive": "ɹˈɔkəsnəsɪŋ"
+  },
+  {
+   "stem": "tɹˈɔθ",
+   "plural": "tɹˈɔθs",
+   "past": "tɹˈɔθt",
+   "progressive": "tɹˈɔθɪŋ"
+  },
+  {
+   "stem": "θˌɜɹdɹˈAt",
+   "plural": "θˌɜɹdɹˈAts",
+   "past": "θˌɜɹdɹˈAɾᵻd",
+   "progressive": "θˌɜɹdɹˈAɾɪŋ"
+  },
+  {
+   "stem": "suvlˈɑkiə",
+   "plural": "suvlˈɑkiəz",
+   "past": "suvlˈɑkiəd",
+   "progressive": "suvlˈɑkiəɪŋ"
+  },
+  {
+   "stem": "ɹˈɪʤwˌA",
+   "plural": "ɹˈɪʤwˌAz",
+   "past": "ɹˈɪʤwˌAd",
+   "progressive": "ɹˈɪʤwˌAɪŋ"
+  },
+  {
+   "stem": "dˌIəɡnˈOsɪs",
+   "plural": "dˌIəɡnˈOsɪsᵻz",
+   "past": "dˌIəɡnˈOsɪst",
+   "progressive": "dˌIəɡnˈOsɪsɪŋ"
+  },
+  {
+   "stem": "tɹˈæɡəpˌæn",
+   "plural": "tɹˈæɡəpˌænz",
+   "past": "tɹˈæɡəpˌænd",
+   "progressive": "tɹˈæɡəpˌænɪŋ"
+  },
+  {
+   "stem": "bˈɑdibˌɪldɪŋ",
+   "plural": "bˈɑdibˌɪldɪŋz",
+   "past": "bˈɑdibˌɪldɪŋd",
+   "progressive": "bˈɑdibˌɪldɪŋɪŋ"
+  },
+  {
+   "stem": "mˌɪsmˈAt",
+   "plural": "mˌɪsmˈAts",
+   "past": "mˌɪsmˈAɾᵻd",
+   "progressive": "mˌɪsmˈAɾɪŋ"
+  },
+  {
+   "stem": "ʧˈɛɹiəɹ",
+   "plural": "ʧˈɛɹiəɹz",
+   "past": "ʧˈɛɹiəɹd",
+   "progressive": "ʧˈɛɹiəɹɪŋ"
+  },
+  {
+   "stem": "pɹOsˈɜɹpənə",
+   "plural": "pɹOsˈɜɹpənəz",
+   "past": "pɹOsˈɜɹpənəd",
+   "progressive": "pɹOsˈɜɹpənəɪŋ"
+  },
+  {
+   "stem": "vˈɛksədli",
+   "plural": "vˈɛksədliz",
+   "past": "vˈɛksədlid",
+   "progressive": "vˈɛksədliɪŋ"
+  },
+  {
+   "stem": "ˈAt",
+   "plural": "ˈAts",
+   "past": "ˈAɾᵻd",
+   "progressive": "ˈAɾɪŋ"
+  },
+  {
+   "stem": "fˈɛɹmˌIndᵻd",
+   "plural": "fˈɛɹmˌIndᵻdz",
+   "past": "fˈɛɹmˌIndᵻdᵻd",
+   "progressive": "fˈɛɹmˌIndᵻdɪŋ"
+  },
+  {
+   "stem": "pəɹˈɛɾɪk",
+   "plural": "pəɹˈɛɾɪks",
+   "past": "pəɹˈɛɾɪkt",
+   "progressive": "pəɹˈɛɾɪkɪŋ"
+  },
+  {
+   "stem": "ˌʌnkˌɑntɹəvˈɜɹɾᵻd",
+   "plural": "ˌʌnkˌɑntɹəvˈɜɹɾᵻdz",
+   "past": "ˌʌnkˌɑntɹəvˈɜɹɾᵻdᵻd",
+   "progressive": "ˌʌnkˌɑntɹəvˈɜɹɾᵻdɪŋ"
+  },
+  {
+   "stem": "ʧˈɑɹʤəbᵊl",
+   "plural": "ʧˈɑɹʤəbᵊlz",
+   "past": "ʧˈɑɹʤəbᵊld",
+   "progressive": "ʧˈɑɹʤəbᵊlɪŋ"
+  },
+  {
+   "stem": "hˈuʒəɹ",
+   "plural": "hˈuʒəɹz",
+   "past": "hˈuʒəɹd",
+   "progressive": "hˈuʒəɹɪŋ"
+  },
+  {
+   "stem": "ˌæɡɹObˌIˈɑləʤɪst",
+   "plural": "ˌæɡɹObˌIˈɑləʤɪsts",
+   "past": "ˌæɡɹObˌIˈɑləʤɪstᵻd",
+   "progressive": "ˌæɡɹObˌIˈɑləʤɪstɪŋ"
+  },
+  {
+   "stem": "ɪksplˌɔɹətˈɔɹiəm",
+   "plural": "ɪksplˌɔɹətˈɔɹiəmz",
+   "past": "ɪksplˌɔɹətˈɔɹiəmd",
+   "progressive": "ɪksplˌɔɹətˈɔɹiəmɪŋ"
+  },
+  {
+   "stem": "pˈʊʃəli",
+   "plural": "pˈʊʃəliz",
+   "past": "pˈʊʃəlid",
+   "progressive": "pˈʊʃəliɪŋ"
+  },
+  {
+   "stem": "ikˈitɔs",
+   "plural": "ikˈitɔsᵻz",
+   "past": "ikˈitɔst",
+   "progressive": "ikˈitɔsɪŋ"
+  },
+  {
+   "stem": "pˈɪʧstˌOn",
+   "plural": "pˈɪʧstˌOnz",
+   "past": "pˈɪʧstˌOnd",
+   "progressive": "pˈɪʧstˌOnɪŋ"
+  },
+  {
+   "stem": "pˌOstˈObət",
+   "plural": "pˌOstˈObəts",
+   "past": "pˌOstˈObəɾᵻd",
+   "progressive": "pˌOstˈObəɾɪŋ"
+  },
+  {
+   "stem": "nɑnnˈAɾɪv",
+   "plural": "nɑnnˈAɾɪvz",
+   "past": "nɑnnˈAɾɪvd",
+   "progressive": "nɑnnˈAɾɪvɪŋ"
+  },
+  {
+   "stem": "ɪnɡˈɔɹʤmənt",
+   "plural": "ɪnɡˈɔɹʤmənts",
+   "past": "ɪnɡˈɔɹʤməntᵻd",
+   "progressive": "ɪnɡˈɔɹʤməntɪŋ"
+  },
+  {
+   "stem": "fəlˈukə",
+   "plural": "fəlˈukəz",
+   "past": "fəlˈukəd",
+   "progressive": "fəlˈukəɪŋ"
+  },
+  {
+   "stem": "klˈYstəɹ",
+   "plural": "klˈYstəɹz",
+   "past": "klˈYstəɹd",
+   "progressive": "klˈYstəɹɪŋ"
+  },
+  {
+   "stem": "mˌælfˈɔɹmd",
+   "plural": "mˌælfˈɔɹmdz",
+   "past": "mˌælfˈɔɹmdᵻd",
+   "progressive": "mˌælfˈɔɹmdɪŋ"
+  },
+  {
+   "stem": "pˌɛdəɹˈæstɪk",
+   "plural": "pˌɛdəɹˈæstɪks",
+   "past": "pˌɛdəɹˈæstɪkt",
+   "progressive": "pˌɛdəɹˈæstɪkɪŋ"
+  },
+  {
+   "stem": "hˈɛlfˌIəɹ",
+   "plural": "hˈɛlfˌIəɹz",
+   "past": "hˈɛlfˌIəɹd",
+   "progressive": "hˈɛlfˌIəɹɪŋ"
+  },
+  {
+   "stem": "bˈɜɹnɪʃt",
+   "plural": "bˈɜɹnɪʃts",
+   "past": "bˈɜɹnɪʃtᵻd",
+   "progressive": "bˈɜɹnɪʃtɪŋ"
+  },
+  {
+   "stem": "tˈæbjəlˌAt",
+   "plural": "tˈæbjəlˌAts",
+   "past": "tˈæbjəlˌAɾᵻd",
+   "progressive": "tˈæbjəlˌAɾɪŋ"
+  },
+  {
+   "stem": "ɪntˈɪɹiəɹli",
+   "plural": "ɪntˈɪɹiəɹliz",
+   "past": "ɪntˈɪɹiəɹlid",
+   "progressive": "ɪntˈɪɹiəɹliɪŋ"
+  },
+  {
+   "stem": "pˈɑɹtli",
+   "plural": "pˈɑɹtliz",
+   "past": "pˈɑɹtlid",
+   "progressive": "pˈɑɹtliɪŋ"
+  },
+  {
+   "stem": "kˈɔɹdət",
+   "plural": "kˈɔɹdəts",
+   "past": "kˈɔɹdəɾᵻd",
+   "progressive": "kˈɔɹdəɾɪŋ"
+  },
+  {
+   "stem": "ɹˈIvᵊl",
+   "plural": "ɹˈIvᵊlz",
+   "past": "ɹˈIvᵊld",
+   "progressive": "ɹˈIvᵊlɪŋ"
+  },
+  {
+   "stem": "ˌʌnsˈɛntᵻd",
+   "plural": "ˌʌnsˈɛntᵻdz",
+   "past": "ˌʌnsˈɛntᵻdᵻd",
+   "progressive": "ˌʌnsˈɛntᵻdɪŋ"
+  },
+  {
+   "stem": "kˌOplˈAnəɹ",
+   "plural": "kˌOplˈAnəɹz",
+   "past": "kˌOplˈAnəɹd",
+   "progressive": "kˌOplˈAnəɹɪŋ"
+  },
+  {
+   "stem": "əŋɡˈOmə",
+   "plural": "əŋɡˈOməz",
+   "past": "əŋɡˈOməd",
+   "progressive": "əŋɡˈOməɪŋ"
+  },
+  {
+   "stem": "ˌʌnəksplˈɔɹd",
+   "plural": "ˌʌnəksplˈɔɹdz",
+   "past": "ˌʌnəksplˈɔɹdᵻd",
+   "progressive": "ˌʌnəksplˈɔɹdɪŋ"
+  },
+  {
+   "stem": "snˈɪpəɾi",
+   "plural": "snˈɪpəɾiz",
+   "past": "snˈɪpəɾid",
+   "progressive": "snˈɪpəɾiɪŋ"
+  },
+  {
+   "stem": "ɹisˈɔɹt",
+   "plural": "ɹisˈɔɹts",
+   "past": "ɹisˈɔɹɾᵻd",
+   "progressive": "ɹisˈɔɹɾɪŋ"
+  },
+  {
+   "stem": "ænfɹˌækʧəwˈɑsəɾi",
+   "plural": "ænfɹˌækʧəwˈɑsəɾiz",
+   "past": "ænfɹˌækʧəwˈɑsəɾid",
+   "progressive": "ænfɹˌækʧəwˈɑsəɾiɪŋ"
+  },
+  {
+   "stem": "spɑndˈAɪk",
+   "plural": "spɑndˈAɪks",
+   "past": "spɑndˈAɪkt",
+   "progressive": "spɑndˈAɪkɪŋ"
+  },
+  {
+   "stem": "ɹətˈun",
+   "plural": "ɹətˈunz",
+   "past": "ɹətˈund",
+   "progressive": "ɹətˈunɪŋ"
+  },
+  {
+   "stem": "spˌɪntɹˈɑnɪks",
+   "plural": "spˌɪntɹˈɑnɪksᵻz",
+   "past": "spˌɪntɹˈɑnɪkst",
+   "progressive": "spˌɪntɹˈɑnɪksɪŋ"
+  },
+  {
+   "stem": "dˌihjˌumˈɪdəfˌI",
+   "plural": "dˌihjˌumˈɪdəfˌIz",
+   "past": "dˌihjˌumˈɪdəfˌId",
+   "progressive": "dˌihjˌumˈɪdəfˌIɪŋ"
+  },
+  {
+   "stem": "bˈut",
+   "plural": "bˈuts",
+   "past": "bˈuɾᵻd",
+   "progressive": "bˈuɾɪŋ"
+  },
+  {
+   "stem": "fˌɪləpˈOdiəm",
+   "plural": "fˌɪləpˈOdiəmz",
+   "past": "fˌɪləpˈOdiəmd",
+   "progressive": "fˌɪləpˈOdiəmɪŋ"
+  },
+  {
+   "stem": "əθˌɔɹətˈɛɹiənˌɪzəm",
+   "plural": "əθˌɔɹətˈɛɹiənˌɪzəmz",
+   "past": "əθˌɔɹətˈɛɹiənˌɪzəmd",
+   "progressive": "əθˌɔɹətˈɛɹiənˌɪzəmɪŋ"
+  },
+  {
+   "stem": "ɡˈAɹɑ",
+   "plural": "ɡˈAɹɑz",
+   "past": "ɡˈAɹɑd",
+   "progressive": "ɡˈAɹɑɪŋ"
+  },
+  {
+   "stem": "nˈɜɹld",
+   "plural": "nˈɜɹldz",
+   "past": "nˈɜɹldᵻd",
+   "progressive": "nˈɜɹldɪŋ"
+  },
+  {
+   "stem": "ɡæmbˈOʤ",
+   "plural": "ɡæmbˈOʤᵻz",
+   "past": "ɡæmbˈOʤd",
+   "progressive": "ɡæmbˈOʤɪŋ"
+  },
+  {
+   "stem": "nʊɹˈOsɪs",
+   "plural": "nʊɹˈOsɪsᵻz",
+   "past": "nʊɹˈOsɪst",
+   "progressive": "nʊɹˈOsɪsɪŋ"
+  },
+  {
+   "stem": "ˈɑfjəɹˌYd",
+   "plural": "ˈɑfjəɹˌYdz",
+   "past": "ˈɑfjəɹˌYdᵻd",
+   "progressive": "ˈɑfjəɹˌYdɪŋ"
+  },
+  {
+   "stem": "nˈOwA",
+   "plural": "nˈOwAz",
+   "past": "nˈOwAd",
+   "progressive": "nˈOwAɪŋ"
+  },
+  {
+   "stem": "kˈælənʧˌɜɹ",
+   "plural": "kˈælənʧˌɜɹz",
+   "past": "kˈælənʧˌɜɹd",
+   "progressive": "kˈælənʧˌɜɹɪŋ"
+  },
+  {
+   "stem": "kˈʌstəmˌɛɹinəs",
+   "plural": "kˈʌstəmˌɛɹinəsᵻz",
+   "past": "kˈʌstəmˌɛɹinəst",
+   "progressive": "kˈʌstəmˌɛɹinəsɪŋ"
+  },
+  {
+   "stem": "kˌOˈɑpt",
+   "plural": "kˌOˈɑpts",
+   "past": "kˌOˈɑptᵻd",
+   "progressive": "kˌOˈɑptɪŋ"
+  },
+  {
+   "stem": "ɹimˈɪks",
+   "plural": "ɹimˈɪksᵻz",
+   "past": "ɹimˈɪkst",
+   "progressive": "ɹimˈɪksɪŋ"
+  },
+  {
+   "stem": "pɹˈO",
+   "plural": "pɹˈOz",
+   "past": "pɹˈOd",
+   "progressive": "pɹˈOɪŋ"
+  },
+  {
+   "stem": "tˌiətwˈɔki",
+   "plural": "tˌiətwˈɔkiz",
+   "past": "tˌiətwˈɔkid",
+   "progressive": "tˌiətwˈɔkiɪŋ"
+  },
+  {
+   "stem": "mˈiltˌIm",
+   "plural": "mˈiltˌImz",
+   "past": "mˈiltˌImd",
+   "progressive": "mˈiltˌImɪŋ"
+  },
+  {
+   "stem": "lˌɪtəɹˈæləɾi",
+   "plural": "lˌɪtəɹˈæləɾiz",
+   "past": "lˌɪtəɹˈæləɾid",
+   "progressive": "lˌɪtəɹˈæləɾiɪŋ"
+  },
+  {
+   "stem": "ɡlˈuʔn",
+   "plural": "ɡlˈuʔnz",
+   "past": "ɡlˈuʔnd",
+   "progressive": "ɡlˈuʔnɪŋ"
+  },
+  {
+   "stem": "sˈɛkstᵊnt",
+   "plural": "sˈɛkstᵊnts",
+   "past": "sˈɛkstᵊntᵻd",
+   "progressive": "sˈɛkstᵊntɪŋ"
+  },
+  {
+   "stem": "vˈɪɾᵊld",
+   "plural": "vˈɪɾᵊldz",
+   "past": "vˈɪɾᵊldᵻd",
+   "progressive": "vˈɪɾᵊldɪŋ"
+  },
+  {
+   "stem": "ˌɛkwəmˈOləɹ",
+   "plural": "ˌɛkwəmˈOləɹz",
+   "past": "ˌɛkwəmˈOləɹd",
+   "progressive": "ˌɛkwəmˈOləɹɪŋ"
+  },
+  {
+   "stem": "pˈɑmpəz",
+   "plural": "pˈɑmpəzᵻz",
+   "past": "pˈɑmpəzd",
+   "progressive": "pˈɑmpəzɪŋ"
+  },
+  {
+   "stem": "ɹInˈɑsəɹəsᵻz",
+   "plural": "ɹInˈɑsəɹəsᵻzᵻz",
+   "past": "ɹInˈɑsəɹəsᵻzd",
+   "progressive": "ɹInˈɑsəɹəsᵻzɪŋ"
+  },
+  {
+   "stem": "sˈʌpləkətˌɔɹi",
+   "plural": "sˈʌpləkətˌɔɹiz",
+   "past": "sˈʌpləkətˌɔɹid",
+   "progressive": "sˈʌpləkətˌɔɹiɪŋ"
+  },
+  {
+   "stem": "ˌɪndəsˈɑljəbᵊl",
+   "plural": "ˌɪndəsˈɑljəbᵊlz",
+   "past": "ˌɪndəsˈɑljəbᵊld",
+   "progressive": "ˌɪndəsˈɑljəbᵊlɪŋ"
+  },
+  {
+   "stem": "sˌOviəɾəzˈAʃən",
+   "plural": "sˌOviəɾəzˈAʃənz",
+   "past": "sˌOviəɾəzˈAʃənd",
+   "progressive": "sˌOviəɾəzˈAʃənɪŋ"
+  },
+  {
+   "stem": "pˈɑɾᵻd",
+   "plural": "pˈɑɾᵻdz",
+   "past": "pˈɑɾᵻdᵻd",
+   "progressive": "pˈɑɾᵻdɪŋ"
+  },
+  {
+   "stem": "ˌʌntˈIdinəs",
+   "plural": "ˌʌntˈIdinəsᵻz",
+   "past": "ˌʌntˈIdinəst",
+   "progressive": "ˌʌntˈIdinəsɪŋ"
+  },
+  {
+   "stem": "əvˈæljʊˌAɾɪv",
+   "plural": "əvˈæljʊˌAɾɪvz",
+   "past": "əvˈæljʊˌAɾɪvd",
+   "progressive": "əvˈæljʊˌAɾɪvɪŋ"
+  },
+  {
+   "stem": "sˈɜɹv",
+   "plural": "sˈɜɹvz",
+   "past": "sˈɜɹvd",
+   "progressive": "sˈɜɹvɪŋ"
+  },
+  {
+   "stem": "pˈʌŋktˌAt",
+   "plural": "pˈʌŋktˌAts",
+   "past": "pˈʌŋktˌAɾᵻd",
+   "progressive": "pˈʌŋktˌAɾɪŋ"
+  },
+  {
+   "stem": "ɹənˈæsnt",
+   "plural": "ɹənˈæsnts",
+   "past": "ɹənˈæsntᵻd",
+   "progressive": "ɹənˈæsntɪŋ"
+  },
+  {
+   "stem": "klˈupiˌYd",
+   "plural": "klˈupiˌYdz",
+   "past": "klˈupiˌYdᵻd",
+   "progressive": "klˈupiˌYdɪŋ"
+  },
+  {
+   "stem": "kɹˈOki",
+   "plural": "kɹˈOkiz",
+   "past": "kɹˈOkid",
+   "progressive": "kɹˈOkiɪŋ"
+  },
+  {
+   "stem": "pˈudu",
+   "plural": "pˈuduz",
+   "past": "pˈudud",
+   "progressive": "pˈuduɪŋ"
+  },
+  {
+   "stem": "ɹˈæpsədɪst",
+   "plural": "ɹˈæpsədɪsts",
+   "past": "ɹˈæpsədɪstᵻd",
+   "progressive": "ɹˈæpsədɪstɪŋ"
+  },
+  {
+   "stem": "skɹˈæpəli",
+   "plural": "skɹˈæpəliz",
+   "past": "skɹˈæpəlid",
+   "progressive": "skɹˈæpəliɪŋ"
+  },
+  {
+   "stem": "bˈuɡənvˌɪl",
+   "plural": "bˈuɡənvˌɪlz",
+   "past": "bˈuɡənvˌɪld",
+   "progressive": "bˈuɡənvˌɪlɪŋ"
+  },
+  {
+   "stem": "kˌɑkəhˈup",
+   "plural": "kˌɑkəhˈups",
+   "past": "kˌɑkəhˈupt",
+   "progressive": "kˌɑkəhˈupɪŋ"
+  },
+  {
+   "stem": "hˈɛt",
+   "plural": "hˈɛts",
+   "past": "hˈɛɾᵻd",
+   "progressive": "hˈɛɾɪŋ"
+  },
+  {
+   "stem": "spˈæm",
+   "plural": "spˈæmz",
+   "past": "spˈæmd",
+   "progressive": "spˈæmɪŋ"
+  },
+  {
+   "stem": "ʧˈɑɹʤbˌæk",
+   "plural": "ʧˈɑɹʤbˌæks",
+   "past": "ʧˈɑɹʤbˌækt",
+   "progressive": "ʧˈɑɹʤbˌækɪŋ"
+  },
+  {
+   "stem": "bˈʌtɹəst",
+   "plural": "bˈʌtɹəsts",
+   "past": "bˈʌtɹəstᵻd",
+   "progressive": "bˈʌtɹəstɪŋ"
+  },
+  {
+   "stem": "ˈɑmnəɹAnʤ",
+   "plural": "ˈɑmnəɹAnʤᵻz",
+   "past": "ˈɑmnəɹAnʤd",
+   "progressive": "ˈɑmnəɹAnʤɪŋ"
+  },
+  {
+   "stem": "ʤˈiOmˌænsi",
+   "plural": "ʤˈiOmˌænsiz",
+   "past": "ʤˈiOmˌænsid",
+   "progressive": "ʤˈiOmˌænsiɪŋ"
+  },
+  {
+   "stem": "nˈAdəɹ",
+   "plural": "nˈAdəɹz",
+   "past": "nˈAdəɹd",
+   "progressive": "nˈAdəɹɪŋ"
+  },
+  {
+   "stem": "sˌʌlfjəɹˌIzˈAʃən",
+   "plural": "sˌʌlfjəɹˌIzˈAʃənz",
+   "past": "sˌʌlfjəɹˌIzˈAʃənd",
+   "progressive": "sˌʌlfjəɹˌIzˈAʃənɪŋ"
+  },
+  {
+   "stem": "ˌʌndˈɔntədnəs",
+   "plural": "ˌʌndˈɔntədnəsᵻz",
+   "past": "ˌʌndˈɔntədnəst",
+   "progressive": "ˌʌndˈɔntədnəsɪŋ"
+  },
+  {
+   "stem": "ɹˈɛktəsˌil",
+   "plural": "ɹˈɛktəsˌilz",
+   "past": "ɹˈɛktəsˌild",
+   "progressive": "ɹˈɛktəsˌilɪŋ"
+  },
+  {
+   "stem": "dInˈæməkᵊli",
+   "plural": "dInˈæməkᵊliz",
+   "past": "dInˈæməkᵊlid",
+   "progressive": "dInˈæməkᵊliɪŋ"
+  },
+  {
+   "stem": "wˈɪkəɹ",
+   "plural": "wˈɪkəɹz",
+   "past": "wˈɪkəɹd",
+   "progressive": "wˈɪkəɹɪŋ"
+  },
+  {
+   "stem": "blˌɛfəɹˈIɾəs",
+   "plural": "blˌɛfəɹˈIɾəsᵻz",
+   "past": "blˌɛfəɹˈIɾəst",
+   "progressive": "blˌɛfəɹˈIɾəsɪŋ"
+  },
+  {
+   "stem": "kwˈɪnəlᵊn",
+   "plural": "kwˈɪnəlᵊnz",
+   "past": "kwˈɪnəlᵊnd",
+   "progressive": "kwˈɪnəlᵊnɪŋ"
+  },
+  {
+   "stem": "ˈɪmˌId",
+   "plural": "ˈɪmˌIdz",
+   "past": "ˈɪmˌIdᵻd",
+   "progressive": "ˈɪmˌIdɪŋ"
+  },
+  {
+   "stem": "ɪllˈɪtɹəsi",
+   "plural": "ɪllˈɪtɹəsiz",
+   "past": "ɪllˈɪtɹəsid",
+   "progressive": "ɪllˈɪtɹəsiɪŋ"
+  },
+  {
+   "stem": "ˌænʤəlˈinO",
+   "plural": "ˌænʤəlˈinOz",
+   "past": "ˌænʤəlˈinOd",
+   "progressive": "ˌænʤəlˈinOɪŋ"
+  },
+  {
+   "stem": "sˈɜɹkəmsˌIz",
+   "plural": "sˈɜɹkəmsˌIzᵻz",
+   "past": "sˈɜɹkəmsˌIzd",
+   "progressive": "sˈɜɹkəmsˌIzɪŋ"
+  },
+  {
+   "stem": "nˌuɹOstˈɪmjəlˌAɾəɹ",
+   "plural": "nˌuɹOstˈɪmjəlˌAɾəɹz",
+   "past": "nˌuɹOstˈɪmjəlˌAɾəɹd",
+   "progressive": "nˌuɹOstˈɪmjəlˌAɾəɹɪŋ"
+  },
+  {
+   "stem": "wˈɑ",
+   "plural": "wˈɑz",
+   "past": "wˈɑd",
+   "progressive": "wˈɑɪŋ"
+  },
+  {
+   "stem": "ɹəkˈɜɹvd",
+   "plural": "ɹəkˈɜɹvdz",
+   "past": "ɹəkˈɜɹvdᵻd",
+   "progressive": "ɹəkˈɜɹvdɪŋ"
+  },
+  {
+   "stem": "klˈud",
+   "plural": "klˈudz",
+   "past": "klˈudᵻd",
+   "progressive": "klˈudɪŋ"
+  },
+  {
+   "stem": "jˈɛstəɹnˌIt",
+   "plural": "jˈɛstəɹnˌIts",
+   "past": "jˈɛstəɹnˌIɾᵻd",
+   "progressive": "jˈɛstəɹnˌIɾɪŋ"
+  },
+  {
+   "stem": "sˌɪndəkˈAʃən",
+   "plural": "sˌɪndəkˈAʃənz",
+   "past": "sˌɪndəkˈAʃənd",
+   "progressive": "sˌɪndəkˈAʃənɪŋ"
+  },
+  {
+   "stem": "ɹˈumən",
+   "plural": "ɹˈumənz",
+   "past": "ɹˈumənd",
+   "progressive": "ɹˈumənɪŋ"
+  },
+  {
+   "stem": "dˌɪsˌædvəntˈAʤəs",
+   "plural": "dˌɪsˌædvəntˈAʤəsᵻz",
+   "past": "dˌɪsˌædvəntˈAʤəst",
+   "progressive": "dˌɪsˌædvəntˈAʤəsɪŋ"
+  },
+  {
+   "stem": "spənˈOzɪst",
+   "plural": "spənˈOzɪsts",
+   "past": "spənˈOzɪstᵻd",
+   "progressive": "spənˈOzɪstɪŋ"
+  },
+  {
+   "stem": "bˈɔɹdəɹkɹˌɔs",
+   "plural": "bˈɔɹdəɹkɹˌɔsᵻz",
+   "past": "bˈɔɹdəɹkɹˌɔst",
+   "progressive": "bˈɔɹdəɹkɹˌɔsɪŋ"
+  },
+  {
+   "stem": "lunˈɛɹiən",
+   "plural": "lunˈɛɹiənz",
+   "past": "lunˈɛɹiənd",
+   "progressive": "lunˈɛɹiənɪŋ"
+  },
+  {
+   "stem": "tˈOz",
+   "plural": "tˈOzᵻz",
+   "past": "tˈOzd",
+   "progressive": "tˈOzɪŋ"
+  },
+  {
+   "stem": "ˈænətAs",
+   "plural": "ˈænətAsᵻz",
+   "past": "ˈænətAst",
+   "progressive": "ˈænətAsɪŋ"
+  },
+  {
+   "stem": "ɡlˈAzi",
+   "plural": "ɡlˈAziz",
+   "past": "ɡlˈAzid",
+   "progressive": "ɡlˈAziɪŋ"
+  },
+  {
+   "stem": "bjʊɹˈɑkɹətˌIz",
+   "plural": "bjʊɹˈɑkɹətˌIzᵻz",
+   "past": "bjʊɹˈɑkɹətˌIzd",
+   "progressive": "bjʊɹˈɑkɹətˌIzɪŋ"
+  },
+  {
+   "stem": "kwˈɑd",
+   "plural": "kwˈɑdz",
+   "past": "kwˈɑdᵻd",
+   "progressive": "kwˈɑdɪŋ"
+  },
+  {
+   "stem": "vɪnkɹˈɪstˌin",
+   "plural": "vɪnkɹˈɪstˌinz",
+   "past": "vɪnkɹˈɪstˌind",
+   "progressive": "vɪnkɹˈɪstˌinɪŋ"
+  },
+  {
+   "stem": "dˈɪmpəld",
+   "plural": "dˈɪmpəldz",
+   "past": "dˈɪmpəldᵻd",
+   "progressive": "dˈɪmpəldɪŋ"
+  },
+  {
+   "stem": "sˌIbəɹnˈɛɾɪks",
+   "plural": "sˌIbəɹnˈɛɾɪksᵻz",
+   "past": "sˌIbəɹnˈɛɾɪkst",
+   "progressive": "sˌIbəɹnˈɛɾɪksɪŋ"
+  },
+  {
+   "stem": "mˌɪsˌæpɹəhˈɛnʃən",
+   "plural": "mˌɪsˌæpɹəhˈɛnʃənz",
+   "past": "mˌɪsˌæpɹəhˈɛnʃənd",
+   "progressive": "mˌɪsˌæpɹəhˈɛnʃənɪŋ"
+  },
+  {
+   "stem": "pˈAzli",
+   "plural": "pˈAzliz",
+   "past": "pˈAzlid",
+   "progressive": "pˈAzliɪŋ"
+  },
+  {
+   "stem": "pˈɑliˌin",
+   "plural": "pˈɑliˌinz",
+   "past": "pˈɑliˌind",
+   "progressive": "pˈɑliˌinɪŋ"
+  },
+  {
+   "stem": "ˌæpəfˈɛniə",
+   "plural": "ˌæpəfˈɛniəz",
+   "past": "ˌæpəfˈɛniəd",
+   "progressive": "ˌæpəfˈɛniəɪŋ"
+  },
+  {
+   "stem": "bɹˈɔdəɹ",
+   "plural": "bɹˈɔdəɹz",
+   "past": "bɹˈɔdəɹd",
+   "progressive": "bɹˈɔdəɹɪŋ"
+  },
+  {
+   "stem": "pˌɛkəbˈɪləɾi",
+   "plural": "pˌɛkəbˈɪləɾiz",
+   "past": "pˌɛkəbˈɪləɾid",
+   "progressive": "pˌɛkəbˈɪləɾiɪŋ"
+  },
+  {
+   "stem": "stˈiliəɹ",
+   "plural": "stˈiliəɹz",
+   "past": "stˈiliəɹd",
+   "progressive": "stˈiliəɹɪŋ"
+  },
+  {
+   "stem": "bIpˈɑɹɾəzᵊnʃˌɪp",
+   "plural": "bIpˈɑɹɾəzᵊnʃˌɪps",
+   "past": "bIpˈɑɹɾəzᵊnʃˌɪpt",
+   "progressive": "bIpˈɑɹɾəzᵊnʃˌɪpɪŋ"
+  },
+  {
+   "stem": "ɡwˈɑvə",
+   "plural": "ɡwˈɑvəz",
+   "past": "ɡwˈɑvəd",
+   "progressive": "ɡwˈɑvəɪŋ"
+  },
+  {
+   "stem": "zənˈɑɹθɹə",
+   "plural": "zənˈɑɹθɹəz",
+   "past": "zənˈɑɹθɹəd",
+   "progressive": "zənˈɑɹθɹəɪŋ"
+  },
+  {
+   "stem": "ˌʌʧˈɑɹiə",
+   "plural": "ˌʌʧˈɑɹiəz",
+   "past": "ˌʌʧˈɑɹiəd",
+   "progressive": "ˌʌʧˈɑɹiəɪŋ"
+  },
+  {
+   "stem": "fˌOɾəkˈɛməkᵊl",
+   "plural": "fˌOɾəkˈɛməkᵊlz",
+   "past": "fˌOɾəkˈɛməkᵊld",
+   "progressive": "fˌOɾəkˈɛməkᵊlɪŋ"
+  },
+  {
+   "stem": "səɹˈin",
+   "plural": "səɹˈinz",
+   "past": "səɹˈind",
+   "progressive": "səɹˈinɪŋ"
+  },
+  {
+   "stem": "ɡˈɑli",
+   "plural": "ɡˈɑliz",
+   "past": "ɡˈɑlid",
+   "progressive": "ɡˈɑliɪŋ"
+  },
+  {
+   "stem": "ɡlˈæsiəɹ",
+   "plural": "ɡlˈæsiəɹz",
+   "past": "ɡlˈæsiəɹd",
+   "progressive": "ɡlˈæsiəɹɪŋ"
+  },
+  {
+   "stem": "ˈæksədəntpɹˌOn",
+   "plural": "ˈæksədəntpɹˌOnz",
+   "past": "ˈæksədəntpɹˌOnd",
+   "progressive": "ˈæksədəntpɹˌOnɪŋ"
+  },
+  {
+   "stem": "kˈɑɹbəɹˌIz",
+   "plural": "kˈɑɹbəɹˌIzᵻz",
+   "past": "kˈɑɹbəɹˌIzd",
+   "progressive": "kˈɑɹbəɹˌIzɪŋ"
+  },
+  {
+   "stem": "hˈɛksətˌuk",
+   "plural": "hˈɛksətˌuks",
+   "past": "hˈɛksətˌukt",
+   "progressive": "hˈɛksətˌukɪŋ"
+  },
+  {
+   "stem": "mˌiɾiəɹˈYdᵊl",
+   "plural": "mˌiɾiəɹˈYdᵊlz",
+   "past": "mˌiɾiəɹˈYdᵊld",
+   "progressive": "mˌiɾiəɹˈYdᵊlɪŋ"
+  },
+  {
+   "stem": "spɪnˈOni",
+   "plural": "spɪnˈOniz",
+   "past": "spɪnˈOnid",
+   "progressive": "spɪnˈOniɪŋ"
+  },
+  {
+   "stem": "ɡɹˈɪn",
+   "plural": "ɡɹˈɪnz",
+   "past": "ɡɹˈɪnd",
+   "progressive": "ɡɹˈɪnɪŋ"
+  },
+  {
+   "stem": "sˌɪɹOkəŋvˈɜɹʒᵊn",
+   "plural": "sˌɪɹOkəŋvˈɜɹʒᵊnz",
+   "past": "sˌɪɹOkəŋvˈɜɹʒᵊnd",
+   "progressive": "sˌɪɹOkəŋvˈɜɹʒᵊnɪŋ"
+  },
+  {
+   "stem": "həmˈɑʤənˌIz",
+   "plural": "həmˈɑʤənˌIzᵻz",
+   "past": "həmˈɑʤənˌIzd",
+   "progressive": "həmˈɑʤənˌIzɪŋ"
+  },
+  {
+   "stem": "ləmˈɑz",
+   "plural": "ləmˈɑzᵻz",
+   "past": "ləmˈɑzd",
+   "progressive": "ləmˈɑzɪŋ"
+  },
+  {
+   "stem": "lˈukən",
+   "plural": "lˈukənz",
+   "past": "lˈukənd",
+   "progressive": "lˈukənɪŋ"
+  },
+  {
+   "stem": "ɡlˈWəɹ",
+   "plural": "ɡlˈWəɹz",
+   "past": "ɡlˈWəɹd",
+   "progressive": "ɡlˈWəɹɪŋ"
+  },
+  {
+   "stem": "fˈɛkjələns",
+   "plural": "fˈɛkjələnsᵻz",
+   "past": "fˈɛkjələnst",
+   "progressive": "fˈɛkjələnsɪŋ"
+  },
+  {
+   "stem": "hɛksˈæɡənᵊl",
+   "plural": "hɛksˈæɡənᵊlz",
+   "past": "hɛksˈæɡənᵊld",
+   "progressive": "hɛksˈæɡənᵊlɪŋ"
+  },
+  {
+   "stem": "tənˈækjələm",
+   "plural": "tənˈækjələmz",
+   "past": "tənˈækjələmd",
+   "progressive": "tənˈækjələmɪŋ"
+  },
+  {
+   "stem": "hˈɑdᵊn",
+   "plural": "hˈɑdᵊnz",
+   "past": "hˈɑdᵊnd",
+   "progressive": "hˈɑdᵊnɪŋ"
+  },
+  {
+   "stem": "kˈævᵊn",
+   "plural": "kˈævᵊnz",
+   "past": "kˈævᵊnd",
+   "progressive": "kˈævᵊnɪŋ"
+  },
+  {
+   "stem": "kɹˈOkəsᵻz",
+   "plural": "kɹˈOkəsᵻzᵻz",
+   "past": "kɹˈOkəsᵻzd",
+   "progressive": "kɹˈOkəsᵻzɪŋ"
+  },
+  {
+   "stem": "ɹəmˈɪɾəbəl",
+   "plural": "ɹəmˈɪɾəbəlz",
+   "past": "ɹəmˈɪɾəbəld",
+   "progressive": "ɹəmˈɪɾəbəlɪŋ"
+  },
+  {
+   "stem": "stˈɑnʧ",
+   "plural": "stˈɑnʧᵻz",
+   "past": "stˈɑnʧt",
+   "progressive": "stˈɑnʧɪŋ"
+  },
+  {
+   "stem": "bˈækswɪŋ",
+   "plural": "bˈækswɪŋz",
+   "past": "bˈækswɪŋd",
+   "progressive": "bˈækswɪŋɪŋ"
+  },
+  {
+   "stem": "ˈIdəhˌOən",
+   "plural": "ˈIdəhˌOənz",
+   "past": "ˈIdəhˌOənd",
+   "progressive": "ˈIdəhˌOənɪŋ"
+  },
+  {
+   "stem": "kˈOfˌʌŋkʃən",
+   "plural": "kˈOfˌʌŋkʃənz",
+   "past": "kˈOfˌʌŋkʃənd",
+   "progressive": "kˈOfˌʌŋkʃənɪŋ"
+  },
+  {
+   "stem": "sˈɜɹfəɾɪŋ",
+   "plural": "sˈɜɹfəɾɪŋz",
+   "past": "sˈɜɹfəɾɪŋd",
+   "progressive": "sˈɜɹfəɾɪŋɪŋ"
+  },
+  {
+   "stem": "ɹəmˈuv",
+   "plural": "ɹəmˈuvz",
+   "past": "ɹəmˈuvd",
+   "progressive": "ɹəmˈuvɪŋ"
+  },
+  {
+   "stem": "ɹˈɛndəɹ",
+   "plural": "ɹˈɛndəɹz",
+   "past": "ɹˈɛndəɹd",
+   "progressive": "ɹˈɛndəɹɪŋ"
+  },
+  {
+   "stem": "pˈɛɹijˌA",
+   "plural": "pˈɛɹijˌAz",
+   "past": "pˈɛɹijˌAd",
+   "progressive": "pˈɛɹijˌAɪŋ"
+  },
+  {
+   "stem": "kˌɑntɹəˌɪndəkˈAʃən",
+   "plural": "kˌɑntɹəˌɪndəkˈAʃənz",
+   "past": "kˌɑntɹəˌɪndəkˈAʃənd",
+   "progressive": "kˌɑntɹəˌɪndəkˈAʃənɪŋ"
+  },
+  {
+   "stem": "ˈɪsləmɪst",
+   "plural": "ˈɪsləmɪsts",
+   "past": "ˈɪsləmɪstᵻd",
+   "progressive": "ˈɪsləmɪstɪŋ"
+  },
+  {
+   "stem": "sɑnˈiŋkˌA",
+   "plural": "sɑnˈiŋkˌAz",
+   "past": "sɑnˈiŋkˌAd",
+   "progressive": "sɑnˈiŋkˌAɪŋ"
+  },
+  {
+   "stem": "kəmˈOnO",
+   "plural": "kəmˈOnOz",
+   "past": "kəmˈOnOd",
+   "progressive": "kəmˈOnOɪŋ"
+  },
+  {
+   "stem": "ˈæntɹˌɑn",
+   "plural": "ˈæntɹˌɑnz",
+   "past": "ˈæntɹˌɑnd",
+   "progressive": "ˈæntɹˌɑnɪŋ"
+  },
+  {
+   "stem": "mˈæskjələnli",
+   "plural": "mˈæskjələnliz",
+   "past": "mˈæskjələnlid",
+   "progressive": "mˈæskjələnliɪŋ"
+  },
+  {
+   "stem": "kˌʌnkɹˈitnəs",
+   "plural": "kˌʌnkɹˈitnəsᵻz",
+   "past": "kˌʌnkɹˈitnəst",
+   "progressive": "kˌʌnkɹˈitnəsɪŋ"
+  },
+  {
+   "stem": "ˌɪlfˈWndᵻd",
+   "plural": "ˌɪlfˈWndᵻdz",
+   "past": "ˌɪlfˈWndᵻdᵻd",
+   "progressive": "ˌɪlfˈWndᵻdɪŋ"
+  },
+  {
+   "stem": "ˈɪnʤɛɹə",
+   "plural": "ˈɪnʤɛɹəz",
+   "past": "ˈɪnʤɛɹəd",
+   "progressive": "ˈɪnʤɛɹəɪŋ"
+  },
+  {
+   "stem": "klədˈɪstɪk",
+   "plural": "klədˈɪstɪks",
+   "past": "klədˈɪstɪkt",
+   "progressive": "klədˈɪstɪkɪŋ"
+  },
+  {
+   "stem": "kwˈɑzipˌɑɹɾəkᵊl",
+   "plural": "kwˈɑzipˌɑɹɾəkᵊlz",
+   "past": "kwˈɑzipˌɑɹɾəkᵊld",
+   "progressive": "kwˈɑzipˌɑɹɾəkᵊlɪŋ"
+  },
+  {
+   "stem": "wˈɪləwˌɔ",
+   "plural": "wˈɪləwˌɔz",
+   "past": "wˈɪləwˌɔd",
+   "progressive": "wˈɪləwˌɔɪŋ"
+  },
+  {
+   "stem": "hˈʌmd",
+   "plural": "hˈʌmdz",
+   "past": "hˈʌmdᵻd",
+   "progressive": "hˈʌmdɪŋ"
+  },
+  {
+   "stem": "ˈɪɹətᵊnt",
+   "plural": "ˈɪɹətᵊnts",
+   "past": "ˈɪɹətᵊntᵻd",
+   "progressive": "ˈɪɹətᵊntɪŋ"
+  },
+  {
+   "stem": "mˈIkɹOfˌAʤ",
+   "plural": "mˈIkɹOfˌAʤᵻz",
+   "past": "mˈIkɹOfˌAʤd",
+   "progressive": "mˈIkɹOfˌAʤɪŋ"
+  },
+  {
+   "stem": "skˈAtbˌɔɹd",
+   "plural": "skˈAtbˌɔɹdz",
+   "past": "skˈAtbˌɔɹdᵻd",
+   "progressive": "skˈAtbˌɔɹdɪŋ"
+  },
+  {
+   "stem": "ˌʌnˈænsəɹəbli",
+   "plural": "ˌʌnˈænsəɹəbliz",
+   "past": "ˌʌnˈænsəɹəblid",
+   "progressive": "ˌʌnˈænsəɹəbliɪŋ"
+  },
+  {
+   "stem": "ɪnhˈɪɹ",
+   "plural": "ɪnhˈɪɹz",
+   "past": "ɪnhˈɪɹd",
+   "progressive": "ɪnhˈɪɹɪŋ"
+  },
+  {
+   "stem": "kwˈɔɹt",
+   "plural": "kwˈɔɹts",
+   "past": "kwˈɔɹɾᵻd",
+   "progressive": "kwˈɔɹɾɪŋ"
+  },
+  {
+   "stem": "kˌɑnsjˈɛɹʤ",
+   "plural": "kˌɑnsjˈɛɹʤᵻz",
+   "past": "kˌɑnsjˈɛɹʤd",
+   "progressive": "kˌɑnsjˈɛɹʤɪŋ"
+  },
+  {
+   "stem": "kˈApəɹ",
+   "plural": "kˈApəɹz",
+   "past": "kˈApəɹd",
+   "progressive": "kˈApəɹɪŋ"
+  },
+  {
+   "stem": "pˈɑɹθənˌɑn",
+   "plural": "pˈɑɹθənˌɑnz",
+   "past": "pˈɑɹθənˌɑnd",
+   "progressive": "pˈɑɹθənˌɑnɪŋ"
+  },
+  {
+   "stem": "tˈɛndɹəl",
+   "plural": "tˈɛndɹəlz",
+   "past": "tˈɛndɹəld",
+   "progressive": "tˈɛndɹəlɪŋ"
+  },
+  {
+   "stem": "lˈæks",
+   "plural": "lˈæksᵻz",
+   "past": "lˈækst",
+   "progressive": "lˈæksɪŋ"
+  },
+  {
+   "stem": "pɹˈɛməsᵻz",
+   "plural": "pɹˈɛməsᵻzᵻz",
+   "past": "pɹˈɛməsᵻzd",
+   "progressive": "pɹˈɛməsᵻzɪŋ"
+  },
+  {
+   "stem": "bˈɑɹɡᵊnəɹ",
+   "plural": "bˈɑɹɡᵊnəɹz",
+   "past": "bˈɑɹɡᵊnəɹd",
+   "progressive": "bˈɑɹɡᵊnəɹɪŋ"
+  },
+  {
+   "stem": "tˈɛlətˌɛkst",
+   "plural": "tˈɛlətˌɛksts",
+   "past": "tˈɛlətˌɛkstᵻd",
+   "progressive": "tˈɛlətˌɛkstɪŋ"
+  },
+  {
+   "stem": "pɹˌOɾənˈOpiə",
+   "plural": "pɹˌOɾənˈOpiəz",
+   "past": "pɹˌOɾənˈOpiəd",
+   "progressive": "pɹˌOɾənˈOpiəɪŋ"
+  },
+  {
+   "stem": "blˈip",
+   "plural": "blˈips",
+   "past": "blˈipt",
+   "progressive": "blˈipɪŋ"
+  },
+  {
+   "stem": "tɹˈIəmf",
+   "plural": "tɹˈIəmfs",
+   "past": "tɹˈIəmft",
+   "progressive": "tɹˈIəmfɪŋ"
+  },
+  {
+   "stem": "pəlˈɪɡəməsli",
+   "plural": "pəlˈɪɡəməsliz",
+   "past": "pəlˈɪɡəməslid",
+   "progressive": "pəlˈɪɡəməsliɪŋ"
+  },
+  {
+   "stem": "hˈɛɹɹˌAzɪŋ",
+   "plural": "hˈɛɹɹˌAzɪŋz",
+   "past": "hˈɛɹɹˌAzɪŋd",
+   "progressive": "hˈɛɹɹˌAzɪŋɪŋ"
+  },
+  {
+   "stem": "ɡɹənˈiɾə",
+   "plural": "ɡɹənˈiɾəz",
+   "past": "ɡɹənˈiɾəd",
+   "progressive": "ɡɹənˈiɾəɪŋ"
+  },
+  {
+   "stem": "plˈɛksəɹ",
+   "plural": "plˈɛksəɹz",
+   "past": "plˈɛksəɹd",
+   "progressive": "plˈɛksəɹɪŋ"
+  },
+  {
+   "stem": "fˈɪɡjəɹəɾɪv",
+   "plural": "fˈɪɡjəɹəɾɪvz",
+   "past": "fˈɪɡjəɹəɾɪvd",
+   "progressive": "fˈɪɡjəɹəɾɪvɪŋ"
+  },
+  {
+   "stem": "tˈɪpsi",
+   "plural": "tˈɪpsiz",
+   "past": "tˈɪpsid",
+   "progressive": "tˈɪpsiɪŋ"
+  },
+  {
+   "stem": "əlˌɛktɹəfˌɪziəlˈɑʤəkəl",
+   "plural": "əlˌɛktɹəfˌɪziəlˈɑʤəkəlz",
+   "past": "əlˌɛktɹəfˌɪziəlˈɑʤəkəld",
+   "progressive": "əlˌɛktɹəfˌɪziəlˈɑʤəkəlɪŋ"
+  },
+  {
+   "stem": "ʤˈɜɹkt",
+   "plural": "ʤˈɜɹkts",
+   "past": "ʤˈɜɹktᵻd",
+   "progressive": "ʤˈɜɹktɪŋ"
+  },
+  {
+   "stem": "fˈɔstəɹ",
+   "plural": "fˈɔstəɹz",
+   "past": "fˈɔstəɹd",
+   "progressive": "fˈɔstəɹɪŋ"
+  },
+  {
+   "stem": "əstɹˈɑləʤəɹ",
+   "plural": "əstɹˈɑləʤəɹz",
+   "past": "əstɹˈɑləʤəɹd",
+   "progressive": "əstɹˈɑləʤəɹɪŋ"
+  },
+  {
+   "stem": "flˈInɪs",
+   "plural": "flˈInɪsᵻz",
+   "past": "flˈInɪst",
+   "progressive": "flˈInɪsɪŋ"
+  },
+  {
+   "stem": "mˈɪŋki",
+   "plural": "mˈɪŋkiz",
+   "past": "mˈɪŋkid",
+   "progressive": "mˈɪŋkiɪŋ"
+  },
+  {
+   "stem": "dəspɹˈOziəm",
+   "plural": "dəspɹˈOziəmz",
+   "past": "dəspɹˈOziəmd",
+   "progressive": "dəspɹˈOziəmɪŋ"
+  },
+  {
+   "stem": "ʧˈizmˌɑŋɡəɹ",
+   "plural": "ʧˈizmˌɑŋɡəɹz",
+   "past": "ʧˈizmˌɑŋɡəɹd",
+   "progressive": "ʧˈizmˌɑŋɡəɹɪŋ"
+  },
+  {
+   "stem": "ˌɪntəɹdˈɪkʃən",
+   "plural": "ˌɪntəɹdˈɪkʃənz",
+   "past": "ˌɪntəɹdˈɪkʃənd",
+   "progressive": "ˌɪntəɹdˈɪkʃənɪŋ"
+  },
+  {
+   "stem": "ɑk",
+   "plural": "ɑks",
+   "past": "ɑkt",
+   "progressive": "ɑkɪŋ"
+  },
+  {
+   "stem": "ˌɪmjənOzˈɔɹbᵊnt",
+   "plural": "ˌɪmjənOzˈɔɹbᵊnts",
+   "past": "ˌɪmjənOzˈɔɹbᵊntᵻd",
+   "progressive": "ˌɪmjənOzˈɔɹbᵊntɪŋ"
+  },
+  {
+   "stem": "lˈɪkwəfˌI",
+   "plural": "lˈɪkwəfˌIz",
+   "past": "lˈɪkwəfˌId",
+   "progressive": "lˈɪkwəfˌIɪŋ"
+  },
+  {
+   "stem": "ˈɛksəɹsˌIz",
+   "plural": "ˈɛksəɹsˌIzᵻz",
+   "past": "ˈɛksəɹsˌIzd",
+   "progressive": "ˈɛksəɹsˌIzɪŋ"
+  },
+  {
+   "stem": "A",
+   "plural": "Az",
+   "past": "Ad",
+   "progressive": "Aɪŋ"
+  },
+  {
+   "stem": "kjutˈAniəs",
+   "plural": "kjutˈAniəsᵻz",
+   "past": "kjutˈAniəst",
+   "progressive": "kjutˈAniəsɪŋ"
+  },
+  {
+   "stem": "hˈæŋk",
+   "plural": "hˈæŋks",
+   "past": "hˈæŋkt",
+   "progressive": "hˈæŋkɪŋ"
+  },
+  {
+   "stem": "ɡɹˈOn",
+   "plural": "ɡɹˈOnz",
+   "past": "ɡɹˈOnd",
+   "progressive": "ɡɹˈOnɪŋ"
+  },
+  {
+   "stem": "ˌɛθnOmˌɛθədˈɑləʤɪst",
+   "plural": "ˌɛθnOmˌɛθədˈɑləʤɪsts",
+   "past": "ˌɛθnOmˌɛθədˈɑləʤɪstᵻd",
+   "progressive": "ˌɛθnOmˌɛθədˈɑləʤɪstɪŋ"
+  },
+  {
+   "stem": "nˈikˌæp",
+   "plural": "nˈikˌæps",
+   "past": "nˈikˌæpt",
+   "progressive": "nˈikˌæpɪŋ"
+  },
+  {
+   "stem": "bˈIɹə",
+   "plural": "bˈIɹəz",
+   "past": "bˈIɹəd",
+   "progressive": "bˈIɹəɪŋ"
+  },
+  {
+   "stem": "ʤˈæp",
+   "plural": "ʤˈæps",
+   "past": "ʤˈæpt",
+   "progressive": "ʤˈæpɪŋ"
+  },
+  {
+   "stem": "dˌʌbdˌʌbdˈʌb",
+   "plural": "dˌʌbdˌʌbdˈʌbz",
+   "past": "dˌʌbdˌʌbdˈʌbd",
+   "progressive": "dˌʌbdˌʌbdˈʌbɪŋ"
+  },
+  {
+   "stem": "sɑlvˈAʃən",
+   "plural": "sɑlvˈAʃənz",
+   "past": "sɑlvˈAʃənd",
+   "progressive": "sɑlvˈAʃənɪŋ"
+  },
+  {
+   "stem": "kˈɪŋkstəɹ",
+   "plural": "kˈɪŋkstəɹz",
+   "past": "kˈɪŋkstəɹd",
+   "progressive": "kˈɪŋkstəɹɪŋ"
+  },
+  {
+   "stem": "ɹiwˈWnd",
+   "plural": "ɹiwˈWndz",
+   "past": "ɹiwˈWndᵻd",
+   "progressive": "ɹiwˈWndɪŋ"
+  },
+  {
+   "stem": "wˈɛðəɹɪŋ",
+   "plural": "wˈɛðəɹɪŋz",
+   "past": "wˈɛðəɹɪŋd",
+   "progressive": "wˈɛðəɹɪŋɪŋ"
+  },
+  {
+   "stem": "skɹˈʌbi",
+   "plural": "skɹˈʌbiz",
+   "past": "skɹˈʌbid",
+   "progressive": "skɹˈʌbiɪŋ"
+  },
+  {
+   "stem": "ɡɹˈɑɡ",
+   "plural": "ɡɹˈɑɡz",
+   "past": "ɡɹˈɑɡd",
+   "progressive": "ɡɹˈɑɡɪŋ"
+  },
+  {
+   "stem": "ˌɪntəɹfˈAʃᵊl",
+   "plural": "ˌɪntəɹfˈAʃᵊlz",
+   "past": "ˌɪntəɹfˈAʃᵊld",
+   "progressive": "ˌɪntəɹfˈAʃᵊlɪŋ"
+  },
+  {
+   "stem": "ænʃˈæn",
+   "plural": "ænʃˈænz",
+   "past": "ænʃˈænd",
+   "progressive": "ænʃˈænɪŋ"
+  },
+  {
+   "stem": "tˈOdflˌæks",
+   "plural": "tˈOdflˌæksᵻz",
+   "past": "tˈOdflˌækst",
+   "progressive": "tˈOdflˌæksɪŋ"
+  },
+  {
+   "stem": "dˈɛvəlfˌɪʃ",
+   "plural": "dˈɛvəlfˌɪʃᵻz",
+   "past": "dˈɛvəlfˌɪʃt",
+   "progressive": "dˈɛvəlfˌɪʃɪŋ"
+  },
+  {
+   "stem": "kˌɑɹbənˈɑɹə",
+   "plural": "kˌɑɹbənˈɑɹəz",
+   "past": "kˌɑɹbənˈɑɹəd",
+   "progressive": "kˌɑɹbənˈɑɹəɪŋ"
+  },
+  {
+   "stem": "dˈʌpi",
+   "plural": "dˈʌpiz",
+   "past": "dˈʌpid",
+   "progressive": "dˈʌpiɪŋ"
+  },
+  {
+   "stem": "kˈɑkniˌɪzəm",
+   "plural": "kˈɑkniˌɪzəmz",
+   "past": "kˈɑkniˌɪzəmd",
+   "progressive": "kˈɑkniˌɪzəmɪŋ"
+  },
+  {
+   "stem": "bˈɑlmiəɹ",
+   "plural": "bˈɑlmiəɹz",
+   "past": "bˈɑlmiəɹd",
+   "progressive": "bˈɑlmiəɹɪŋ"
+  },
+  {
+   "stem": "ˌOvəɹlˈIɪŋ",
+   "plural": "ˌOvəɹlˈIɪŋz",
+   "past": "ˌOvəɹlˈIɪŋd",
+   "progressive": "ˌOvəɹlˈIɪŋɪŋ"
+  },
+  {
+   "stem": "ˌɛpəlˈɪθɪk",
+   "plural": "ˌɛpəlˈɪθɪks",
+   "past": "ˌɛpəlˈɪθɪkt",
+   "progressive": "ˌɛpəlˈɪθɪkɪŋ"
+  },
+  {
+   "stem": "blˈækθˌɔɹn",
+   "plural": "blˈækθˌɔɹnz",
+   "past": "blˈækθˌɔɹnd",
+   "progressive": "blˈækθˌɔɹnɪŋ"
+  },
+  {
+   "stem": "dˌɪsəmbˈɑdi",
+   "plural": "dˌɪsəmbˈɑdiz",
+   "past": "dˌɪsəmbˈɑdid",
+   "progressive": "dˌɪsəmbˈɑdiɪŋ"
+  },
+  {
+   "stem": "hˈIdɹəfˌIt",
+   "plural": "hˈIdɹəfˌIts",
+   "past": "hˈIdɹəfˌIɾᵻd",
+   "progressive": "hˈIdɹəfˌIɾɪŋ"
+  },
+  {
+   "stem": "pˌɛkəɹˈinO",
+   "plural": "pˌɛkəɹˈinOz",
+   "past": "pˌɛkəɹˈinOd",
+   "progressive": "pˌɛkəɹˈinOɪŋ"
+  },
+  {
+   "stem": "ˌɪnstəntˈAniəsli",
+   "plural": "ˌɪnstəntˈAniəsliz",
+   "past": "ˌɪnstəntˈAniəslid",
+   "progressive": "ˌɪnstəntˈAniəsliɪŋ"
+  },
+  {
+   "stem": "kˈɑmjətˌAɾəɹ",
+   "plural": "kˈɑmjətˌAɾəɹz",
+   "past": "kˈɑmjətˌAɾəɹd",
+   "progressive": "kˈɑmjətˌAɾəɹɪŋ"
+  },
+  {
+   "stem": "pɹəsˈɛntəmᵊnt",
+   "plural": "pɹəsˈɛntəmᵊnts",
+   "past": "pɹəsˈɛntəmᵊntᵻd",
+   "progressive": "pɹəsˈɛntəmᵊntɪŋ"
+  },
+  {
+   "stem": "bˈɜɹɡənfˌild",
+   "plural": "bˈɜɹɡənfˌildz",
+   "past": "bˈɜɹɡənfˌildᵻd",
+   "progressive": "bˈɜɹɡənfˌildɪŋ"
+  },
+  {
+   "stem": "ˈɪnpˌAʃənt",
+   "plural": "ˈɪnpˌAʃənts",
+   "past": "ˈɪnpˌAʃəntᵻd",
+   "progressive": "ˈɪnpˌAʃəntɪŋ"
+  },
+  {
+   "stem": "zˈɑstəɹ",
+   "plural": "zˈɑstəɹz",
+   "past": "zˈɑstəɹd",
+   "progressive": "zˈɑstəɹɪŋ"
+  },
+  {
+   "stem": "sənˈɛsᵊnt",
+   "plural": "sənˈɛsᵊnts",
+   "past": "sənˈɛsᵊntᵻd",
+   "progressive": "sənˈɛsᵊntɪŋ"
+  },
+  {
+   "stem": "ɹˈɛɾəsᵊnt",
+   "plural": "ɹˈɛɾəsᵊnts",
+   "past": "ɹˈɛɾəsᵊntᵻd",
+   "progressive": "ɹˈɛɾəsᵊntɪŋ"
+  },
+  {
+   "stem": "sˌɪləʤˈɪstɪk",
+   "plural": "sˌɪləʤˈɪstɪks",
+   "past": "sˌɪləʤˈɪstɪkt",
+   "progressive": "sˌɪləʤˈɪstɪkɪŋ"
+  },
+  {
+   "stem": "kˌɑnvəlˈɛs",
+   "plural": "kˌɑnvəlˈɛsᵻz",
+   "past": "kˌɑnvəlˈɛst",
+   "progressive": "kˌɑnvəlˈɛsɪŋ"
+  },
+  {
+   "stem": "dənˌɑmənˈAʃᵊnəl",
+   "plural": "dənˌɑmənˈAʃᵊnəlz",
+   "past": "dənˌɑmənˈAʃᵊnəld",
+   "progressive": "dənˌɑmənˈAʃᵊnəlɪŋ"
+  },
+  {
+   "stem": "ʃˈæŋkɪŋ",
+   "plural": "ʃˈæŋkɪŋz",
+   "past": "ʃˈæŋkɪŋd",
+   "progressive": "ʃˈæŋkɪŋɪŋ"
+  },
+  {
+   "stem": "ɹˈɑðəɹəm",
+   "plural": "ɹˈɑðəɹəmz",
+   "past": "ɹˈɑðəɹəmd",
+   "progressive": "ɹˈɑðəɹəmɪŋ"
+  },
+  {
+   "stem": "bɹiˈOʃ",
+   "plural": "bɹiˈOʃᵻz",
+   "past": "bɹiˈOʃt",
+   "progressive": "bɹiˈOʃɪŋ"
+  },
+  {
+   "stem": "ˌʌnmˈɔɹəl",
+   "plural": "ˌʌnmˈɔɹəlz",
+   "past": "ˌʌnmˈɔɹəld",
+   "progressive": "ˌʌnmˈɔɹəlɪŋ"
+  },
+  {
+   "stem": "ˌɪntɹˈæktəbəlnəs",
+   "plural": "ˌɪntɹˈæktəbəlnəsᵻz",
+   "past": "ˌɪntɹˈæktəbəlnəst",
+   "progressive": "ˌɪntɹˈæktəbəlnəsɪŋ"
+  },
+  {
+   "stem": "hˈipɪŋ",
+   "plural": "hˈipɪŋz",
+   "past": "hˈipɪŋd",
+   "progressive": "hˈipɪŋɪŋ"
+  },
+  {
+   "stem": "ˌɛndɑɹɾəɹˈIɾəs",
+   "plural": "ˌɛndɑɹɾəɹˈIɾəsᵻz",
+   "past": "ˌɛndɑɹɾəɹˈIɾəst",
+   "progressive": "ˌɛndɑɹɾəɹˈIɾəsɪŋ"
+  },
+  {
+   "stem": "vˈɪnəfˌI",
+   "plural": "vˈɪnəfˌIz",
+   "past": "vˈɪnəfˌId",
+   "progressive": "vˈɪnəfˌIɪŋ"
+  },
+  {
+   "stem": "pˈupt",
+   "plural": "pˈupts",
+   "past": "pˈuptᵻd",
+   "progressive": "pˈuptɪŋ"
+  },
+  {
+   "stem": "pəɹfˈɪdiəs",
+   "plural": "pəɹfˈɪdiəsᵻz",
+   "past": "pəɹfˈɪdiəst",
+   "progressive": "pəɹfˈɪdiəsɪŋ"
+  },
+  {
+   "stem": "hˈændikɹˌæft",
+   "plural": "hˈændikɹˌæfts",
+   "past": "hˈændikɹˌæftᵻd",
+   "progressive": "hˈændikɹˌæftɪŋ"
+  },
+  {
+   "stem": "tɑbˈɑk",
+   "plural": "tɑbˈɑks",
+   "past": "tɑbˈɑkt",
+   "progressive": "tɑbˈɑkɪŋ"
+  },
+  {
+   "stem": "kˈɔɹm",
+   "plural": "kˈɔɹmz",
+   "past": "kˈɔɹmd",
+   "progressive": "kˈɔɹmɪŋ"
+  },
+  {
+   "stem": "nˌɑnəbʤˈɛktɪv",
+   "plural": "nˌɑnəbʤˈɛktɪvz",
+   "past": "nˌɑnəbʤˈɛktɪvd",
+   "progressive": "nˌɑnəbʤˈɛktɪvɪŋ"
+  },
+  {
+   "stem": "dˌɑməsˈɪliˌɛɹi",
+   "plural": "dˌɑməsˈɪliˌɛɹiz",
+   "past": "dˌɑməsˈɪliˌɛɹid",
+   "progressive": "dˌɑməsˈɪliˌɛɹiɪŋ"
+  },
+  {
+   "stem": "hˈænəmˌɑn",
+   "plural": "hˈænəmˌɑnz",
+   "past": "hˈænəmˌɑnd",
+   "progressive": "hˈænəmˌɑnɪŋ"
+  },
+  {
+   "stem": "sˌɛmənˈɛɹiən",
+   "plural": "sˌɛmənˈɛɹiənz",
+   "past": "sˌɛmənˈɛɹiənd",
+   "progressive": "sˌɛmənˈɛɹiənɪŋ"
+  },
+  {
+   "stem": "vəɹˈizmO",
+   "plural": "vəɹˈizmOz",
+   "past": "vəɹˈizmOd",
+   "progressive": "vəɹˈizmOɪŋ"
+  },
+  {
+   "stem": "hˌɛməpəɹˈisɪs",
+   "plural": "hˌɛməpəɹˈisɪsᵻz",
+   "past": "hˌɛməpəɹˈisɪst",
+   "progressive": "hˌɛməpəɹˈisɪsɪŋ"
+  },
+  {
+   "stem": "ɹˈApɪst",
+   "plural": "ɹˈApɪsts",
+   "past": "ɹˈApɪstᵻd",
+   "progressive": "ɹˈApɪstɪŋ"
+  },
+  {
+   "stem": "ˈIlˌɛks",
+   "plural": "ˈIlˌɛksᵻz",
+   "past": "ˈIlˌɛkst",
+   "progressive": "ˈIlˌɛksɪŋ"
+  },
+  {
+   "stem": "sˈæn",
+   "plural": "sˈænz",
+   "past": "sˈænd",
+   "progressive": "sˈænɪŋ"
+  },
+  {
+   "stem": "sɛkstˈɪljənθ",
+   "plural": "sɛkstˈɪljənθs",
+   "past": "sɛkstˈɪljənθt",
+   "progressive": "sɛkstˈɪljənθɪŋ"
+  },
+  {
+   "stem": "tˈælən",
+   "plural": "tˈælənz",
+   "past": "tˈælənd",
+   "progressive": "tˈælənɪŋ"
+  },
+  {
+   "stem": "flˈɔɹəkˌʌlʧəɹ",
+   "plural": "flˈɔɹəkˌʌlʧəɹz",
+   "past": "flˈɔɹəkˌʌlʧəɹd",
+   "progressive": "flˈɔɹəkˌʌlʧəɹɪŋ"
+  },
+  {
+   "stem": "dəskɹˈɪptəvɪst",
+   "plural": "dəskɹˈɪptəvɪsts",
+   "past": "dəskɹˈɪptəvɪstᵻd",
+   "progressive": "dəskɹˈɪptəvɪstɪŋ"
+  },
+  {
+   "stem": "ˌɛndəmˈitɹiəm",
+   "plural": "ˌɛndəmˈitɹiəmz",
+   "past": "ˌɛndəmˈitɹiəmd",
+   "progressive": "ˌɛndəmˈitɹiəmɪŋ"
+  },
+  {
+   "stem": "ˌɑktəhˈidɹənz",
+   "plural": "ˌɑktəhˈidɹənzᵻz",
+   "past": "ˌɑktəhˈidɹənzd",
+   "progressive": "ˌɑktəhˈidɹənzɪŋ"
+  },
+  {
+   "stem": "kˈɜɹsəd",
+   "plural": "kˈɜɹsədz",
+   "past": "kˈɜɹsədᵻd",
+   "progressive": "kˈɜɹsədɪŋ"
+  },
+  {
+   "stem": "ɡəmˈiɾəsˌIt",
+   "plural": "ɡəmˈiɾəsˌIts",
+   "past": "ɡəmˈiɾəsˌIɾᵻd",
+   "progressive": "ɡəmˈiɾəsˌIɾɪŋ"
+  },
+  {
+   "stem": "blˈæksbəɹɡ",
+   "plural": "blˈæksbəɹɡz",
+   "past": "blˈæksbəɹɡd",
+   "progressive": "blˈæksbəɹɡɪŋ"
+  },
+  {
+   "stem": "sˈɜɹkjələɹˌIz",
+   "plural": "sˈɜɹkjələɹˌIzᵻz",
+   "past": "sˈɜɹkjələɹˌIzd",
+   "progressive": "sˈɜɹkjələɹˌIzɪŋ"
+  },
+  {
+   "stem": "kɹˈiˌOl",
+   "plural": "kɹˈiˌOlz",
+   "past": "kɹˈiˌOld",
+   "progressive": "kɹˈiˌOlɪŋ"
+  },
+  {
+   "stem": "əpɹˈOpɹiətli",
+   "plural": "əpɹˈOpɹiətliz",
+   "past": "əpɹˈOpɹiətlid",
+   "progressive": "əpɹˈOpɹiətliɪŋ"
+  },
+  {
+   "stem": "stˈæbi",
+   "plural": "stˈæbiz",
+   "past": "stˈæbid",
+   "progressive": "stˈæbiɪŋ"
+  },
+  {
+   "stem": "tOtˈɪpəɾənt",
+   "plural": "tOtˈɪpəɾənts",
+   "past": "tOtˈɪpəɾəntᵻd",
+   "progressive": "tOtˈɪpəɾəntɪŋ"
+  },
+  {
+   "stem": "kˈɛɹiˌOvəɹ",
+   "plural": "kˈɛɹiˌOvəɹz",
+   "past": "kˈɛɹiˌOvəɹd",
+   "progressive": "kˈɛɹiˌOvəɹɪŋ"
+  },
+  {
+   "stem": "ɹəfɹˌæktˈɪvəɾi",
+   "plural": "ɹəfɹˌæktˈɪvəɾiz",
+   "past": "ɹəfɹˌæktˈɪvəɾid",
+   "progressive": "ɹəfɹˌæktˈɪvəɾiɪŋ"
+  },
+  {
+   "stem": "kˈɑɾiəɹ",
+   "plural": "kˈɑɾiəɹz",
+   "past": "kˈɑɾiəɹd",
+   "progressive": "kˈɑɾiəɹɪŋ"
+  },
+  {
+   "stem": "ɹəbˈʌɾᵻd",
+   "plural": "ɹəbˈʌɾᵻdz",
+   "past": "ɹəbˈʌɾᵻdᵻd",
+   "progressive": "ɹəbˈʌɾᵻdɪŋ"
+  },
+  {
+   "stem": "sˈɪbʃˌɪp",
+   "plural": "sˈɪbʃˌɪps",
+   "past": "sˈɪbʃˌɪpt",
+   "progressive": "sˈɪbʃˌɪpɪŋ"
+  },
+  {
+   "stem": "θˈɪsᵊl",
+   "plural": "θˈɪsᵊlz",
+   "past": "θˈɪsᵊld",
+   "progressive": "θˈɪsᵊlɪŋ"
+  },
+  {
+   "stem": "mˈɛləfˌOn",
+   "plural": "mˈɛləfˌOnz",
+   "past": "mˈɛləfˌOnd",
+   "progressive": "mˈɛləfˌOnɪŋ"
+  },
+  {
+   "stem": "spˈidinəs",
+   "plural": "spˈidinəsᵻz",
+   "past": "spˈidinəst",
+   "progressive": "spˈidinəsɪŋ"
+  },
+  {
+   "stem": "nɛptˈuniən",
+   "plural": "nɛptˈuniənz",
+   "past": "nɛptˈuniənd",
+   "progressive": "nɛptˈuniənɪŋ"
+  },
+  {
+   "stem": "bˈistli",
+   "plural": "bˈistliz",
+   "past": "bˈistlid",
+   "progressive": "bˈistliɪŋ"
+  },
+  {
+   "stem": "bˈækdɹˌɑp",
+   "plural": "bˈækdɹˌɑps",
+   "past": "bˈækdɹˌɑpt",
+   "progressive": "bˈækdɹˌɑpɪŋ"
+  },
+  {
+   "stem": "ˌʌnˌæmbˈɪɡjəwəs",
+   "plural": "ˌʌnˌæmbˈɪɡjəwəsᵻz",
+   "past": "ˌʌnˌæmbˈɪɡjəwəst",
+   "progressive": "ˌʌnˌæmbˈɪɡjəwəsɪŋ"
+  },
+  {
+   "stem": "fˈæntəsi",
+   "plural": "fˈæntəsiz",
+   "past": "fˈæntəsid",
+   "progressive": "fˈæntəsiɪŋ"
+  },
+  {
+   "stem": "kwˈɪz",
+   "plural": "kwˈɪzᵻz",
+   "past": "kwˈɪzd",
+   "progressive": "kwˈɪzɪŋ"
+  },
+  {
+   "stem": "bˈændi",
+   "plural": "bˈændiz",
+   "past": "bˈændid",
+   "progressive": "bˈændiɪŋ"
+  },
+  {
+   "stem": "ɪnfˈɔɹmd",
+   "plural": "ɪnfˈɔɹmdz",
+   "past": "ɪnfˈɔɹmdᵻd",
+   "progressive": "ɪnfˈɔɹmdɪŋ"
+  },
+  {
+   "stem": "pˌɛɹənˈɔɹmᵊl",
+   "plural": "pˌɛɹənˈɔɹmᵊlz",
+   "past": "pˌɛɹənˈɔɹmᵊld",
+   "progressive": "pˌɛɹənˈɔɹmᵊlɪŋ"
+  },
+  {
+   "stem": "ˌɔɹθədˈɑntɪks",
+   "plural": "ˌɔɹθədˈɑntɪksᵻz",
+   "past": "ˌɔɹθədˈɑntɪkst",
+   "progressive": "ˌɔɹθədˈɑntɪksɪŋ"
+  },
+  {
+   "stem": "ɡˈʊdɹən",
+   "plural": "ɡˈʊdɹənz",
+   "past": "ɡˈʊdɹənd",
+   "progressive": "ɡˈʊdɹənɪŋ"
+  },
+  {
+   "stem": "ˌɪntəɹɹˈAʃᵊl",
+   "plural": "ˌɪntəɹɹˈAʃᵊlz",
+   "past": "ˌɪntəɹɹˈAʃᵊld",
+   "progressive": "ˌɪntəɹɹˈAʃᵊlɪŋ"
+  },
+  {
+   "stem": "mˌɪskˈi",
+   "plural": "mˌɪskˈiz",
+   "past": "mˌɪskˈid",
+   "progressive": "mˌɪskˈiɪŋ"
+  },
+  {
+   "stem": "ˌæməzˈOniən",
+   "plural": "ˌæməzˈOniənz",
+   "past": "ˌæməzˈOniənd",
+   "progressive": "ˌæməzˈOniənɪŋ"
+  },
+  {
+   "stem": "jˈusˌæt",
+   "plural": "jˈusˌæts",
+   "past": "jˈusˌæɾᵻd",
+   "progressive": "jˈusˌæɾɪŋ"
+  },
+  {
+   "stem": "kənsˈuməbᵊl",
+   "plural": "kənsˈuməbᵊlz",
+   "past": "kənsˈuməbᵊld",
+   "progressive": "kənsˈuməbᵊlɪŋ"
+  },
+  {
+   "stem": "ˌæntəsˈɛptɪk",
+   "plural": "ˌæntəsˈɛptɪks",
+   "past": "ˌæntəsˈɛptɪkt",
+   "progressive": "ˌæntəsˈɛptɪkɪŋ"
+  },
+  {
+   "stem": "kənsˈɛntɪŋ",
+   "plural": "kənsˈɛntɪŋz",
+   "past": "kənsˈɛntɪŋd",
+   "progressive": "kənsˈɛntɪŋɪŋ"
+  },
+  {
+   "stem": "mˈu",
+   "plural": "mˈuz",
+   "past": "mˈud",
+   "progressive": "mˈuɪŋ"
+  },
+  {
+   "stem": "dˌɛfənˈɪʃᵊnəli",
+   "plural": "dˌɛfənˈɪʃᵊnəliz",
+   "past": "dˌɛfənˈɪʃᵊnəlid",
+   "progressive": "dˌɛfənˈɪʃᵊnəliɪŋ"
+  },
+  {
+   "stem": "ˌʌnkɹˌiˈAɾᵻd",
+   "plural": "ˌʌnkɹˌiˈAɾᵻdz",
+   "past": "ˌʌnkɹˌiˈAɾᵻdᵻd",
+   "progressive": "ˌʌnkɹˌiˈAɾᵻdɪŋ"
+  },
+  {
+   "stem": "hˈændwˌɜɹkt",
+   "plural": "hˈændwˌɜɹkts",
+   "past": "hˈændwˌɜɹktᵻd",
+   "progressive": "hˈændwˌɜɹktɪŋ"
+  },
+  {
+   "stem": "skˈʌlk",
+   "plural": "skˈʌlks",
+   "past": "skˈʌlkt",
+   "progressive": "skˈʌlkɪŋ"
+  },
+  {
+   "stem": "ɹˈɛmənəns",
+   "plural": "ɹˈɛmənənsᵻz",
+   "past": "ɹˈɛmənənst",
+   "progressive": "ɹˈɛmənənsɪŋ"
+  },
+  {
+   "stem": "dIɡɹˈɛsɪvnəs",
+   "plural": "dIɡɹˈɛsɪvnəsᵻz",
+   "past": "dIɡɹˈɛsɪvnəst",
+   "progressive": "dIɡɹˈɛsɪvnəsɪŋ"
+  },
+  {
+   "stem": "mˈInəɹ",
+   "plural": "mˈInəɹz",
+   "past": "mˈInəɹd",
+   "progressive": "mˈInəɹɪŋ"
+  },
+  {
+   "stem": "dətˌɪɹiəɹˈAʃən",
+   "plural": "dətˌɪɹiəɹˈAʃənz",
+   "past": "dətˌɪɹiəɹˈAʃənd",
+   "progressive": "dətˌɪɹiəɹˈAʃənɪŋ"
+  },
+  {
+   "stem": "ɹˈWz",
+   "plural": "ɹˈWzᵻz",
+   "past": "ɹˈWzd",
+   "progressive": "ɹˈWzɪŋ"
+  },
+  {
+   "stem": "bˈʌdɪŋ",
+   "plural": "bˈʌdɪŋz",
+   "past": "bˈʌdɪŋd",
+   "progressive": "bˈʌdɪŋɪŋ"
+  },
+  {
+   "stem": "smˈɜɹki",
+   "plural": "smˈɜɹkiz",
+   "past": "smˈɜɹkid",
+   "progressive": "smˈɜɹkiɪŋ"
+  },
+  {
+   "stem": "ɹəɡˈAl",
+   "plural": "ɹəɡˈAlz",
+   "past": "ɹəɡˈAld",
+   "progressive": "ɹəɡˈAlɪŋ"
+  },
+  {
+   "stem": "tˈɪp",
+   "plural": "tˈɪps",
+   "past": "tˈɪpt",
+   "progressive": "tˈɪpɪŋ"
+  },
+  {
+   "stem": "fˈʊɾɪʤ",
+   "plural": "fˈʊɾɪʤᵻz",
+   "past": "fˈʊɾɪʤd",
+   "progressive": "fˈʊɾɪʤɪŋ"
+  },
+  {
+   "stem": "ɪnʤˈʌŋkʃən",
+   "plural": "ɪnʤˈʌŋkʃənz",
+   "past": "ɪnʤˈʌŋkʃənd",
+   "progressive": "ɪnʤˈʌŋkʃənɪŋ"
+  },
+  {
+   "stem": "mˈIkɹOpɹˌOb",
+   "plural": "mˈIkɹOpɹˌObz",
+   "past": "mˈIkɹOpɹˌObd",
+   "progressive": "mˈIkɹOpɹˌObɪŋ"
+  },
+  {
+   "stem": "nˈObᵊlwˌʊmᵊn",
+   "plural": "nˈObᵊlwˌʊmᵊnz",
+   "past": "nˈObᵊlwˌʊmᵊnd",
+   "progressive": "nˈObᵊlwˌʊmᵊnɪŋ"
+  },
+  {
+   "stem": "kˈObˌɑl",
+   "plural": "kˈObˌɑlz",
+   "past": "kˈObˌɑld",
+   "progressive": "kˈObˌɑlɪŋ"
+  },
+  {
+   "stem": "pɹiskɹˈɪptɪv",
+   "plural": "pɹiskɹˈɪptɪvz",
+   "past": "pɹiskɹˈɪptɪvd",
+   "progressive": "pɹiskɹˈɪptɪvɪŋ"
+  },
+  {
+   "stem": "hˈIɪŋ",
+   "plural": "hˈIɪŋz",
+   "past": "hˈIɪŋd",
+   "progressive": "hˈIɪŋɪŋ"
+  },
+  {
+   "stem": "snˈɪfɪŋ",
+   "plural": "snˈɪfɪŋz",
+   "past": "snˈɪfɪŋd",
+   "progressive": "snˈɪfɪŋɪŋ"
+  },
+  {
+   "stem": "kˈɜɹənt",
+   "plural": "kˈɜɹənts",
+   "past": "kˈɜɹəntᵻd",
+   "progressive": "kˈɜɹəntɪŋ"
+  },
+  {
+   "stem": "bˈIɡˌɔn",
+   "plural": "bˈIɡˌɔnz",
+   "past": "bˈIɡˌɔnd",
+   "progressive": "bˈIɡˌɔnɪŋ"
+  },
+  {
+   "stem": "lˈɪft",
+   "plural": "lˈɪfts",
+   "past": "lˈɪftᵻd",
+   "progressive": "lˈɪftɪŋ"
+  },
+  {
+   "stem": "stˈɪɹɪŋ",
+   "plural": "stˈɪɹɪŋz",
+   "past": "stˈɪɹɪŋd",
+   "progressive": "stˈɪɹɪŋɪŋ"
+  },
+  {
+   "stem": "ɪkstˈɔɹt",
+   "plural": "ɪkstˈɔɹts",
+   "past": "ɪkstˈɔɹɾᵻd",
+   "progressive": "ɪkstˈɔɹɾɪŋ"
+  },
+  {
+   "stem": "kˈʌləɹˌɪzəm",
+   "plural": "kˈʌləɹˌɪzəmz",
+   "past": "kˈʌləɹˌɪzəmd",
+   "progressive": "kˈʌləɹˌɪzəmɪŋ"
+  },
+  {
+   "stem": "dɪstˈAstfəli",
+   "plural": "dɪstˈAstfəliz",
+   "past": "dɪstˈAstfəlid",
+   "progressive": "dɪstˈAstfəliɪŋ"
+  },
+  {
+   "stem": "mˈæsk",
+   "plural": "mˈæsks",
+   "past": "mˈæskt",
+   "progressive": "mˈæskɪŋ"
+  },
+  {
+   "stem": "mˈil",
+   "plural": "mˈilz",
+   "past": "mˈild",
+   "progressive": "mˈilɪŋ"
+  },
+  {
+   "stem": "ˌæzʊlˈAhO",
+   "plural": "ˌæzʊlˈAhOz",
+   "past": "ˌæzʊlˈAhOd",
+   "progressive": "ˌæzʊlˈAhOɪŋ"
+  },
+  {
+   "stem": "ˌɛkstɹəkˌɑnstətˈuʃənᵊl",
+   "plural": "ˌɛkstɹəkˌɑnstətˈuʃənᵊlz",
+   "past": "ˌɛkstɹəkˌɑnstətˈuʃənᵊld",
+   "progressive": "ˌɛkstɹəkˌɑnstətˈuʃənᵊlɪŋ"
+  },
+  {
+   "stem": "kəmˈɪɾi",
+   "plural": "kəmˈɪɾiz",
+   "past": "kəmˈɪɾid",
+   "progressive": "kəmˈɪɾiɪŋ"
+  },
+  {
+   "stem": "lˌæktOpɹˈOtˌin",
+   "plural": "lˌæktOpɹˈOtˌinz",
+   "past": "lˌæktOpɹˈOtˌind",
+   "progressive": "lˌæktOpɹˈOtˌinɪŋ"
+  },
+  {
+   "stem": "sˈɛdᵊntˌɛɹəli",
+   "plural": "sˈɛdᵊntˌɛɹəliz",
+   "past": "sˈɛdᵊntˌɛɹəlid",
+   "progressive": "sˈɛdᵊntˌɛɹəliɪŋ"
+  },
+  {
+   "stem": "ʤˈɛnəɾəɹ",
+   "plural": "ʤˈɛnəɾəɹz",
+   "past": "ʤˈɛnəɾəɹd",
+   "progressive": "ʤˈɛnəɾəɹɪŋ"
+  },
+  {
+   "stem": "ˈɪntəɹkˌul",
+   "plural": "ˈɪntəɹkˌulz",
+   "past": "ˈɪntəɹkˌuld",
+   "progressive": "ˈɪntəɹkˌulɪŋ"
+  },
+  {
+   "stem": "lˈIɾəɹmən",
+   "plural": "lˈIɾəɹmənz",
+   "past": "lˈIɾəɹmənd",
+   "progressive": "lˈIɾəɹmənɪŋ"
+  },
+  {
+   "stem": "spɹˈɪŋlət",
+   "plural": "spɹˈɪŋləts",
+   "past": "spɹˈɪŋləɾᵻd",
+   "progressive": "spɹˈɪŋləɾɪŋ"
+  },
+  {
+   "stem": "ˈOdiəsnəs",
+   "plural": "ˈOdiəsnəsᵻz",
+   "past": "ˈOdiəsnəst",
+   "progressive": "ˈOdiəsnəsɪŋ"
+  },
+  {
+   "stem": "ɪnˌɛvəɾəbˈɪləɾi",
+   "plural": "ɪnˌɛvəɾəbˈɪləɾiz",
+   "past": "ɪnˌɛvəɾəbˈɪləɾid",
+   "progressive": "ɪnˌɛvəɾəbˈɪləɾiɪŋ"
+  },
+  {
+   "stem": "ˈifuɡˌW",
+   "plural": "ˈifuɡˌWz",
+   "past": "ˈifuɡˌWd",
+   "progressive": "ˈifuɡˌWɪŋ"
+  },
+  {
+   "stem": "ʤənˈivəɹ",
+   "plural": "ʤənˈivəɹz",
+   "past": "ʤənˈivəɹd",
+   "progressive": "ʤənˈivəɹɪŋ"
+  },
+  {
+   "stem": "dˌɛndɹOkɹˌɑnəlˈɑʤəkəl",
+   "plural": "dˌɛndɹOkɹˌɑnəlˈɑʤəkəlz",
+   "past": "dˌɛndɹOkɹˌɑnəlˈɑʤəkəld",
+   "progressive": "dˌɛndɹOkɹˌɑnəlˈɑʤəkəlɪŋ"
+  },
+  {
+   "stem": "mˌɛθənəʤˈɛnɪk",
+   "plural": "mˌɛθənəʤˈɛnɪks",
+   "past": "mˌɛθənəʤˈɛnɪkt",
+   "progressive": "mˌɛθənəʤˈɛnɪkɪŋ"
+  },
+  {
+   "stem": "ɡlˈɪbli",
+   "plural": "ɡlˈɪbliz",
+   "past": "ɡlˈɪblid",
+   "progressive": "ɡlˈɪbliɪŋ"
+  },
+  {
+   "stem": "lˈɔɡˌɪvəɹ",
+   "plural": "lˈɔɡˌɪvəɹz",
+   "past": "lˈɔɡˌɪvəɹd",
+   "progressive": "lˈɔɡˌɪvəɹɪŋ"
+  },
+  {
+   "stem": "ˌAnᵊlɹətˈɛntɪv",
+   "plural": "ˌAnᵊlɹətˈɛntɪvz",
+   "past": "ˌAnᵊlɹətˈɛntɪvd",
+   "progressive": "ˌAnᵊlɹətˈɛntɪvɪŋ"
+  },
+  {
+   "stem": "pˈWəɹˌʌp",
+   "plural": "pˈWəɹˌʌps",
+   "past": "pˈWəɹˌʌpt",
+   "progressive": "pˈWəɹˌʌpɪŋ"
+  },
+  {
+   "stem": "tɹəpˈiziəm",
+   "plural": "tɹəpˈiziəmz",
+   "past": "tɹəpˈiziəmd",
+   "progressive": "tɹəpˈiziəmɪŋ"
+  },
+  {
+   "stem": "ˈidˌIl",
+   "plural": "ˈidˌIlz",
+   "past": "ˈidˌIld",
+   "progressive": "ˈidˌIlɪŋ"
+  },
+  {
+   "stem": "ɪmpˈɑstəɹ",
+   "plural": "ɪmpˈɑstəɹz",
+   "past": "ɪmpˈɑstəɹd",
+   "progressive": "ɪmpˈɑstəɹɪŋ"
+  },
+  {
+   "stem": "skˈæɾəɹbɹˌAn",
+   "plural": "skˈæɾəɹbɹˌAnz",
+   "past": "skˈæɾəɹbɹˌAnd",
+   "progressive": "skˈæɾəɹbɹˌAnɪŋ"
+  },
+  {
+   "stem": "ˌʌpɹˈOz",
+   "plural": "ˌʌpɹˈOzᵻz",
+   "past": "ˌʌpɹˈOzd",
+   "progressive": "ˌʌpɹˈOzɪŋ"
+  },
+  {
+   "stem": "bˈɔɡɔf",
+   "plural": "bˈɔɡɔfs",
+   "past": "bˈɔɡɔft",
+   "progressive": "bˈɔɡɔfɪŋ"
+  },
+  {
+   "stem": "hˈɛdstˌɔl",
+   "plural": "hˈɛdstˌɔlz",
+   "past": "hˈɛdstˌɔld",
+   "progressive": "hˈɛdstˌɔlɪŋ"
+  },
+  {
+   "stem": "əlˈɛvənfˌOld",
+   "plural": "əlˈɛvənfˌOldz",
+   "past": "əlˈɛvənfˌOldᵻd",
+   "progressive": "əlˈɛvənfˌOldɪŋ"
+  },
+  {
+   "stem": "dinjˌuməɹəbˈɪləɾi",
+   "plural": "dinjˌuməɹəbˈɪləɾiz",
+   "past": "dinjˌuməɹəbˈɪləɾid",
+   "progressive": "dinjˌuməɹəbˈɪləɾiɪŋ"
+  },
+  {
+   "stem": "mˌɪsəlˈInmᵊnt",
+   "plural": "mˌɪsəlˈInmᵊnts",
+   "past": "mˌɪsəlˈInmᵊntᵻd",
+   "progressive": "mˌɪsəlˈInmᵊntɪŋ"
+  },
+  {
+   "stem": "ɡˈɑɹdᵊnəɹ",
+   "plural": "ɡˈɑɹdᵊnəɹz",
+   "past": "ɡˈɑɹdᵊnəɹd",
+   "progressive": "ɡˈɑɹdᵊnəɹɪŋ"
+  },
+  {
+   "stem": "ɛksfˈOliˌAɾɪv",
+   "plural": "ɛksfˈOliˌAɾɪvz",
+   "past": "ɛksfˈOliˌAɾɪvd",
+   "progressive": "ɛksfˈOliˌAɾɪvɪŋ"
+  },
+  {
+   "stem": "ɡˈWɾi",
+   "plural": "ɡˈWɾiz",
+   "past": "ɡˈWɾid",
+   "progressive": "ɡˈWɾiɪŋ"
+  },
+  {
+   "stem": "ˌæpəkɹˈOmæt",
+   "plural": "ˌæpəkɹˈOmæts",
+   "past": "ˌæpəkɹˈOmæɾᵻd",
+   "progressive": "ˌæpəkɹˈOmæɾɪŋ"
+  },
+  {
+   "stem": "kɹˈɪl",
+   "plural": "kɹˈɪlz",
+   "past": "kɹˈɪld",
+   "progressive": "kɹˈɪlɪŋ"
+  },
+  {
+   "stem": "ˈæktən",
+   "plural": "ˈæktənz",
+   "past": "ˈæktənd",
+   "progressive": "ˈæktənɪŋ"
+  },
+  {
+   "stem": "ˈæftəɹ",
+   "plural": "ˈæftəɹz",
+   "past": "ˈæftəɹd",
+   "progressive": "ˈæftəɹɪŋ"
+  },
+  {
+   "stem": "pˈɪʤən",
+   "plural": "pˈɪʤənz",
+   "past": "pˈɪʤənd",
+   "progressive": "pˈɪʤənɪŋ"
+  },
+  {
+   "stem": "fˌOɾəsˈɪnθəsɪs",
+   "plural": "fˌOɾəsˈɪnθəsɪsᵻz",
+   "past": "fˌOɾəsˈɪnθəsɪst",
+   "progressive": "fˌOɾəsˈɪnθəsɪsɪŋ"
+  },
+  {
+   "stem": "ɡwˈɑnˌin",
+   "plural": "ɡwˈɑnˌinz",
+   "past": "ɡwˈɑnˌind",
+   "progressive": "ɡwˈɑnˌinɪŋ"
+  },
+  {
+   "stem": "ˌʌnbˈɪlt",
+   "plural": "ˌʌnbˈɪlts",
+   "past": "ˌʌnbˈɪltᵻd",
+   "progressive": "ˌʌnbˈɪltɪŋ"
+  },
+  {
+   "stem": "tˈʌmbᵊləɹ",
+   "plural": "tˈʌmbᵊləɹz",
+   "past": "tˈʌmbᵊləɹd",
+   "progressive": "tˈʌmbᵊləɹɪŋ"
+  },
+  {
+   "stem": "kˈɔɹniə",
+   "plural": "kˈɔɹniəz",
+   "past": "kˈɔɹniəd",
+   "progressive": "kˈɔɹniəɪŋ"
+  },
+  {
+   "stem": "klˈOsnəs",
+   "plural": "klˈOsnəsᵻz",
+   "past": "klˈOsnəst",
+   "progressive": "klˈOsnəsɪŋ"
+  },
+  {
+   "stem": "kˈæʧwˌɜɹd",
+   "plural": "kˈæʧwˌɜɹdz",
+   "past": "kˈæʧwˌɜɹdᵻd",
+   "progressive": "kˈæʧwˌɜɹdɪŋ"
+  },
+  {
+   "stem": "fˈAdəwˌA",
+   "plural": "fˈAdəwˌAz",
+   "past": "fˈAdəwˌAd",
+   "progressive": "fˈAdəwˌAɪŋ"
+  },
+  {
+   "stem": "blˈIndᵻd",
+   "plural": "blˈIndᵻdz",
+   "past": "blˈIndᵻdᵻd",
+   "progressive": "blˈIndᵻdɪŋ"
+  },
+  {
+   "stem": "pˈuntˌæŋ",
+   "plural": "pˈuntˌæŋz",
+   "past": "pˈuntˌæŋd",
+   "progressive": "pˈuntˌæŋɪŋ"
+  },
+  {
+   "stem": "vəlˈæmənə",
+   "plural": "vəlˈæmənəz",
+   "past": "vəlˈæmənəd",
+   "progressive": "vəlˈæmənəɪŋ"
+  },
+  {
+   "stem": "sˌʌbmjukˈOsə",
+   "plural": "sˌʌbmjukˈOsəz",
+   "past": "sˌʌbmjukˈOsəd",
+   "progressive": "sˌʌbmjukˈOsəɪŋ"
+  },
+  {
+   "stem": "mˌɪnəɹˈɑləʤi",
+   "plural": "mˌɪnəɹˈɑləʤiz",
+   "past": "mˌɪnəɹˈɑləʤid",
+   "progressive": "mˌɪnəɹˈɑləʤiɪŋ"
+  },
+  {
+   "stem": "ɹˈɛvəɹi",
+   "plural": "ɹˈɛvəɹiz",
+   "past": "ɹˈɛvəɹid",
+   "progressive": "ɹˈɛvəɹiɪŋ"
+  },
+  {
+   "stem": "mənˈiʃəs",
+   "plural": "mənˈiʃəsᵻz",
+   "past": "mənˈiʃəst",
+   "progressive": "mənˈiʃəsɪŋ"
+  },
+  {
+   "stem": "dˈɛntᵊlˌIz",
+   "plural": "dˈɛntᵊlˌIzᵻz",
+   "past": "dˈɛntᵊlˌIzd",
+   "progressive": "dˈɛntᵊlˌIzɪŋ"
+  },
+  {
+   "stem": "klˈʌb",
+   "plural": "klˈʌbz",
+   "past": "klˈʌbd",
+   "progressive": "klˈʌbɪŋ"
+  },
+  {
+   "stem": "ɹˈYli",
+   "plural": "ɹˈYliz",
+   "past": "ɹˈYlid",
+   "progressive": "ɹˈYliɪŋ"
+  },
+  {
+   "stem": "bˌʌkənˈɪɹ",
+   "plural": "bˌʌkənˈɪɹz",
+   "past": "bˌʌkənˈɪɹd",
+   "progressive": "bˌʌkənˈɪɹɪŋ"
+  },
+  {
+   "stem": "hˈɛðəɹi",
+   "plural": "hˈɛðəɹiz",
+   "past": "hˈɛðəɹid",
+   "progressive": "hˈɛðəɹiɪŋ"
+  },
+  {
+   "stem": "ɛθnˈɪsəɾi",
+   "plural": "ɛθnˈɪsəɾiz",
+   "past": "ɛθnˈɪsəɾid",
+   "progressive": "ɛθnˈɪsəɾiɪŋ"
+  },
+  {
+   "stem": "kɹˈɪpəlwɛɹ",
+   "plural": "kɹˈɪpəlwɛɹz",
+   "past": "kɹˈɪpəlwɛɹd",
+   "progressive": "kɹˈɪpəlwɛɹɪŋ"
+  },
+  {
+   "stem": "ɑlfˈæktɪv",
+   "plural": "ɑlfˈæktɪvz",
+   "past": "ɑlfˈæktɪvd",
+   "progressive": "ɑlfˈæktɪvɪŋ"
+  },
+  {
+   "stem": "hɛlvˈɛɾɪk",
+   "plural": "hɛlvˈɛɾɪks",
+   "past": "hɛlvˈɛɾɪkt",
+   "progressive": "hɛlvˈɛɾɪkɪŋ"
+  },
+  {
+   "stem": "bˈOtbˌɪldɪŋ",
+   "plural": "bˈOtbˌɪldɪŋz",
+   "past": "bˈOtbˌɪldɪŋd",
+   "progressive": "bˈOtbˌɪldɪŋɪŋ"
+  },
+  {
+   "stem": "ˌɛfəktˈɪvəɾi",
+   "plural": "ˌɛfəktˈɪvəɾiz",
+   "past": "ˌɛfəktˈɪvəɾid",
+   "progressive": "ˌɛfəktˈɪvəɾiɪŋ"
+  },
+  {
+   "stem": "sfˌɪɡmOmənˈɑmətɹi",
+   "plural": "sfˌɪɡmOmənˈɑmətɹiz",
+   "past": "sfˌɪɡmOmənˈɑmətɹid",
+   "progressive": "sfˌɪɡmOmənˈɑmətɹiɪŋ"
+  },
+  {
+   "stem": "ˌɛktədˈɜɹmᵊl",
+   "plural": "ˌɛktədˈɜɹmᵊlz",
+   "past": "ˌɛktədˈɜɹmᵊld",
+   "progressive": "ˌɛktədˈɜɹmᵊlɪŋ"
+  },
+  {
+   "stem": "nˈO",
+   "plural": "nˈOz",
+   "past": "nˈOd",
+   "progressive": "nˈOɪŋ"
+  },
+  {
+   "stem": "sˈɛɡɹəɡˌAɾɪŋ",
+   "plural": "sˈɛɡɹəɡˌAɾɪŋz",
+   "past": "sˈɛɡɹəɡˌAɾɪŋd",
+   "progressive": "sˈɛɡɹəɡˌAɾɪŋɪŋ"
+  },
+  {
+   "stem": "kˈOvəɹts",
+   "plural": "kˈOvəɹtsᵻz",
+   "past": "kˈOvəɹtst",
+   "progressive": "kˈOvəɹtsɪŋ"
+  },
+  {
+   "stem": "vəlˈuɾə",
+   "plural": "vəlˈuɾəz",
+   "past": "vəlˈuɾəd",
+   "progressive": "vəlˈuɾəɪŋ"
+  },
+  {
+   "stem": "fəlˈɪkjəlˌAɾᵻd",
+   "plural": "fəlˈɪkjəlˌAɾᵻdz",
+   "past": "fəlˈɪkjəlˌAɾᵻdᵻd",
+   "progressive": "fəlˈɪkjəlˌAɾᵻdɪŋ"
+  },
+  {
+   "stem": "kɹˈæbiəɹ",
+   "plural": "kɹˈæbiəɹz",
+   "past": "kɹˈæbiəɹd",
+   "progressive": "kɹˈæbiəɹɪŋ"
+  },
+  {
+   "stem": "vˌOɾəɹˈɑmə",
+   "plural": "vˌOɾəɹˈɑməz",
+   "past": "vˌOɾəɹˈɑməd",
+   "progressive": "vˌOɾəɹˈɑməɪŋ"
+  },
+  {
+   "stem": "nˌɑndˌIəʤˈɛɾɪk",
+   "plural": "nˌɑndˌIəʤˈɛɾɪks",
+   "past": "nˌɑndˌIəʤˈɛɾɪkt",
+   "progressive": "nˌɑndˌIəʤˈɛɾɪkɪŋ"
+  },
+  {
+   "stem": "sˌɛlfəmpɹˈuvmənt",
+   "plural": "sˌɛlfəmpɹˈuvmənts",
+   "past": "sˌɛlfəmpɹˈuvməntᵻd",
+   "progressive": "sˌɛlfəmpɹˈuvməntɪŋ"
+  },
+  {
+   "stem": "pˈɑɹk",
+   "plural": "pˈɑɹks",
+   "past": "pˈɑɹkt",
+   "progressive": "pˈɑɹkɪŋ"
+  },
+  {
+   "stem": "pɹˈɑvəndəɹ",
+   "plural": "pɹˈɑvəndəɹz",
+   "past": "pɹˈɑvəndəɹd",
+   "progressive": "pɹˈɑvəndəɹɪŋ"
+  },
+  {
+   "stem": "zˈɪŋkO",
+   "plural": "zˈɪŋkOz",
+   "past": "zˈɪŋkOd",
+   "progressive": "zˈɪŋkOɪŋ"
+  },
+  {
+   "stem": "stˈOəkᵊl",
+   "plural": "stˈOəkᵊlz",
+   "past": "stˈOəkᵊld",
+   "progressive": "stˈOəkᵊlɪŋ"
+  },
+  {
+   "stem": "sˈikwəstɹˌAɾəɹ",
+   "plural": "sˈikwəstɹˌAɾəɹz",
+   "past": "sˈikwəstɹˌAɾəɹd",
+   "progressive": "sˈikwəstɹˌAɾəɹɪŋ"
+  },
+  {
+   "stem": "jˈʊɹɪbɔɹ",
+   "plural": "jˈʊɹɪbɔɹz",
+   "past": "jˈʊɹɪbɔɹd",
+   "progressive": "jˈʊɹɪbɔɹɪŋ"
+  },
+  {
+   "stem": "flˌɛkʃʊˈɑsəɾi",
+   "plural": "flˌɛkʃʊˈɑsəɾiz",
+   "past": "flˌɛkʃʊˈɑsəɾid",
+   "progressive": "flˌɛkʃʊˈɑsəɾiɪŋ"
+  },
+  {
+   "stem": "pˈɛɹəmˌO",
+   "plural": "pˈɛɹəmˌOz",
+   "past": "pˈɛɹəmˌOd",
+   "progressive": "pˈɛɹəmˌOɪŋ"
+  },
+  {
+   "stem": "tˈɛləskɹˌin",
+   "plural": "tˈɛləskɹˌinz",
+   "past": "tˈɛləskɹˌind",
+   "progressive": "tˈɛləskɹˌinɪŋ"
+  },
+  {
+   "stem": "mˈɜɹɾᵊl",
+   "plural": "mˈɜɹɾᵊlz",
+   "past": "mˈɜɹɾᵊld",
+   "progressive": "mˈɜɹɾᵊlɪŋ"
+  },
+  {
+   "stem": "hˌumsOˈɛvəɹ",
+   "plural": "hˌumsOˈɛvəɹz",
+   "past": "hˌumsOˈɛvəɹd",
+   "progressive": "hˌumsOˈɛvəɹɪŋ"
+  },
+  {
+   "stem": "dəɡɹˈAdɪŋ",
+   "plural": "dəɡɹˈAdɪŋz",
+   "past": "dəɡɹˈAdɪŋd",
+   "progressive": "dəɡɹˈAdɪŋɪŋ"
+  },
+  {
+   "stem": "θˈæŋkləsli",
+   "plural": "θˈæŋkləsliz",
+   "past": "θˈæŋkləslid",
+   "progressive": "θˈæŋkləsliɪŋ"
+  },
+  {
+   "stem": "hˈænsəməɹ",
+   "plural": "hˈænsəməɹz",
+   "past": "hˈænsəməɹd",
+   "progressive": "hˈænsəməɹɪŋ"
+  },
+  {
+   "stem": "vˈAnstˌOn",
+   "plural": "vˈAnstˌOnz",
+   "past": "vˈAnstˌOnd",
+   "progressive": "vˈAnstˌOnɪŋ"
+  },
+  {
+   "stem": "pˌɪsəkˈʌlʧəɹəl",
+   "plural": "pˌɪsəkˈʌlʧəɹəlz",
+   "past": "pˌɪsəkˈʌlʧəɹəld",
+   "progressive": "pˌɪsəkˈʌlʧəɹəlɪŋ"
+  },
+  {
+   "stem": "ˌʌnsˈʌɾᵊli",
+   "plural": "ˌʌnsˈʌɾᵊliz",
+   "past": "ˌʌnsˈʌɾᵊlid",
+   "progressive": "ˌʌnsˈʌɾᵊliɪŋ"
+  },
+  {
+   "stem": "sˈɪɹiəli",
+   "plural": "sˈɪɹiəliz",
+   "past": "sˈɪɹiəlid",
+   "progressive": "sˈɪɹiəliɪŋ"
+  },
+  {
+   "stem": "stˈiviə",
+   "plural": "stˈiviəz",
+   "past": "stˈiviəd",
+   "progressive": "stˈiviəɪŋ"
+  },
+  {
+   "stem": "kˈʌstəɹd",
+   "plural": "kˈʌstəɹdz",
+   "past": "kˈʌstəɹdᵻd",
+   "progressive": "kˈʌstəɹdɪŋ"
+  },
+  {
+   "stem": "ɑktˈɑvO",
+   "plural": "ɑktˈɑvOz",
+   "past": "ɑktˈɑvOd",
+   "progressive": "ɑktˈɑvOɪŋ"
+  },
+  {
+   "stem": "tɹˈiləs",
+   "plural": "tɹˈiləsᵻz",
+   "past": "tɹˈiləst",
+   "progressive": "tɹˈiləsɪŋ"
+  },
+  {
+   "stem": "ʧˈɑɹli",
+   "plural": "ʧˈɑɹliz",
+   "past": "ʧˈɑɹlid",
+   "progressive": "ʧˈɑɹliɪŋ"
+  },
+  {
+   "stem": "ˌʌndəɹfˈʌndɪŋ",
+   "plural": "ˌʌndəɹfˈʌndɪŋz",
+   "past": "ˌʌndəɹfˈʌndɪŋd",
+   "progressive": "ˌʌndəɹfˈʌndɪŋɪŋ"
+  },
+  {
+   "stem": "ˌʌnəlˈiviˌAɾᵻd",
+   "plural": "ˌʌnəlˈiviˌAɾᵻdz",
+   "past": "ˌʌnəlˈiviˌAɾᵻdᵻd",
+   "progressive": "ˌʌnəlˈiviˌAɾᵻdɪŋ"
+  },
+  {
+   "stem": "hˈIdɹOfˌYl",
+   "plural": "hˈIdɹOfˌYlz",
+   "past": "hˈIdɹOfˌYld",
+   "progressive": "hˈIdɹOfˌYlɪŋ"
+  },
+  {
+   "stem": "tˈOp",
+   "plural": "tˈOps",
+   "past": "tˈOpt",
+   "progressive": "tˈOpɪŋ"
+  },
+  {
+   "stem": "vəɹˈɔnɪʃ",
+   "plural": "vəɹˈɔnɪʃᵻz",
+   "past": "vəɹˈɔnɪʃt",
+   "progressive": "vəɹˈɔnɪʃɪŋ"
+  },
+  {
+   "stem": "ɡˈuldənz",
+   "plural": "ɡˈuldənzᵻz",
+   "past": "ɡˈuldənzd",
+   "progressive": "ɡˈuldənzɪŋ"
+  },
+  {
+   "stem": "dˌiIdˌɛntəfəkˈAʃən",
+   "plural": "dˌiIdˌɛntəfəkˈAʃənz",
+   "past": "dˌiIdˌɛntəfəkˈAʃənd",
+   "progressive": "dˌiIdˌɛntəfəkˈAʃənɪŋ"
+  },
+  {
+   "stem": "tɛknˈɑləʤˌIzd",
+   "plural": "tɛknˈɑləʤˌIzdz",
+   "past": "tɛknˈɑləʤˌIzdᵻd",
+   "progressive": "tɛknˈɑləʤˌIzdɪŋ"
+  },
+  {
+   "stem": "tɹˈɛsi",
+   "plural": "tɹˈɛsiz",
+   "past": "tɹˈɛsid",
+   "progressive": "tɹˈɛsiɪŋ"
+  },
+  {
+   "stem": "ɪmpˈɪɹiəsnəs",
+   "plural": "ɪmpˈɪɹiəsnəsᵻz",
+   "past": "ɪmpˈɪɹiəsnəst",
+   "progressive": "ɪmpˈɪɹiəsnəsɪŋ"
+  },
+  {
+   "stem": "plˈætfˌɔɹm",
+   "plural": "plˈætfˌɔɹmz",
+   "past": "plˈætfˌɔɹmd",
+   "progressive": "plˈætfˌɔɹmɪŋ"
+  },
+  {
+   "stem": "tˈɛmplət",
+   "plural": "tˈɛmpləts",
+   "past": "tˈɛmpləɾᵻd",
+   "progressive": "tˈɛmpləɾɪŋ"
+  },
+  {
+   "stem": "sənˈɑptəkəl",
+   "plural": "sənˈɑptəkəlz",
+   "past": "sənˈɑptəkəld",
+   "progressive": "sənˈɑptəkəlɪŋ"
+  },
+  {
+   "stem": "sˌɛlfkˌɑntɹədˈɪktɪŋ",
+   "plural": "sˌɛlfkˌɑntɹədˈɪktɪŋz",
+   "past": "sˌɛlfkˌɑntɹədˈɪktɪŋd",
+   "progressive": "sˌɛlfkˌɑntɹədˈɪktɪŋɪŋ"
+  },
+  {
+   "stem": "mˈiɾiəɹˌYd",
+   "plural": "mˈiɾiəɹˌYdz",
+   "past": "mˈiɾiəɹˌYdᵻd",
+   "progressive": "mˈiɾiəɹˌYdɪŋ"
+  },
+  {
+   "stem": "pˌælpəbˈɪləɾi",
+   "plural": "pˌælpəbˈɪləɾiz",
+   "past": "pˌælpəbˈɪləɾid",
+   "progressive": "pˌælpəbˈɪləɾiɪŋ"
+  },
+  {
+   "stem": "pˌɛdəmˈɔɹfɪk",
+   "plural": "pˌɛdəmˈɔɹfɪks",
+   "past": "pˌɛdəmˈɔɹfɪkt",
+   "progressive": "pˌɛdəmˈɔɹfɪkɪŋ"
+  },
+  {
+   "stem": "hˈɛvinəs",
+   "plural": "hˈɛvinəsᵻz",
+   "past": "hˈɛvinəst",
+   "progressive": "hˈɛvinəsɪŋ"
+  },
+  {
+   "stem": "hɛɹˈɛz",
+   "plural": "hɛɹˈɛzᵻz",
+   "past": "hɛɹˈɛzd",
+   "progressive": "hɛɹˈɛzɪŋ"
+  },
+  {
+   "stem": "ɹˈutwˌɜɹm",
+   "plural": "ɹˈutwˌɜɹmz",
+   "past": "ɹˈutwˌɜɹmd",
+   "progressive": "ɹˈutwˌɜɹmɪŋ"
+  },
+  {
+   "stem": "sˌɪkstˈinmˌO",
+   "plural": "sˌɪkstˈinmˌOz",
+   "past": "sˌɪkstˈinmˌOd",
+   "progressive": "sˌɪkstˈinmˌOɪŋ"
+  },
+  {
+   "stem": "vˈɜɹɡə",
+   "plural": "vˈɜɹɡəz",
+   "past": "vˈɜɹɡəd",
+   "progressive": "vˈɜɹɡəɪŋ"
+  },
+  {
+   "stem": "bɹˈʌvəɹ",
+   "plural": "bɹˈʌvəɹz",
+   "past": "bɹˈʌvəɹd",
+   "progressive": "bɹˈʌvəɹɪŋ"
+  },
+  {
+   "stem": "bəɹˈɑʤ",
+   "plural": "bəɹˈɑʤᵻz",
+   "past": "bəɹˈɑʤd",
+   "progressive": "bəɹˈɑʤɪŋ"
+  },
+  {
+   "stem": "ʤəɹˈɑntɪk",
+   "plural": "ʤəɹˈɑntɪks",
+   "past": "ʤəɹˈɑntɪkt",
+   "progressive": "ʤəɹˈɑntɪkɪŋ"
+  },
+  {
+   "stem": "ɡˈɑshˌɔk",
+   "plural": "ɡˈɑshˌɔks",
+   "past": "ɡˈɑshˌɔkt",
+   "progressive": "ɡˈɑshˌɔkɪŋ"
+  },
+  {
+   "stem": "dˌɪsɪnkˈɑɹnɪt",
+   "plural": "dˌɪsɪnkˈɑɹnɪts",
+   "past": "dˌɪsɪnkˈɑɹnɪɾᵻd",
+   "progressive": "dˌɪsɪnkˈɑɹnɪɾɪŋ"
+  },
+  {
+   "stem": "ɹOdˈiʒə",
+   "plural": "ɹOdˈiʒəz",
+   "past": "ɹOdˈiʒəd",
+   "progressive": "ɹOdˈiʒəɪŋ"
+  },
+  {
+   "stem": "wɪðdɹˈɔᵊl",
+   "plural": "wɪðdɹˈɔᵊlz",
+   "past": "wɪðdɹˈɔᵊld",
+   "progressive": "wɪðdɹˈɔᵊlɪŋ"
+  },
+  {
+   "stem": "kˈɪsəɡɹˌæm",
+   "plural": "kˈɪsəɡɹˌæmz",
+   "past": "kˈɪsəɡɹˌæmd",
+   "progressive": "kˈɪsəɡɹˌæmɪŋ"
+  },
+  {
+   "stem": "dəsɹˈɛlɪʃ",
+   "plural": "dəsɹˈɛlɪʃᵻz",
+   "past": "dəsɹˈɛlɪʃt",
+   "progressive": "dəsɹˈɛlɪʃɪŋ"
+  },
+  {
+   "stem": "tɹˈɪʃ",
+   "plural": "tɹˈɪʃᵻz",
+   "past": "tɹˈɪʃt",
+   "progressive": "tɹˈɪʃɪŋ"
+  },
+  {
+   "stem": "lˈɔndɹəs",
+   "plural": "lˈɔndɹəsᵻz",
+   "past": "lˈɔndɹəst",
+   "progressive": "lˈɔndɹəsɪŋ"
+  },
+  {
+   "stem": "hˈʌnisˌʌkəl",
+   "plural": "hˈʌnisˌʌkəlz",
+   "past": "hˈʌnisˌʌkəld",
+   "progressive": "hˈʌnisˌʌkəlɪŋ"
+  },
+  {
+   "stem": "dˈWnpˌɔɹ",
+   "plural": "dˈWnpˌɔɹz",
+   "past": "dˈWnpˌɔɹd",
+   "progressive": "dˈWnpˌɔɹɪŋ"
+  },
+  {
+   "stem": "səbskɹˈɪpʃən",
+   "plural": "səbskɹˈɪpʃənz",
+   "past": "səbskɹˈɪpʃənd",
+   "progressive": "səbskɹˈɪpʃənɪŋ"
+  },
+  {
+   "stem": "kˈipˌʌnʧ",
+   "plural": "kˈipˌʌnʧᵻz",
+   "past": "kˈipˌʌnʧt",
+   "progressive": "kˈipˌʌnʧɪŋ"
+  },
+  {
+   "stem": "ɪkspˈænsɪvnəs",
+   "plural": "ɪkspˈænsɪvnəsᵻz",
+   "past": "ɪkspˈænsɪvnəst",
+   "progressive": "ɪkspˈænsɪvnəsɪŋ"
+  },
+  {
+   "stem": "stˈæɾəsˌɪst",
+   "plural": "stˈæɾəsˌɪsts",
+   "past": "stˈæɾəsˌɪstᵻd",
+   "progressive": "stˈæɾəsˌɪstɪŋ"
+  },
+  {
+   "stem": "ɹˈæŋkəɹəsli",
+   "plural": "ɹˈæŋkəɹəsliz",
+   "past": "ɹˈæŋkəɹəslid",
+   "progressive": "ɹˈæŋkəɹəsliɪŋ"
+  },
+  {
+   "stem": "ˈɪntəɹlˌOpəɹ",
+   "plural": "ˈɪntəɹlˌOpəɹz",
+   "past": "ˈɪntəɹlˌOpəɹd",
+   "progressive": "ˈɪntəɹlˌOpəɹɪŋ"
+  },
+  {
+   "stem": "slˌOɡənˈɪɹɪŋ",
+   "plural": "slˌOɡənˈɪɹɪŋz",
+   "past": "slˌOɡənˈɪɹɪŋd",
+   "progressive": "slˌOɡənˈɪɹɪŋɪŋ"
+  },
+  {
+   "stem": "vˈʌlɡəɹ",
+   "plural": "vˈʌlɡəɹz",
+   "past": "vˈʌlɡəɹd",
+   "progressive": "vˈʌlɡəɹɪŋ"
+  },
+  {
+   "stem": "bˈɑniᵻst",
+   "plural": "bˈɑniᵻsts",
+   "past": "bˈɑniᵻstᵻd",
+   "progressive": "bˈɑniᵻstɪŋ"
+  },
+  {
+   "stem": "sˌɛlfənˌIəlˈAʃən",
+   "plural": "sˌɛlfənˌIəlˈAʃənz",
+   "past": "sˌɛlfənˌIəlˈAʃənd",
+   "progressive": "sˌɛlfənˌIəlˈAʃənɪŋ"
+  },
+  {
+   "stem": "slˈipˌɪn",
+   "plural": "slˈipˌɪnz",
+   "past": "slˈipˌɪnd",
+   "progressive": "slˈipˌɪnɪŋ"
+  },
+  {
+   "stem": "əvˈYʒən",
+   "plural": "əvˈYʒənz",
+   "past": "əvˈYʒənd",
+   "progressive": "əvˈYʒənɪŋ"
+  },
+  {
+   "stem": "ɛmblˈɛməɾɪst",
+   "plural": "ɛmblˈɛməɾɪsts",
+   "past": "ɛmblˈɛməɾɪstᵻd",
+   "progressive": "ɛmblˈɛməɾɪstɪŋ"
+  },
+  {
+   "stem": "vˈIᵊləntli",
+   "plural": "vˈIᵊləntliz",
+   "past": "vˈIᵊləntlid",
+   "progressive": "vˈIᵊləntliɪŋ"
+  },
+  {
+   "stem": "fɹˈɪɾᵊlˌɛɹi",
+   "plural": "fɹˈɪɾᵊlˌɛɹiz",
+   "past": "fɹˈɪɾᵊlˌɛɹid",
+   "progressive": "fɹˈɪɾᵊlˌɛɹiɪŋ"
+  },
+  {
+   "stem": "klˈɔɡəɹ",
+   "plural": "klˈɔɡəɹz",
+   "past": "klˈɔɡəɹd",
+   "progressive": "klˈɔɡəɹɪŋ"
+  },
+  {
+   "stem": "kwˈAkəɹˌɪzəm",
+   "plural": "kwˈAkəɹˌɪzəmz",
+   "past": "kwˈAkəɹˌɪzəmd",
+   "progressive": "kwˈAkəɹˌɪzəmɪŋ"
+  },
+  {
+   "stem": "ˌɑskjəlˈAʃən",
+   "plural": "ˌɑskjəlˈAʃənz",
+   "past": "ˌɑskjəlˈAʃənd",
+   "progressive": "ˌɑskjəlˈAʃənɪŋ"
+  },
+  {
+   "stem": "fɹˈɪsk",
+   "plural": "fɹˈɪsks",
+   "past": "fɹˈɪskt",
+   "progressive": "fɹˈɪskɪŋ"
+  },
+  {
+   "stem": "ˌʌnɡɹəmˈæɾəkᵊl",
+   "plural": "ˌʌnɡɹəmˈæɾəkᵊlz",
+   "past": "ˌʌnɡɹəmˈæɾəkᵊld",
+   "progressive": "ˌʌnɡɹəmˈæɾəkᵊlɪŋ"
+  },
+  {
+   "stem": "dəskˈɑɹdᵻd",
+   "plural": "dəskˈɑɹdᵻdz",
+   "past": "dəskˈɑɹdᵻdᵻd",
+   "progressive": "dəskˈɑɹdᵻdɪŋ"
+  },
+  {
+   "stem": "ˌɪnəfˈAsəbli",
+   "plural": "ˌɪnəfˈAsəbliz",
+   "past": "ˌɪnəfˈAsəblid",
+   "progressive": "ˌɪnəfˈAsəbliɪŋ"
+  },
+  {
+   "stem": "flˈuɾɪst",
+   "plural": "flˈuɾɪsts",
+   "past": "flˈuɾɪstᵻd",
+   "progressive": "flˈuɾɪstɪŋ"
+  },
+  {
+   "stem": "mɪsəsˈɪpiən",
+   "plural": "mɪsəsˈɪpiənz",
+   "past": "mɪsəsˈɪpiənd",
+   "progressive": "mɪsəsˈɪpiənɪŋ"
+  },
+  {
+   "stem": "mæskˈɛɹəd",
+   "plural": "mæskˈɛɹədz",
+   "past": "mæskˈɛɹədᵻd",
+   "progressive": "mæskˈɛɹədɪŋ"
+  },
+  {
+   "stem": "ˈæʤəlˌAɾəɹ",
+   "plural": "ˈæʤəlˌAɾəɹz",
+   "past": "ˈæʤəlˌAɾəɹd",
+   "progressive": "ˈæʤəlˌAɾəɹɪŋ"
+  },
+  {
+   "stem": "fˈɪksɪŋ",
+   "plural": "fˈɪksɪŋz",
+   "past": "fˈɪksɪŋd",
+   "progressive": "fˈɪksɪŋɪŋ"
+  },
+  {
+   "stem": "bəwˈɪʧmənt",
+   "plural": "bəwˈɪʧmənts",
+   "past": "bəwˈɪʧməntᵻd",
+   "progressive": "bəwˈɪʧməntɪŋ"
+  },
+  {
+   "stem": "wˈivɪŋ",
+   "plural": "wˈivɪŋz",
+   "past": "wˈivɪŋd",
+   "progressive": "wˈivɪŋɪŋ"
+  },
+  {
+   "stem": "ɪmpˈɔɹɾɪŋ",
+   "plural": "ɪmpˈɔɹɾɪŋz",
+   "past": "ɪmpˈɔɹɾɪŋd",
+   "progressive": "ɪmpˈɔɹɾɪŋɪŋ"
+  },
+  {
+   "stem": "smˈuði",
+   "plural": "smˈuðiz",
+   "past": "smˈuðid",
+   "progressive": "smˈuðiɪŋ"
+  },
+  {
+   "stem": "ʤˈIɹˌAt",
+   "plural": "ʤˈIɹˌAts",
+   "past": "ʤˈIɹˌAɾᵻd",
+   "progressive": "ʤˈIɹˌAɾɪŋ"
+  },
+  {
+   "stem": "mətˈæstəsɪs",
+   "plural": "mətˈæstəsɪsᵻz",
+   "past": "mətˈæstəsɪst",
+   "progressive": "mətˈæstəsɪsɪŋ"
+  },
+  {
+   "stem": "fɹˈibˌɔɹd",
+   "plural": "fɹˈibˌɔɹdz",
+   "past": "fɹˈibˌɔɹdᵻd",
+   "progressive": "fɹˈibˌɔɹdɪŋ"
+  },
+  {
+   "stem": "stɹˈIdᵊnsi",
+   "plural": "stɹˈIdᵊnsiz",
+   "past": "stɹˈIdᵊnsid",
+   "progressive": "stɹˈIdᵊnsiɪŋ"
+  },
+  {
+   "stem": "ɪntˈAlɪŋ",
+   "plural": "ɪntˈAlɪŋz",
+   "past": "ɪntˈAlɪŋd",
+   "progressive": "ɪntˈAlɪŋɪŋ"
+  },
+  {
+   "stem": "θɹˌɑmbOˌɛmbˈɑlɪk",
+   "plural": "θɹˌɑmbOˌɛmbˈɑlɪks",
+   "past": "θɹˌɑmbOˌɛmbˈɑlɪkt",
+   "progressive": "θɹˌɑmbOˌɛmbˈɑlɪkɪŋ"
+  },
+  {
+   "stem": "fˌOɾətɹˈɑpɪk",
+   "plural": "fˌOɾətɹˈɑpɪks",
+   "past": "fˌOɾətɹˈɑpɪkt",
+   "progressive": "fˌOɾətɹˈɑpɪkɪŋ"
+  },
+  {
+   "stem": "sˈɑtsˌɑŋ",
+   "plural": "sˈɑtsˌɑŋz",
+   "past": "sˈɑtsˌɑŋd",
+   "progressive": "sˈɑtsˌɑŋɪŋ"
+  },
+  {
+   "stem": "sˌIkəpˈæθəkᵊli",
+   "plural": "sˌIkəpˈæθəkᵊliz",
+   "past": "sˌIkəpˈæθəkᵊlid",
+   "progressive": "sˌIkəpˈæθəkᵊliɪŋ"
+  },
+  {
+   "stem": "mˈOˌA",
+   "plural": "mˈOˌAz",
+   "past": "mˈOˌAd",
+   "progressive": "mˈOˌAɪŋ"
+  },
+  {
+   "stem": "ɹifˈæktəɹ",
+   "plural": "ɹifˈæktəɹz",
+   "past": "ɹifˈæktəɹd",
+   "progressive": "ɹifˈæktəɹɪŋ"
+  },
+  {
+   "stem": "wˈɪnʤi",
+   "plural": "wˈɪnʤiz",
+   "past": "wˈɪnʤid",
+   "progressive": "wˈɪnʤiɪŋ"
+  },
+  {
+   "stem": "lɪŋɡwˈɪstɪks",
+   "plural": "lɪŋɡwˈɪstɪksᵻz",
+   "past": "lɪŋɡwˈɪstɪkst",
+   "progressive": "lɪŋɡwˈɪstɪksɪŋ"
+  },
+  {
+   "stem": "mˈiθ",
+   "plural": "mˈiθs",
+   "past": "mˈiθt",
+   "progressive": "mˈiθɪŋ"
+  },
+  {
+   "stem": "mˈOɾəvˌAt",
+   "plural": "mˈOɾəvˌAts",
+   "past": "mˈOɾəvˌAɾᵻd",
+   "progressive": "mˈOɾəvˌAɾɪŋ"
+  },
+  {
+   "stem": "sˌIkOsˈɪnθəsɪs",
+   "plural": "sˌIkOsˈɪnθəsɪsᵻz",
+   "past": "sˌIkOsˈɪnθəsɪst",
+   "progressive": "sˌIkOsˈɪnθəsɪsɪŋ"
+  },
+  {
+   "stem": "səblˈisɪŋ",
+   "plural": "səblˈisɪŋz",
+   "past": "səblˈisɪŋd",
+   "progressive": "səblˈisɪŋɪŋ"
+  },
+  {
+   "stem": "səsˈɛptəbᵊl",
+   "plural": "səsˈɛptəbᵊlz",
+   "past": "səsˈɛptəbᵊld",
+   "progressive": "səsˈɛptəbᵊlɪŋ"
+  },
+  {
+   "stem": "nˌiəʤˈiə",
+   "plural": "nˌiəʤˈiəz",
+   "past": "nˌiəʤˈiəd",
+   "progressive": "nˌiəʤˈiəɪŋ"
+  },
+  {
+   "stem": "fˈɔɹwəɹd",
+   "plural": "fˈɔɹwəɹdz",
+   "past": "fˈɔɹwəɹdᵻd",
+   "progressive": "fˈɔɹwəɹdɪŋ"
+  },
+  {
+   "stem": "hˈɔltɪŋli",
+   "plural": "hˈɔltɪŋliz",
+   "past": "hˈɔltɪŋlid",
+   "progressive": "hˈɔltɪŋliɪŋ"
+  },
+  {
+   "stem": "dˈuəlˌIz",
+   "plural": "dˈuəlˌIzᵻz",
+   "past": "dˈuəlˌIzd",
+   "progressive": "dˈuəlˌIzɪŋ"
+  },
+  {
+   "stem": "tɹænzˈækʃən",
+   "plural": "tɹænzˈækʃənz",
+   "past": "tɹænzˈækʃənd",
+   "progressive": "tɹænzˈækʃənɪŋ"
+  },
+  {
+   "stem": "fˈɛmtOsˌɛl",
+   "plural": "fˈɛmtOsˌɛlz",
+   "past": "fˈɛmtOsˌɛld",
+   "progressive": "fˈɛmtOsˌɛlɪŋ"
+  },
+  {
+   "stem": "ˌʌntɹˈuli",
+   "plural": "ˌʌntɹˈuliz",
+   "past": "ˌʌntɹˈulid",
+   "progressive": "ˌʌntɹˈuliɪŋ"
+  },
+  {
+   "stem": "fˌOɾəɡɹˈæmətɹɪst",
+   "plural": "fˌOɾəɡɹˈæmətɹɪsts",
+   "past": "fˌOɾəɡɹˈæmətɹɪstᵻd",
+   "progressive": "fˌOɾəɡɹˈæmətɹɪstɪŋ"
+  },
+  {
+   "stem": "ɹˈɛdhˌɛdᵻd",
+   "plural": "ɹˈɛdhˌɛdᵻdz",
+   "past": "ɹˈɛdhˌɛdᵻdᵻd",
+   "progressive": "ɹˈɛdhˌɛdᵻdɪŋ"
+  },
+  {
+   "stem": "pəpˌIɹəlˈɑʤəkəl",
+   "plural": "pəpˌIɹəlˈɑʤəkəlz",
+   "past": "pəpˌIɹəlˈɑʤəkəld",
+   "progressive": "pəpˌIɹəlˈɑʤəkəlɪŋ"
+  },
+  {
+   "stem": "tˈunəs",
+   "plural": "tˈunəsᵻz",
+   "past": "tˈunəst",
+   "progressive": "tˈunəsɪŋ"
+  },
+  {
+   "stem": "dˈɑnʤᵊn",
+   "plural": "dˈɑnʤᵊnz",
+   "past": "dˈɑnʤᵊnd",
+   "progressive": "dˈɑnʤᵊnɪŋ"
+  },
+  {
+   "stem": "tˈɜɹnsˌOl",
+   "plural": "tˈɜɹnsˌOlz",
+   "past": "tˈɜɹnsˌOld",
+   "progressive": "tˈɜɹnsˌOlɪŋ"
+  },
+  {
+   "stem": "dˈɛsəmˌiɾəɹ",
+   "plural": "dˈɛsəmˌiɾəɹz",
+   "past": "dˈɛsəmˌiɾəɹd",
+   "progressive": "dˈɛsəmˌiɾəɹɪŋ"
+  },
+  {
+   "stem": "pˈʊlˌɔf",
+   "plural": "pˈʊlˌɔfs",
+   "past": "pˈʊlˌɔft",
+   "progressive": "pˈʊlˌɔfɪŋ"
+  },
+  {
+   "stem": "bˈɑɹnəkᵊl",
+   "plural": "bˈɑɹnəkᵊlz",
+   "past": "bˈɑɹnəkᵊld",
+   "progressive": "bˈɑɹnəkᵊlɪŋ"
+  },
+  {
+   "stem": "dˌiskˈulɪŋ",
+   "plural": "dˌiskˈulɪŋz",
+   "past": "dˌiskˈulɪŋd",
+   "progressive": "dˌiskˈulɪŋɪŋ"
+  },
+  {
+   "stem": "wˈɛn",
+   "plural": "wˈɛnz",
+   "past": "wˈɛnd",
+   "progressive": "wˈɛnɪŋ"
+  },
+  {
+   "stem": "ˈAkˌæs",
+   "plural": "ˈAkˌæsᵻz",
+   "past": "ˈAkˌæst",
+   "progressive": "ˈAkˌæsɪŋ"
+  },
+  {
+   "stem": "ɑptˈɑmətɹi",
+   "plural": "ɑptˈɑmətɹiz",
+   "past": "ɑptˈɑmətɹid",
+   "progressive": "ɑptˈɑmətɹiɪŋ"
+  },
+  {
+   "stem": "ɹˌiəpˈɪɹəns",
+   "plural": "ɹˌiəpˈɪɹənsᵻz",
+   "past": "ɹˌiəpˈɪɹənst",
+   "progressive": "ɹˌiəpˈɪɹənsɪŋ"
+  },
+  {
+   "stem": "ˌɑndˌɑntˈinO",
+   "plural": "ˌɑndˌɑntˈinOz",
+   "past": "ˌɑndˌɑntˈinOd",
+   "progressive": "ˌɑndˌɑntˈinOɪŋ"
+  },
+  {
+   "stem": "pɹəpɹˈIəɾi",
+   "plural": "pɹəpɹˈIəɾiz",
+   "past": "pɹəpɹˈIəɾid",
+   "progressive": "pɹəpɹˈIəɾiɪŋ"
+  },
+  {
+   "stem": "bˈɪɡI",
+   "plural": "bˈɪɡIz",
+   "past": "bˈɪɡId",
+   "progressive": "bˈɪɡIɪŋ"
+  },
+  {
+   "stem": "ɡlˈɪɾəɹɪŋli",
+   "plural": "ɡlˈɪɾəɹɪŋliz",
+   "past": "ɡlˈɪɾəɹɪŋlid",
+   "progressive": "ɡlˈɪɾəɹɪŋliɪŋ"
+  },
+  {
+   "stem": "fɹˈikˌWt",
+   "plural": "fɹˈikˌWts",
+   "past": "fɹˈikˌWɾᵻd",
+   "progressive": "fɹˈikˌWɾɪŋ"
+  },
+  {
+   "stem": "θɹˈʌstəɹ",
+   "plural": "θɹˈʌstəɹz",
+   "past": "θɹˈʌstəɹd",
+   "progressive": "θɹˈʌstəɹɪŋ"
+  },
+  {
+   "stem": "hˌYɾitˈYɾi",
+   "plural": "hˌYɾitˈYɾiz",
+   "past": "hˌYɾitˈYɾid",
+   "progressive": "hˌYɾitˈYɾiɪŋ"
+  },
+  {
+   "stem": "pˈæθ",
+   "plural": "pˈæθs",
+   "past": "pˈæθt",
+   "progressive": "pˈæθɪŋ"
+  },
+  {
+   "stem": "ʤˈɛnəɹəlˌIzd",
+   "plural": "ʤˈɛnəɹəlˌIzdz",
+   "past": "ʤˈɛnəɹəlˌIzdᵻd",
+   "progressive": "ʤˈɛnəɹəlˌIzdɪŋ"
+  },
+  {
+   "stem": "blˈɑbfˌɪʃ",
+   "plural": "blˈɑbfˌɪʃᵻz",
+   "past": "blˈɑbfˌɪʃt",
+   "progressive": "blˈɑbfˌɪʃɪŋ"
+  },
+  {
+   "stem": "bˈɛɹəstəɹ",
+   "plural": "bˈɛɹəstəɹz",
+   "past": "bˈɛɹəstəɹd",
+   "progressive": "bˈɛɹəstəɹɪŋ"
+  },
+  {
+   "stem": "θˈɔɹnpɹˌuf",
+   "plural": "θˈɔɹnpɹˌufs",
+   "past": "θˈɔɹnpɹˌuft",
+   "progressive": "θˈɔɹnpɹˌufɪŋ"
+  },
+  {
+   "stem": "pɹˈɑsəkjˌut",
+   "plural": "pɹˈɑsəkjˌuts",
+   "past": "pɹˈɑsəkjˌuɾᵻd",
+   "progressive": "pɹˈɑsəkjˌuɾɪŋ"
+  },
+  {
+   "stem": "wˈʊdstˌɑk",
+   "plural": "wˈʊdstˌɑks",
+   "past": "wˈʊdstˌɑkt",
+   "progressive": "wˈʊdstˌɑkɪŋ"
+  },
+  {
+   "stem": "fjˌukOzˈænθən",
+   "plural": "fjˌukOzˈænθənz",
+   "past": "fjˌukOzˈænθənd",
+   "progressive": "fjˌukOzˈænθənɪŋ"
+  },
+  {
+   "stem": "ˌʌnɹəstɹˈAnt",
+   "plural": "ˌʌnɹəstɹˈAnts",
+   "past": "ˌʌnɹəstɹˈAntᵻd",
+   "progressive": "ˌʌnɹəstɹˈAntɪŋ"
+  },
+  {
+   "stem": "fˈæbjələs",
+   "plural": "fˈæbjələsᵻz",
+   "past": "fˈæbjələst",
+   "progressive": "fˈæbjələsɪŋ"
+  },
+  {
+   "stem": "lˈɑkˌWt",
+   "plural": "lˈɑkˌWts",
+   "past": "lˈɑkˌWɾᵻd",
+   "progressive": "lˈɑkˌWɾɪŋ"
+  },
+  {
+   "stem": "kəlˈæps",
+   "plural": "kəlˈæpsᵻz",
+   "past": "kəlˈæpst",
+   "progressive": "kəlˈæpsɪŋ"
+  },
+  {
+   "stem": "hˈɑstᵊlɪŋ",
+   "plural": "hˈɑstᵊlɪŋz",
+   "past": "hˈɑstᵊlɪŋd",
+   "progressive": "hˈɑstᵊlɪŋɪŋ"
+  },
+  {
+   "stem": "ˌɑbtjəɹˈAʃən",
+   "plural": "ˌɑbtjəɹˈAʃənz",
+   "past": "ˌɑbtjəɹˈAʃənd",
+   "progressive": "ˌɑbtjəɹˈAʃənɪŋ"
+  },
+  {
+   "stem": "ˈɛlkhˌWnd",
+   "plural": "ˈɛlkhˌWndz",
+   "past": "ˈɛlkhˌWndᵻd",
+   "progressive": "ˈɛlkhˌWndɪŋ"
+  },
+  {
+   "stem": "ɪkstɹˈAniəsli",
+   "plural": "ɪkstɹˈAniəsliz",
+   "past": "ɪkstɹˈAniəslid",
+   "progressive": "ɪkstɹˈAniəsliɪŋ"
+  },
+  {
+   "stem": "pˈʌzᵊl",
+   "plural": "pˈʌzᵊlz",
+   "past": "pˈʌzᵊld",
+   "progressive": "pˈʌzᵊlɪŋ"
+  },
+  {
+   "stem": "sˈændinəs",
+   "plural": "sˈændinəsᵻz",
+   "past": "sˈændinəst",
+   "progressive": "sˈændinəsɪŋ"
+  },
+  {
+   "stem": "njuɹˈɑtɹəpˌɪzəm",
+   "plural": "njuɹˈɑtɹəpˌɪzəmz",
+   "past": "njuɹˈɑtɹəpˌɪzəmd",
+   "progressive": "njuɹˈɑtɹəpˌɪzəmɪŋ"
+  },
+  {
+   "stem": "ˌɛθnOhɪstˈɔɹəkəl",
+   "plural": "ˌɛθnOhɪstˈɔɹəkəlz",
+   "past": "ˌɛθnOhɪstˈɔɹəkəld",
+   "progressive": "ˌɛθnOhɪstˈɔɹəkəlɪŋ"
+  },
+  {
+   "stem": "vˈAkˌAt",
+   "plural": "vˈAkˌAts",
+   "past": "vˈAkˌAɾᵻd",
+   "progressive": "vˈAkˌAɾɪŋ"
+  },
+  {
+   "stem": "hˈɑspˌɪɾələɹ",
+   "plural": "hˈɑspˌɪɾələɹz",
+   "past": "hˈɑspˌɪɾələɹd",
+   "progressive": "hˈɑspˌɪɾələɹɪŋ"
+  },
+  {
+   "stem": "vˈɛntəlˌAt",
+   "plural": "vˈɛntəlˌAts",
+   "past": "vˈɛntəlˌAɾᵻd",
+   "progressive": "vˈɛntəlˌAɾɪŋ"
+  },
+  {
+   "stem": "ˈæmpᵊləɹ",
+   "plural": "ˈæmpᵊləɹz",
+   "past": "ˈæmpᵊləɹd",
+   "progressive": "ˈæmpᵊləɹɪŋ"
+  },
+  {
+   "stem": "ɑndˈui",
+   "plural": "ɑndˈuiz",
+   "past": "ɑndˈuid",
+   "progressive": "ɑndˈuiɪŋ"
+  },
+  {
+   "stem": "ɡˈæswˌɜɹks",
+   "plural": "ɡˈæswˌɜɹksᵻz",
+   "past": "ɡˈæswˌɜɹkst",
+   "progressive": "ɡˈæswˌɜɹksɪŋ"
+  },
+  {
+   "stem": "klˈɑndˌIk",
+   "plural": "klˈɑndˌIks",
+   "past": "klˈɑndˌIkt",
+   "progressive": "klˈɑndˌIkɪŋ"
+  },
+  {
+   "stem": "uɡˈɑli",
+   "plural": "uɡˈɑliz",
+   "past": "uɡˈɑlid",
+   "progressive": "uɡˈɑliɪŋ"
+  },
+  {
+   "stem": "tɹˈɪpləkˌAɾᵻd",
+   "plural": "tɹˈɪpləkˌAɾᵻdz",
+   "past": "tɹˈɪpləkˌAɾᵻdᵻd",
+   "progressive": "tɹˈɪpləkˌAɾᵻdɪŋ"
+  },
+  {
+   "stem": "pˌælOvˈɜɹdi",
+   "plural": "pˌælOvˈɜɹdiz",
+   "past": "pˌælOvˈɜɹdid",
+   "progressive": "pˌælOvˈɜɹdiɪŋ"
+  },
+  {
+   "stem": "fˈɔɹfəʧəɹ",
+   "plural": "fˈɔɹfəʧəɹz",
+   "past": "fˈɔɹfəʧəɹd",
+   "progressive": "fˈɔɹfəʧəɹɪŋ"
+  },
+  {
+   "stem": "lˈOdˌWn",
+   "plural": "lˈOdˌWnz",
+   "past": "lˈOdˌWnd",
+   "progressive": "lˈOdˌWnɪŋ"
+  },
+  {
+   "stem": "ʤəpˈɑnəkə",
+   "plural": "ʤəpˈɑnəkəz",
+   "past": "ʤəpˈɑnəkəd",
+   "progressive": "ʤəpˈɑnəkəɪŋ"
+  },
+  {
+   "stem": "ɡˈʌlfwˌid",
+   "plural": "ɡˈʌlfwˌidz",
+   "past": "ɡˈʌlfwˌidᵻd",
+   "progressive": "ɡˈʌlfwˌidɪŋ"
+  },
+  {
+   "stem": "nˈɪpi",
+   "plural": "nˈɪpiz",
+   "past": "nˈɪpid",
+   "progressive": "nˈɪpiɪŋ"
+  },
+  {
+   "stem": "slˈIɾᵻst",
+   "plural": "slˈIɾᵻsts",
+   "past": "slˈIɾᵻstᵻd",
+   "progressive": "slˈIɾᵻstɪŋ"
+  },
+  {
+   "stem": "sˈʌmdˌA",
+   "plural": "sˈʌmdˌAz",
+   "past": "sˈʌmdˌAd",
+   "progressive": "sˈʌmdˌAɪŋ"
+  },
+  {
+   "stem": "mˌɑdəfəkˈAʃən",
+   "plural": "mˌɑdəfəkˈAʃənz",
+   "past": "mˌɑdəfəkˈAʃənd",
+   "progressive": "mˌɑdəfəkˈAʃənɪŋ"
+  },
+  {
+   "stem": "pˈisəɹ",
+   "plural": "pˈisəɹz",
+   "past": "pˈisəɹd",
+   "progressive": "pˈisəɹɪŋ"
+  },
+  {
+   "stem": "ˌOvəɹfəmˈɪljəɹ",
+   "plural": "ˌOvəɹfəmˈɪljəɹz",
+   "past": "ˌOvəɹfəmˈɪljəɹd",
+   "progressive": "ˌOvəɹfəmˈɪljəɹɪŋ"
+  },
+  {
+   "stem": "splˈɑʤ",
+   "plural": "splˈɑʤᵻz",
+   "past": "splˈɑʤd",
+   "progressive": "splˈɑʤɪŋ"
+  },
+  {
+   "stem": "bˈOləsᵻz",
+   "plural": "bˈOləsᵻzᵻz",
+   "past": "bˈOləsᵻzd",
+   "progressive": "bˈOləsᵻzɪŋ"
+  },
+  {
+   "stem": "lˈɪkəɹɪʃ",
+   "plural": "lˈɪkəɹɪʃᵻz",
+   "past": "lˈɪkəɹɪʃt",
+   "progressive": "lˈɪkəɹɪʃɪŋ"
+  },
+  {
+   "stem": "pɹˈut",
+   "plural": "pɹˈuts",
+   "past": "pɹˈuɾᵻd",
+   "progressive": "pɹˈuɾɪŋ"
+  },
+  {
+   "stem": "ˌOvəɹpɹətˈɛkt",
+   "plural": "ˌOvəɹpɹətˈɛkts",
+   "past": "ˌOvəɹpɹətˈɛktᵻd",
+   "progressive": "ˌOvəɹpɹətˈɛktɪŋ"
+  },
+  {
+   "stem": "dətˈAld",
+   "plural": "dətˈAldz",
+   "past": "dətˈAldᵻd",
+   "progressive": "dətˈAldɪŋ"
+  },
+  {
+   "stem": "blˈæstᵻd",
+   "plural": "blˈæstᵻdz",
+   "past": "blˈæstᵻdᵻd",
+   "progressive": "blˈæstᵻdɪŋ"
+  },
+  {
+   "stem": "tˈimˌɔɹ",
+   "plural": "tˈimˌɔɹz",
+   "past": "tˈimˌɔɹd",
+   "progressive": "tˈimˌɔɹɪŋ"
+  },
+  {
+   "stem": "sˈɔɹdplˌA",
+   "plural": "sˈɔɹdplˌAz",
+   "past": "sˈɔɹdplˌAd",
+   "progressive": "sˈɔɹdplˌAɪŋ"
+  },
+  {
+   "stem": "kəmpˈæktᵻd",
+   "plural": "kəmpˈæktᵻdz",
+   "past": "kəmpˈæktᵻdᵻd",
+   "progressive": "kəmpˈæktᵻdɪŋ"
+  },
+  {
+   "stem": "skənˈɛktədi",
+   "plural": "skənˈɛktədiz",
+   "past": "skənˈɛktədid",
+   "progressive": "skənˈɛktədiɪŋ"
+  },
+  {
+   "stem": "əlˈæskᵊn",
+   "plural": "əlˈæskᵊnz",
+   "past": "əlˈæskᵊnd",
+   "progressive": "əlˈæskᵊnɪŋ"
+  },
+  {
+   "stem": "fˈʌŋɡᵊl",
+   "plural": "fˈʌŋɡᵊlz",
+   "past": "fˈʌŋɡᵊld",
+   "progressive": "fˈʌŋɡᵊlɪŋ"
+  },
+  {
+   "stem": "nˈAθləs",
+   "plural": "nˈAθləsᵻz",
+   "past": "nˈAθləst",
+   "progressive": "nˈAθləsɪŋ"
+  },
+  {
+   "stem": "ˌɪntəɹpˈɛlˌAɾəɹ",
+   "plural": "ˌɪntəɹpˈɛlˌAɾəɹz",
+   "past": "ˌɪntəɹpˈɛlˌAɾəɹd",
+   "progressive": "ˌɪntəɹpˈɛlˌAɾəɹɪŋ"
+  },
+  {
+   "stem": "plˌAnəmˈɛtɹəkᵊli",
+   "plural": "plˌAnəmˈɛtɹəkᵊliz",
+   "past": "plˌAnəmˈɛtɹəkᵊlid",
+   "progressive": "plˌAnəmˈɛtɹəkᵊliɪŋ"
+  },
+  {
+   "stem": "ɹimˈænd",
+   "plural": "ɹimˈændz",
+   "past": "ɹimˈændᵻd",
+   "progressive": "ɹimˈændɪŋ"
+  },
+  {
+   "stem": "kɹˈʌstəli",
+   "plural": "kɹˈʌstəliz",
+   "past": "kɹˈʌstəlid",
+   "progressive": "kɹˈʌstəliɪŋ"
+  },
+  {
+   "stem": "sˈupəɹhˌɛləsˌiz",
+   "plural": "sˈupəɹhˌɛləsˌizᵻz",
+   "past": "sˈupəɹhˌɛləsˌizd",
+   "progressive": "sˈupəɹhˌɛləsˌizɪŋ"
+  },
+  {
+   "stem": "flˈæɡflˌIɪŋ",
+   "plural": "flˈæɡflˌIɪŋz",
+   "past": "flˈæɡflˌIɪŋd",
+   "progressive": "flˈæɡflˌIɪŋɪŋ"
+  },
+  {
+   "stem": "kˌObəlˈɪʤəɹənt",
+   "plural": "kˌObəlˈɪʤəɹənts",
+   "past": "kˌObəlˈɪʤəɹəntᵻd",
+   "progressive": "kˌObəlˈɪʤəɹəntɪŋ"
+  },
+  {
+   "stem": "kˈʌɾwˌɔɾəɹ",
+   "plural": "kˈʌɾwˌɔɾəɹz",
+   "past": "kˈʌɾwˌɔɾəɹd",
+   "progressive": "kˈʌɾwˌɔɾəɹɪŋ"
+  },
+  {
+   "stem": "ˌɪnəpɹˌiʃiəbˈɪlədi",
+   "plural": "ˌɪnəpɹˌiʃiəbˈɪlədiz",
+   "past": "ˌɪnəpɹˌiʃiəbˈɪlədid",
+   "progressive": "ˌɪnəpɹˌiʃiəbˈɪlədiɪŋ"
+  },
+  {
+   "stem": "sˌIɾOsˈɛntɹəfjˌuʤ",
+   "plural": "sˌIɾOsˈɛntɹəfjˌuʤᵻz",
+   "past": "sˌIɾOsˈɛntɹəfjˌuʤd",
+   "progressive": "sˌIɾOsˈɛntɹəfjˌuʤɪŋ"
+  },
+  {
+   "stem": "slˈipinəs",
+   "plural": "slˈipinəsᵻz",
+   "past": "slˈipinəst",
+   "progressive": "slˈipinəsɪŋ"
+  },
+  {
+   "stem": "ˌɪmpjətˈAʃən",
+   "plural": "ˌɪmpjətˈAʃənz",
+   "past": "ˌɪmpjətˈAʃənd",
+   "progressive": "ˌɪmpjətˈAʃənɪŋ"
+  },
+  {
+   "stem": "ˌʌnpɹəpˈɪʃəs",
+   "plural": "ˌʌnpɹəpˈɪʃəsᵻz",
+   "past": "ˌʌnpɹəpˈɪʃəst",
+   "progressive": "ˌʌnpɹəpˈɪʃəsɪŋ"
+  },
+  {
+   "stem": "pˈiɾi",
+   "plural": "pˈiɾiz",
+   "past": "pˈiɾid",
+   "progressive": "pˈiɾiɪŋ"
+  },
+  {
+   "stem": "swˈɑt",
+   "plural": "swˈɑts",
+   "past": "swˈɑɾᵻd",
+   "progressive": "swˈɑɾɪŋ"
+  },
+  {
+   "stem": "nˌɑjɑɹˈit",
+   "plural": "nˌɑjɑɹˈits",
+   "past": "nˌɑjɑɹˈiɾᵻd",
+   "progressive": "nˌɑjɑɹˈiɾɪŋ"
+  },
+  {
+   "stem": "fɹˈɔɡi",
+   "plural": "fɹˈɔɡiz",
+   "past": "fɹˈɔɡid",
+   "progressive": "fɹˈɔɡiɪŋ"
+  },
+  {
+   "stem": "ˌiɡOˈɪstɪkᵊl",
+   "plural": "ˌiɡOˈɪstɪkᵊlz",
+   "past": "ˌiɡOˈɪstɪkᵊld",
+   "progressive": "ˌiɡOˈɪstɪkᵊlɪŋ"
+  },
+  {
+   "stem": "OlˌɪŋɡˈiɾO",
+   "plural": "OlˌɪŋɡˈiɾOz",
+   "past": "OlˌɪŋɡˈiɾOd",
+   "progressive": "OlˌɪŋɡˈiɾOɪŋ"
+  },
+  {
+   "stem": "məlˈʌskˌYd",
+   "plural": "məlˈʌskˌYdz",
+   "past": "məlˈʌskˌYdᵻd",
+   "progressive": "məlˈʌskˌYdɪŋ"
+  },
+  {
+   "stem": "ðɛɹbˈI",
+   "plural": "ðɛɹbˈIz",
+   "past": "ðɛɹbˈId",
+   "progressive": "ðɛɹbˈIɪŋ"
+  },
+  {
+   "stem": "θˈʌdᵻd",
+   "plural": "θˈʌdᵻdz",
+   "past": "θˈʌdᵻdᵻd",
+   "progressive": "θˈʌdᵻdɪŋ"
+  },
+  {
+   "stem": "ˌʌnfˈAlɪŋnəs",
+   "plural": "ˌʌnfˈAlɪŋnəsᵻz",
+   "past": "ˌʌnfˈAlɪŋnəst",
+   "progressive": "ˌʌnfˈAlɪŋnəsɪŋ"
+  },
+  {
+   "stem": "mˈuʃən",
+   "plural": "mˈuʃənz",
+   "past": "mˈuʃənd",
+   "progressive": "mˈuʃənɪŋ"
+  },
+  {
+   "stem": "nəlˈɑksˌOn",
+   "plural": "nəlˈɑksˌOnz",
+   "past": "nəlˈɑksˌOnd",
+   "progressive": "nəlˈɑksˌOnɪŋ"
+  },
+  {
+   "stem": "bˈutlˌɪk",
+   "plural": "bˈutlˌɪks",
+   "past": "bˈutlˌɪkt",
+   "progressive": "bˈutlˌɪkɪŋ"
+  },
+  {
+   "stem": "spˈidəɹ",
+   "plural": "spˈidəɹz",
+   "past": "spˈidəɹd",
+   "progressive": "spˈidəɹɪŋ"
+  },
+  {
+   "stem": "ˌɪnfOmˈAniə",
+   "plural": "ˌɪnfOmˈAniəz",
+   "past": "ˌɪnfOmˈAniəd",
+   "progressive": "ˌɪnfOmˈAniəɪŋ"
+  },
+  {
+   "stem": "pjˈupˌi",
+   "plural": "pjˈupˌiz",
+   "past": "pjˈupˌid",
+   "progressive": "pjˈupˌiɪŋ"
+  },
+  {
+   "stem": "əvˈɔlv",
+   "plural": "əvˈɔlvz",
+   "past": "əvˈɔlvd",
+   "progressive": "əvˈɔlvɪŋ"
+  },
+  {
+   "stem": "mˌʌltistˈɔɹi",
+   "plural": "mˌʌltistˈɔɹiz",
+   "past": "mˌʌltistˈɔɹid",
+   "progressive": "mˌʌltistˈɔɹiɪŋ"
+  },
+  {
+   "stem": "ˌæfɹOfjˈuʧəɹɪzəm",
+   "plural": "ˌæfɹOfjˈuʧəɹɪzəmz",
+   "past": "ˌæfɹOfjˈuʧəɹɪzəmd",
+   "progressive": "ˌæfɹOfjˈuʧəɹɪzəmɪŋ"
+  },
+  {
+   "stem": "ˌʌlsəɹˈAʃən",
+   "plural": "ˌʌlsəɹˈAʃənz",
+   "past": "ˌʌlsəɹˈAʃənd",
+   "progressive": "ˌʌlsəɹˈAʃənɪŋ"
+  },
+  {
+   "stem": "bˈæŋkəɹ",
+   "plural": "bˈæŋkəɹz",
+   "past": "bˈæŋkəɹd",
+   "progressive": "bˈæŋkəɹɪŋ"
+  },
+  {
+   "stem": "bˈæstəɹd",
+   "plural": "bˈæstəɹdz",
+   "past": "bˈæstəɹdᵻd",
+   "progressive": "bˈæstəɹdɪŋ"
+  },
+  {
+   "stem": "hˈɔltəɹ",
+   "plural": "hˈɔltəɹz",
+   "past": "hˈɔltəɹd",
+   "progressive": "hˈɔltəɹɪŋ"
+  },
+  {
+   "stem": "ɪksˈIzd",
+   "plural": "ɪksˈIzdz",
+   "past": "ɪksˈIzdᵻd",
+   "progressive": "ɪksˈIzdɪŋ"
+  },
+  {
+   "stem": "sˈʌbstətˌuɾᵻd",
+   "plural": "sˈʌbstətˌuɾᵻdz",
+   "past": "sˈʌbstətˌuɾᵻdᵻd",
+   "progressive": "sˈʌbstətˌuɾᵻdɪŋ"
+  },
+  {
+   "stem": "ʃˈʌk",
+   "plural": "ʃˈʌks",
+   "past": "ʃˈʌkt",
+   "progressive": "ʃˈʌkɪŋ"
+  },
+  {
+   "stem": "kəmˈɛməɹəɾɪv",
+   "plural": "kəmˈɛməɹəɾɪvz",
+   "past": "kəmˈɛməɹəɾɪvd",
+   "progressive": "kəmˈɛməɹəɾɪvɪŋ"
+  },
+  {
+   "stem": "ˈæʤəlˌAt",
+   "plural": "ˈæʤəlˌAts",
+   "past": "ˈæʤəlˌAɾᵻd",
+   "progressive": "ˈæʤəlˌAɾɪŋ"
+  },
+  {
+   "stem": "kɹˈOkˌI",
+   "plural": "kɹˈOkˌIz",
+   "past": "kɹˈOkˌId",
+   "progressive": "kɹˈOkˌIɪŋ"
+  },
+  {
+   "stem": "hˌIəɹəɡlˈɪfɪk",
+   "plural": "hˌIəɹəɡlˈɪfɪks",
+   "past": "hˌIəɹəɡlˈɪfɪkt",
+   "progressive": "hˌIəɹəɡlˈɪfɪkɪŋ"
+  },
+  {
+   "stem": "ɹˈɑndəvˌuz",
+   "plural": "ɹˈɑndəvˌuzᵻz",
+   "past": "ɹˈɑndəvˌuzd",
+   "progressive": "ɹˈɑndəvˌuzɪŋ"
+  },
+  {
+   "stem": "ˈɛɹbˌAs",
+   "plural": "ˈɛɹbˌAsᵻz",
+   "past": "ˈɛɹbˌAst",
+   "progressive": "ˈɛɹbˌAsɪŋ"
+  },
+  {
+   "stem": "dɹˈæɡəɹ",
+   "plural": "dɹˈæɡəɹz",
+   "past": "dɹˈæɡəɹd",
+   "progressive": "dɹˈæɡəɹɪŋ"
+  },
+  {
+   "stem": "plˈænəɹ",
+   "plural": "plˈænəɹz",
+   "past": "plˈænəɹd",
+   "progressive": "plˈænəɹɪŋ"
+  },
+  {
+   "stem": "kɹˈOkənˌOl",
+   "plural": "kɹˈOkənˌOlz",
+   "past": "kɹˈOkənˌOld",
+   "progressive": "kɹˈOkənˌOlɪŋ"
+  },
+  {
+   "stem": "tˌImlˈæps",
+   "plural": "tˌImlˈæpsᵻz",
+   "past": "tˌImlˈæpst",
+   "progressive": "tˌImlˈæpsɪŋ"
+  },
+  {
+   "stem": "ɡɹˈæɾəfˌIɪŋ",
+   "plural": "ɡɹˈæɾəfˌIɪŋz",
+   "past": "ɡɹˈæɾəfˌIɪŋd",
+   "progressive": "ɡɹˈæɾəfˌIɪŋɪŋ"
+  },
+  {
+   "stem": "bˈʊkəɹ",
+   "plural": "bˈʊkəɹz",
+   "past": "bˈʊkəɹd",
+   "progressive": "bˈʊkəɹɪŋ"
+  },
+  {
+   "stem": "sˈIbəɹkɹˌIm",
+   "plural": "sˈIbəɹkɹˌImz",
+   "past": "sˈIbəɹkɹˌImd",
+   "progressive": "sˈIbəɹkɹˌImɪŋ"
+  },
+  {
+   "stem": "dəstˌɛnsəbˈɪləɾi",
+   "plural": "dəstˌɛnsəbˈɪləɾiz",
+   "past": "dəstˌɛnsəbˈɪləɾid",
+   "progressive": "dəstˌɛnsəbˈɪləɾiɪŋ"
+  },
+  {
+   "stem": "æktˈɪniən",
+   "plural": "æktˈɪniənz",
+   "past": "æktˈɪniənd",
+   "progressive": "æktˈɪniənɪŋ"
+  },
+  {
+   "stem": "hˈOmʃɔɹɪŋ",
+   "plural": "hˈOmʃɔɹɪŋz",
+   "past": "hˈOmʃɔɹɪŋd",
+   "progressive": "hˈOmʃɔɹɪŋɪŋ"
+  },
+  {
+   "stem": "pɹisˈɪpəɾəts",
+   "plural": "pɹisˈɪpəɾətsᵻz",
+   "past": "pɹisˈɪpəɾətst",
+   "progressive": "pɹisˈɪpəɾətsɪŋ"
+  },
+  {
+   "stem": "dˈWtləsli",
+   "plural": "dˈWtləsliz",
+   "past": "dˈWtləslid",
+   "progressive": "dˈWtləsliɪŋ"
+  },
+  {
+   "stem": "ləvˈɪɾəkəs",
+   "plural": "ləvˈɪɾəkəsᵻz",
+   "past": "ləvˈɪɾəkəst",
+   "progressive": "ləvˈɪɾəkəsɪŋ"
+  },
+  {
+   "stem": "pOˈɛɾəkᵊli",
+   "plural": "pOˈɛɾəkᵊliz",
+   "past": "pOˈɛɾəkᵊlid",
+   "progressive": "pOˈɛɾəkᵊliɪŋ"
+  },
+  {
+   "stem": "əklˈuʒᵊn",
+   "plural": "əklˈuʒᵊnz",
+   "past": "əklˈuʒᵊnd",
+   "progressive": "əklˈuʒᵊnɪŋ"
+  },
+  {
+   "stem": "ɪnɡˈɔɹʤ",
+   "plural": "ɪnɡˈɔɹʤᵻz",
+   "past": "ɪnɡˈɔɹʤd",
+   "progressive": "ɪnɡˈɔɹʤɪŋ"
+  },
+  {
+   "stem": "djˌuɾəɹˈAʃən",
+   "plural": "djˌuɾəɹˈAʃənz",
+   "past": "djˌuɾəɹˈAʃənd",
+   "progressive": "djˌuɾəɹˈAʃənɪŋ"
+  },
+  {
+   "stem": "tˈɜɹvz",
+   "plural": "tˈɜɹvzᵻz",
+   "past": "tˈɜɹvzd",
+   "progressive": "tˈɜɹvzɪŋ"
+  },
+  {
+   "stem": "wˈɛpən",
+   "plural": "wˈɛpənz",
+   "past": "wˈɛpənd",
+   "progressive": "wˈɛpənɪŋ"
+  },
+  {
+   "stem": "bɹˈæsəkə",
+   "plural": "bɹˈæsəkəz",
+   "past": "bɹˈæsəkəd",
+   "progressive": "bɹˈæsəkəɪŋ"
+  },
+  {
+   "stem": "stˈAmən",
+   "plural": "stˈAmənz",
+   "past": "stˈAmənd",
+   "progressive": "stˈAmənɪŋ"
+  },
+  {
+   "stem": "wˈuz",
+   "plural": "wˈuzᵻz",
+   "past": "wˈuzd",
+   "progressive": "wˈuzɪŋ"
+  },
+  {
+   "stem": "fɹˈæɡd",
+   "plural": "fɹˈæɡdz",
+   "past": "fɹˈæɡdᵻd",
+   "progressive": "fɹˈæɡdɪŋ"
+  },
+  {
+   "stem": "skˈɑns",
+   "plural": "skˈɑnsᵻz",
+   "past": "skˈɑnst",
+   "progressive": "skˈɑnsɪŋ"
+  },
+  {
+   "stem": "ˈOdəɹ",
+   "plural": "ˈOdəɹz",
+   "past": "ˈOdəɹd",
+   "progressive": "ˈOdəɹɪŋ"
+  },
+  {
+   "stem": "hˌupˈA",
+   "plural": "hˌupˈAz",
+   "past": "hˌupˈAd",
+   "progressive": "hˌupˈAɪŋ"
+  },
+  {
+   "stem": "kˈɑɹbˌId",
+   "plural": "kˈɑɹbˌIdz",
+   "past": "kˈɑɹbˌIdᵻd",
+   "progressive": "kˈɑɹbˌIdɪŋ"
+  },
+  {
+   "stem": "fˈɑsfənˌAt",
+   "plural": "fˈɑsfənˌAts",
+   "past": "fˈɑsfənˌAɾᵻd",
+   "progressive": "fˈɑsfənˌAɾɪŋ"
+  },
+  {
+   "stem": "fˌOɾəsˌɪnθˈɛɾɪk",
+   "plural": "fˌOɾəsˌɪnθˈɛɾɪks",
+   "past": "fˌOɾəsˌɪnθˈɛɾɪkt",
+   "progressive": "fˌOɾəsˌɪnθˈɛɾɪkɪŋ"
+  },
+  {
+   "stem": "lˈiɡd",
+   "plural": "lˈiɡdz",
+   "past": "lˈiɡdᵻd",
+   "progressive": "lˈiɡdɪŋ"
+  },
+  {
+   "stem": "hˌIdɹəʤiˈɑləʤɪst",
+   "plural": "hˌIdɹəʤiˈɑləʤɪsts",
+   "past": "hˌIdɹəʤiˈɑləʤɪstᵻd",
+   "progressive": "hˌIdɹəʤiˈɑləʤɪstɪŋ"
+  },
+  {
+   "stem": "bˈɑŋɡə",
+   "plural": "bˈɑŋɡəz",
+   "past": "bˈɑŋɡəd",
+   "progressive": "bˈɑŋɡəɪŋ"
+  },
+  {
+   "stem": "lˈIm",
+   "plural": "lˈImz",
+   "past": "lˈImd",
+   "progressive": "lˈImɪŋ"
+  },
+  {
+   "stem": "ˌɑɹəkˈipə",
+   "plural": "ˌɑɹəkˈipəz",
+   "past": "ˌɑɹəkˈipəd",
+   "progressive": "ˌɑɹəkˈipəɪŋ"
+  },
+  {
+   "stem": "plˈAn",
+   "plural": "plˈAnz",
+   "past": "plˈAnd",
+   "progressive": "plˈAnɪŋ"
+  },
+  {
+   "stem": "bˈɜɹbᵊl",
+   "plural": "bˈɜɹbᵊlz",
+   "past": "bˈɜɹbᵊld",
+   "progressive": "bˈɜɹbᵊlɪŋ"
+  },
+  {
+   "stem": "ˈɪpswəʧ",
+   "plural": "ˈɪpswəʧᵻz",
+   "past": "ˈɪpswəʧt",
+   "progressive": "ˈɪpswəʧɪŋ"
+  },
+  {
+   "stem": "mətɹˈIɾəs",
+   "plural": "mətɹˈIɾəsᵻz",
+   "past": "mətɹˈIɾəst",
+   "progressive": "mətɹˈIɾəsɪŋ"
+  },
+  {
+   "stem": "dˌIəɡnˌɑstˈɪʃən",
+   "plural": "dˌIəɡnˌɑstˈɪʃənz",
+   "past": "dˌIəɡnˌɑstˈɪʃənd",
+   "progressive": "dˌIəɡnˌɑstˈɪʃənɪŋ"
+  },
+  {
+   "stem": "fˈɔt",
+   "plural": "fˈɔts",
+   "past": "fˈɔtᵻd",
+   "progressive": "fˈɔtɪŋ"
+  },
+  {
+   "stem": "ˌʌnstˈɪntɪdli",
+   "plural": "ˌʌnstˈɪntɪdliz",
+   "past": "ˌʌnstˈɪntɪdlid",
+   "progressive": "ˌʌnstˈɪntɪdliɪŋ"
+  },
+  {
+   "stem": "mˈɑŋd",
+   "plural": "mˈɑŋdz",
+   "past": "mˈɑŋdᵻd",
+   "progressive": "mˈɑŋdɪŋ"
+  },
+  {
+   "stem": "pˈɑɾɪʤ",
+   "plural": "pˈɑɾɪʤᵻz",
+   "past": "pˈɑɾɪʤd",
+   "progressive": "pˈɑɾɪʤɪŋ"
+  },
+  {
+   "stem": "bˈʌɾək",
+   "plural": "bˈʌɾəks",
+   "past": "bˈʌɾəkt",
+   "progressive": "bˈʌɾəkɪŋ"
+  },
+  {
+   "stem": "sˌɛmˌIɹˈɪʤəd",
+   "plural": "sˌɛmˌIɹˈɪʤədz",
+   "past": "sˌɛmˌIɹˈɪʤədᵻd",
+   "progressive": "sˌɛmˌIɹˈɪʤədɪŋ"
+  },
+  {
+   "stem": "zˈIməʤən",
+   "plural": "zˈIməʤənz",
+   "past": "zˈIməʤənd",
+   "progressive": "zˈIməʤənɪŋ"
+  },
+  {
+   "stem": "ˌɪntəɹfjˈuzd",
+   "plural": "ˌɪntəɹfjˈuzdz",
+   "past": "ˌɪntəɹfjˈuzdᵻd",
+   "progressive": "ˌɪntəɹfjˈuzdɪŋ"
+  },
+  {
+   "stem": "ɪnvˈɪzəbli",
+   "plural": "ɪnvˈɪzəbliz",
+   "past": "ɪnvˈɪzəblid",
+   "progressive": "ɪnvˈɪzəbliɪŋ"
+  },
+  {
+   "stem": "ɪkspɹˈɛs",
+   "plural": "ɪkspɹˈɛsᵻz",
+   "past": "ɪkspɹˈɛst",
+   "progressive": "ɪkspɹˈɛsɪŋ"
+  },
+  {
+   "stem": "səmˈɪlətˌud",
+   "plural": "səmˈɪlətˌudz",
+   "past": "səmˈɪlətˌudᵻd",
+   "progressive": "səmˈɪlətˌudɪŋ"
+  },
+  {
+   "stem": "ðˌɛɹɪnbəfˈɔɹ",
+   "plural": "ðˌɛɹɪnbəfˈɔɹz",
+   "past": "ðˌɛɹɪnbəfˈɔɹd",
+   "progressive": "ðˌɛɹɪnbəfˈɔɹɪŋ"
+  },
+  {
+   "stem": "ɹˈɑtɡˌʌt",
+   "plural": "ɹˈɑtɡˌʌts",
+   "past": "ɹˈɑtɡˌʌɾᵻd",
+   "progressive": "ɹˈɑtɡˌʌɾɪŋ"
+  },
+  {
+   "stem": "mˈɛɹəɾəkɹˌæt",
+   "plural": "mˈɛɹəɾəkɹˌæts",
+   "past": "mˈɛɹəɾəkɹˌæɾᵻd",
+   "progressive": "mˈɛɹəɾəkɹˌæɾɪŋ"
+  },
+  {
+   "stem": "ɛkspˈAtɹiəts",
+   "plural": "ɛkspˈAtɹiətsᵻz",
+   "past": "ɛkspˈAtɹiətst",
+   "progressive": "ɛkspˈAtɹiətsɪŋ"
+  },
+  {
+   "stem": "bˌɪbliˈɑlətɹi",
+   "plural": "bˌɪbliˈɑlətɹiz",
+   "past": "bˌɪbliˈɑlətɹid",
+   "progressive": "bˌɪbliˈɑlətɹiɪŋ"
+  },
+  {
+   "stem": "tˈæksˌiz",
+   "plural": "tˈæksˌizᵻz",
+   "past": "tˈæksˌizd",
+   "progressive": "tˈæksˌizɪŋ"
+  },
+  {
+   "stem": "klˈæmbəɹ",
+   "plural": "klˈæmbəɹz",
+   "past": "klˈæmbəɹd",
+   "progressive": "klˈæmbəɹɪŋ"
+  },
+  {
+   "stem": "stˈimbˌOt",
+   "plural": "stˈimbˌOts",
+   "past": "stˈimbˌOɾᵻd",
+   "progressive": "stˈimbˌOɾɪŋ"
+  },
+  {
+   "stem": "nˈɑʃi",
+   "plural": "nˈɑʃiz",
+   "past": "nˈɑʃid",
+   "progressive": "nˈɑʃiɪŋ"
+  },
+  {
+   "stem": "wˈɑləwəɹ",
+   "plural": "wˈɑləwəɹz",
+   "past": "wˈɑləwəɹd",
+   "progressive": "wˈɑləwəɹɪŋ"
+  },
+  {
+   "stem": "fˈɛɹiɪʤ",
+   "plural": "fˈɛɹiɪʤᵻz",
+   "past": "fˈɛɹiɪʤd",
+   "progressive": "fˈɛɹiɪʤɪŋ"
+  },
+  {
+   "stem": "ləlˈɑŋwi",
+   "plural": "ləlˈɑŋwiz",
+   "past": "ləlˈɑŋwid",
+   "progressive": "ləlˈɑŋwiɪŋ"
+  },
+  {
+   "stem": "pˈɑʤi",
+   "plural": "pˈɑʤiz",
+   "past": "pˈɑʤid",
+   "progressive": "pˈɑʤiɪŋ"
+  },
+  {
+   "stem": "kˌænəbələzˈAʃən",
+   "plural": "kˌænəbələzˈAʃənz",
+   "past": "kˌænəbələzˈAʃənd",
+   "progressive": "kˌænəbələzˈAʃənɪŋ"
+  },
+  {
+   "stem": "hOmˈʌŋkjəlˌI",
+   "plural": "hOmˈʌŋkjəlˌIz",
+   "past": "hOmˈʌŋkjəlˌId",
+   "progressive": "hOmˈʌŋkjəlˌIɪŋ"
+  },
+  {
+   "stem": "fˈɛdəɹəlˌɪzəm",
+   "plural": "fˈɛdəɹəlˌɪzəmz",
+   "past": "fˈɛdəɹəlˌɪzəmd",
+   "progressive": "fˈɛdəɹəlˌɪzəmɪŋ"
+  },
+  {
+   "stem": "kˈWntəs",
+   "plural": "kˈWntəsᵻz",
+   "past": "kˈWntəst",
+   "progressive": "kˈWntəsɪŋ"
+  },
+  {
+   "stem": "ləθˈɑɹʤəkᵊli",
+   "plural": "ləθˈɑɹʤəkᵊliz",
+   "past": "ləθˈɑɹʤəkᵊlid",
+   "progressive": "ləθˈɑɹʤəkᵊliɪŋ"
+  },
+  {
+   "stem": "ɪnkˈæpsjəlˌAt",
+   "plural": "ɪnkˈæpsjəlˌAts",
+   "past": "ɪnkˈæpsjəlˌAɾᵻd",
+   "progressive": "ɪnkˈæpsjəlˌAɾɪŋ"
+  },
+  {
+   "stem": "ˌælənˈɑn",
+   "plural": "ˌælənˈɑnz",
+   "past": "ˌælənˈɑnd",
+   "progressive": "ˌælənˈɑnɪŋ"
+  },
+  {
+   "stem": "ɡælvˈænəkᵊli",
+   "plural": "ɡælvˈænəkᵊliz",
+   "past": "ɡælvˈænəkᵊlid",
+   "progressive": "ɡælvˈænəkᵊliɪŋ"
+  },
+  {
+   "stem": "klˈWnɪʃ",
+   "plural": "klˈWnɪʃᵻz",
+   "past": "klˈWnɪʃt",
+   "progressive": "klˈWnɪʃɪŋ"
+  },
+  {
+   "stem": "mˈɛɡədˌɛɹi",
+   "plural": "mˈɛɡədˌɛɹiz",
+   "past": "mˈɛɡədˌɛɹid",
+   "progressive": "mˈɛɡədˌɛɹiɪŋ"
+  },
+  {
+   "stem": "tˈɪməθi",
+   "plural": "tˈɪməθiz",
+   "past": "tˈɪməθid",
+   "progressive": "tˈɪməθiɪŋ"
+  },
+  {
+   "stem": "sˌɪləbˈɪsəɾi",
+   "plural": "sˌɪləbˈɪsəɾiz",
+   "past": "sˌɪləbˈɪsəɾid",
+   "progressive": "sˌɪləbˈɪsəɾiɪŋ"
+  },
+  {
+   "stem": "tɹəkˈInə",
+   "plural": "tɹəkˈInəz",
+   "past": "tɹəkˈInəd",
+   "progressive": "tɹəkˈInəɪŋ"
+  },
+  {
+   "stem": "ɹˌAdiˈɑmətɹi",
+   "plural": "ɹˌAdiˈɑmətɹiz",
+   "past": "ɹˌAdiˈɑmətɹid",
+   "progressive": "ɹˌAdiˈɑmətɹiɪŋ"
+  },
+  {
+   "stem": "bˈiʧkˌOmɪŋ",
+   "plural": "bˈiʧkˌOmɪŋz",
+   "past": "bˈiʧkˌOmɪŋd",
+   "progressive": "bˈiʧkˌOmɪŋɪŋ"
+  },
+  {
+   "stem": "ˈidəm",
+   "plural": "ˈidəmz",
+   "past": "ˈidəmd",
+   "progressive": "ˈidəmɪŋ"
+  },
+  {
+   "stem": "ɹəʤˌuvənˈɛsənt",
+   "plural": "ɹəʤˌuvənˈɛsənts",
+   "past": "ɹəʤˌuvənˈɛsəntᵻd",
+   "progressive": "ɹəʤˌuvənˈɛsəntɪŋ"
+  },
+  {
+   "stem": "əmbɹˈAs",
+   "plural": "əmbɹˈAsᵻz",
+   "past": "əmbɹˈAst",
+   "progressive": "əmbɹˈAsɪŋ"
+  },
+  {
+   "stem": "kˈæɾᵻd",
+   "plural": "kˈæɾᵻdz",
+   "past": "kˈæɾᵻdᵻd",
+   "progressive": "kˈæɾᵻdɪŋ"
+  },
+  {
+   "stem": "tˈɛʃ",
+   "plural": "tˈɛʃᵻz",
+   "past": "tˈɛʃt",
+   "progressive": "tˈɛʃɪŋ"
+  },
+  {
+   "stem": "bˌIsˈIklɪk",
+   "plural": "bˌIsˈIklɪks",
+   "past": "bˌIsˈIklɪkt",
+   "progressive": "bˌIsˈIklɪkɪŋ"
+  },
+  {
+   "stem": "spˈɑɹk",
+   "plural": "spˈɑɹks",
+   "past": "spˈɑɹkt",
+   "progressive": "spˈɑɹkɪŋ"
+  },
+  {
+   "stem": "ˈuɡɹiən",
+   "plural": "ˈuɡɹiənz",
+   "past": "ˈuɡɹiənd",
+   "progressive": "ˈuɡɹiənɪŋ"
+  },
+  {
+   "stem": "fˈɔɹmˌAt",
+   "plural": "fˈɔɹmˌAts",
+   "past": "fˈɔɹmˌAɾᵻd",
+   "progressive": "fˈɔɹmˌAɾɪŋ"
+  },
+  {
+   "stem": "tˈɑɹtɹəzᵊn",
+   "plural": "tˈɑɹtɹəzᵊnz",
+   "past": "tˈɑɹtɹəzᵊnd",
+   "progressive": "tˈɑɹtɹəzᵊnɪŋ"
+  },
+  {
+   "stem": "kjˈʊɹiəsli",
+   "plural": "kjˈʊɹiəsliz",
+   "past": "kjˈʊɹiəslid",
+   "progressive": "kjˈʊɹiəsliɪŋ"
+  },
+  {
+   "stem": "dəblˈun",
+   "plural": "dəblˈunz",
+   "past": "dəblˈund",
+   "progressive": "dəblˈunɪŋ"
+  },
+  {
+   "stem": "pˈɜɹʒᵊn",
+   "plural": "pˈɜɹʒᵊnz",
+   "past": "pˈɜɹʒᵊnd",
+   "progressive": "pˈɜɹʒᵊnɪŋ"
+  },
+  {
+   "stem": "ˌʌnbˈYld",
+   "plural": "ˌʌnbˈYldz",
+   "past": "ˌʌnbˈYldᵻd",
+   "progressive": "ˌʌnbˈYldɪŋ"
+  },
+  {
+   "stem": "əpɹˈOʧəbᵊl",
+   "plural": "əpɹˈOʧəbᵊlz",
+   "past": "əpɹˈOʧəbᵊld",
+   "progressive": "əpɹˈOʧəbᵊlɪŋ"
+  },
+  {
+   "stem": "ˌɪnsəɹmˈWntəbli",
+   "plural": "ˌɪnsəɹmˈWntəbliz",
+   "past": "ˌɪnsəɹmˈWntəblid",
+   "progressive": "ˌɪnsəɹmˈWntəbliɪŋ"
+  },
+  {
+   "stem": "hˈOʒəɹ",
+   "plural": "hˈOʒəɹz",
+   "past": "hˈOʒəɹd",
+   "progressive": "hˈOʒəɹɪŋ"
+  },
+  {
+   "stem": "ˈɔɹdᵊnˌɛɹinəs",
+   "plural": "ˈɔɹdᵊnˌɛɹinəsᵻz",
+   "past": "ˈɔɹdᵊnˌɛɹinəst",
+   "progressive": "ˈɔɹdᵊnˌɛɹinəsɪŋ"
+  },
+  {
+   "stem": "tɹˈʌmpəɾɪŋ",
+   "plural": "tɹˈʌmpəɾɪŋz",
+   "past": "tɹˈʌmpəɾɪŋd",
+   "progressive": "tɹˈʌmpəɾɪŋɪŋ"
+  },
+  {
+   "stem": "dəmˈɪdiˌAt",
+   "plural": "dəmˈɪdiˌAts",
+   "past": "dəmˈɪdiˌAɾᵻd",
+   "progressive": "dəmˈɪdiˌAɾɪŋ"
+  },
+  {
+   "stem": "dˈɛləɡəbəl",
+   "plural": "dˈɛləɡəbəlz",
+   "past": "dˈɛləɡəbəld",
+   "progressive": "dˈɛləɡəbəlɪŋ"
+  },
+  {
+   "stem": "ɹəflˈɛktɪv",
+   "plural": "ɹəflˈɛktɪvz",
+   "past": "ɹəflˈɛktɪvd",
+   "progressive": "ɹəflˈɛktɪvɪŋ"
+  },
+  {
+   "stem": "ʧˈɑɹlstən",
+   "plural": "ʧˈɑɹlstənz",
+   "past": "ʧˈɑɹlstənd",
+   "progressive": "ʧˈɑɹlstənɪŋ"
+  },
+  {
+   "stem": "kˈæʃəbᵊl",
+   "plural": "kˈæʃəbᵊlz",
+   "past": "kˈæʃəbᵊld",
+   "progressive": "kˈæʃəbᵊlɪŋ"
+  },
+  {
+   "stem": "ˈætᵊlbˌɜɹO",
+   "plural": "ˈætᵊlbˌɜɹOz",
+   "past": "ˈætᵊlbˌɜɹOd",
+   "progressive": "ˈætᵊlbˌɜɹOɪŋ"
+  },
+  {
+   "stem": "ˌɪnspəsˈAʃən",
+   "plural": "ˌɪnspəsˈAʃənz",
+   "past": "ˌɪnspəsˈAʃənd",
+   "progressive": "ˌɪnspəsˈAʃənɪŋ"
+  },
+  {
+   "stem": "kəmpˈænjənəbəl",
+   "plural": "kəmpˈænjənəbəlz",
+   "past": "kəmpˈænjənəbəld",
+   "progressive": "kəmpˈænjənəbəlɪŋ"
+  },
+  {
+   "stem": "ˌɛpəɡɹəmˈæɾɪk",
+   "plural": "ˌɛpəɡɹəmˈæɾɪks",
+   "past": "ˌɛpəɡɹəmˈæɾɪkt",
+   "progressive": "ˌɛpəɡɹəmˈæɾɪkɪŋ"
+  },
+  {
+   "stem": "kˈWntəɹʃˌæft",
+   "plural": "kˈWntəɹʃˌæfts",
+   "past": "kˈWntəɹʃˌæftᵻd",
+   "progressive": "kˈWntəɹʃˌæftɪŋ"
+  },
+  {
+   "stem": "pˌAliəlˈɪθɪk",
+   "plural": "pˌAliəlˈɪθɪks",
+   "past": "pˌAliəlˈɪθɪkt",
+   "progressive": "pˌAliəlˈɪθɪkɪŋ"
+  },
+  {
+   "stem": "pəlˈItnəs",
+   "plural": "pəlˈItnəsᵻz",
+   "past": "pəlˈItnəst",
+   "progressive": "pəlˈItnəsɪŋ"
+  },
+  {
+   "stem": "kənkjˈubənɪʤ",
+   "plural": "kənkjˈubənɪʤᵻz",
+   "past": "kənkjˈubənɪʤd",
+   "progressive": "kənkjˈubənɪʤɪŋ"
+  },
+  {
+   "stem": "bɹˈAvli",
+   "plural": "bɹˈAvliz",
+   "past": "bɹˈAvlid",
+   "progressive": "bɹˈAvliɪŋ"
+  },
+  {
+   "stem": "stˈOp",
+   "plural": "stˈOps",
+   "past": "stˈOpt",
+   "progressive": "stˈOpɪŋ"
+  },
+  {
+   "stem": "ˌʌnəpˈɛɹənt",
+   "plural": "ˌʌnəpˈɛɹənts",
+   "past": "ˌʌnəpˈɛɹəntᵻd",
+   "progressive": "ˌʌnəpˈɛɹəntɪŋ"
+  },
+  {
+   "stem": "bˈæstəɹdˌIz",
+   "plural": "bˈæstəɹdˌIzᵻz",
+   "past": "bˈæstəɹdˌIzd",
+   "progressive": "bˈæstəɹdˌIzɪŋ"
+  },
+  {
+   "stem": "ʤˈɑɹd",
+   "plural": "ʤˈɑɹdz",
+   "past": "ʤˈɑɹdᵻd",
+   "progressive": "ʤˈɑɹdɪŋ"
+  },
+  {
+   "stem": "klˈOzᵻz",
+   "plural": "klˈOzᵻzᵻz",
+   "past": "klˈOzᵻzd",
+   "progressive": "klˈOzᵻzɪŋ"
+  },
+  {
+   "stem": "stɹˈæŋɡjəlˌAt",
+   "plural": "stɹˈæŋɡjəlˌAts",
+   "past": "stɹˈæŋɡjəlˌAɾᵻd",
+   "progressive": "stɹˈæŋɡjəlˌAɾɪŋ"
+  },
+  {
+   "stem": "lIˌɑfəlˌIzˈAʃən",
+   "plural": "lIˌɑfəlˌIzˈAʃənz",
+   "past": "lIˌɑfəlˌIzˈAʃənd",
+   "progressive": "lIˌɑfəlˌIzˈAʃənɪŋ"
+  },
+  {
+   "stem": "dˈʌmpstəɹ",
+   "plural": "dˈʌmpstəɹz",
+   "past": "dˈʌmpstəɹd",
+   "progressive": "dˈʌmpstəɹɪŋ"
+  },
+  {
+   "stem": "ˈɔɡmənts",
+   "plural": "ˈɔɡməntsᵻz",
+   "past": "ˈɔɡməntst",
+   "progressive": "ˈɔɡməntsɪŋ"
+  },
+  {
+   "stem": "sˈɪmbᵊl",
+   "plural": "sˈɪmbᵊlz",
+   "past": "sˈɪmbᵊld",
+   "progressive": "sˈɪmbᵊlɪŋ"
+  },
+  {
+   "stem": "mˈænʤəkˌAt",
+   "plural": "mˈænʤəkˌAts",
+   "past": "mˈænʤəkˌAɾᵻd",
+   "progressive": "mˈænʤəkˌAɾɪŋ"
+  },
+  {
+   "stem": "wˈɪlɪts",
+   "plural": "wˈɪlɪtsᵻz",
+   "past": "wˈɪlɪtst",
+   "progressive": "wˈɪlɪtsɪŋ"
+  },
+  {
+   "stem": "ɹˈɪŋd",
+   "plural": "ɹˈɪŋdz",
+   "past": "ɹˈɪŋdᵻd",
+   "progressive": "ɹˈɪŋdɪŋ"
+  },
+  {
+   "stem": "ˈɑɹtləsli",
+   "plural": "ˈɑɹtləsliz",
+   "past": "ˈɑɹtləslid",
+   "progressive": "ˈɑɹtləsliɪŋ"
+  },
+  {
+   "stem": "lˈɪniəl",
+   "plural": "lˈɪniəlz",
+   "past": "lˈɪniəld",
+   "progressive": "lˈɪniəlɪŋ"
+  },
+  {
+   "stem": "sˈʌnəvəbˌɪʧ",
+   "plural": "sˈʌnəvəbˌɪʧᵻz",
+   "past": "sˈʌnəvəbˌɪʧt",
+   "progressive": "sˈʌnəvəbˌɪʧɪŋ"
+  },
+  {
+   "stem": "kˈOmɪŋz",
+   "plural": "kˈOmɪŋzᵻz",
+   "past": "kˈOmɪŋzd",
+   "progressive": "kˈOmɪŋzɪŋ"
+  },
+  {
+   "stem": "əɹbˈAn",
+   "plural": "əɹbˈAnz",
+   "past": "əɹbˈAnd",
+   "progressive": "əɹbˈAnɪŋ"
+  },
+  {
+   "stem": "stˈɛɹAn",
+   "plural": "stˈɛɹAnz",
+   "past": "stˈɛɹAnd",
+   "progressive": "stˈɛɹAnɪŋ"
+  },
+  {
+   "stem": "ˌʌnskˈAld",
+   "plural": "ˌʌnskˈAldz",
+   "past": "ˌʌnskˈAldᵻd",
+   "progressive": "ˌʌnskˈAldɪŋ"
+  },
+  {
+   "stem": "pˈɛstəl",
+   "plural": "pˈɛstəlz",
+   "past": "pˈɛstəld",
+   "progressive": "pˈɛstəlɪŋ"
+  },
+  {
+   "stem": "ʧˈAstli",
+   "plural": "ʧˈAstliz",
+   "past": "ʧˈAstlid",
+   "progressive": "ʧˈAstliɪŋ"
+  },
+  {
+   "stem": "pɹəvˈIdᵻd",
+   "plural": "pɹəvˈIdᵻdz",
+   "past": "pɹəvˈIdᵻdᵻd",
+   "progressive": "pɹəvˈIdᵻdɪŋ"
+  },
+  {
+   "stem": "bˈɛʧə",
+   "plural": "bˈɛʧəz",
+   "past": "bˈɛʧəd",
+   "progressive": "bˈɛʧəɪŋ"
+  },
+  {
+   "stem": "bInˈɔɹəl",
+   "plural": "bInˈɔɹəlz",
+   "past": "bInˈɔɹəld",
+   "progressive": "bInˈɔɹəlɪŋ"
+  },
+  {
+   "stem": "stɹətˈɑkɹəsi",
+   "plural": "stɹətˈɑkɹəsiz",
+   "past": "stɹətˈɑkɹəsid",
+   "progressive": "stɹətˈɑkɹəsiɪŋ"
+  },
+  {
+   "stem": "ɡɹəvjˈʊɹ",
+   "plural": "ɡɹəvjˈʊɹz",
+   "past": "ɡɹəvjˈʊɹd",
+   "progressive": "ɡɹəvjˈʊɹɪŋ"
+  },
+  {
+   "stem": "ˌʌnvˈAlɪŋ",
+   "plural": "ˌʌnvˈAlɪŋz",
+   "past": "ˌʌnvˈAlɪŋd",
+   "progressive": "ˌʌnvˈAlɪŋɪŋ"
+  },
+  {
+   "stem": "hæʃˈʊɹz",
+   "plural": "hæʃˈʊɹzᵻz",
+   "past": "hæʃˈʊɹzd",
+   "progressive": "hæʃˈʊɹzɪŋ"
+  },
+  {
+   "stem": "sikwˈɛli",
+   "plural": "sikwˈɛliz",
+   "past": "sikwˈɛlid",
+   "progressive": "sikwˈɛliɪŋ"
+  },
+  {
+   "stem": "pˈɪskO",
+   "plural": "pˈɪskOz",
+   "past": "pˈɪskOd",
+   "progressive": "pˈɪskOɪŋ"
+  },
+  {
+   "stem": "hˈIfən",
+   "plural": "hˈIfənz",
+   "past": "hˈIfənd",
+   "progressive": "hˈIfənɪŋ"
+  },
+  {
+   "stem": "mˈistˌɛk",
+   "plural": "mˈistˌɛks",
+   "past": "mˈistˌɛkt",
+   "progressive": "mˈistˌɛkɪŋ"
+  },
+  {
+   "stem": "mˈʌs",
+   "plural": "mˈʌsᵻz",
+   "past": "mˈʌst",
+   "progressive": "mˈʌsɪŋ"
+  },
+  {
+   "stem": "tɹˈɪplət",
+   "plural": "tɹˈɪpləts",
+   "past": "tɹˈɪpləɾᵻd",
+   "progressive": "tɹˈɪpləɾɪŋ"
+  },
+  {
+   "stem": "fˈɜɹkjəlˌi",
+   "plural": "fˈɜɹkjəlˌiz",
+   "past": "fˈɜɹkjəlˌid",
+   "progressive": "fˈɜɹkjəlˌiɪŋ"
+  },
+  {
+   "stem": "snˈizwˌid",
+   "plural": "snˈizwˌidz",
+   "past": "snˈizwˌidᵻd",
+   "progressive": "snˈizwˌidɪŋ"
+  },
+  {
+   "stem": "ɹˈidˌOnli",
+   "plural": "ɹˈidˌOnliz",
+   "past": "ɹˈidˌOnlid",
+   "progressive": "ɹˈidˌOnliɪŋ"
+  },
+  {
+   "stem": "təmˈɑksəfən",
+   "plural": "təmˈɑksəfənz",
+   "past": "təmˈɑksəfənd",
+   "progressive": "təmˈɑksəfənɪŋ"
+  },
+  {
+   "stem": "plˈʌɡd",
+   "plural": "plˈʌɡdz",
+   "past": "plˈʌɡdᵻd",
+   "progressive": "plˈʌɡdɪŋ"
+  },
+  {
+   "stem": "vAkˈAʃən",
+   "plural": "vAkˈAʃənz",
+   "past": "vAkˈAʃənd",
+   "progressive": "vAkˈAʃənɪŋ"
+  },
+  {
+   "stem": "sˌɛʧwˈɑn",
+   "plural": "sˌɛʧwˈɑnz",
+   "past": "sˌɛʧwˈɑnd",
+   "progressive": "sˌɛʧwˈɑnɪŋ"
+  },
+  {
+   "stem": "ɪmpɹˈudᵊns",
+   "plural": "ɪmpɹˈudᵊnsᵻz",
+   "past": "ɪmpɹˈudᵊnst",
+   "progressive": "ɪmpɹˈudᵊnsɪŋ"
+  },
+  {
+   "stem": "ˈAmiəbᵊl",
+   "plural": "ˈAmiəbᵊlz",
+   "past": "ˈAmiəbᵊld",
+   "progressive": "ˈAmiəbᵊlɪŋ"
+  },
+  {
+   "stem": "swˈɑzi",
+   "plural": "swˈɑziz",
+   "past": "swˈɑzid",
+   "progressive": "swˈɑziɪŋ"
+  },
+  {
+   "stem": "pɹˈiˌæmbᵊl",
+   "plural": "pɹˈiˌæmbᵊlz",
+   "past": "pɹˈiˌæmbᵊld",
+   "progressive": "pɹˈiˌæmbᵊlɪŋ"
+  },
+  {
+   "stem": "ɛsθˈɛɾɪk",
+   "plural": "ɛsθˈɛɾɪks",
+   "past": "ɛsθˈɛɾɪkt",
+   "progressive": "ɛsθˈɛɾɪkɪŋ"
+  },
+  {
+   "stem": "fˈɔɹsəm",
+   "plural": "fˈɔɹsəmz",
+   "past": "fˈɔɹsəmd",
+   "progressive": "fˈɔɹsəmɪŋ"
+  },
+  {
+   "stem": "ˈIshˌWs",
+   "plural": "ˈIshˌWsᵻz",
+   "past": "ˈIshˌWst",
+   "progressive": "ˈIshˌWsɪŋ"
+  },
+  {
+   "stem": "ɪnkɹˈɪmənˌAɾɪŋ",
+   "plural": "ɪnkɹˈɪmənˌAɾɪŋz",
+   "past": "ɪnkɹˈɪmənˌAɾɪŋd",
+   "progressive": "ɪnkɹˈɪmənˌAɾɪŋɪŋ"
+  },
+  {
+   "stem": "jˈistɪli",
+   "plural": "jˈistɪliz",
+   "past": "jˈistɪlid",
+   "progressive": "jˈistɪliɪŋ"
+  },
+  {
+   "stem": "fjunˈæmbjəlˌɪzəm",
+   "plural": "fjunˈæmbjəlˌɪzəmz",
+   "past": "fjunˈæmbjəlˌɪzəmd",
+   "progressive": "fjunˈæmbjəlˌɪzəmɪŋ"
+  },
+  {
+   "stem": "fɹˈɔstiᵻst",
+   "plural": "fɹˈɔstiᵻsts",
+   "past": "fɹˈɔstiᵻstᵻd",
+   "progressive": "fɹˈɔstiᵻstɪŋ"
+  },
+  {
+   "stem": "ˌʌnsəspˈɛktədli",
+   "plural": "ˌʌnsəspˈɛktədliz",
+   "past": "ˌʌnsəspˈɛktədlid",
+   "progressive": "ˌʌnsəspˈɛktədliɪŋ"
+  },
+  {
+   "stem": "nʊɹˈɑpəθi",
+   "plural": "nʊɹˈɑpəθiz",
+   "past": "nʊɹˈɑpəθid",
+   "progressive": "nʊɹˈɑpəθiɪŋ"
+  },
+  {
+   "stem": "kˈɛɹətˌOs",
+   "plural": "kˈɛɹətˌOsᵻz",
+   "past": "kˈɛɹətˌOst",
+   "progressive": "kˈɛɹətˌOsɪŋ"
+  },
+  {
+   "stem": "ləθˈɑləʤi",
+   "plural": "ləθˈɑləʤiz",
+   "past": "ləθˈɑləʤid",
+   "progressive": "ləθˈɑləʤiɪŋ"
+  },
+  {
+   "stem": "bɹˈɪʤəbᵊl",
+   "plural": "bɹˈɪʤəbᵊlz",
+   "past": "bɹˈɪʤəbᵊld",
+   "progressive": "bɹˈɪʤəbᵊlɪŋ"
+  },
+  {
+   "stem": "ɹˈisˌɔɹs",
+   "plural": "ɹˈisˌɔɹsᵻz",
+   "past": "ɹˈisˌɔɹst",
+   "progressive": "ɹˈisˌɔɹsɪŋ"
+  },
+  {
+   "stem": "ɪllˈiɡᵊl",
+   "plural": "ɪllˈiɡᵊlz",
+   "past": "ɪllˈiɡᵊld",
+   "progressive": "ɪllˈiɡᵊlɪŋ"
+  },
+  {
+   "stem": "tədˈɑ",
+   "plural": "tədˈɑz",
+   "past": "tədˈɑd",
+   "progressive": "tədˈɑɪŋ"
+  },
+  {
+   "stem": "hˈɛdpˌis",
+   "plural": "hˈɛdpˌisᵻz",
+   "past": "hˈɛdpˌist",
+   "progressive": "hˈɛdpˌisɪŋ"
+  },
+  {
+   "stem": "sfˈinˌYd",
+   "plural": "sfˈinˌYdz",
+   "past": "sfˈinˌYdᵻd",
+   "progressive": "sfˈinˌYdɪŋ"
+  },
+  {
+   "stem": "ˈʌpəɹkˌʌt",
+   "plural": "ˈʌpəɹkˌʌts",
+   "past": "ˈʌpəɹkˌʌɾᵻd",
+   "progressive": "ˈʌpəɹkˌʌɾɪŋ"
+  },
+  {
+   "stem": "ɪkskɹˈuʃiˌAt",
+   "plural": "ɪkskɹˈuʃiˌAts",
+   "past": "ɪkskɹˈuʃiˌAɾᵻd",
+   "progressive": "ɪkskɹˈuʃiˌAɾɪŋ"
+  },
+  {
+   "stem": "bæktˈɪɹiəli",
+   "plural": "bæktˈɪɹiəliz",
+   "past": "bæktˈɪɹiəlid",
+   "progressive": "bæktˈɪɹiəliɪŋ"
+  },
+  {
+   "stem": "vˈɑləntˌɛɹiɪst",
+   "plural": "vˈɑləntˌɛɹiɪsts",
+   "past": "vˈɑləntˌɛɹiɪstᵻd",
+   "progressive": "vˈɑləntˌɛɹiɪstɪŋ"
+  },
+  {
+   "stem": "bˈɪɡi",
+   "plural": "bˈɪɡiz",
+   "past": "bˈɪɡid",
+   "progressive": "bˈɪɡiɪŋ"
+  },
+  {
+   "stem": "pˈɪlɡɹəmɪʤ",
+   "plural": "pˈɪlɡɹəmɪʤᵻz",
+   "past": "pˈɪlɡɹəmɪʤd",
+   "progressive": "pˈɪlɡɹəmɪʤɪŋ"
+  },
+  {
+   "stem": "mˈɑsəɹˌit",
+   "plural": "mˈɑsəɹˌits",
+   "past": "mˈɑsəɹˌiɾᵻd",
+   "progressive": "mˈɑsəɹˌiɾɪŋ"
+  },
+  {
+   "stem": "ˈɪntəɹɡɹˌOθ",
+   "plural": "ˈɪntəɹɡɹˌOθs",
+   "past": "ˈɪntəɹɡɹˌOθt",
+   "progressive": "ˈɪntəɹɡɹˌOθɪŋ"
+  },
+  {
+   "stem": "spˈɪnstəɹhˌʊd",
+   "plural": "spˈɪnstəɹhˌʊdz",
+   "past": "spˈɪnstəɹhˌʊdᵻd",
+   "progressive": "spˈɪnstəɹhˌʊdɪŋ"
+  },
+  {
+   "stem": "ɹəpˈɔɹɾɪʤ",
+   "plural": "ɹəpˈɔɹɾɪʤᵻz",
+   "past": "ɹəpˈɔɹɾɪʤd",
+   "progressive": "ɹəpˈɔɹɾɪʤɪŋ"
+  },
+  {
+   "stem": "tˌɛtɹəvˈAlənt",
+   "plural": "tˌɛtɹəvˈAlənts",
+   "past": "tˌɛtɹəvˈAləntᵻd",
+   "progressive": "tˌɛtɹəvˈAləntɪŋ"
+  },
+  {
+   "stem": "ˈɔɹᵊl",
+   "plural": "ˈɔɹᵊlz",
+   "past": "ˈɔɹᵊld",
+   "progressive": "ˈɔɹᵊlɪŋ"
+  },
+  {
+   "stem": "ɪɡzˈɛkjəɾəɹʃˌɪp",
+   "plural": "ɪɡzˈɛkjəɾəɹʃˌɪps",
+   "past": "ɪɡzˈɛkjəɾəɹʃˌɪpt",
+   "progressive": "ɪɡzˈɛkjəɾəɹʃˌɪpɪŋ"
+  },
+  {
+   "stem": "kˌɑnsəɹtˈɑnti",
+   "plural": "kˌɑnsəɹtˈɑntiz",
+   "past": "kˌɑnsəɹtˈɑntid",
+   "progressive": "kˌɑnsəɹtˈɑntiɪŋ"
+  },
+  {
+   "stem": "ʃˌɑɹkˈuɾəɹi",
+   "plural": "ʃˌɑɹkˈuɾəɹiz",
+   "past": "ʃˌɑɹkˈuɾəɹid",
+   "progressive": "ʃˌɑɹkˈuɾəɹiɪŋ"
+  },
+  {
+   "stem": "sˌɪɹOstɹˈæɾəs",
+   "plural": "sˌɪɹOstɹˈæɾəsᵻz",
+   "past": "sˌɪɹOstɹˈæɾəst",
+   "progressive": "sˌɪɹOstɹˈæɾəsɪŋ"
+  },
+  {
+   "stem": "ˌʌpɹˈAz",
+   "plural": "ˌʌpɹˈAzᵻz",
+   "past": "ˌʌpɹˈAzd",
+   "progressive": "ˌʌpɹˈAzɪŋ"
+  },
+  {
+   "stem": "sˈuðəɹ",
+   "plural": "sˈuðəɹz",
+   "past": "sˈuðəɹd",
+   "progressive": "sˈuðəɹɪŋ"
+  },
+  {
+   "stem": "pænfˈɔɹtˌA",
+   "plural": "pænfˈɔɹtˌAz",
+   "past": "pænfˈɔɹtˌAd",
+   "progressive": "pænfˈɔɹtˌAɪŋ"
+  },
+  {
+   "stem": "kɹˈiO",
+   "plural": "kɹˈiOz",
+   "past": "kɹˈiOd",
+   "progressive": "kɹˈiOɪŋ"
+  },
+  {
+   "stem": "dilˈæmənˌAt",
+   "plural": "dilˈæmənˌAts",
+   "past": "dilˈæmənˌAɾᵻd",
+   "progressive": "dilˈæmənˌAɾɪŋ"
+  },
+  {
+   "stem": "ɪkspˈɛktənsi",
+   "plural": "ɪkspˈɛktənsiz",
+   "past": "ɪkspˈɛktənsid",
+   "progressive": "ɪkspˈɛktənsiɪŋ"
+  },
+  {
+   "stem": "tɑɹtˈufO",
+   "plural": "tɑɹtˈufOz",
+   "past": "tɑɹtˈufOd",
+   "progressive": "tɑɹtˈufOɪŋ"
+  },
+  {
+   "stem": "ˈæntəfˌɑn",
+   "plural": "ˈæntəfˌɑnz",
+   "past": "ˈæntəfˌɑnd",
+   "progressive": "ˈæntəfˌɑnɪŋ"
+  },
+  {
+   "stem": "ɡˈʌʃɪŋli",
+   "plural": "ɡˈʌʃɪŋliz",
+   "past": "ɡˈʌʃɪŋlid",
+   "progressive": "ɡˈʌʃɪŋliɪŋ"
+  },
+  {
+   "stem": "stˈɛləɾᵻd",
+   "plural": "stˈɛləɾᵻdz",
+   "past": "stˈɛləɾᵻdᵻd",
+   "progressive": "stˈɛləɾᵻdɪŋ"
+  },
+  {
+   "stem": "ɹˈɪpᵊlɪŋ",
+   "plural": "ɹˈɪpᵊlɪŋz",
+   "past": "ɹˈɪpᵊlɪŋd",
+   "progressive": "ɹˈɪpᵊlɪŋɪŋ"
+  },
+  {
+   "stem": "tˈɪŋɡᵊliəɹ",
+   "plural": "tˈɪŋɡᵊliəɹz",
+   "past": "tˈɪŋɡᵊliəɹd",
+   "progressive": "tˈɪŋɡᵊliəɹɪŋ"
+  },
+  {
+   "stem": "mˈɑθiəɹ",
+   "plural": "mˈɑθiəɹz",
+   "past": "mˈɑθiəɹd",
+   "progressive": "mˈɑθiəɹɪŋ"
+  },
+  {
+   "stem": "sˈɜɹtᵊnti",
+   "plural": "sˈɜɹtᵊntiz",
+   "past": "sˈɜɹtᵊntid",
+   "progressive": "sˈɜɹtᵊntiɪŋ"
+  },
+  {
+   "stem": "pˈɪɾiləsli",
+   "plural": "pˈɪɾiləsliz",
+   "past": "pˈɪɾiləslid",
+   "progressive": "pˈɪɾiləsliɪŋ"
+  },
+  {
+   "stem": "fˈɪʃwˌA",
+   "plural": "fˈɪʃwˌAz",
+   "past": "fˈɪʃwˌAd",
+   "progressive": "fˈɪʃwˌAɪŋ"
+  },
+  {
+   "stem": "bɹˈɛn",
+   "plural": "bɹˈɛnz",
+   "past": "bɹˈɛnd",
+   "progressive": "bɹˈɛnɪŋ"
+  },
+  {
+   "stem": "ɡˈYɾəɹd",
+   "plural": "ɡˈYɾəɹdz",
+   "past": "ɡˈYɾəɹdᵻd",
+   "progressive": "ɡˈYɾəɹdɪŋ"
+  },
+  {
+   "stem": "hˈæljəsˌiz",
+   "plural": "hˈæljəsˌizᵻz",
+   "past": "hˈæljəsˌizd",
+   "progressive": "hˈæljəsˌizɪŋ"
+  },
+  {
+   "stem": "bˈɑɹmiəɹ",
+   "plural": "bˈɑɹmiəɹz",
+   "past": "bˈɑɹmiəɹd",
+   "progressive": "bˈɑɹmiəɹɪŋ"
+  },
+  {
+   "stem": "ˈælsəd",
+   "plural": "ˈælsədz",
+   "past": "ˈælsədᵻd",
+   "progressive": "ˈælsədɪŋ"
+  },
+  {
+   "stem": "pˌOstpˈOnəɹ",
+   "plural": "pˌOstpˈOnəɹz",
+   "past": "pˌOstpˈOnəɹd",
+   "progressive": "pˌOstpˈOnəɹɪŋ"
+  },
+  {
+   "stem": "ˈAkɪŋ",
+   "plural": "ˈAkɪŋz",
+   "past": "ˈAkɪŋd",
+   "progressive": "ˈAkɪŋɪŋ"
+  },
+  {
+   "stem": "sˈupəɹkəmpjˌuɾɪŋ",
+   "plural": "sˈupəɹkəmpjˌuɾɪŋz",
+   "past": "sˈupəɹkəmpjˌuɾɪŋd",
+   "progressive": "sˈupəɹkəmpjˌuɾɪŋɪŋ"
+  },
+  {
+   "stem": "nˌOɾəbˈɪləɾi",
+   "plural": "nˌOɾəbˈɪləɾiz",
+   "past": "nˌOɾəbˈɪləɾid",
+   "progressive": "nˌOɾəbˈɪləɾiɪŋ"
+  },
+  {
+   "stem": "tˈɛnθli",
+   "plural": "tˈɛnθliz",
+   "past": "tˈɛnθlid",
+   "progressive": "tˈɛnθliɪŋ"
+  },
+  {
+   "stem": "hˈOksəɹ",
+   "plural": "hˈOksəɹz",
+   "past": "hˈOksəɹd",
+   "progressive": "hˈOksəɹɪŋ"
+  },
+  {
+   "stem": "skˈɛɹ",
+   "plural": "skˈɛɹz",
+   "past": "skˈɛɹd",
+   "progressive": "skˈɛɹɪŋ"
+  },
+  {
+   "stem": "θɹˈOstəɹ",
+   "plural": "θɹˈOstəɹz",
+   "past": "θɹˈOstəɹd",
+   "progressive": "θɹˈOstəɹɪŋ"
+  },
+  {
+   "stem": "ʃɪtˈɑki",
+   "plural": "ʃɪtˈɑkiz",
+   "past": "ʃɪtˈɑkid",
+   "progressive": "ʃɪtˈɑkiɪŋ"
+  },
+  {
+   "stem": "kˈɪsləv",
+   "plural": "kˈɪsləvz",
+   "past": "kˈɪsləvd",
+   "progressive": "kˈɪsləvɪŋ"
+  },
+  {
+   "stem": "stˈɔlwəɹtnəs",
+   "plural": "stˈɔlwəɹtnəsᵻz",
+   "past": "stˈɔlwəɹtnəst",
+   "progressive": "stˈɔlwəɹtnəsɪŋ"
+  },
+  {
+   "stem": "bˈɛɹfˌʊt",
+   "plural": "bˈɛɹfˌʊts",
+   "past": "bˈɛɹfˌʊɾᵻd",
+   "progressive": "bˈɛɹfˌʊɾɪŋ"
+  },
+  {
+   "stem": "mˈɑkəsᵊn",
+   "plural": "mˈɑkəsᵊnz",
+   "past": "mˈɑkəsᵊnd",
+   "progressive": "mˈɑkəsᵊnɪŋ"
+  },
+  {
+   "stem": "həlˈɑfɹəsɪs",
+   "plural": "həlˈɑfɹəsɪsᵻz",
+   "past": "həlˈɑfɹəsɪst",
+   "progressive": "həlˈɑfɹəsɪsɪŋ"
+  },
+  {
+   "stem": "slˌæmbˈæŋ",
+   "plural": "slˌæmbˈæŋz",
+   "past": "slˌæmbˈæŋd",
+   "progressive": "slˌæmbˈæŋɪŋ"
+  },
+  {
+   "stem": "lˈændskˌApt",
+   "plural": "lˈændskˌApts",
+   "past": "lˈændskˌAptᵻd",
+   "progressive": "lˈændskˌAptɪŋ"
+  },
+  {
+   "stem": "ˌʌnpəɹtˈɜɹbədli",
+   "plural": "ˌʌnpəɹtˈɜɹbədliz",
+   "past": "ˌʌnpəɹtˈɜɹbədlid",
+   "progressive": "ˌʌnpəɹtˈɜɹbədliɪŋ"
+  },
+  {
+   "stem": "ˌiɡOsˈɛntɹˌɪzəm",
+   "plural": "ˌiɡOsˈɛntɹˌɪzəmz",
+   "past": "ˌiɡOsˈɛntɹˌɪzəmd",
+   "progressive": "ˌiɡOsˈɛntɹˌɪzəmɪŋ"
+  },
+  {
+   "stem": "klˈɑkmˌAkɪŋ",
+   "plural": "klˈɑkmˌAkɪŋz",
+   "past": "klˈɑkmˌAkɪŋd",
+   "progressive": "klˈɑkmˌAkɪŋɪŋ"
+  },
+  {
+   "stem": "bˈuljɑn",
+   "plural": "bˈuljɑnz",
+   "past": "bˈuljɑnd",
+   "progressive": "bˈuljɑnɪŋ"
+  },
+  {
+   "stem": "sˌɛmiˈɑɾəkᵊli",
+   "plural": "sˌɛmiˈɑɾəkᵊliz",
+   "past": "sˌɛmiˈɑɾəkᵊlid",
+   "progressive": "sˌɛmiˈɑɾəkᵊliɪŋ"
+  },
+  {
+   "stem": "mælfˈizᵊnt",
+   "plural": "mælfˈizᵊnts",
+   "past": "mælfˈizᵊntᵻd",
+   "progressive": "mælfˈizᵊntɪŋ"
+  },
+  {
+   "stem": "ɹOtˈʌnd",
+   "plural": "ɹOtˈʌndz",
+   "past": "ɹOtˈʌndᵻd",
+   "progressive": "ɹOtˈʌndɪŋ"
+  },
+  {
+   "stem": "ˈɛkwəbᵊl",
+   "plural": "ˈɛkwəbᵊlz",
+   "past": "ˈɛkwəbᵊld",
+   "progressive": "ˈɛkwəbᵊlɪŋ"
+  },
+  {
+   "stem": "pɹˌiəsˈɛmbᵊld",
+   "plural": "pɹˌiəsˈɛmbᵊldz",
+   "past": "pɹˌiəsˈɛmbᵊldᵻd",
+   "progressive": "pɹˌiəsˈɛmbᵊldɪŋ"
+  },
+  {
+   "stem": "pɹOˈænə",
+   "plural": "pɹOˈænəz",
+   "past": "pɹOˈænəd",
+   "progressive": "pɹOˈænəɪŋ"
+  },
+  {
+   "stem": "dəɹˈAnʤ",
+   "plural": "dəɹˈAnʤᵻz",
+   "past": "dəɹˈAnʤd",
+   "progressive": "dəɹˈAnʤɪŋ"
+  },
+  {
+   "stem": "hˈɑɹbɪn",
+   "plural": "hˈɑɹbɪnz",
+   "past": "hˈɑɹbɪnd",
+   "progressive": "hˈɑɹbɪnɪŋ"
+  },
+  {
+   "stem": "dəplˈOməɾɪst",
+   "plural": "dəplˈOməɾɪsts",
+   "past": "dəplˈOməɾɪstᵻd",
+   "progressive": "dəplˈOməɾɪstɪŋ"
+  },
+  {
+   "stem": "əlˈʊɹɪŋ",
+   "plural": "əlˈʊɹɪŋz",
+   "past": "əlˈʊɹɪŋd",
+   "progressive": "əlˈʊɹɪŋɪŋ"
+  },
+  {
+   "stem": "təɹˈɛstɹiəl",
+   "plural": "təɹˈɛstɹiəlz",
+   "past": "təɹˈɛstɹiəld",
+   "progressive": "təɹˈɛstɹiəlɪŋ"
+  },
+  {
+   "stem": "sˈɛljəlˌYd",
+   "plural": "sˈɛljəlˌYdz",
+   "past": "sˈɛljəlˌYdᵻd",
+   "progressive": "sˈɛljəlˌYdɪŋ"
+  },
+  {
+   "stem": "ˈId",
+   "plural": "ˈIdz",
+   "past": "ˈIdᵻd",
+   "progressive": "ˈIdɪŋ"
+  },
+  {
+   "stem": "dɹˈɛʤəɹ",
+   "plural": "dɹˈɛʤəɹz",
+   "past": "dɹˈɛʤəɹd",
+   "progressive": "dɹˈɛʤəɹɪŋ"
+  },
+  {
+   "stem": "stˈAbəlˌIzəɹ",
+   "plural": "stˈAbəlˌIzəɹz",
+   "past": "stˈAbəlˌIzəɹd",
+   "progressive": "stˈAbəlˌIzəɹɪŋ"
+  },
+  {
+   "stem": "kɹətˈik",
+   "plural": "kɹətˈiks",
+   "past": "kɹətˈikt",
+   "progressive": "kɹətˈikɪŋ"
+  },
+  {
+   "stem": "kwɪŋkwˈɛniəl",
+   "plural": "kwɪŋkwˈɛniəlz",
+   "past": "kwɪŋkwˈɛniəld",
+   "progressive": "kwɪŋkwˈɛniəlɪŋ"
+  },
+  {
+   "stem": "kəndˈOnəbᵊl",
+   "plural": "kəndˈOnəbᵊlz",
+   "past": "kəndˈOnəbᵊld",
+   "progressive": "kəndˈOnəbᵊlɪŋ"
+  },
+  {
+   "stem": "fˈæɡət",
+   "plural": "fˈæɡəts",
+   "past": "fˈæɡəɾᵻd",
+   "progressive": "fˈæɡəɾɪŋ"
+  },
+  {
+   "stem": "nˈidz",
+   "plural": "nˈidzᵻz",
+   "past": "nˈidzd",
+   "progressive": "nˈidzɪŋ"
+  },
+  {
+   "stem": "pɹOklˈɪɾəkᵊli",
+   "plural": "pɹOklˈɪɾəkᵊliz",
+   "past": "pɹOklˈɪɾəkᵊlid",
+   "progressive": "pɹOklˈɪɾəkᵊliɪŋ"
+  },
+  {
+   "stem": "ɹˈɑmbəs",
+   "plural": "ɹˈɑmbəsᵻz",
+   "past": "ɹˈɑmbəst",
+   "progressive": "ɹˈɑmbəsɪŋ"
+  },
+  {
+   "stem": "swˈɑnˌʌpɪŋ",
+   "plural": "swˈɑnˌʌpɪŋz",
+   "past": "swˈɑnˌʌpɪŋd",
+   "progressive": "swˈɑnˌʌpɪŋɪŋ"
+  },
+  {
+   "stem": "kˌʊɹOʃˈiO",
+   "plural": "kˌʊɹOʃˈiOz",
+   "past": "kˌʊɹOʃˈiOd",
+   "progressive": "kˌʊɹOʃˈiOɪŋ"
+  },
+  {
+   "stem": "pˌɑɹkˈɔɹ",
+   "plural": "pˌɑɹkˈɔɹz",
+   "past": "pˌɑɹkˈɔɹd",
+   "progressive": "pˌɑɹkˈɔɹɪŋ"
+  },
+  {
+   "stem": "ɡɹˈæbəɹ",
+   "plural": "ɡɹˈæbəɹz",
+   "past": "ɡɹˈæbəɹd",
+   "progressive": "ɡɹˈæbəɹɪŋ"
+  },
+  {
+   "stem": "dIdˈɪmiəm",
+   "plural": "dIdˈɪmiəmz",
+   "past": "dIdˈɪmiəmd",
+   "progressive": "dIdˈɪmiəmɪŋ"
+  },
+  {
+   "stem": "ˈɪndɹiz",
+   "plural": "ˈɪndɹizᵻz",
+   "past": "ˈɪndɹizd",
+   "progressive": "ˈɪndɹizɪŋ"
+  },
+  {
+   "stem": "kˈɛnjən",
+   "plural": "kˈɛnjənz",
+   "past": "kˈɛnjənd",
+   "progressive": "kˈɛnjənɪŋ"
+  },
+  {
+   "stem": "bˈIplˌA",
+   "plural": "bˈIplˌAz",
+   "past": "bˈIplˌAd",
+   "progressive": "bˈIplˌAɪŋ"
+  },
+  {
+   "stem": "sˈɜɹvᵊl",
+   "plural": "sˈɜɹvᵊlz",
+   "past": "sˈɜɹvᵊld",
+   "progressive": "sˈɜɹvᵊlɪŋ"
+  },
+  {
+   "stem": "skəpˈɑləmˌin",
+   "plural": "skəpˈɑləmˌinz",
+   "past": "skəpˈɑləmˌind",
+   "progressive": "skəpˈɑləmˌinɪŋ"
+  },
+  {
+   "stem": "ɪmpˈæsəvli",
+   "plural": "ɪmpˈæsəvliz",
+   "past": "ɪmpˈæsəvlid",
+   "progressive": "ɪmpˈæsəvliɪŋ"
+  },
+  {
+   "stem": "pˈɑlətɪkɪŋ",
+   "plural": "pˈɑlətɪkɪŋz",
+   "past": "pˈɑlətɪkɪŋd",
+   "progressive": "pˈɑlətɪkɪŋɪŋ"
+  },
+  {
+   "stem": "lˈAbˌI",
+   "plural": "lˈAbˌIz",
+   "past": "lˈAbˌId",
+   "progressive": "lˈAbˌIɪŋ"
+  },
+  {
+   "stem": "hˌItˈɛnsəl",
+   "plural": "hˌItˈɛnsəlz",
+   "past": "hˌItˈɛnsəld",
+   "progressive": "hˌItˈɛnsəlɪŋ"
+  },
+  {
+   "stem": "bɹˈɪʤɪŋ",
+   "plural": "bɹˈɪʤɪŋz",
+   "past": "bɹˈɪʤɪŋd",
+   "progressive": "bɹˈɪʤɪŋɪŋ"
+  },
+  {
+   "stem": "ˌæpəsˌIəpˈisiz",
+   "plural": "ˌæpəsˌIəpˈisizᵻz",
+   "past": "ˌæpəsˌIəpˈisizd",
+   "progressive": "ˌæpəsˌIəpˈisizɪŋ"
+  },
+  {
+   "stem": "plˈæk",
+   "plural": "plˈæks",
+   "past": "plˈækt",
+   "progressive": "plˈækɪŋ"
+  },
+  {
+   "stem": "lˈɛndəɹ",
+   "plural": "lˈɛndəɹz",
+   "past": "lˈɛndəɹd",
+   "progressive": "lˈɛndəɹɪŋ"
+  },
+  {
+   "stem": "dˈɛdənɪŋ",
+   "plural": "dˈɛdənɪŋz",
+   "past": "dˈɛdənɪŋd",
+   "progressive": "dˈɛdənɪŋɪŋ"
+  },
+  {
+   "stem": "ˈɛksəkɹən",
+   "plural": "ˈɛksəkɹənz",
+   "past": "ˈɛksəkɹənd",
+   "progressive": "ˈɛksəkɹənɪŋ"
+  },
+  {
+   "stem": "ˈʊmə",
+   "plural": "ˈʊməz",
+   "past": "ˈʊməd",
+   "progressive": "ˈʊməɪŋ"
+  },
+  {
+   "stem": "ˌɑstiOsɑɹkˈOməz",
+   "plural": "ˌɑstiOsɑɹkˈOməzᵻz",
+   "past": "ˌɑstiOsɑɹkˈOməzd",
+   "progressive": "ˌɑstiOsɑɹkˈOməzɪŋ"
+  },
+  {
+   "stem": "kWdˈijˌO",
+   "plural": "kWdˈijˌOz",
+   "past": "kWdˈijˌOd",
+   "progressive": "kWdˈijˌOɪŋ"
+  },
+  {
+   "stem": "ˈæksOplˌæzəm",
+   "plural": "ˈæksOplˌæzəmz",
+   "past": "ˈæksOplˌæzəmd",
+   "progressive": "ˈæksOplˌæzəmɪŋ"
+  },
+  {
+   "stem": "dˌikəmpˈIl",
+   "plural": "dˌikəmpˈIlz",
+   "past": "dˌikəmpˈIld",
+   "progressive": "dˌikəmpˈIlɪŋ"
+  },
+  {
+   "stem": "ɹˈIf",
+   "plural": "ɹˈIfs",
+   "past": "ɹˈIft",
+   "progressive": "ɹˈIfɪŋ"
+  },
+  {
+   "stem": "junˈIt",
+   "plural": "junˈIts",
+   "past": "junˈIɾᵻd",
+   "progressive": "junˈIɾɪŋ"
+  },
+  {
+   "stem": "kˈæpʃən",
+   "plural": "kˈæpʃənz",
+   "past": "kˈæpʃənd",
+   "progressive": "kˈæpʃənɪŋ"
+  },
+  {
+   "stem": "mˈWθfˌʊl",
+   "plural": "mˈWθfˌʊlz",
+   "past": "mˈWθfˌʊld",
+   "progressive": "mˈWθfˌʊlɪŋ"
+  },
+  {
+   "stem": "pˈikəbˌu",
+   "plural": "pˈikəbˌuz",
+   "past": "pˈikəbˌud",
+   "progressive": "pˈikəbˌuɪŋ"
+  },
+  {
+   "stem": "wˈɪmən",
+   "plural": "wˈɪmənz",
+   "past": "wˈɪmənd",
+   "progressive": "wˈɪmənɪŋ"
+  },
+  {
+   "stem": "nˈumənᵊl",
+   "plural": "nˈumənᵊlz",
+   "past": "nˈumənᵊld",
+   "progressive": "nˈumənᵊlɪŋ"
+  },
+  {
+   "stem": "mˈɛɡəvˌOlt",
+   "plural": "mˈɛɡəvˌOlts",
+   "past": "mˈɛɡəvˌOltᵻd",
+   "progressive": "mˈɛɡəvˌOltɪŋ"
+  },
+  {
+   "stem": "pɹətɹˈudɪŋ",
+   "plural": "pɹətɹˈudɪŋz",
+   "past": "pɹətɹˈudɪŋd",
+   "progressive": "pɹətɹˈudɪŋɪŋ"
+  },
+  {
+   "stem": "pɹivˈɛɹəkˌAt",
+   "plural": "pɹivˈɛɹəkˌAts",
+   "past": "pɹivˈɛɹəkˌAɾᵻd",
+   "progressive": "pɹivˈɛɹəkˌAɾɪŋ"
+  },
+  {
+   "stem": "nˈɑkjəwəs",
+   "plural": "nˈɑkjəwəsᵻz",
+   "past": "nˈɑkjəwəst",
+   "progressive": "nˈɑkjəwəsɪŋ"
+  },
+  {
+   "stem": "fˈInᵊlˌIz",
+   "plural": "fˈInᵊlˌIzᵻz",
+   "past": "fˈInᵊlˌIzd",
+   "progressive": "fˈInᵊlˌIzɪŋ"
+  },
+  {
+   "stem": "zˈɪɡzˌæɡɪŋ",
+   "plural": "zˈɪɡzˌæɡɪŋz",
+   "past": "zˈɪɡzˌæɡɪŋd",
+   "progressive": "zˈɪɡzˌæɡɪŋɪŋ"
+  },
+  {
+   "stem": "sˈʌbkˌæɾəɡˌɔɹi",
+   "plural": "sˈʌbkˌæɾəɡˌɔɹiz",
+   "past": "sˈʌbkˌæɾəɡˌɔɹid",
+   "progressive": "sˈʌbkˌæɾəɡˌɔɹiɪŋ"
+  },
+  {
+   "stem": "ɪnʃˈʊɹəbᵊl",
+   "plural": "ɪnʃˈʊɹəbᵊlz",
+   "past": "ɪnʃˈʊɹəbᵊld",
+   "progressive": "ɪnʃˈʊɹəbᵊlɪŋ"
+  },
+  {
+   "stem": "ədˈʌltəɹi",
+   "plural": "ədˈʌltəɹiz",
+   "past": "ədˈʌltəɹid",
+   "progressive": "ədˈʌltəɹiɪŋ"
+  },
+  {
+   "stem": "wˈɑlɪŋfəɹd",
+   "plural": "wˈɑlɪŋfəɹdz",
+   "past": "wˈɑlɪŋfəɹdᵻd",
+   "progressive": "wˈɑlɪŋfəɹdɪŋ"
+  },
+  {
+   "stem": "dˌɪsˌɛkwəlˈɪbɹiəm",
+   "plural": "dˌɪsˌɛkwəlˈɪbɹiəmz",
+   "past": "dˌɪsˌɛkwəlˈɪbɹiəmd",
+   "progressive": "dˌɪsˌɛkwəlˈɪbɹiəmɪŋ"
+  },
+  {
+   "stem": "tˈæblə",
+   "plural": "tˈæbləz",
+   "past": "tˈæbləd",
+   "progressive": "tˈæbləɪŋ"
+  },
+  {
+   "stem": "fˈʌs",
+   "plural": "fˈʌsᵻz",
+   "past": "fˈʌst",
+   "progressive": "fˈʌsɪŋ"
+  },
+  {
+   "stem": "hˌOmiəmˈɔɹfɪk",
+   "plural": "hˌOmiəmˈɔɹfɪks",
+   "past": "hˌOmiəmˈɔɹfɪkt",
+   "progressive": "hˌOmiəmˈɔɹfɪkɪŋ"
+  },
+  {
+   "stem": "ɡʊlˈɑl",
+   "plural": "ɡʊlˈɑlz",
+   "past": "ɡʊlˈɑld",
+   "progressive": "ɡʊlˈɑlɪŋ"
+  },
+  {
+   "stem": "kiˈɑnti",
+   "plural": "kiˈɑntiz",
+   "past": "kiˈɑntid",
+   "progressive": "kiˈɑntiɪŋ"
+  },
+  {
+   "stem": "tˈʌsək",
+   "plural": "tˈʌsəks",
+   "past": "tˈʌsəkt",
+   "progressive": "tˈʌsəkɪŋ"
+  },
+  {
+   "stem": "ˈɔθəɹˌIzd",
+   "plural": "ˈɔθəɹˌIzdz",
+   "past": "ˈɔθəɹˌIzdᵻd",
+   "progressive": "ˈɔθəɹˌIzdɪŋ"
+  },
+  {
+   "stem": "jˌʊɹədˈilə",
+   "plural": "jˌʊɹədˈiləz",
+   "past": "jˌʊɹədˈiləd",
+   "progressive": "jˌʊɹədˈiləɪŋ"
+  },
+  {
+   "stem": "fɹˈɪkʃənləs",
+   "plural": "fɹˈɪkʃənləsᵻz",
+   "past": "fɹˈɪkʃənləst",
+   "progressive": "fɹˈɪkʃənləsɪŋ"
+  },
+  {
+   "stem": "fəɹbˈɪdɪŋli",
+   "plural": "fəɹbˈɪdɪŋliz",
+   "past": "fəɹbˈɪdɪŋlid",
+   "progressive": "fəɹbˈɪdɪŋliɪŋ"
+  },
+  {
+   "stem": "sˈɛnʃəɹ",
+   "plural": "sˈɛnʃəɹz",
+   "past": "sˈɛnʃəɹd",
+   "progressive": "sˈɛnʃəɹɪŋ"
+  },
+  {
+   "stem": "skɹˈʌnʧi",
+   "plural": "skɹˈʌnʧiz",
+   "past": "skɹˈʌnʧid",
+   "progressive": "skɹˈʌnʧiɪŋ"
+  },
+  {
+   "stem": "kˈæptəvˌAɾɪŋ",
+   "plural": "kˈæptəvˌAɾɪŋz",
+   "past": "kˈæptəvˌAɾɪŋd",
+   "progressive": "kˈæptəvˌAɾɪŋɪŋ"
+  },
+  {
+   "stem": "ɡəlˈIəθ",
+   "plural": "ɡəlˈIəθs",
+   "past": "ɡəlˈIəθt",
+   "progressive": "ɡəlˈIəθɪŋ"
+  },
+  {
+   "stem": "mˈæləbˌu",
+   "plural": "mˈæləbˌuz",
+   "past": "mˈæləbˌud",
+   "progressive": "mˈæləbˌuɪŋ"
+  },
+  {
+   "stem": "ɪmˌæʤənˈɛɹəli",
+   "plural": "ɪmˌæʤənˈɛɹəliz",
+   "past": "ɪmˌæʤənˈɛɹəlid",
+   "progressive": "ɪmˌæʤənˈɛɹəliɪŋ"
+  },
+  {
+   "stem": "pˌɛɹəstˈɔltɪk",
+   "plural": "pˌɛɹəstˈɔltɪks",
+   "past": "pˌɛɹəstˈɔltɪkt",
+   "progressive": "pˌɛɹəstˈɔltɪkɪŋ"
+  },
+  {
+   "stem": "ɡɹˈævəld",
+   "plural": "ɡɹˈævəldz",
+   "past": "ɡɹˈævəldᵻd",
+   "progressive": "ɡɹˈævəldɪŋ"
+  },
+  {
+   "stem": "ˈɑbsəkwiz",
+   "plural": "ˈɑbsəkwizᵻz",
+   "past": "ˈɑbsəkwizd",
+   "progressive": "ˈɑbsəkwizɪŋ"
+  },
+  {
+   "stem": "jʊɹˈænənˌIt",
+   "plural": "jʊɹˈænənˌIts",
+   "past": "jʊɹˈænənˌIɾᵻd",
+   "progressive": "jʊɹˈænənˌIɾɪŋ"
+  },
+  {
+   "stem": "klˌɛɹˈɔdiəns",
+   "plural": "klˌɛɹˈɔdiənsᵻz",
+   "past": "klˌɛɹˈɔdiənst",
+   "progressive": "klˌɛɹˈɔdiənsɪŋ"
+  },
+  {
+   "stem": "wˌʌnmˈæn",
+   "plural": "wˌʌnmˈænz",
+   "past": "wˌʌnmˈænd",
+   "progressive": "wˌʌnmˈænɪŋ"
+  },
+  {
+   "stem": "ˌɛndəmˈɪsəɾi",
+   "plural": "ˌɛndəmˈɪsəɾiz",
+   "past": "ˌɛndəmˈɪsəɾid",
+   "progressive": "ˌɛndəmˈɪsəɾiɪŋ"
+  },
+  {
+   "stem": "tɹˈIᵊl",
+   "plural": "tɹˈIᵊlz",
+   "past": "tɹˈIᵊld",
+   "progressive": "tɹˈIᵊlɪŋ"
+  },
+  {
+   "stem": "ɹˈɪʃi",
+   "plural": "ɹˈɪʃiz",
+   "past": "ɹˈɪʃid",
+   "progressive": "ɹˈɪʃiɪŋ"
+  },
+  {
+   "stem": "ɔdˈæsəɾi",
+   "plural": "ɔdˈæsəɾiz",
+   "past": "ɔdˈæsəɾid",
+   "progressive": "ɔdˈæsəɾiɪŋ"
+  },
+  {
+   "stem": "kældˈiə",
+   "plural": "kældˈiəz",
+   "past": "kældˈiəd",
+   "progressive": "kældˈiəɪŋ"
+  },
+  {
+   "stem": "lˈɪvəɹimən",
+   "plural": "lˈɪvəɹimənz",
+   "past": "lˈɪvəɹimənd",
+   "progressive": "lˈɪvəɹimənɪŋ"
+  },
+  {
+   "stem": "ænθˈɑləʤˌIz",
+   "plural": "ænθˈɑləʤˌIzᵻz",
+   "past": "ænθˈɑləʤˌIzd",
+   "progressive": "ænθˈɑləʤˌIzɪŋ"
+  },
+  {
+   "stem": "dɹˈæɡənfˌɪʃ",
+   "plural": "dɹˈæɡənfˌɪʃᵻz",
+   "past": "dɹˈæɡənfˌɪʃt",
+   "progressive": "dɹˈæɡənfˌɪʃɪŋ"
+  },
+  {
+   "stem": "ˈæstɹOkˌʌmpəs",
+   "plural": "ˈæstɹOkˌʌmpəsᵻz",
+   "past": "ˈæstɹOkˌʌmpəst",
+   "progressive": "ˈæstɹOkˌʌmpəsɪŋ"
+  },
+  {
+   "stem": "ɪnɡlˈɔɹiəsnəs",
+   "plural": "ɪnɡlˈɔɹiəsnəsᵻz",
+   "past": "ɪnɡlˈɔɹiəsnəst",
+   "progressive": "ɪnɡlˈɔɹiəsnəsɪŋ"
+  },
+  {
+   "stem": "fˈAkəɹi",
+   "plural": "fˈAkəɹiz",
+   "past": "fˈAkəɹid",
+   "progressive": "fˈAkəɹiɪŋ"
+  },
+  {
+   "stem": "kəlkˈɔz",
+   "plural": "kəlkˈɔzᵻz",
+   "past": "kəlkˈɔzd",
+   "progressive": "kəlkˈɔzɪŋ"
+  },
+  {
+   "stem": "mˈɪm",
+   "plural": "mˈɪmz",
+   "past": "mˈɪmd",
+   "progressive": "mˈɪmɪŋ"
+  },
+  {
+   "stem": "bɹˈɑtwˌɜɹst",
+   "plural": "bɹˈɑtwˌɜɹsts",
+   "past": "bɹˈɑtwˌɜɹstᵻd",
+   "progressive": "bɹˈɑtwˌɜɹstɪŋ"
+  },
+  {
+   "stem": "kˈæptəvˌAt",
+   "plural": "kˈæptəvˌAts",
+   "past": "kˈæptəvˌAɾᵻd",
+   "progressive": "kˈæptəvˌAɾɪŋ"
+  },
+  {
+   "stem": "tɹˈIOs",
+   "plural": "tɹˈIOsᵻz",
+   "past": "tɹˈIOst",
+   "progressive": "tɹˈIOsɪŋ"
+  },
+  {
+   "stem": "bˈʌkɹəm",
+   "plural": "bˈʌkɹəmz",
+   "past": "bˈʌkɹəmd",
+   "progressive": "bˈʌkɹəmɪŋ"
+  },
+  {
+   "stem": "sˈændiəɹ",
+   "plural": "sˈændiəɹz",
+   "past": "sˈændiəɹd",
+   "progressive": "sˈændiəɹɪŋ"
+  },
+  {
+   "stem": "tˈʊʃi",
+   "plural": "tˈʊʃiz",
+   "past": "tˈʊʃid",
+   "progressive": "tˈʊʃiɪŋ"
+  },
+  {
+   "stem": "mˈɪləɡɹˌæm",
+   "plural": "mˈɪləɡɹˌæmz",
+   "past": "mˈɪləɡɹˌæmd",
+   "progressive": "mˈɪləɡɹˌæmɪŋ"
+  },
+  {
+   "stem": "ˌɛntəɹtˈAn",
+   "plural": "ˌɛntəɹtˈAnz",
+   "past": "ˌɛntəɹtˈAnd",
+   "progressive": "ˌɛntəɹtˈAnɪŋ"
+  },
+  {
+   "stem": "tˈunfᵊl",
+   "plural": "tˈunfᵊlz",
+   "past": "tˈunfᵊld",
+   "progressive": "tˈunfᵊlɪŋ"
+  },
+  {
+   "stem": "dəpˈɪkʃən",
+   "plural": "dəpˈɪkʃənz",
+   "past": "dəpˈɪkʃənd",
+   "progressive": "dəpˈɪkʃənɪŋ"
+  },
+  {
+   "stem": "mˌɑnənˌukliˈOsɪs",
+   "plural": "mˌɑnənˌukliˈOsɪsᵻz",
+   "past": "mˌɑnənˌukliˈOsɪst",
+   "progressive": "mˌɑnənˌukliˈOsɪsɪŋ"
+  },
+  {
+   "stem": "ɡˈAθəɹzbˌɜɹɡ",
+   "plural": "ɡˈAθəɹzbˌɜɹɡz",
+   "past": "ɡˈAθəɹzbˌɜɹɡd",
+   "progressive": "ɡˈAθəɹzbˌɜɹɡɪŋ"
+  },
+  {
+   "stem": "stˈɑkbɹˌOkɪŋ",
+   "plural": "stˈɑkbɹˌOkɪŋz",
+   "past": "stˈɑkbɹˌOkɪŋd",
+   "progressive": "stˈɑkbɹˌOkɪŋɪŋ"
+  },
+  {
+   "stem": "ɹiɹˈOt",
+   "plural": "ɹiɹˈOts",
+   "past": "ɹiɹˈOɾᵻd",
+   "progressive": "ɹiɹˈOɾɪŋ"
+  },
+  {
+   "stem": "kˈɛɹiz",
+   "plural": "kˈɛɹizᵻz",
+   "past": "kˈɛɹizd",
+   "progressive": "kˈɛɹizɪŋ"
+  },
+  {
+   "stem": "kˌæləməzˈu",
+   "plural": "kˌæləməzˈuz",
+   "past": "kˌæləməzˈud",
+   "progressive": "kˌæləməzˈuɪŋ"
+  },
+  {
+   "stem": "sˈɔɹɾəlɪʤ",
+   "plural": "sˈɔɹɾəlɪʤᵻz",
+   "past": "sˈɔɹɾəlɪʤd",
+   "progressive": "sˈɔɹɾəlɪʤɪŋ"
+  },
+  {
+   "stem": "skˈɪɾəʃnəs",
+   "plural": "skˈɪɾəʃnəsᵻz",
+   "past": "skˈɪɾəʃnəst",
+   "progressive": "skˈɪɾəʃnəsɪŋ"
+  },
+  {
+   "stem": "ˌʌnsˈɛɾᵊlmənt",
+   "plural": "ˌʌnsˈɛɾᵊlmənts",
+   "past": "ˌʌnsˈɛɾᵊlməntᵻd",
+   "progressive": "ˌʌnsˈɛɾᵊlməntɪŋ"
+  },
+  {
+   "stem": "lˈɔɡɹˌOləɹ",
+   "plural": "lˈɔɡɹˌOləɹz",
+   "past": "lˈɔɡɹˌOləɹd",
+   "progressive": "lˈɔɡɹˌOləɹɪŋ"
+  },
+  {
+   "stem": "sˈʌlkəs",
+   "plural": "sˈʌlkəsᵻz",
+   "past": "sˈʌlkəst",
+   "progressive": "sˈʌlkəsɪŋ"
+  },
+  {
+   "stem": "kənsˈIsnəs",
+   "plural": "kənsˈIsnəsᵻz",
+   "past": "kənsˈIsnəst",
+   "progressive": "kənsˈIsnəsɪŋ"
+  },
+  {
+   "stem": "skwˈɑndəɹ",
+   "plural": "skwˈɑndəɹz",
+   "past": "skwˈɑndəɹd",
+   "progressive": "skwˈɑndəɹɪŋ"
+  },
+  {
+   "stem": "wˈɛɹfˌɔɹ",
+   "plural": "wˈɛɹfˌɔɹz",
+   "past": "wˈɛɹfˌɔɹd",
+   "progressive": "wˈɛɹfˌɔɹɪŋ"
+  },
+  {
+   "stem": "pˈAnstˌAkɪŋli",
+   "plural": "pˈAnstˌAkɪŋliz",
+   "past": "pˈAnstˌAkɪŋlid",
+   "progressive": "pˈAnstˌAkɪŋliɪŋ"
+  },
+  {
+   "stem": "klændˈɛstən",
+   "plural": "klændˈɛstənz",
+   "past": "klændˈɛstənd",
+   "progressive": "klændˈɛstənɪŋ"
+  },
+  {
+   "stem": "kəmplˈɪsəɾəs",
+   "plural": "kəmplˈɪsəɾəsᵻz",
+   "past": "kəmplˈɪsəɾəst",
+   "progressive": "kəmplˈɪsəɾəsɪŋ"
+  },
+  {
+   "stem": "sˈIɡə",
+   "plural": "sˈIɡəz",
+   "past": "sˈIɡəd",
+   "progressive": "sˈIɡəɪŋ"
+  },
+  {
+   "stem": "hˈɑvdɑlɑ",
+   "plural": "hˈɑvdɑlɑz",
+   "past": "hˈɑvdɑlɑd",
+   "progressive": "hˈɑvdɑlɑɪŋ"
+  },
+  {
+   "stem": "pˈɛdᵊnt",
+   "plural": "pˈɛdᵊnts",
+   "past": "pˈɛdᵊntᵻd",
+   "progressive": "pˈɛdᵊntɪŋ"
+  },
+  {
+   "stem": "sˌɛlfkˈɛɹ",
+   "plural": "sˌɛlfkˈɛɹz",
+   "past": "sˌɛlfkˈɛɹd",
+   "progressive": "sˌɛlfkˈɛɹɪŋ"
+  },
+  {
+   "stem": "ˌæntəbˈɛləm",
+   "plural": "ˌæntəbˈɛləmz",
+   "past": "ˌæntəbˈɛləmd",
+   "progressive": "ˌæntəbˈɛləmɪŋ"
+  },
+  {
+   "stem": "ɹəlˈif",
+   "plural": "ɹəlˈifs",
+   "past": "ɹəlˈift",
+   "progressive": "ɹəlˈifɪŋ"
+  },
+  {
+   "stem": "ɡˈOəɹ",
+   "plural": "ɡˈOəɹz",
+   "past": "ɡˈOəɹd",
+   "progressive": "ɡˈOəɹɪŋ"
+  },
+  {
+   "stem": "kˈʌɾˌOvəɹ",
+   "plural": "kˈʌɾˌOvəɹz",
+   "past": "kˈʌɾˌOvəɹd",
+   "progressive": "kˈʌɾˌOvəɹɪŋ"
+  },
+  {
+   "stem": "tɹænzdˈusəɹ",
+   "plural": "tɹænzdˈusəɹz",
+   "past": "tɹænzdˈusəɹd",
+   "progressive": "tɹænzdˈusəɹɪŋ"
+  },
+  {
+   "stem": "vˈɪɾi",
+   "plural": "vˈɪɾiz",
+   "past": "vˈɪɾid",
+   "progressive": "vˈɪɾiɪŋ"
+  },
+  {
+   "stem": "ədˌʌlkəɹˈAʃən",
+   "plural": "ədˌʌlkəɹˈAʃənz",
+   "past": "ədˌʌlkəɹˈAʃənd",
+   "progressive": "ədˌʌlkəɹˈAʃənɪŋ"
+  },
+  {
+   "stem": "slˈɑɾɪŋ",
+   "plural": "slˈɑɾɪŋz",
+   "past": "slˈɑɾɪŋd",
+   "progressive": "slˈɑɾɪŋɪŋ"
+  },
+  {
+   "stem": "fˈIbəɹɡlˌæs",
+   "plural": "fˈIbəɹɡlˌæsᵻz",
+   "past": "fˈIbəɹɡlˌæst",
+   "progressive": "fˈIbəɹɡlˌæsɪŋ"
+  },
+  {
+   "stem": "ɹˈOztˌɪntᵻd",
+   "plural": "ɹˈOztˌɪntᵻdz",
+   "past": "ɹˈOztˌɪntᵻdᵻd",
+   "progressive": "ɹˈOztˌɪntᵻdɪŋ"
+  },
+  {
+   "stem": "kˈɑdfˌɪʃ",
+   "plural": "kˈɑdfˌɪʃᵻz",
+   "past": "kˈɑdfˌɪʃt",
+   "progressive": "kˈɑdfˌɪʃɪŋ"
+  },
+  {
+   "stem": "skɹˈinɹˌIɾəɹ",
+   "plural": "skɹˈinɹˌIɾəɹz",
+   "past": "skɹˈinɹˌIɾəɹd",
+   "progressive": "skɹˈinɹˌIɾəɹɪŋ"
+  },
+  {
+   "stem": "ɡlɔmˌɛɹjəlOnəfɹˈIɾəs",
+   "plural": "ɡlɔmˌɛɹjəlOnəfɹˈIɾəsᵻz",
+   "past": "ɡlɔmˌɛɹjəlOnəfɹˈIɾəst",
+   "progressive": "ɡlɔmˌɛɹjəlOnəfɹˈIɾəsɪŋ"
+  },
+  {
+   "stem": "stˈɔɹmiᵻst",
+   "plural": "stˈɔɹmiᵻsts",
+   "past": "stˈɔɹmiᵻstᵻd",
+   "progressive": "stˈɔɹmiᵻstɪŋ"
+  },
+  {
+   "stem": "kˈɑpi",
+   "plural": "kˈɑpiz",
+   "past": "kˈɑpid",
+   "progressive": "kˈɑpiɪŋ"
+  },
+  {
+   "stem": "kˌilˈʊŋ",
+   "plural": "kˌilˈʊŋz",
+   "past": "kˌilˈʊŋd",
+   "progressive": "kˌilˈʊŋɪŋ"
+  },
+  {
+   "stem": "hjˈumədli",
+   "plural": "hjˈumədliz",
+   "past": "hjˈumədlid",
+   "progressive": "hjˈumədliɪŋ"
+  },
+  {
+   "stem": "skɹˈutᵊnˌIzəɹ",
+   "plural": "skɹˈutᵊnˌIzəɹz",
+   "past": "skɹˈutᵊnˌIzəɹd",
+   "progressive": "skɹˈutᵊnˌIzəɹɪŋ"
+  },
+  {
+   "stem": "wˈɛldəɹ",
+   "plural": "wˈɛldəɹz",
+   "past": "wˈɛldəɹd",
+   "progressive": "wˈɛldəɹɪŋ"
+  },
+  {
+   "stem": "sˌIkOlˌɪŋɡwˈɪstɪks",
+   "plural": "sˌIkOlˌɪŋɡwˈɪstɪksᵻz",
+   "past": "sˌIkOlˌɪŋɡwˈɪstɪkst",
+   "progressive": "sˌIkOlˌɪŋɡwˈɪstɪksɪŋ"
+  },
+  {
+   "stem": "pɹˈɪði",
+   "plural": "pɹˈɪðiz",
+   "past": "pɹˈɪðid",
+   "progressive": "pɹˈɪðiɪŋ"
+  },
+  {
+   "stem": "kˈɑmbˌInz",
+   "plural": "kˈɑmbˌInzᵻz",
+   "past": "kˈɑmbˌInzd",
+   "progressive": "kˈɑmbˌInzɪŋ"
+  },
+  {
+   "stem": "dˈɛsəkˌAɾᵻd",
+   "plural": "dˈɛsəkˌAɾᵻdz",
+   "past": "dˈɛsəkˌAɾᵻdᵻd",
+   "progressive": "dˈɛsəkˌAɾᵻdɪŋ"
+  },
+  {
+   "stem": "tˌænənəɹˈiv",
+   "plural": "tˌænənəɹˈivz",
+   "past": "tˌænənəɹˈivd",
+   "progressive": "tˌænənəɹˈivɪŋ"
+  },
+  {
+   "stem": "sˈɜɹʧəɹ",
+   "plural": "sˈɜɹʧəɹz",
+   "past": "sˈɜɹʧəɹd",
+   "progressive": "sˈɜɹʧəɹɪŋ"
+  },
+  {
+   "stem": "ˌɛkstɹəʤudˈɪʃᵊl",
+   "plural": "ˌɛkstɹəʤudˈɪʃᵊlz",
+   "past": "ˌɛkstɹəʤudˈɪʃᵊld",
+   "progressive": "ˌɛkstɹəʤudˈɪʃᵊlɪŋ"
+  },
+  {
+   "stem": "ˈɑkwəkˌAd",
+   "plural": "ˈɑkwəkˌAdz",
+   "past": "ˈɑkwəkˌAdᵻd",
+   "progressive": "ˈɑkwəkˌAdɪŋ"
+  },
+  {
+   "stem": "bˌæktˈɪɹiəsən",
+   "plural": "bˌæktˈɪɹiəsənz",
+   "past": "bˌæktˈɪɹiəsənd",
+   "progressive": "bˌæktˈɪɹiəsənɪŋ"
+  },
+  {
+   "stem": "fɪlˈAd",
+   "plural": "fɪlˈAdz",
+   "past": "fɪlˈAdᵻd",
+   "progressive": "fɪlˈAdɪŋ"
+  },
+  {
+   "stem": "ˈæntliə",
+   "plural": "ˈæntliəz",
+   "past": "ˈæntliəd",
+   "progressive": "ˈæntliəɪŋ"
+  },
+  {
+   "stem": "ɹˌipɹədˈusəɹ",
+   "plural": "ɹˌipɹədˈusəɹz",
+   "past": "ɹˌipɹədˈusəɹd",
+   "progressive": "ɹˌipɹədˈusəɹɪŋ"
+  },
+  {
+   "stem": "mˈiɾi",
+   "plural": "mˈiɾiz",
+   "past": "mˈiɾid",
+   "progressive": "mˈiɾiɪŋ"
+  },
+  {
+   "stem": "dɹˈæftəɹ",
+   "plural": "dɹˈæftəɹz",
+   "past": "dɹˈæftəɹd",
+   "progressive": "dɹˈæftəɹɪŋ"
+  },
+  {
+   "stem": "slˈus",
+   "plural": "slˈusᵻz",
+   "past": "slˈust",
+   "progressive": "slˈusɪŋ"
+  },
+  {
+   "stem": "pjˈubəɹɾi",
+   "plural": "pjˈubəɹɾiz",
+   "past": "pjˈubəɹɾid",
+   "progressive": "pjˈubəɹɾiɪŋ"
+  },
+  {
+   "stem": "ɔvjˈɛdO",
+   "plural": "ɔvjˈɛdOz",
+   "past": "ɔvjˈɛdOd",
+   "progressive": "ɔvjˈɛdOɪŋ"
+  },
+  {
+   "stem": "ɹəmˈɑnstɹənt",
+   "plural": "ɹəmˈɑnstɹənts",
+   "past": "ɹəmˈɑnstɹəntᵻd",
+   "progressive": "ɹəmˈɑnstɹəntɪŋ"
+  },
+  {
+   "stem": "ɡˈɔɹʤət",
+   "plural": "ɡˈɔɹʤəts",
+   "past": "ɡˈɔɹʤəɾᵻd",
+   "progressive": "ɡˈɔɹʤəɾɪŋ"
+  },
+  {
+   "stem": "ˈɪnlˌɛt",
+   "plural": "ˈɪnlˌɛts",
+   "past": "ˈɪnlˌɛɾᵻd",
+   "progressive": "ˈɪnlˌɛɾɪŋ"
+  },
+  {
+   "stem": "fˈʌɾək",
+   "plural": "fˈʌɾəks",
+   "past": "fˈʌɾəkt",
+   "progressive": "fˈʌɾəkɪŋ"
+  },
+  {
+   "stem": "θˈiəɹˌIz",
+   "plural": "θˈiəɹˌIzᵻz",
+   "past": "θˈiəɹˌIzd",
+   "progressive": "θˈiəɹˌIzɪŋ"
+  },
+  {
+   "stem": "ˌɪmətˈʊɹ",
+   "plural": "ˌɪmətˈʊɹz",
+   "past": "ˌɪmətˈʊɹd",
+   "progressive": "ˌɪmətˈʊɹɪŋ"
+  },
+  {
+   "stem": "dˈɪpiᵻst",
+   "plural": "dˈɪpiᵻsts",
+   "past": "dˈɪpiᵻstᵻd",
+   "progressive": "dˈɪpiᵻstɪŋ"
+  },
+  {
+   "stem": "ʒˈɑnɹə",
+   "plural": "ʒˈɑnɹəz",
+   "past": "ʒˈɑnɹəd",
+   "progressive": "ʒˈɑnɹəɪŋ"
+  },
+  {
+   "stem": "skɹˈimɪŋ",
+   "plural": "skɹˈimɪŋz",
+   "past": "skɹˈimɪŋd",
+   "progressive": "skɹˈimɪŋɪŋ"
+  },
+  {
+   "stem": "mjunˈɪfəsᵊns",
+   "plural": "mjunˈɪfəsᵊnsᵻz",
+   "past": "mjunˈɪfəsᵊnst",
+   "progressive": "mjunˈɪfəsᵊnsɪŋ"
+  },
+  {
+   "stem": "hˈæŋdˌɔɡ",
+   "plural": "hˈæŋdˌɔɡz",
+   "past": "hˈæŋdˌɔɡd",
+   "progressive": "hˈæŋdˌɔɡɪŋ"
+  },
+  {
+   "stem": "ˌædəmˈæntˌIn",
+   "plural": "ˌædəmˈæntˌInz",
+   "past": "ˌædəmˈæntˌInd",
+   "progressive": "ˌædəmˈæntˌInɪŋ"
+  },
+  {
+   "stem": "ʃɹˈɪŋk",
+   "plural": "ʃɹˈɪŋks",
+   "past": "ʃɹˈɪŋkt",
+   "progressive": "ʃɹˈɪŋkɪŋ"
+  },
+  {
+   "stem": "ˈæbət",
+   "plural": "ˈæbəts",
+   "past": "ˈæbəɾᵻd",
+   "progressive": "ˈæbəɾɪŋ"
+  },
+  {
+   "stem": "kˌɑɹbənnˈutɹəl",
+   "plural": "kˌɑɹbənnˈutɹəlz",
+   "past": "kˌɑɹbənnˈutɹəld",
+   "progressive": "kˌɑɹbənnˈutɹəlɪŋ"
+  },
+  {
+   "stem": "tˈuhˌændᵻd",
+   "plural": "tˈuhˌændᵻdz",
+   "past": "tˈuhˌændᵻdᵻd",
+   "progressive": "tˈuhˌændᵻdɪŋ"
+  },
+  {
+   "stem": "ˌWɾəvkˈɔɹt",
+   "plural": "ˌWɾəvkˈɔɹts",
+   "past": "ˌWɾəvkˈɔɹɾᵻd",
+   "progressive": "ˌWɾəvkˈɔɹɾɪŋ"
+  },
+  {
+   "stem": "kˌOlblˈæk",
+   "plural": "kˌOlblˈæks",
+   "past": "kˌOlblˈækt",
+   "progressive": "kˌOlblˈækɪŋ"
+  },
+  {
+   "stem": "twˈIt",
+   "plural": "twˈIts",
+   "past": "twˈIɾᵻd",
+   "progressive": "twˈIɾɪŋ"
+  },
+  {
+   "stem": "ˈIsəklˌIn",
+   "plural": "ˈIsəklˌInz",
+   "past": "ˈIsəklˌInd",
+   "progressive": "ˈIsəklˌInɪŋ"
+  },
+  {
+   "stem": "ˈɛpəsˌɛntəɹ",
+   "plural": "ˈɛpəsˌɛntəɹz",
+   "past": "ˈɛpəsˌɛntəɹd",
+   "progressive": "ˈɛpəsˌɛntəɹɪŋ"
+  },
+  {
+   "stem": "mˈʌnilˌɛndɪŋ",
+   "plural": "mˈʌnilˌɛndɪŋz",
+   "past": "mˈʌnilˌɛndɪŋd",
+   "progressive": "mˈʌnilˌɛndɪŋɪŋ"
+  },
+  {
+   "stem": "bˈʌʤəɾᵻd",
+   "plural": "bˈʌʤəɾᵻdz",
+   "past": "bˈʌʤəɾᵻdᵻd",
+   "progressive": "bˈʌʤəɾᵻdɪŋ"
+  },
+  {
+   "stem": "kɹɪstˈinə",
+   "plural": "kɹɪstˈinəz",
+   "past": "kɹɪstˈinəd",
+   "progressive": "kɹɪstˈinəɪŋ"
+  },
+  {
+   "stem": "bʊɹjˈɑɾiə",
+   "plural": "bʊɹjˈɑɾiəz",
+   "past": "bʊɹjˈɑɾiəd",
+   "progressive": "bʊɹjˈɑɾiəɪŋ"
+  },
+  {
+   "stem": "məskˈOɡi",
+   "plural": "məskˈOɡiz",
+   "past": "məskˈOɡid",
+   "progressive": "məskˈOɡiɪŋ"
+  },
+  {
+   "stem": "sɛkstˈɛt",
+   "plural": "sɛkstˈɛts",
+   "past": "sɛkstˈɛɾᵻd",
+   "progressive": "sɛkstˈɛɾɪŋ"
+  },
+  {
+   "stem": "wˈɛlk",
+   "plural": "wˈɛlks",
+   "past": "wˈɛlkt",
+   "progressive": "wˈɛlkɪŋ"
+  },
+  {
+   "stem": "fɹˈæŋkli",
+   "plural": "fɹˈæŋkliz",
+   "past": "fɹˈæŋklid",
+   "progressive": "fɹˈæŋkliɪŋ"
+  },
+  {
+   "stem": "ɹˌɛʤəsˈIdᵊl",
+   "plural": "ɹˌɛʤəsˈIdᵊlz",
+   "past": "ɹˌɛʤəsˈIdᵊld",
+   "progressive": "ɹˌɛʤəsˈIdᵊlɪŋ"
+  },
+  {
+   "stem": "ˌʌltɹəkənsˈɜɹvəɾɪv",
+   "plural": "ˌʌltɹəkənsˈɜɹvəɾɪvz",
+   "past": "ˌʌltɹəkənsˈɜɹvəɾɪvd",
+   "progressive": "ˌʌltɹəkənsˈɜɹvəɾɪvɪŋ"
+  },
+  {
+   "stem": "kəmpjˌuɾəɹʤˈɛnəɹˌAɾᵻd",
+   "plural": "kəmpjˌuɾəɹʤˈɛnəɹˌAɾᵻdz",
+   "past": "kəmpjˌuɾəɹʤˈɛnəɹˌAɾᵻdᵻd",
+   "progressive": "kəmpjˌuɾəɹʤˈɛnəɹˌAɾᵻdɪŋ"
+  },
+  {
+   "stem": "fˈɔɹkˌædi",
+   "plural": "fˈɔɹkˌædiz",
+   "past": "fˈɔɹkˌædid",
+   "progressive": "fˈɔɹkˌædiɪŋ"
+  },
+  {
+   "stem": "fˈɛməsˌId",
+   "plural": "fˈɛməsˌIdz",
+   "past": "fˈɛməsˌIdᵻd",
+   "progressive": "fˈɛməsˌIdɪŋ"
+  },
+  {
+   "stem": "hˈɑtʃˌɑt",
+   "plural": "hˈɑtʃˌɑts",
+   "past": "hˈɑtʃˌɑɾᵻd",
+   "progressive": "hˈɑtʃˌɑɾɪŋ"
+  },
+  {
+   "stem": "ˈʌndəɹtˌɪnt",
+   "plural": "ˈʌndəɹtˌɪnts",
+   "past": "ˈʌndəɹtˌɪntᵻd",
+   "progressive": "ˈʌndəɹtˌɪntɪŋ"
+  },
+  {
+   "stem": "kˈʌni",
+   "plural": "kˈʌniz",
+   "past": "kˈʌnid",
+   "progressive": "kˈʌniɪŋ"
+  },
+  {
+   "stem": "ˌæntiklˈɛɹəkᵊl",
+   "plural": "ˌæntiklˈɛɹəkᵊlz",
+   "past": "ˌæntiklˈɛɹəkᵊld",
+   "progressive": "ˌæntiklˈɛɹəkᵊlɪŋ"
+  },
+  {
+   "stem": "ɹikˈæpʃən",
+   "plural": "ɹikˈæpʃənz",
+   "past": "ɹikˈæpʃənd",
+   "progressive": "ɹikˈæpʃənɪŋ"
+  },
+  {
+   "stem": "ˌʌndəɹpəɹfˈɔɹməns",
+   "plural": "ˌʌndəɹpəɹfˈɔɹmənsᵻz",
+   "past": "ˌʌndəɹpəɹfˈɔɹmənst",
+   "progressive": "ˌʌndəɹpəɹfˈɔɹmənsɪŋ"
+  },
+  {
+   "stem": "ˌɪndəskɹˈɪmənˌAɾɪŋ",
+   "plural": "ˌɪndəskɹˈɪmənˌAɾɪŋz",
+   "past": "ˌɪndəskɹˈɪmənˌAɾɪŋd",
+   "progressive": "ˌɪndəskɹˈɪmənˌAɾɪŋɪŋ"
+  },
+  {
+   "stem": "jˈæpəɹ",
+   "plural": "jˈæpəɹz",
+   "past": "jˈæpəɹd",
+   "progressive": "jˈæpəɹɪŋ"
+  },
+  {
+   "stem": "kəɹˈɑkəs",
+   "plural": "kəɹˈɑkəsᵻz",
+   "past": "kəɹˈɑkəst",
+   "progressive": "kəɹˈɑkəsɪŋ"
+  },
+  {
+   "stem": "hæplˈOsɪs",
+   "plural": "hæplˈOsɪsᵻz",
+   "past": "hæplˈOsɪst",
+   "progressive": "hæplˈOsɪsɪŋ"
+  },
+  {
+   "stem": "sˌɛmidˌɛmisˈɛmikwˌAvəɹ",
+   "plural": "sˌɛmidˌɛmisˈɛmikwˌAvəɹz",
+   "past": "sˌɛmidˌɛmisˈɛmikwˌAvəɹd",
+   "progressive": "sˌɛmidˌɛmisˈɛmikwˌAvəɹɪŋ"
+  },
+  {
+   "stem": "fˌɛɹOmˌæɡnˈiʒᵊn",
+   "plural": "fˌɛɹOmˌæɡnˈiʒᵊnz",
+   "past": "fˌɛɹOmˌæɡnˈiʒᵊnd",
+   "progressive": "fˌɛɹOmˌæɡnˈiʒᵊnɪŋ"
+  },
+  {
+   "stem": "pˌɛɹəsˌɛntˈisˌiz",
+   "plural": "pˌɛɹəsˌɛntˈisˌizᵻz",
+   "past": "pˌɛɹəsˌɛntˈisˌizd",
+   "progressive": "pˌɛɹəsˌɛntˈisˌizɪŋ"
+  },
+  {
+   "stem": "ˈæzdˌɪk",
+   "plural": "ˈæzdˌɪks",
+   "past": "ˈæzdˌɪkt",
+   "progressive": "ˈæzdˌɪkɪŋ"
+  },
+  {
+   "stem": "ɹˈiəfˌI",
+   "plural": "ɹˈiəfˌIz",
+   "past": "ɹˈiəfˌId",
+   "progressive": "ɹˈiəfˌIɪŋ"
+  },
+  {
+   "stem": "ˌʌpθɹˈOn",
+   "plural": "ˌʌpθɹˈOnz",
+   "past": "ˌʌpθɹˈOnd",
+   "progressive": "ˌʌpθɹˈOnɪŋ"
+  },
+  {
+   "stem": "skæljˈOlə",
+   "plural": "skæljˈOləz",
+   "past": "skæljˈOləd",
+   "progressive": "skæljˈOləɪŋ"
+  },
+  {
+   "stem": "vətˈɔɹiə",
+   "plural": "vətˈɔɹiəz",
+   "past": "vətˈɔɹiəd",
+   "progressive": "vətˈɔɹiəɪŋ"
+  },
+  {
+   "stem": "ˈæɾəvˌɪzəm",
+   "plural": "ˈæɾəvˌɪzəmz",
+   "past": "ˈæɾəvˌɪzəmd",
+   "progressive": "ˈæɾəvˌɪzəmɪŋ"
+  },
+  {
+   "stem": "ɡɹˈuvəli",
+   "plural": "ɡɹˈuvəliz",
+   "past": "ɡɹˈuvəlid",
+   "progressive": "ɡɹˈuvəliɪŋ"
+  },
+  {
+   "stem": "kˈɑɹfˌʊl",
+   "plural": "kˈɑɹfˌʊlz",
+   "past": "kˈɑɹfˌʊld",
+   "progressive": "kˈɑɹfˌʊlɪŋ"
+  },
+  {
+   "stem": "pɹəsˈɪpəɾɪn",
+   "plural": "pɹəsˈɪpəɾɪnz",
+   "past": "pɹəsˈɪpəɾɪnd",
+   "progressive": "pɹəsˈɪpəɾɪnɪŋ"
+  },
+  {
+   "stem": "θˈɪnd",
+   "plural": "θˈɪndz",
+   "past": "θˈɪndᵻd",
+   "progressive": "θˈɪndɪŋ"
+  },
+  {
+   "stem": "tˈæli",
+   "plural": "tˈæliz",
+   "past": "tˈælid",
+   "progressive": "tˈæliɪŋ"
+  },
+  {
+   "stem": "hˈOɾə",
+   "plural": "hˈOɾəz",
+   "past": "hˈOɾəd",
+   "progressive": "hˈOɾəɪŋ"
+  },
+  {
+   "stem": "ˈɜɹst",
+   "plural": "ˈɜɹsts",
+   "past": "ˈɜɹstᵻd",
+   "progressive": "ˈɜɹstɪŋ"
+  },
+  {
+   "stem": "səbtˈɛns",
+   "plural": "səbtˈɛnsᵻz",
+   "past": "səbtˈɛnst",
+   "progressive": "səbtˈɛnsɪŋ"
+  },
+  {
+   "stem": "ˈisˌæt",
+   "plural": "ˈisˌæts",
+   "past": "ˈisˌæɾᵻd",
+   "progressive": "ˈisˌæɾɪŋ"
+  },
+  {
+   "stem": "nˈOəsfˌɪɹ",
+   "plural": "nˈOəsfˌɪɹz",
+   "past": "nˈOəsfˌɪɹd",
+   "progressive": "nˈOəsfˌɪɹɪŋ"
+  },
+  {
+   "stem": "lˈusᵊnəɹ",
+   "plural": "lˈusᵊnəɹz",
+   "past": "lˈusᵊnəɹd",
+   "progressive": "lˈusᵊnəɹɪŋ"
+  },
+  {
+   "stem": "fəɹɡˈɑt",
+   "plural": "fəɹɡˈɑts",
+   "past": "fəɹɡˈɑɾᵻd",
+   "progressive": "fəɹɡˈɑɾɪŋ"
+  },
+  {
+   "stem": "lˈɔfɾi",
+   "plural": "lˈɔfɾiz",
+   "past": "lˈɔfɾid",
+   "progressive": "lˈɔfɾiɪŋ"
+  },
+  {
+   "stem": "lˌɛsAfˈɛɹ",
+   "plural": "lˌɛsAfˈɛɹz",
+   "past": "lˌɛsAfˈɛɹd",
+   "progressive": "lˌɛsAfˈɛɹɪŋ"
+  },
+  {
+   "stem": "fˈɔɹtˌOkənɪŋ",
+   "plural": "fˈɔɹtˌOkənɪŋz",
+   "past": "fˈɔɹtˌOkənɪŋd",
+   "progressive": "fˈɔɹtˌOkənɪŋɪŋ"
+  },
+  {
+   "stem": "dəlˈusɪvnɪs",
+   "plural": "dəlˈusɪvnɪsᵻz",
+   "past": "dəlˈusɪvnɪst",
+   "progressive": "dəlˈusɪvnɪsɪŋ"
+  },
+  {
+   "stem": "sˌɛnsəɹimˈOɾəɹ",
+   "plural": "sˌɛnsəɹimˈOɾəɹz",
+   "past": "sˌɛnsəɹimˈOɾəɹd",
+   "progressive": "sˌɛnsəɹimˈOɾəɹɪŋ"
+  },
+  {
+   "stem": "mˈænəɹɪst",
+   "plural": "mˈænəɹɪsts",
+   "past": "mˈænəɹɪstᵻd",
+   "progressive": "mˈænəɹɪstɪŋ"
+  },
+  {
+   "stem": "spɹˈɛdʃˌiɾɪŋ",
+   "plural": "spɹˈɛdʃˌiɾɪŋz",
+   "past": "spɹˈɛdʃˌiɾɪŋd",
+   "progressive": "spɹˈɛdʃˌiɾɪŋɪŋ"
+  },
+  {
+   "stem": "pɹˈunəs",
+   "plural": "pɹˈunəsᵻz",
+   "past": "pɹˈunəst",
+   "progressive": "pɹˈunəsɪŋ"
+  },
+  {
+   "stem": "bˈɑɹkɪŋ",
+   "plural": "bˈɑɹkɪŋz",
+   "past": "bˈɑɹkɪŋd",
+   "progressive": "bˈɑɹkɪŋɪŋ"
+  },
+  {
+   "stem": "dəpˌɑɹtmˈɛntᵊli",
+   "plural": "dəpˌɑɹtmˈɛntᵊliz",
+   "past": "dəpˌɑɹtmˈɛntᵊlid",
+   "progressive": "dəpˌɑɹtmˈɛntᵊliɪŋ"
+  },
+  {
+   "stem": "juˈɑnəməs",
+   "plural": "juˈɑnəməsᵻz",
+   "past": "juˈɑnəməst",
+   "progressive": "juˈɑnəməsɪŋ"
+  },
+  {
+   "stem": "ʧˈɪpəwˌɑ",
+   "plural": "ʧˈɪpəwˌɑz",
+   "past": "ʧˈɪpəwˌɑd",
+   "progressive": "ʧˈɪpəwˌɑɪŋ"
+  },
+  {
+   "stem": "lˈI",
+   "plural": "lˈIz",
+   "past": "lˈId",
+   "progressive": "lˈIɪŋ"
+  },
+  {
+   "stem": "tOmˈɛntəs",
+   "plural": "tOmˈɛntəsᵻz",
+   "past": "tOmˈɛntəst",
+   "progressive": "tOmˈɛntəsɪŋ"
+  },
+  {
+   "stem": "lˈɑləɹdˌɪzəm",
+   "plural": "lˈɑləɹdˌɪzəmz",
+   "past": "lˈɑləɹdˌɪzəmd",
+   "progressive": "lˈɑləɹdˌɪzəmɪŋ"
+  },
+  {
+   "stem": "sˈæmbO",
+   "plural": "sˈæmbOz",
+   "past": "sˈæmbOd",
+   "progressive": "sˈæmbOɪŋ"
+  },
+  {
+   "stem": "ɹˈʌnti",
+   "plural": "ɹˈʌntiz",
+   "past": "ɹˈʌntid",
+   "progressive": "ɹˈʌntiɪŋ"
+  },
+  {
+   "stem": "nˈɛməsɪs",
+   "plural": "nˈɛməsɪsᵻz",
+   "past": "nˈɛməsɪst",
+   "progressive": "nˈɛməsɪsɪŋ"
+  },
+  {
+   "stem": "mˈʌskwˌɔʃ",
+   "plural": "mˈʌskwˌɔʃᵻz",
+   "past": "mˈʌskwˌɔʃt",
+   "progressive": "mˈʌskwˌɔʃɪŋ"
+  },
+  {
+   "stem": "hˈɛksˌæd",
+   "plural": "hˈɛksˌædz",
+   "past": "hˈɛksˌædᵻd",
+   "progressive": "hˈɛksˌædɪŋ"
+  },
+  {
+   "stem": "ɡɹəfˈɪɾɪk",
+   "plural": "ɡɹəfˈɪɾɪks",
+   "past": "ɡɹəfˈɪɾɪkt",
+   "progressive": "ɡɹəfˈɪɾɪkɪŋ"
+  },
+  {
+   "stem": "wˈIflɪs",
+   "plural": "wˈIflɪsᵻz",
+   "past": "wˈIflɪst",
+   "progressive": "wˈIflɪsɪŋ"
+  },
+  {
+   "stem": "sˈupinɪs",
+   "plural": "sˈupinɪsᵻz",
+   "past": "sˈupinɪst",
+   "progressive": "sˈupinɪsɪŋ"
+  },
+  {
+   "stem": "ɪzˈɔld",
+   "plural": "ɪzˈɔldz",
+   "past": "ɪzˈɔldᵻd",
+   "progressive": "ɪzˈɔldɪŋ"
+  },
+  {
+   "stem": "bˈænɪʃ",
+   "plural": "bˈænɪʃᵻz",
+   "past": "bˈænɪʃt",
+   "progressive": "bˈænɪʃɪŋ"
+  },
+  {
+   "stem": "pˈɪmp",
+   "plural": "pˈɪmps",
+   "past": "pˈɪmpt",
+   "progressive": "pˈɪmpɪŋ"
+  },
+  {
+   "stem": "ˈɛksəspˌɔɹ",
+   "plural": "ˈɛksəspˌɔɹz",
+   "past": "ˈɛksəspˌɔɹd",
+   "progressive": "ˈɛksəspˌɔɹɪŋ"
+  },
+  {
+   "stem": "wˈæŋk",
+   "plural": "wˈæŋks",
+   "past": "wˈæŋkt",
+   "progressive": "wˈæŋkɪŋ"
+  },
+  {
+   "stem": "kˈYdɑɡ",
+   "plural": "kˈYdɑɡz",
+   "past": "kˈYdɑɡd",
+   "progressive": "kˈYdɑɡɪŋ"
+  },
+  {
+   "stem": "mˈʌdslˌId",
+   "plural": "mˈʌdslˌIdz",
+   "past": "mˈʌdslˌIdᵻd",
+   "progressive": "mˈʌdslˌIdɪŋ"
+  },
+  {
+   "stem": "Odˈɑməɾəɹ",
+   "plural": "Odˈɑməɾəɹz",
+   "past": "Odˈɑməɾəɹd",
+   "progressive": "Odˈɑməɾəɹɪŋ"
+  },
+  {
+   "stem": "məkˈɑbɹə",
+   "plural": "məkˈɑbɹəz",
+   "past": "məkˈɑbɹəd",
+   "progressive": "məkˈɑbɹəɪŋ"
+  },
+  {
+   "stem": "kɹˈɪnᵊlən",
+   "plural": "kɹˈɪnᵊlənz",
+   "past": "kɹˈɪnᵊlənd",
+   "progressive": "kɹˈɪnᵊlənɪŋ"
+  },
+  {
+   "stem": "ˌɪndəskɹˌɪmənˈAʃən",
+   "plural": "ˌɪndəskɹˌɪmənˈAʃənz",
+   "past": "ˌɪndəskɹˌɪmənˈAʃənd",
+   "progressive": "ˌɪndəskɹˌɪmənˈAʃənɪŋ"
+  },
+  {
+   "stem": "bɹˈɛktiən",
+   "plural": "bɹˈɛktiənz",
+   "past": "bɹˈɛktiənd",
+   "progressive": "bɹˈɛktiənɪŋ"
+  },
+  {
+   "stem": "pɹˌikˈʊkt",
+   "plural": "pɹˌikˈʊkts",
+   "past": "pɹˌikˈʊktᵻd",
+   "progressive": "pɹˌikˈʊktɪŋ"
+  },
+  {
+   "stem": "sˌɛlfsˈidɪŋ",
+   "plural": "sˌɛlfsˈidɪŋz",
+   "past": "sˌɛlfsˈidɪŋd",
+   "progressive": "sˌɛlfsˈidɪŋɪŋ"
+  },
+  {
+   "stem": "əɹˈɑɾəsˌIz",
+   "plural": "əɹˈɑɾəsˌIzᵻz",
+   "past": "əɹˈɑɾəsˌIzd",
+   "progressive": "əɹˈɑɾəsˌIzɪŋ"
+  },
+  {
+   "stem": "ˌWdənˈWt",
+   "plural": "ˌWdənˈWts",
+   "past": "ˌWdənˈWɾᵻd",
+   "progressive": "ˌWdənˈWɾɪŋ"
+  },
+  {
+   "stem": "flˈʌstəɹd",
+   "plural": "flˈʌstəɹdz",
+   "past": "flˈʌstəɹdᵻd",
+   "progressive": "flˈʌstəɹdɪŋ"
+  },
+  {
+   "stem": "ɹˌiənˈæləsɪs",
+   "plural": "ɹˌiənˈæləsɪsᵻz",
+   "past": "ɹˌiənˈæləsɪst",
+   "progressive": "ɹˌiənˈæləsɪsɪŋ"
+  },
+  {
+   "stem": "kɹˌAniOfˈAʃəl",
+   "plural": "kɹˌAniOfˈAʃəlz",
+   "past": "kɹˌAniOfˈAʃəld",
+   "progressive": "kɹˌAniOfˈAʃəlɪŋ"
+  },
+  {
+   "stem": "swˈɜɹl",
+   "plural": "swˈɜɹlz",
+   "past": "swˈɜɹld",
+   "progressive": "swˈɜɹlɪŋ"
+  },
+  {
+   "stem": "pˈɑlikˌit",
+   "plural": "pˈɑlikˌits",
+   "past": "pˈɑlikˌiɾᵻd",
+   "progressive": "pˈɑlikˌiɾɪŋ"
+  },
+  {
+   "stem": "stˈAʤəbəl",
+   "plural": "stˈAʤəbəlz",
+   "past": "stˈAʤəbəld",
+   "progressive": "stˈAʤəbəlɪŋ"
+  },
+  {
+   "stem": "əmˈɜɹʤ",
+   "plural": "əmˈɜɹʤᵻz",
+   "past": "əmˈɜɹʤd",
+   "progressive": "əmˈɜɹʤɪŋ"
+  },
+  {
+   "stem": "d",
+   "plural": "dz",
+   "past": "dᵻd",
+   "progressive": "dɪŋ"
+  },
+  {
+   "stem": "kˈælsəfjˌuʤ",
+   "plural": "kˈælsəfjˌuʤᵻz",
+   "past": "kˈælsəfjˌuʤd",
+   "progressive": "kˈælsəfjˌuʤɪŋ"
+  },
+  {
+   "stem": "ɪksklˈusɪvnəs",
+   "plural": "ɪksklˈusɪvnəsᵻz",
+   "past": "ɪksklˈusɪvnəst",
+   "progressive": "ɪksklˈusɪvnəsɪŋ"
+  },
+  {
+   "stem": "lˈɔɹiətʃˌɪp",
+   "plural": "lˈɔɹiətʃˌɪps",
+   "past": "lˈɔɹiətʃˌɪpt",
+   "progressive": "lˈɔɹiətʃˌɪpɪŋ"
+  },
+  {
+   "stem": "kwˈɑntɪk",
+   "plural": "kwˈɑntɪks",
+   "past": "kwˈɑntɪkt",
+   "progressive": "kwˈɑntɪkɪŋ"
+  },
+  {
+   "stem": "ɹijˈunjən",
+   "plural": "ɹijˈunjənz",
+   "past": "ɹijˈunjənd",
+   "progressive": "ɹijˈunjənɪŋ"
+  },
+  {
+   "stem": "ɹˈɛləvᵊnt",
+   "plural": "ɹˈɛləvᵊnts",
+   "past": "ɹˈɛləvᵊntᵻd",
+   "progressive": "ɹˈɛləvᵊntɪŋ"
+  },
+  {
+   "stem": "ˈAdᵊn",
+   "plural": "ˈAdᵊnz",
+   "past": "ˈAdᵊnd",
+   "progressive": "ˈAdᵊnɪŋ"
+  },
+  {
+   "stem": "wˌɛn",
+   "plural": "wˌɛnz",
+   "past": "wˌɛnd",
+   "progressive": "wˌɛnɪŋ"
+  },
+  {
+   "stem": "pˌOstdˈɑktəɹət",
+   "plural": "pˌOstdˈɑktəɹəts",
+   "past": "pˌOstdˈɑktəɹəɾᵻd",
+   "progressive": "pˌOstdˈɑktəɹəɾɪŋ"
+  },
+  {
+   "stem": "bˈɔlkənˌIz",
+   "plural": "bˈɔlkənˌIzᵻz",
+   "past": "bˈɔlkənˌIzd",
+   "progressive": "bˈɔlkənˌIzɪŋ"
+  },
+  {
+   "stem": "ˌænθɹəpˈɑləʤɪst",
+   "plural": "ˌænθɹəpˈɑləʤɪsts",
+   "past": "ˌænθɹəpˈɑləʤɪstᵻd",
+   "progressive": "ˌænθɹəpˈɑləʤɪstɪŋ"
+  },
+  {
+   "stem": "ɡˈɑdləsnəs",
+   "plural": "ɡˈɑdləsnəsᵻz",
+   "past": "ɡˈɑdləsnəst",
+   "progressive": "ɡˈɑdləsnəsɪŋ"
+  },
+  {
+   "stem": "fˈud",
+   "plural": "fˈudz",
+   "past": "fˈudᵻd",
+   "progressive": "fˈudɪŋ"
+  },
+  {
+   "stem": "mˈæstəɹli",
+   "plural": "mˈæstəɹliz",
+   "past": "mˈæstəɹlid",
+   "progressive": "mˈæstəɹliɪŋ"
+  },
+  {
+   "stem": "kənˈut",
+   "plural": "kənˈuts",
+   "past": "kənˈuɾᵻd",
+   "progressive": "kənˈuɾɪŋ"
+  },
+  {
+   "stem": "hˈændiəɹ",
+   "plural": "hˈændiəɹz",
+   "past": "hˈændiəɹd",
+   "progressive": "hˈændiəɹɪŋ"
+  },
+  {
+   "stem": "məskˈOɡiən",
+   "plural": "məskˈOɡiənz",
+   "past": "məskˈOɡiənd",
+   "progressive": "məskˈOɡiənɪŋ"
+  },
+  {
+   "stem": "kˌOɹəɡɹˈæfɪk",
+   "plural": "kˌOɹəɡɹˈæfɪks",
+   "past": "kˌOɹəɡɹˈæfɪkt",
+   "progressive": "kˌOɹəɡɹˈæfɪkɪŋ"
+  },
+  {
+   "stem": "ˌʌnətɹˈæktɪvnəs",
+   "plural": "ˌʌnətɹˈæktɪvnəsᵻz",
+   "past": "ˌʌnətɹˈæktɪvnəst",
+   "progressive": "ˌʌnətɹˈæktɪvnəsɪŋ"
+  },
+  {
+   "stem": "kˈæpsəkəmz",
+   "plural": "kˈæpsəkəmzᵻz",
+   "past": "kˈæpsəkəmzd",
+   "progressive": "kˈæpsəkəmzɪŋ"
+  },
+  {
+   "stem": "dimˈɪstɪfˌId",
+   "plural": "dimˈɪstɪfˌIdz",
+   "past": "dimˈɪstɪfˌIdᵻd",
+   "progressive": "dimˈɪstɪfˌIdɪŋ"
+  },
+  {
+   "stem": "tˈʌmbəldɹˌI",
+   "plural": "tˈʌmbəldɹˌIz",
+   "past": "tˈʌmbəldɹˌId",
+   "progressive": "tˈʌmbəldɹˌIɪŋ"
+  },
+  {
+   "stem": "pɹəmˈOɾəɹ",
+   "plural": "pɹəmˈOɾəɹz",
+   "past": "pɹəmˈOɾəɹd",
+   "progressive": "pɹəmˈOɾəɹɪŋ"
+  },
+  {
+   "stem": "ˌʌnkˈɜɹl",
+   "plural": "ˌʌnkˈɜɹlz",
+   "past": "ˌʌnkˈɜɹld",
+   "progressive": "ˌʌnkˈɜɹlɪŋ"
+  },
+  {
+   "stem": "spˈIklət",
+   "plural": "spˈIkləts",
+   "past": "spˈIkləɾᵻd",
+   "progressive": "spˈIkləɾɪŋ"
+  },
+  {
+   "stem": "hɪstˌɔɹiˈɑɡɹəfi",
+   "plural": "hɪstˌɔɹiˈɑɡɹəfiz",
+   "past": "hɪstˌɔɹiˈɑɡɹəfid",
+   "progressive": "hɪstˌɔɹiˈɑɡɹəfiɪŋ"
+  },
+  {
+   "stem": "smˈOkinəs",
+   "plural": "smˈOkinəsᵻz",
+   "past": "smˈOkinəst",
+   "progressive": "smˈOkinəsɪŋ"
+  },
+  {
+   "stem": "tɹˈIkˌOm",
+   "plural": "tɹˈIkˌOmz",
+   "past": "tɹˈIkˌOmd",
+   "progressive": "tɹˈIkˌOmɪŋ"
+  },
+  {
+   "stem": "wˈʊstᵻd",
+   "plural": "wˈʊstᵻdz",
+   "past": "wˈʊstᵻdᵻd",
+   "progressive": "wˈʊstᵻdɪŋ"
+  },
+  {
+   "stem": "ˈɪzmɪt",
+   "plural": "ˈɪzmɪts",
+   "past": "ˈɪzmɪɾᵻd",
+   "progressive": "ˈɪzmɪɾɪŋ"
+  },
+  {
+   "stem": "ɔɹθˈɑɡnəθəs",
+   "plural": "ɔɹθˈɑɡnəθəsᵻz",
+   "past": "ɔɹθˈɑɡnəθəst",
+   "progressive": "ɔɹθˈɑɡnəθəsɪŋ"
+  },
+  {
+   "stem": "sˈɪksɪkə",
+   "plural": "sˈɪksɪkəz",
+   "past": "sˈɪksɪkəd",
+   "progressive": "sˈɪksɪkəɪŋ"
+  },
+  {
+   "stem": "mˈɑɹɡɹˌAv",
+   "plural": "mˈɑɹɡɹˌAvz",
+   "past": "mˈɑɹɡɹˌAvd",
+   "progressive": "mˈɑɹɡɹˌAvɪŋ"
+  },
+  {
+   "stem": "kənklˈusɪvnəs",
+   "plural": "kənklˈusɪvnəsᵻz",
+   "past": "kənklˈusɪvnəst",
+   "progressive": "kənklˈusɪvnəsɪŋ"
+  },
+  {
+   "stem": "ɪkspɹˈOpɹiˌAɾəɹ",
+   "plural": "ɪkspɹˈOpɹiˌAɾəɹz",
+   "past": "ɪkspɹˈOpɹiˌAɾəɹd",
+   "progressive": "ɪkspɹˈOpɹiˌAɾəɹɪŋ"
+  },
+  {
+   "stem": "kəmjˈund",
+   "plural": "kəmjˈundz",
+   "past": "kəmjˈundᵻd",
+   "progressive": "kəmjˈundɪŋ"
+  },
+  {
+   "stem": "nˌɑnplˈʌs",
+   "plural": "nˌɑnplˈʌsᵻz",
+   "past": "nˌɑnplˈʌst",
+   "progressive": "nˌɑnplˈʌsɪŋ"
+  },
+  {
+   "stem": "ˌIsətˈɑpɪk",
+   "plural": "ˌIsətˈɑpɪks",
+   "past": "ˌIsətˈɑpɪkt",
+   "progressive": "ˌIsətˈɑpɪkɪŋ"
+  },
+  {
+   "stem": "nˈɛklət",
+   "plural": "nˈɛkləts",
+   "past": "nˈɛkləɾᵻd",
+   "progressive": "nˈɛkləɾɪŋ"
+  },
+  {
+   "stem": "nˈukliətˌId",
+   "plural": "nˈukliətˌIdz",
+   "past": "nˈukliətˌIdᵻd",
+   "progressive": "nˈukliətˌIdɪŋ"
+  },
+  {
+   "stem": "ˈæmpjətˌAt",
+   "plural": "ˈæmpjətˌAts",
+   "past": "ˈæmpjətˌAɾᵻd",
+   "progressive": "ˈæmpjətˌAɾɪŋ"
+  },
+  {
+   "stem": "pˈɛɹiən",
+   "plural": "pˈɛɹiənz",
+   "past": "pˈɛɹiənd",
+   "progressive": "pˈɛɹiənɪŋ"
+  },
+  {
+   "stem": "fˈIbɹəlˌIt",
+   "plural": "fˈIbɹəlˌIts",
+   "past": "fˈIbɹəlˌIɾᵻd",
+   "progressive": "fˈIbɹəlˌIɾɪŋ"
+  },
+  {
+   "stem": "ˈʌnɹə",
+   "plural": "ˈʌnɹəz",
+   "past": "ˈʌnɹəd",
+   "progressive": "ˈʌnɹəɪŋ"
+  },
+  {
+   "stem": "tɛnˈuəɾi",
+   "plural": "tɛnˈuəɾiz",
+   "past": "tɛnˈuəɾid",
+   "progressive": "tɛnˈuəɾiɪŋ"
+  },
+  {
+   "stem": "ˌɛkOtˈOpiə",
+   "plural": "ˌɛkOtˈOpiəz",
+   "past": "ˌɛkOtˈOpiəd",
+   "progressive": "ˌɛkOtˈOpiəɪŋ"
+  },
+  {
+   "stem": "dəfɹˈAᵊl",
+   "plural": "dəfɹˈAᵊlz",
+   "past": "dəfɹˈAᵊld",
+   "progressive": "dəfɹˈAᵊlɪŋ"
+  },
+  {
+   "stem": "jˈɛə",
+   "plural": "jˈɛəz",
+   "past": "jˈɛəd",
+   "progressive": "jˈɛəɪŋ"
+  },
+  {
+   "stem": "ɹˌɛpɹəhˈɛnd",
+   "plural": "ɹˌɛpɹəhˈɛndz",
+   "past": "ɹˌɛpɹəhˈɛndᵻd",
+   "progressive": "ɹˌɛpɹəhˈɛndɪŋ"
+  },
+  {
+   "stem": "stˈApəld",
+   "plural": "stˈApəldz",
+   "past": "stˈApəldᵻd",
+   "progressive": "stˈApəldɪŋ"
+  },
+  {
+   "stem": "ʤIɡˈæntɪk",
+   "plural": "ʤIɡˈæntɪks",
+   "past": "ʤIɡˈæntɪkt",
+   "progressive": "ʤIɡˈæntɪkɪŋ"
+  },
+  {
+   "stem": "ˈɪpɪɹɔs",
+   "plural": "ˈɪpɪɹɔsᵻz",
+   "past": "ˈɪpɪɹɔst",
+   "progressive": "ˈɪpɪɹɔsɪŋ"
+  },
+  {
+   "stem": "Asfˈɛɹɪk",
+   "plural": "Asfˈɛɹɪks",
+   "past": "Asfˈɛɹɪkt",
+   "progressive": "Asfˈɛɹɪkɪŋ"
+  },
+  {
+   "stem": "flʊəɹˈɑskəpi",
+   "plural": "flʊəɹˈɑskəpiz",
+   "past": "flʊəɹˈɑskəpid",
+   "progressive": "flʊəɹˈɑskəpiɪŋ"
+  },
+  {
+   "stem": "ɹˈumətˌɪzəm",
+   "plural": "ɹˈumətˌɪzəmz",
+   "past": "ɹˈumətˌɪzəmd",
+   "progressive": "ɹˈumətˌɪzəmɪŋ"
+  },
+  {
+   "stem": "məlˈiəlˌI",
+   "plural": "məlˈiəlˌIz",
+   "past": "məlˈiəlˌId",
+   "progressive": "məlˈiəlˌIɪŋ"
+  },
+  {
+   "stem": "jˌunəvˈɜɹsᵊl",
+   "plural": "jˌunəvˈɜɹsᵊlz",
+   "past": "jˌunəvˈɜɹsᵊld",
+   "progressive": "jˌunəvˈɜɹsᵊlɪŋ"
+  },
+  {
+   "stem": "pˈæsᵊnʤəɹ",
+   "plural": "pˈæsᵊnʤəɹz",
+   "past": "pˈæsᵊnʤəɹd",
+   "progressive": "pˈæsᵊnʤəɹɪŋ"
+  },
+  {
+   "stem": "dəflˈɛkt",
+   "plural": "dəflˈɛkts",
+   "past": "dəflˈɛktᵻd",
+   "progressive": "dəflˈɛktɪŋ"
+  },
+  {
+   "stem": "pɹidˈɛstᵊnd",
+   "plural": "pɹidˈɛstᵊndz",
+   "past": "pɹidˈɛstᵊndᵻd",
+   "progressive": "pɹidˈɛstᵊndɪŋ"
+  },
+  {
+   "stem": "blˈOəɹ",
+   "plural": "blˈOəɹz",
+   "past": "blˈOəɹd",
+   "progressive": "blˈOəɹɪŋ"
+  },
+  {
+   "stem": "kˈOltɪʃ",
+   "plural": "kˈOltɪʃᵻz",
+   "past": "kˈOltɪʃt",
+   "progressive": "kˈOltɪʃɪŋ"
+  },
+  {
+   "stem": "dˈWdiəɹ",
+   "plural": "dˈWdiəɹz",
+   "past": "dˈWdiəɹd",
+   "progressive": "dˈWdiəɹɪŋ"
+  },
+  {
+   "stem": "ˈIpˌæʧ",
+   "plural": "ˈIpˌæʧᵻz",
+   "past": "ˈIpˌæʧt",
+   "progressive": "ˈIpˌæʧɪŋ"
+  },
+  {
+   "stem": "jˈɑɹdˌɑɹm",
+   "plural": "jˈɑɹdˌɑɹmz",
+   "past": "jˈɑɹdˌɑɹmd",
+   "progressive": "jˈɑɹdˌɑɹmɪŋ"
+  },
+  {
+   "stem": "hˈæməɹhˌɛd",
+   "plural": "hˈæməɹhˌɛdz",
+   "past": "hˈæməɹhˌɛdᵻd",
+   "progressive": "hˈæməɹhˌɛdɪŋ"
+  },
+  {
+   "stem": "mˈɛltᵊn",
+   "plural": "mˈɛltᵊnz",
+   "past": "mˈɛltᵊnd",
+   "progressive": "mˈɛltᵊnɪŋ"
+  },
+  {
+   "stem": "hˌʌhˈɔt",
+   "plural": "hˌʌhˈɔts",
+   "past": "hˌʌhˈɔtᵻd",
+   "progressive": "hˌʌhˈɔtɪŋ"
+  },
+  {
+   "stem": "pɹˈɛɹfəli",
+   "plural": "pɹˈɛɹfəliz",
+   "past": "pɹˈɛɹfəlid",
+   "progressive": "pɹˈɛɹfəliɪŋ"
+  },
+  {
+   "stem": "ʤˌiOkˈɛməkᵊl",
+   "plural": "ʤˌiOkˈɛməkᵊlz",
+   "past": "ʤˌiOkˈɛməkᵊld",
+   "progressive": "ʤˌiOkˈɛməkᵊlɪŋ"
+  },
+  {
+   "stem": "hˈAdiən",
+   "plural": "hˈAdiənz",
+   "past": "hˈAdiənd",
+   "progressive": "hˈAdiənɪŋ"
+  },
+  {
+   "stem": "kˈɛnədi",
+   "plural": "kˈɛnədiz",
+   "past": "kˈɛnədid",
+   "progressive": "kˈɛnədiɪŋ"
+  },
+  {
+   "stem": "dˈWnspˌWt",
+   "plural": "dˈWnspˌWts",
+   "past": "dˈWnspˌWɾᵻd",
+   "progressive": "dˈWnspˌWɾɪŋ"
+  },
+  {
+   "stem": "ˈɛpək",
+   "plural": "ˈɛpəks",
+   "past": "ˈɛpəkt",
+   "progressive": "ˈɛpəkɪŋ"
+  },
+  {
+   "stem": "tˈɛnəɹ",
+   "plural": "tˈɛnəɹz",
+   "past": "tˈɛnəɹd",
+   "progressive": "tˈɛnəɹɪŋ"
+  },
+  {
+   "stem": "dəstˈɪld",
+   "plural": "dəstˈɪldz",
+   "past": "dəstˈɪldᵻd",
+   "progressive": "dəstˈɪldɪŋ"
+  },
+  {
+   "stem": "nˈɛðəɹ",
+   "plural": "nˈɛðəɹz",
+   "past": "nˈɛðəɹd",
+   "progressive": "nˈɛðəɹɪŋ"
+  },
+  {
+   "stem": "sˈɪknəs",
+   "plural": "sˈɪknəsᵻz",
+   "past": "sˈɪknəst",
+   "progressive": "sˈɪknəsɪŋ"
+  },
+  {
+   "stem": "pɹˈOɾiəm",
+   "plural": "pɹˈOɾiəmz",
+   "past": "pɹˈOɾiəmd",
+   "progressive": "pɹˈOɾiəmɪŋ"
+  },
+  {
+   "stem": "pˈɪɡmi",
+   "plural": "pˈɪɡmiz",
+   "past": "pˈɪɡmid",
+   "progressive": "pˈɪɡmiɪŋ"
+  },
+  {
+   "stem": "ˌɪntəɹfjˈuʒᵊn",
+   "plural": "ˌɪntəɹfjˈuʒᵊnz",
+   "past": "ˌɪntəɹfjˈuʒᵊnd",
+   "progressive": "ˌɪntəɹfjˈuʒᵊnɪŋ"
+  },
+  {
+   "stem": "ˈæɡɹəkˌʌlʧəɹ",
+   "plural": "ˈæɡɹəkˌʌlʧəɹz",
+   "past": "ˈæɡɹəkˌʌlʧəɹd",
+   "progressive": "ˈæɡɹəkˌʌlʧəɹɪŋ"
+  },
+  {
+   "stem": "dˌɪstəlˈAʃən",
+   "plural": "dˌɪstəlˈAʃənz",
+   "past": "dˌɪstəlˈAʃənd",
+   "progressive": "dˌɪstəlˈAʃənɪŋ"
+  },
+  {
+   "stem": "dˈAtˌIm",
+   "plural": "dˈAtˌImz",
+   "past": "dˈAtˌImd",
+   "progressive": "dˈAtˌImɪŋ"
+  },
+  {
+   "stem": "ʤˈɛntᵊlᵻst",
+   "plural": "ʤˈɛntᵊlᵻsts",
+   "past": "ʤˈɛntᵊlᵻstᵻd",
+   "progressive": "ʤˈɛntᵊlᵻstɪŋ"
+  },
+  {
+   "stem": "sˈɪŋɡjələ",
+   "plural": "sˈɪŋɡjələz",
+   "past": "sˈɪŋɡjələd",
+   "progressive": "sˈɪŋɡjələɪŋ"
+  },
+  {
+   "stem": "pˈɛk",
+   "plural": "pˈɛks",
+   "past": "pˈɛkt",
+   "progressive": "pˈɛkɪŋ"
+  },
+  {
+   "stem": "ɹˈæthˌWs",
+   "plural": "ɹˈæthˌWsᵻz",
+   "past": "ɹˈæthˌWst",
+   "progressive": "ɹˈæthˌWsɪŋ"
+  },
+  {
+   "stem": "sˈɛnʧiənt",
+   "plural": "sˈɛnʧiənts",
+   "past": "sˈɛnʧiəntᵻd",
+   "progressive": "sˈɛnʧiəntɪŋ"
+  },
+  {
+   "stem": "ɡˈɪltiəɹ",
+   "plural": "ɡˈɪltiəɹz",
+   "past": "ɡˈɪltiəɹd",
+   "progressive": "ɡˈɪltiəɹɪŋ"
+  },
+  {
+   "stem": "ˈʌmbɹəl",
+   "plural": "ˈʌmbɹəlz",
+   "past": "ˈʌmbɹəld",
+   "progressive": "ˈʌmbɹəlɪŋ"
+  },
+  {
+   "stem": "skɹˈinkˌæst",
+   "plural": "skɹˈinkˌæsts",
+   "past": "skɹˈinkˌæstᵻd",
+   "progressive": "skɹˈinkˌæstɪŋ"
+  },
+  {
+   "stem": "kənʤˌʌŋktəvˈIɾəs",
+   "plural": "kənʤˌʌŋktəvˈIɾəsᵻz",
+   "past": "kənʤˌʌŋktəvˈIɾəst",
+   "progressive": "kənʤˌʌŋktəvˈIɾəsɪŋ"
+  },
+  {
+   "stem": "flˈʌkʃən",
+   "plural": "flˈʌkʃənz",
+   "past": "flˈʌkʃənd",
+   "progressive": "flˈʌkʃənɪŋ"
+  },
+  {
+   "stem": "kˈɪnfˌOk",
+   "plural": "kˈɪnfˌOks",
+   "past": "kˈɪnfˌOkt",
+   "progressive": "kˈɪnfˌOkɪŋ"
+  },
+  {
+   "stem": "pˈæsɪʤwˌɜɹk",
+   "plural": "pˈæsɪʤwˌɜɹks",
+   "past": "pˈæsɪʤwˌɜɹkt",
+   "progressive": "pˈæsɪʤwˌɜɹkɪŋ"
+  },
+  {
+   "stem": "bˈʌstinɪs",
+   "plural": "bˈʌstinɪsᵻz",
+   "past": "bˈʌstinɪst",
+   "progressive": "bˈʌstinɪsɪŋ"
+  },
+  {
+   "stem": "səstˌAndɹəlˈis",
+   "plural": "səstˌAndɹəlˈisᵻz",
+   "past": "səstˌAndɹəlˈist",
+   "progressive": "səstˌAndɹəlˈisɪŋ"
+  },
+  {
+   "stem": "pˌOstfˈɛmənɪst",
+   "plural": "pˌOstfˈɛmənɪsts",
+   "past": "pˌOstfˈɛmənɪstᵻd",
+   "progressive": "pˌOstfˈɛmənɪstɪŋ"
+  },
+  {
+   "stem": "ˈʌpwəɹdli",
+   "plural": "ˈʌpwəɹdliz",
+   "past": "ˈʌpwəɹdlid",
+   "progressive": "ˈʌpwəɹdliɪŋ"
+  },
+  {
+   "stem": "sˌɪstəmˈæɾɪks",
+   "plural": "sˌɪstəmˈæɾɪksᵻz",
+   "past": "sˌɪstəmˈæɾɪkst",
+   "progressive": "sˌɪstəmˈæɾɪksɪŋ"
+  },
+  {
+   "stem": "klˈWzᵊnbˌʊɹk",
+   "plural": "klˈWzᵊnbˌʊɹks",
+   "past": "klˈWzᵊnbˌʊɹkt",
+   "progressive": "klˈWzᵊnbˌʊɹkɪŋ"
+  },
+  {
+   "stem": "sɛɡmˈɛntᵊlˌIz",
+   "plural": "sɛɡmˈɛntᵊlˌIzᵻz",
+   "past": "sɛɡmˈɛntᵊlˌIzd",
+   "progressive": "sɛɡmˈɛntᵊlˌIzɪŋ"
+  },
+  {
+   "stem": "kəkˈɛktɪk",
+   "plural": "kəkˈɛktɪks",
+   "past": "kəkˈɛktɪkt",
+   "progressive": "kəkˈɛktɪkɪŋ"
+  },
+  {
+   "stem": "bIˈɑnɪk",
+   "plural": "bIˈɑnɪks",
+   "past": "bIˈɑnɪkt",
+   "progressive": "bIˈɑnɪkɪŋ"
+  },
+  {
+   "stem": "wˈɪɾinəs",
+   "plural": "wˈɪɾinəsᵻz",
+   "past": "wˈɪɾinəst",
+   "progressive": "wˈɪɾinəsɪŋ"
+  },
+  {
+   "stem": "θˈɛft",
+   "plural": "θˈɛfts",
+   "past": "θˈɛftᵻd",
+   "progressive": "θˈɛftɪŋ"
+  },
+  {
+   "stem": "vˈAləns",
+   "plural": "vˈAlənsᵻz",
+   "past": "vˈAlənst",
+   "progressive": "vˈAlənsɪŋ"
+  },
+  {
+   "stem": "ˌɪnəskˌApəbˈɪləɾi",
+   "plural": "ˌɪnəskˌApəbˈɪləɾiz",
+   "past": "ˌɪnəskˌApəbˈɪləɾid",
+   "progressive": "ˌɪnəskˌApəbˈɪləɾiɪŋ"
+  },
+  {
+   "stem": "dˈɪʤəɾəɡɹˌAd",
+   "plural": "dˈɪʤəɾəɡɹˌAdz",
+   "past": "dˈɪʤəɾəɡɹˌAdᵻd",
+   "progressive": "dˈɪʤəɾəɡɹˌAdɪŋ"
+  },
+  {
+   "stem": "ˌʌnbˈʌkᵊl",
+   "plural": "ˌʌnbˈʌkᵊlz",
+   "past": "ˌʌnbˈʌkᵊld",
+   "progressive": "ˌʌnbˈʌkᵊlɪŋ"
+  },
+  {
+   "stem": "hˈɔɡəɹ",
+   "plural": "hˈɔɡəɹz",
+   "past": "hˈɔɡəɹd",
+   "progressive": "hˈɔɡəɹɪŋ"
+  },
+  {
+   "stem": "fˈɪnɪkinɪs",
+   "plural": "fˈɪnɪkinɪsᵻz",
+   "past": "fˈɪnɪkinɪst",
+   "progressive": "fˈɪnɪkinɪsɪŋ"
+  },
+  {
+   "stem": "stˈɪpᵊlɪŋ",
+   "plural": "stˈɪpᵊlɪŋz",
+   "past": "stˈɪpᵊlɪŋd",
+   "progressive": "stˈɪpᵊlɪŋɪŋ"
+  },
+  {
+   "stem": "pəɹˈuzəɹ",
+   "plural": "pəɹˈuzəɹz",
+   "past": "pəɹˈuzəɹd",
+   "progressive": "pəɹˈuzəɹɪŋ"
+  },
+  {
+   "stem": "kˈæmbiəl",
+   "plural": "kˈæmbiəlz",
+   "past": "kˈæmbiəld",
+   "progressive": "kˈæmbiəlɪŋ"
+  },
+  {
+   "stem": "sˌupəɹstɹˈʌkʧəɹəl",
+   "plural": "sˌupəɹstɹˈʌkʧəɹəlz",
+   "past": "sˌupəɹstɹˈʌkʧəɹəld",
+   "progressive": "sˌupəɹstɹˈʌkʧəɹəlɪŋ"
+  },
+  {
+   "stem": "dˌɪsjunˈIt",
+   "plural": "dˌɪsjunˈIts",
+   "past": "dˌɪsjunˈIɾᵻd",
+   "progressive": "dˌɪsjunˈIɾɪŋ"
+  },
+  {
+   "stem": "ˈIɡlˌæs",
+   "plural": "ˈIɡlˌæsᵻz",
+   "past": "ˈIɡlˌæst",
+   "progressive": "ˈIɡlˌæsɪŋ"
+  },
+  {
+   "stem": "ɪnkˈWntəɹ",
+   "plural": "ɪnkˈWntəɹz",
+   "past": "ɪnkˈWntəɹd",
+   "progressive": "ɪnkˈWntəɹɪŋ"
+  },
+  {
+   "stem": "dˈæʃkˌæm",
+   "plural": "dˈæʃkˌæmz",
+   "past": "dˈæʃkˌæmd",
+   "progressive": "dˈæʃkˌæmɪŋ"
+  },
+  {
+   "stem": "bˈæntlɪŋ",
+   "plural": "bˈæntlɪŋz",
+   "past": "bˈæntlɪŋd",
+   "progressive": "bˈæntlɪŋɪŋ"
+  },
+  {
+   "stem": "ɪnˈɛptətˌud",
+   "plural": "ɪnˈɛptətˌudz",
+   "past": "ɪnˈɛptətˌudᵻd",
+   "progressive": "ɪnˈɛptətˌudɪŋ"
+  },
+  {
+   "stem": "stˈɜɹdiᵻst",
+   "plural": "stˈɜɹdiᵻsts",
+   "past": "stˈɜɹdiᵻstᵻd",
+   "progressive": "stˈɜɹdiᵻstɪŋ"
+  },
+  {
+   "stem": "kˈɑpiˌɛdətəɹ",
+   "plural": "kˈɑpiˌɛdətəɹz",
+   "past": "kˈɑpiˌɛdətəɹd",
+   "progressive": "kˈɑpiˌɛdətəɹɪŋ"
+  },
+  {
+   "stem": "tˈɛknəkᵊl",
+   "plural": "tˈɛknəkᵊlz",
+   "past": "tˈɛknəkᵊld",
+   "progressive": "tˈɛknəkᵊlɪŋ"
+  },
+  {
+   "stem": "ʧˌiləkˈilAs",
+   "plural": "ʧˌiləkˈilAsᵻz",
+   "past": "ʧˌiləkˈilAst",
+   "progressive": "ʧˌiləkˈilAsɪŋ"
+  },
+  {
+   "stem": "kˌɑtɑndzˈɑɹO",
+   "plural": "kˌɑtɑndzˈɑɹOz",
+   "past": "kˌɑtɑndzˈɑɹOd",
+   "progressive": "kˌɑtɑndzˈɑɹOɪŋ"
+  },
+  {
+   "stem": "wɑhˈini",
+   "plural": "wɑhˈiniz",
+   "past": "wɑhˈinid",
+   "progressive": "wɑhˈiniɪŋ"
+  },
+  {
+   "stem": "tˈæʃˌɪzəm",
+   "plural": "tˈæʃˌɪzəmz",
+   "past": "tˈæʃˌɪzəmd",
+   "progressive": "tˈæʃˌɪzəmɪŋ"
+  },
+  {
+   "stem": "ˌʌphˈiv",
+   "plural": "ˌʌphˈivz",
+   "past": "ˌʌphˈivd",
+   "progressive": "ˌʌphˈivɪŋ"
+  },
+  {
+   "stem": "kˈænənɪst",
+   "plural": "kˈænənɪsts",
+   "past": "kˈænənɪstᵻd",
+   "progressive": "kˈænənɪstɪŋ"
+  },
+  {
+   "stem": "əlˈɑkθənəs",
+   "plural": "əlˈɑkθənəsᵻz",
+   "past": "əlˈɑkθənəst",
+   "progressive": "əlˈɑkθənəsɪŋ"
+  },
+  {
+   "stem": "tˈikˌʌp",
+   "plural": "tˈikˌʌps",
+   "past": "tˈikˌʌpt",
+   "progressive": "tˈikˌʌpɪŋ"
+  },
+  {
+   "stem": "kˈænəpid",
+   "plural": "kˈænəpidz",
+   "past": "kˈænəpidᵻd",
+   "progressive": "kˈænəpidɪŋ"
+  },
+  {
+   "stem": "pɹˈɑvədᵊnt",
+   "plural": "pɹˈɑvədᵊnts",
+   "past": "pɹˈɑvədᵊntᵻd",
+   "progressive": "pɹˈɑvədᵊntɪŋ"
+  },
+  {
+   "stem": "ˌɪntɹəspˈɛktəvli",
+   "plural": "ˌɪntɹəspˈɛktəvliz",
+   "past": "ˌɪntɹəspˈɛktəvlid",
+   "progressive": "ˌɪntɹəspˈɛktəvliɪŋ"
+  },
+  {
+   "stem": "ˌʌnθˈæŋkfəlnəs",
+   "plural": "ˌʌnθˈæŋkfəlnəsᵻz",
+   "past": "ˌʌnθˈæŋkfəlnəst",
+   "progressive": "ˌʌnθˈæŋkfəlnəsɪŋ"
+  },
+  {
+   "stem": "fˈɔɹəmIt",
+   "plural": "fˈɔɹəmIts",
+   "past": "fˈɔɹəmIɾᵻd",
+   "progressive": "fˈɔɹəmIɾɪŋ"
+  },
+  {
+   "stem": "ˌʌnspˈYld",
+   "plural": "ˌʌnspˈYldz",
+   "past": "ˌʌnspˈYldᵻd",
+   "progressive": "ˌʌnspˈYldɪŋ"
+  },
+  {
+   "stem": "pˈɑsʧəməsli",
+   "plural": "pˈɑsʧəməsliz",
+   "past": "pˈɑsʧəməslid",
+   "progressive": "pˈɑsʧəməsliɪŋ"
+  },
+  {
+   "stem": "ɹˈɛɹədˌɑs",
+   "plural": "ɹˈɛɹədˌɑsᵻz",
+   "past": "ɹˈɛɹədˌɑst",
+   "progressive": "ɹˈɛɹədˌɑsɪŋ"
+  },
+  {
+   "stem": "ɹˈɪʧəɹd",
+   "plural": "ɹˈɪʧəɹdz",
+   "past": "ɹˈɪʧəɹdᵻd",
+   "progressive": "ɹˈɪʧəɹdɪŋ"
+  },
+  {
+   "stem": "skətˈɑləʤi",
+   "plural": "skətˈɑləʤiz",
+   "past": "skətˈɑləʤid",
+   "progressive": "skətˈɑləʤiɪŋ"
+  },
+  {
+   "stem": "wˈAvɪŋ",
+   "plural": "wˈAvɪŋz",
+   "past": "wˈAvɪŋd",
+   "progressive": "wˈAvɪŋɪŋ"
+  },
+  {
+   "stem": "ʤˌuliˈɛt",
+   "plural": "ʤˌuliˈɛts",
+   "past": "ʤˌuliˈɛɾᵻd",
+   "progressive": "ʤˌuliˈɛɾɪŋ"
+  },
+  {
+   "stem": "ɹˌɛpɹəhˈɛnsəbli",
+   "plural": "ɹˌɛpɹəhˈɛnsəbliz",
+   "past": "ɹˌɛpɹəhˈɛnsəblid",
+   "progressive": "ɹˌɛpɹəhˈɛnsəbliɪŋ"
+  },
+  {
+   "stem": "bəfˈʌdəld",
+   "plural": "bəfˈʌdəldz",
+   "past": "bəfˈʌdəldᵻd",
+   "progressive": "bəfˈʌdəldɪŋ"
+  },
+  {
+   "stem": "dəvˈɜɹʤənsi",
+   "plural": "dəvˈɜɹʤənsiz",
+   "past": "dəvˈɜɹʤənsid",
+   "progressive": "dəvˈɜɹʤənsiɪŋ"
+  },
+  {
+   "stem": "ɹəfɹˈɪʤəɹˌAɾəɹ",
+   "plural": "ɹəfɹˈɪʤəɹˌAɾəɹz",
+   "past": "ɹəfɹˈɪʤəɹˌAɾəɹd",
+   "progressive": "ɹəfɹˈɪʤəɹˌAɾəɹɪŋ"
+  },
+  {
+   "stem": "ɹˈæpsədˌIz",
+   "plural": "ɹˈæpsədˌIzᵻz",
+   "past": "ɹˈæpsədˌIzd",
+   "progressive": "ɹˈæpsədˌIzɪŋ"
+  },
+  {
+   "stem": "fˈɑðəɹləsnəs",
+   "plural": "fˈɑðəɹləsnəsᵻz",
+   "past": "fˈɑðəɹləsnəst",
+   "progressive": "fˈɑðəɹləsnəsɪŋ"
+  },
+  {
+   "stem": "ɹimˈɪnəɹəlˌIz",
+   "plural": "ɹimˈɪnəɹəlˌIzᵻz",
+   "past": "ɹimˈɪnəɹəlˌIzd",
+   "progressive": "ɹimˈɪnəɹəlˌIzɪŋ"
+  },
+  {
+   "stem": "pˈIpfˌɪʃ",
+   "plural": "pˈIpfˌɪʃᵻz",
+   "past": "pˈIpfˌɪʃt",
+   "progressive": "pˈIpfˌɪʃɪŋ"
+  },
+  {
+   "stem": "plˈAbˌɪl",
+   "plural": "plˈAbˌɪlz",
+   "past": "plˈAbˌɪld",
+   "progressive": "plˈAbˌɪlɪŋ"
+  },
+  {
+   "stem": "ˈɑmɪʃ",
+   "plural": "ˈɑmɪʃᵻz",
+   "past": "ˈɑmɪʃt",
+   "progressive": "ˈɑmɪʃɪŋ"
+  },
+  {
+   "stem": "tˈɑpt",
+   "plural": "tˈɑpts",
+   "past": "tˈɑptᵻd",
+   "progressive": "tˈɑptɪŋ"
+  },
+  {
+   "stem": "ˈʌvᵊn",
+   "plural": "ˈʌvᵊnz",
+   "past": "ˈʌvᵊnd",
+   "progressive": "ˈʌvᵊnɪŋ"
+  },
+  {
+   "stem": "kˌɔɹnjəkˈOpiən",
+   "plural": "kˌɔɹnjəkˈOpiənz",
+   "past": "kˌɔɹnjəkˈOpiənd",
+   "progressive": "kˌɔɹnjəkˈOpiənɪŋ"
+  },
+  {
+   "stem": "dˈuklɔ",
+   "plural": "dˈuklɔz",
+   "past": "dˈuklɔd",
+   "progressive": "dˈuklɔɪŋ"
+  },
+  {
+   "stem": "mˌɪdfˈild",
+   "plural": "mˌɪdfˈildz",
+   "past": "mˌɪdfˈildᵻd",
+   "progressive": "mˌɪdfˈildɪŋ"
+  },
+  {
+   "stem": "bˌʊləvɑɹdˈɪɹ",
+   "plural": "bˌʊləvɑɹdˈɪɹz",
+   "past": "bˌʊləvɑɹdˈɪɹd",
+   "progressive": "bˌʊləvɑɹdˈɪɹɪŋ"
+  },
+  {
+   "stem": "jusˈOniən",
+   "plural": "jusˈOniənz",
+   "past": "jusˈOniənd",
+   "progressive": "jusˈOniənɪŋ"
+  },
+  {
+   "stem": "mˈɑɹɡɹəvˌin",
+   "plural": "mˈɑɹɡɹəvˌinz",
+   "past": "mˈɑɹɡɹəvˌind",
+   "progressive": "mˈɑɹɡɹəvˌinɪŋ"
+  },
+  {
+   "stem": "snˈikbɑks",
+   "plural": "snˈikbɑksᵻz",
+   "past": "snˈikbɑkst",
+   "progressive": "snˈikbɑksɪŋ"
+  },
+  {
+   "stem": "skˈɛʤˌuld",
+   "plural": "skˈɛʤˌuldz",
+   "past": "skˈɛʤˌuldᵻd",
+   "progressive": "skˈɛʤˌuldɪŋ"
+  },
+  {
+   "stem": "dəlˌɪbəɹˈAʃən",
+   "plural": "dəlˌɪbəɹˈAʃənz",
+   "past": "dəlˌɪbəɹˈAʃənd",
+   "progressive": "dəlˌɪbəɹˈAʃənɪŋ"
+  },
+  {
+   "stem": "ɪɡzˈɔlt",
+   "plural": "ɪɡzˈɔlts",
+   "past": "ɪɡzˈɔltᵻd",
+   "progressive": "ɪɡzˈɔltɪŋ"
+  },
+  {
+   "stem": "ɪnsˈɪpiənt",
+   "plural": "ɪnsˈɪpiənts",
+   "past": "ɪnsˈɪpiəntᵻd",
+   "progressive": "ɪnsˈɪpiəntɪŋ"
+  },
+  {
+   "stem": "pˈIkə",
+   "plural": "pˈIkəz",
+   "past": "pˈIkəd",
+   "progressive": "pˈIkəɪŋ"
+  },
+  {
+   "stem": "flˈɛʤ",
+   "plural": "flˈɛʤᵻz",
+   "past": "flˈɛʤd",
+   "progressive": "flˈɛʤɪŋ"
+  },
+  {
+   "stem": "sˈidiəɹ",
+   "plural": "sˈidiəɹz",
+   "past": "sˈidiəɹd",
+   "progressive": "sˈidiəɹɪŋ"
+  },
+  {
+   "stem": "ˌʌntˈɪl",
+   "plural": "ˌʌntˈɪlz",
+   "past": "ˌʌntˈɪld",
+   "progressive": "ˌʌntˈɪlɪŋ"
+  },
+  {
+   "stem": "ˈɛð",
+   "plural": "ˈɛðz",
+   "past": "ˈɛðd",
+   "progressive": "ˈɛðɪŋ"
+  },
+  {
+   "stem": "plˈɛnəm",
+   "plural": "plˈɛnəmz",
+   "past": "plˈɛnəmd",
+   "progressive": "plˈɛnəmɪŋ"
+  },
+  {
+   "stem": "ˌɪntəlˈɛkʧəwəlˌIz",
+   "plural": "ˌɪntəlˈɛkʧəwəlˌIzᵻz",
+   "past": "ˌɪntəlˈɛkʧəwəlˌIzd",
+   "progressive": "ˌɪntəlˈɛkʧəwəlˌIzɪŋ"
+  },
+  {
+   "stem": "ˌɛktəʤˌʌnˈɛɾəkᵊli",
+   "plural": "ˌɛktəʤˌʌnˈɛɾəkᵊliz",
+   "past": "ˌɛktəʤˌʌnˈɛɾəkᵊlid",
+   "progressive": "ˌɛktəʤˌʌnˈɛɾəkᵊliɪŋ"
+  },
+  {
+   "stem": "hˈɛljən",
+   "plural": "hˈɛljənz",
+   "past": "hˈɛljənd",
+   "progressive": "hˈɛljənɪŋ"
+  },
+  {
+   "stem": "əbˈAtmənt",
+   "plural": "əbˈAtmənts",
+   "past": "əbˈAtməntᵻd",
+   "progressive": "əbˈAtməntɪŋ"
+  },
+  {
+   "stem": "nˈukliəs",
+   "plural": "nˈukliəsᵻz",
+   "past": "nˈukliəst",
+   "progressive": "nˈukliəsɪŋ"
+  },
+  {
+   "stem": "slˈʌʃ",
+   "plural": "slˈʌʃᵻz",
+   "past": "slˈʌʃt",
+   "progressive": "slˈʌʃɪŋ"
+  },
+  {
+   "stem": "kˈɛɹəʤən",
+   "plural": "kˈɛɹəʤənz",
+   "past": "kˈɛɹəʤənd",
+   "progressive": "kˈɛɹəʤənɪŋ"
+  },
+  {
+   "stem": "fˈɛlOz",
+   "plural": "fˈɛlOzᵻz",
+   "past": "fˈɛlOzd",
+   "progressive": "fˈɛlOzɪŋ"
+  },
+  {
+   "stem": "twˈɪʔn",
+   "plural": "twˈɪʔnz",
+   "past": "twˈɪʔnd",
+   "progressive": "twˈɪʔnɪŋ"
+  },
+  {
+   "stem": "ɹˌAdiəlˈɛɹiə",
+   "plural": "ɹˌAdiəlˈɛɹiəz",
+   "past": "ɹˌAdiəlˈɛɹiəd",
+   "progressive": "ɹˌAdiəlˈɛɹiəɪŋ"
+  },
+  {
+   "stem": "slˈIɡO",
+   "plural": "slˈIɡOz",
+   "past": "slˈIɡOd",
+   "progressive": "slˈIɡOɪŋ"
+  },
+  {
+   "stem": "θɛsˈAliən",
+   "plural": "θɛsˈAliənz",
+   "past": "θɛsˈAliənd",
+   "progressive": "θɛsˈAliənɪŋ"
+  },
+  {
+   "stem": "ɡˈædɪd",
+   "plural": "ɡˈædɪdz",
+   "past": "ɡˈædɪdᵻd",
+   "progressive": "ɡˈædɪdɪŋ"
+  },
+  {
+   "stem": "əkwˈɪpəɹ",
+   "plural": "əkwˈɪpəɹz",
+   "past": "əkwˈɪpəɹd",
+   "progressive": "əkwˈɪpəɹɪŋ"
+  },
+  {
+   "stem": "IlˈʊɹəfˌIl",
+   "plural": "IlˈʊɹəfˌIlz",
+   "past": "IlˈʊɹəfˌIld",
+   "progressive": "IlˈʊɹəfˌIlɪŋ"
+  },
+  {
+   "stem": "əbˈændᵊnd",
+   "plural": "əbˈændᵊndz",
+   "past": "əbˈændᵊndᵻd",
+   "progressive": "əbˈændᵊndɪŋ"
+  },
+  {
+   "stem": "spˈɑt",
+   "plural": "spˈɑts",
+   "past": "spˈɑɾᵻd",
+   "progressive": "spˈɑɾɪŋ"
+  },
+  {
+   "stem": "ˈæbsəlˌutnəs",
+   "plural": "ˈæbsəlˌutnəsᵻz",
+   "past": "ˈæbsəlˌutnəst",
+   "progressive": "ˈæbsəlˌutnəsɪŋ"
+  },
+  {
+   "stem": "tˈɑksəfˌI",
+   "plural": "tˈɑksəfˌIz",
+   "past": "tˈɑksəfˌId",
+   "progressive": "tˈɑksəfˌIɪŋ"
+  },
+  {
+   "stem": "ˈæptətˌud",
+   "plural": "ˈæptətˌudz",
+   "past": "ˈæptətˌudᵻd",
+   "progressive": "ˈæptətˌudɪŋ"
+  },
+  {
+   "stem": "ɡˈɑnfələn",
+   "plural": "ɡˈɑnfələnz",
+   "past": "ɡˈɑnfələnd",
+   "progressive": "ɡˈɑnfələnɪŋ"
+  },
+  {
+   "stem": "hˈIpəɹkjˌub",
+   "plural": "hˈIpəɹkjˌubz",
+   "past": "hˈIpəɹkjˌubd",
+   "progressive": "hˈIpəɹkjˌubɪŋ"
+  },
+  {
+   "stem": "fˈɜɹəwi",
+   "plural": "fˈɜɹəwiz",
+   "past": "fˈɜɹəwid",
+   "progressive": "fˈɜɹəwiɪŋ"
+  },
+  {
+   "stem": "stˈʌntᵻd",
+   "plural": "stˈʌntᵻdz",
+   "past": "stˈʌntᵻdᵻd",
+   "progressive": "stˈʌntᵻdɪŋ"
+  },
+  {
+   "stem": "pˈis",
+   "plural": "pˈisᵻz",
+   "past": "pˈist",
+   "progressive": "pˈisɪŋ"
+  },
+  {
+   "stem": "nˈæzəɹˌIt",
+   "plural": "nˈæzəɹˌIts",
+   "past": "nˈæzəɹˌIɾᵻd",
+   "progressive": "nˈæzəɹˌIɾɪŋ"
+  },
+  {
+   "stem": "fjˈuəɹ",
+   "plural": "fjˈuəɹz",
+   "past": "fjˈuəɹd",
+   "progressive": "fjˈuəɹɪŋ"
+  },
+  {
+   "stem": "ˈAɡjˌʌwɪʃ",
+   "plural": "ˈAɡjˌʌwɪʃᵻz",
+   "past": "ˈAɡjˌʌwɪʃt",
+   "progressive": "ˈAɡjˌʌwɪʃɪŋ"
+  },
+  {
+   "stem": "ˌɑksədˈɛntᵊlˌIz",
+   "plural": "ˌɑksədˈɛntᵊlˌIzᵻz",
+   "past": "ˌɑksədˈɛntᵊlˌIzd",
+   "progressive": "ˌɑksədˈɛntᵊlˌIzɪŋ"
+  },
+  {
+   "stem": "pəɹplˈɛksəɾi",
+   "plural": "pəɹplˈɛksəɾiz",
+   "past": "pəɹplˈɛksəɾid",
+   "progressive": "pəɹplˈɛksəɾiɪŋ"
+  },
+  {
+   "stem": "stɹˌAɾəwˈA",
+   "plural": "stɹˌAɾəwˈAz",
+   "past": "stɹˌAɾəwˈAd",
+   "progressive": "stɹˌAɾəwˈAɪŋ"
+  },
+  {
+   "stem": "ˌʌnsəspˈɛktɪŋli",
+   "plural": "ˌʌnsəspˈɛktɪŋliz",
+   "past": "ˌʌnsəspˈɛktɪŋlid",
+   "progressive": "ˌʌnsəspˈɛktɪŋliɪŋ"
+  },
+  {
+   "stem": "ˈɑɹsˌæt",
+   "plural": "ˈɑɹsˌæts",
+   "past": "ˈɑɹsˌæɾᵻd",
+   "progressive": "ˈɑɹsˌæɾɪŋ"
+  },
+  {
+   "stem": "kɹˈɛdəbli",
+   "plural": "kɹˈɛdəbliz",
+   "past": "kɹˈɛdəblid",
+   "progressive": "kɹˈɛdəbliɪŋ"
+  },
+  {
+   "stem": "kˌɑɹbənˈAʃən",
+   "plural": "kˌɑɹbənˈAʃənz",
+   "past": "kˌɑɹbənˈAʃənd",
+   "progressive": "kˌɑɹbənˈAʃənɪŋ"
+  },
+  {
+   "stem": "lɑskˈO",
+   "plural": "lɑskˈOz",
+   "past": "lɑskˈOd",
+   "progressive": "lɑskˈOɪŋ"
+  },
+  {
+   "stem": "splˈɪtɹˌAl",
+   "plural": "splˈɪtɹˌAlz",
+   "past": "splˈɪtɹˌAld",
+   "progressive": "splˈɪtɹˌAlɪŋ"
+  },
+  {
+   "stem": "fˈAnt",
+   "plural": "fˈAnts",
+   "past": "fˈAntᵻd",
+   "progressive": "fˈAntɪŋ"
+  },
+  {
+   "stem": "bˈɑɹtˌɛnd",
+   "plural": "bˈɑɹtˌɛndz",
+   "past": "bˈɑɹtˌɛndᵻd",
+   "progressive": "bˈɑɹtˌɛndɪŋ"
+  },
+  {
+   "stem": "sˈupspˌun",
+   "plural": "sˈupspˌunz",
+   "past": "sˈupspˌund",
+   "progressive": "sˈupspˌunɪŋ"
+  },
+  {
+   "stem": "bɑhˈIz",
+   "plural": "bɑhˈIzᵻz",
+   "past": "bɑhˈIzd",
+   "progressive": "bɑhˈIzɪŋ"
+  },
+  {
+   "stem": "ɪnslˈAvmənt",
+   "plural": "ɪnslˈAvmənts",
+   "past": "ɪnslˈAvməntᵻd",
+   "progressive": "ɪnslˈAvməntɪŋ"
+  },
+  {
+   "stem": "kˈWntəɹstɹˌIk",
+   "plural": "kˈWntəɹstɹˌIks",
+   "past": "kˈWntəɹstɹˌIkt",
+   "progressive": "kˈWntəɹstɹˌIkɪŋ"
+  },
+  {
+   "stem": "hˌIstɹˈʌŋ",
+   "plural": "hˌIstɹˈʌŋz",
+   "past": "hˌIstɹˈʌŋd",
+   "progressive": "hˌIstɹˈʌŋɪŋ"
+  },
+  {
+   "stem": "ɹˌAdiOθˌɛɹəpjˈuɾɪk",
+   "plural": "ɹˌAdiOθˌɛɹəpjˈuɾɪks",
+   "past": "ɹˌAdiOθˌɛɹəpjˈuɾɪkt",
+   "progressive": "ɹˌAdiOθˌɛɹəpjˈuɾɪkɪŋ"
+  },
+  {
+   "stem": "ɹˌiənlˈɪst",
+   "plural": "ɹˌiənlˈɪsts",
+   "past": "ɹˌiənlˈɪstᵻd",
+   "progressive": "ɹˌiənlˈɪstɪŋ"
+  },
+  {
+   "stem": "ɡˈɑdhˌɛd",
+   "plural": "ɡˈɑdhˌɛdz",
+   "past": "ɡˈɑdhˌɛdᵻd",
+   "progressive": "ɡˈɑdhˌɛdɪŋ"
+  },
+  {
+   "stem": "lˈɔləs",
+   "plural": "lˈɔləsᵻz",
+   "past": "lˈɔləst",
+   "progressive": "lˈɔləsɪŋ"
+  },
+  {
+   "stem": "sˌupəɹnˈæʧəɹəlˌɪzəm",
+   "plural": "sˌupəɹnˈæʧəɹəlˌɪzəmz",
+   "past": "sˌupəɹnˈæʧəɹəlˌɪzəmd",
+   "progressive": "sˌupəɹnˈæʧəɹəlˌɪzəmɪŋ"
+  },
+  {
+   "stem": "əpˈɪʤənəs",
+   "plural": "əpˈɪʤənəsᵻz",
+   "past": "əpˈɪʤənəst",
+   "progressive": "əpˈɪʤənəsɪŋ"
+  },
+  {
+   "stem": "mənˈɔɹkəd",
+   "plural": "mənˈɔɹkədz",
+   "past": "mənˈɔɹkədᵻd",
+   "progressive": "mənˈɔɹkədɪŋ"
+  },
+  {
+   "stem": "ˌɛnəɹʤˈɛɾəkᵊli",
+   "plural": "ˌɛnəɹʤˈɛɾəkᵊliz",
+   "past": "ˌɛnəɹʤˈɛɾəkᵊlid",
+   "progressive": "ˌɛnəɹʤˈɛɾəkᵊliɪŋ"
+  },
+  {
+   "stem": "slˈʌŋ",
+   "plural": "slˈʌŋz",
+   "past": "slˈʌŋd",
+   "progressive": "slˈʌŋɪŋ"
+  },
+  {
+   "stem": "sˈɛləbɹətˌɔɹi",
+   "plural": "sˈɛləbɹətˌɔɹiz",
+   "past": "sˈɛləbɹətˌɔɹid",
+   "progressive": "sˈɛləbɹətˌɔɹiɪŋ"
+  },
+  {
+   "stem": "swˈɪs",
+   "plural": "swˈɪsᵻz",
+   "past": "swˈɪst",
+   "progressive": "swˈɪsɪŋ"
+  },
+  {
+   "stem": "səplˈIsˌId",
+   "plural": "səplˈIsˌIdz",
+   "past": "səplˈIsˌIdᵻd",
+   "progressive": "səplˈIsˌIdɪŋ"
+  },
+  {
+   "stem": "bɹˈɑlət",
+   "plural": "bɹˈɑləts",
+   "past": "bɹˈɑləɾᵻd",
+   "progressive": "bɹˈɑləɾɪŋ"
+  },
+  {
+   "stem": "ˌʌndɪspjˈuɾədli",
+   "plural": "ˌʌndɪspjˈuɾədliz",
+   "past": "ˌʌndɪspjˈuɾədlid",
+   "progressive": "ˌʌndɪspjˈuɾədliɪŋ"
+  },
+  {
+   "stem": "ˌɪnədvˈIzəbᵊl",
+   "plural": "ˌɪnədvˈIzəbᵊlz",
+   "past": "ˌɪnədvˈIzəbᵊld",
+   "progressive": "ˌɪnədvˈIzəbᵊlɪŋ"
+  },
+  {
+   "stem": "ɛnklˈOzd",
+   "plural": "ɛnklˈOzdz",
+   "past": "ɛnklˈOzdᵻd",
+   "progressive": "ɛnklˈOzdɪŋ"
+  },
+  {
+   "stem": "pˈʌməs",
+   "plural": "pˈʌməsᵻz",
+   "past": "pˈʌməst",
+   "progressive": "pˈʌməsɪŋ"
+  },
+  {
+   "stem": "plˈæzməsfˌɪɹ",
+   "plural": "plˈæzməsfˌɪɹz",
+   "past": "plˈæzməsfˌɪɹd",
+   "progressive": "plˈæzməsfˌɪɹɪŋ"
+  },
+  {
+   "stem": "sˈɛnsətˌIzəɹ",
+   "plural": "sˈɛnsətˌIzəɹz",
+   "past": "sˈɛnsətˌIzəɹd",
+   "progressive": "sˈɛnsətˌIzəɹɪŋ"
+  },
+  {
+   "stem": "ɪlˈumənˌɪzəm",
+   "plural": "ɪlˈumənˌɪzəmz",
+   "past": "ɪlˈumənˌɪzəmd",
+   "progressive": "ɪlˈumənˌɪzəmɪŋ"
+  },
+  {
+   "stem": "kˈɑməsˌɛɹi",
+   "plural": "kˈɑməsˌɛɹiz",
+   "past": "kˈɑməsˌɛɹid",
+   "progressive": "kˈɑməsˌɛɹiɪŋ"
+  },
+  {
+   "stem": "lˌɑɾəkˈiə",
+   "plural": "lˌɑɾəkˈiəz",
+   "past": "lˌɑɾəkˈiəd",
+   "progressive": "lˌɑɾəkˈiəɪŋ"
+  },
+  {
+   "stem": "ˈæbətwˌɑɹ",
+   "plural": "ˈæbətwˌɑɹz",
+   "past": "ˈæbətwˌɑɹd",
+   "progressive": "ˈæbətwˌɑɹɪŋ"
+  },
+  {
+   "stem": "fˈɔɹəstəɹ",
+   "plural": "fˈɔɹəstəɹz",
+   "past": "fˈɔɹəstəɹd",
+   "progressive": "fˈɔɹəstəɹɪŋ"
+  },
+  {
+   "stem": "fɹˈɪkɪŋ",
+   "plural": "fɹˈɪkɪŋz",
+   "past": "fɹˈɪkɪŋd",
+   "progressive": "fɹˈɪkɪŋɪŋ"
+  },
+  {
+   "stem": "bˈOniᵻst",
+   "plural": "bˈOniᵻsts",
+   "past": "bˈOniᵻstᵻd",
+   "progressive": "bˈOniᵻstɪŋ"
+  },
+  {
+   "stem": "mˌʌltipˈɑɹɾi",
+   "plural": "mˌʌltipˈɑɹɾiz",
+   "past": "mˌʌltipˈɑɹɾid",
+   "progressive": "mˌʌltipˈɑɹɾiɪŋ"
+  },
+  {
+   "stem": "mˌæstəɹəɾˈɑɹmz",
+   "plural": "mˌæstəɹəɾˈɑɹmzᵻz",
+   "past": "mˌæstəɹəɾˈɑɹmzd",
+   "progressive": "mˌæstəɹəɾˈɑɹmzɪŋ"
+  },
+  {
+   "stem": "kOˈɑɾiz",
+   "plural": "kOˈɑɾizᵻz",
+   "past": "kOˈɑɾizd",
+   "progressive": "kOˈɑɾizɪŋ"
+  },
+  {
+   "stem": "ˈɛskəpˌAd",
+   "plural": "ˈɛskəpˌAdz",
+   "past": "ˈɛskəpˌAdᵻd",
+   "progressive": "ˈɛskəpˌAdɪŋ"
+  },
+  {
+   "stem": "ˈɪntəɡɹˌAɾᵻd",
+   "plural": "ˈɪntəɡɹˌAɾᵻdz",
+   "past": "ˈɪntəɡɹˌAɾᵻdᵻd",
+   "progressive": "ˈɪntəɡɹˌAɾᵻdɪŋ"
+  },
+  {
+   "stem": "nˈipəɹ",
+   "plural": "nˈipəɹz",
+   "past": "nˈipəɹd",
+   "progressive": "nˈipəɹɪŋ"
+  },
+  {
+   "stem": "sˈɪmbəlˌIz",
+   "plural": "sˈɪmbəlˌIzᵻz",
+   "past": "sˈɪmbəlˌIzd",
+   "progressive": "sˈɪmbəlˌIzɪŋ"
+  },
+  {
+   "stem": "slˈʌɡəʃli",
+   "plural": "slˈʌɡəʃliz",
+   "past": "slˈʌɡəʃlid",
+   "progressive": "slˈʌɡəʃliɪŋ"
+  },
+  {
+   "stem": "pˈænkˌAk",
+   "plural": "pˈænkˌAks",
+   "past": "pˈænkˌAkt",
+   "progressive": "pˈænkˌAkɪŋ"
+  },
+  {
+   "stem": "ˌɪmmˌObələzˈAʃən",
+   "plural": "ˌɪmmˌObələzˈAʃənz",
+   "past": "ˌɪmmˌObələzˈAʃənd",
+   "progressive": "ˌɪmmˌObələzˈAʃənɪŋ"
+  },
+  {
+   "stem": "ˌʌntˈOəɹdnəs",
+   "plural": "ˌʌntˈOəɹdnəsᵻz",
+   "past": "ˌʌntˈOəɹdnəst",
+   "progressive": "ˌʌntˈOəɹdnəsɪŋ"
+  },
+  {
+   "stem": "pˌɜɹmiˈAʃən",
+   "plural": "pˌɜɹmiˈAʃənz",
+   "past": "pˌɜɹmiˈAʃənd",
+   "progressive": "pˌɜɹmiˈAʃənɪŋ"
+  },
+  {
+   "stem": "ˌæntˌIbˈæktɪɹiəl",
+   "plural": "ˌæntˌIbˈæktɪɹiəlz",
+   "past": "ˌæntˌIbˈæktɪɹiəld",
+   "progressive": "ˌæntˌIbˈæktɪɹiəlɪŋ"
+  },
+  {
+   "stem": "dˈæns",
+   "plural": "dˈænsᵻz",
+   "past": "dˈænst",
+   "progressive": "dˈænsɪŋ"
+  },
+  {
+   "stem": "nˈɑdi",
+   "plural": "nˈɑdiz",
+   "past": "nˈɑdid",
+   "progressive": "nˈɑdiɪŋ"
+  },
+  {
+   "stem": "pˈɪθiəɹ",
+   "plural": "pˈɪθiəɹz",
+   "past": "pˈɪθiəɹd",
+   "progressive": "pˈɪθiəɹɪŋ"
+  },
+  {
+   "stem": "sˌɪnəɡˈɑɡəl",
+   "plural": "sˌɪnəɡˈɑɡəlz",
+   "past": "sˌɪnəɡˈɑɡəld",
+   "progressive": "sˌɪnəɡˈɑɡəlɪŋ"
+  },
+  {
+   "stem": "ɡˈun",
+   "plural": "ɡˈunz",
+   "past": "ɡˈund",
+   "progressive": "ɡˈunɪŋ"
+  },
+  {
+   "stem": "θˌiəɹˈɛɾəkᵊl",
+   "plural": "θˌiəɹˈɛɾəkᵊlz",
+   "past": "θˌiəɹˈɛɾəkᵊld",
+   "progressive": "θˌiəɹˈɛɾəkᵊlɪŋ"
+  },
+  {
+   "stem": "hˌOməsˈɛkʃəwəli",
+   "plural": "hˌOməsˈɛkʃəwəliz",
+   "past": "hˌOməsˈɛkʃəwəlid",
+   "progressive": "hˌOməsˈɛkʃəwəliɪŋ"
+  },
+  {
+   "stem": "pˈɜɹɡətˌɔɹi",
+   "plural": "pˈɜɹɡətˌɔɹiz",
+   "past": "pˈɜɹɡətˌɔɹid",
+   "progressive": "pˈɜɹɡətˌɔɹiɪŋ"
+  },
+  {
+   "stem": "swˈɜɹv",
+   "plural": "swˈɜɹvz",
+   "past": "swˈɜɹvd",
+   "progressive": "swˈɜɹvɪŋ"
+  },
+  {
+   "stem": "ɪnsˈɜɹʤənt",
+   "plural": "ɪnsˈɜɹʤənts",
+   "past": "ɪnsˈɜɹʤəntᵻd",
+   "progressive": "ɪnsˈɜɹʤəntɪŋ"
+  },
+  {
+   "stem": "bɹˌæɡədˈOʃəs",
+   "plural": "bɹˌæɡədˈOʃəsᵻz",
+   "past": "bɹˌæɡədˈOʃəst",
+   "progressive": "bɹˌæɡədˈOʃəsɪŋ"
+  },
+  {
+   "stem": "sˈɪkɪʃ",
+   "plural": "sˈɪkɪʃᵻz",
+   "past": "sˈɪkɪʃt",
+   "progressive": "sˈɪkɪʃɪŋ"
+  },
+  {
+   "stem": "dɪskˈWntᵊnəns",
+   "plural": "dɪskˈWntᵊnənsᵻz",
+   "past": "dɪskˈWntᵊnənst",
+   "progressive": "dɪskˈWntᵊnənsɪŋ"
+  },
+  {
+   "stem": "ˌændəlˈuʒiə",
+   "plural": "ˌændəlˈuʒiəz",
+   "past": "ˌændəlˈuʒiəd",
+   "progressive": "ˌændəlˈuʒiəɪŋ"
+  },
+  {
+   "stem": "swˈuʃ",
+   "plural": "swˈuʃᵻz",
+   "past": "swˈuʃt",
+   "progressive": "swˈuʃɪŋ"
+  },
+  {
+   "stem": "ˈɜɹɡ",
+   "plural": "ˈɜɹɡz",
+   "past": "ˈɜɹɡd",
+   "progressive": "ˈɜɹɡɪŋ"
+  },
+  {
+   "stem": "ˌɪməɹˈæləɾi",
+   "plural": "ˌɪməɹˈæləɾiz",
+   "past": "ˌɪməɹˈæləɾid",
+   "progressive": "ˌɪməɹˈæləɾiɪŋ"
+  },
+  {
+   "stem": "səlˌɛktˈi",
+   "plural": "səlˌɛktˈiz",
+   "past": "səlˌɛktˈid",
+   "progressive": "səlˌɛktˈiɪŋ"
+  },
+  {
+   "stem": "ˈɑsiz",
+   "plural": "ˈɑsizᵻz",
+   "past": "ˈɑsizd",
+   "progressive": "ˈɑsizɪŋ"
+  },
+  {
+   "stem": "slˈæbəɹ",
+   "plural": "slˈæbəɹz",
+   "past": "slˈæbəɹd",
+   "progressive": "slˈæbəɹɪŋ"
+  },
+  {
+   "stem": "ɹˌisəbskɹˈIb",
+   "plural": "ɹˌisəbskɹˈIbz",
+   "past": "ɹˌisəbskɹˈIbd",
+   "progressive": "ɹˌisəbskɹˈIbɪŋ"
+  },
+  {
+   "stem": "stɹˈæɾəpˌɔz",
+   "plural": "stɹˈæɾəpˌɔzᵻz",
+   "past": "stɹˈæɾəpˌɔzd",
+   "progressive": "stɹˈæɾəpˌɔzɪŋ"
+  },
+  {
+   "stem": "pˌɑɹsəmˈOniəsli",
+   "plural": "pˌɑɹsəmˈOniəsliz",
+   "past": "pˌɑɹsəmˈOniəslid",
+   "progressive": "pˌɑɹsəmˈOniəsliɪŋ"
+  },
+  {
+   "stem": "səbʤˈʌŋktɪv",
+   "plural": "səbʤˈʌŋktɪvz",
+   "past": "səbʤˈʌŋktɪvd",
+   "progressive": "səbʤˈʌŋktɪvɪŋ"
+  },
+  {
+   "stem": "dəsˈIdəbəl",
+   "plural": "dəsˈIdəbəlz",
+   "past": "dəsˈIdəbəld",
+   "progressive": "dəsˈIdəbəlɪŋ"
+  },
+  {
+   "stem": "ɑkənˈɑʔn",
+   "plural": "ɑkənˈɑʔnz",
+   "past": "ɑkənˈɑʔnd",
+   "progressive": "ɑkənˈɑʔnɪŋ"
+  },
+  {
+   "stem": "səkɹˈOpiə",
+   "plural": "səkɹˈOpiəz",
+   "past": "səkɹˈOpiəd",
+   "progressive": "səkɹˈOpiəɪŋ"
+  },
+  {
+   "stem": "ʃəɡɹˈɪn",
+   "plural": "ʃəɡɹˈɪnz",
+   "past": "ʃəɡɹˈɪnd",
+   "progressive": "ʃəɡɹˈɪnɪŋ"
+  },
+  {
+   "stem": "nˈuzflˌæʃ",
+   "plural": "nˈuzflˌæʃᵻz",
+   "past": "nˈuzflˌæʃt",
+   "progressive": "nˈuzflˌæʃɪŋ"
+  },
+  {
+   "stem": "lˈædəɹ",
+   "plural": "lˈædəɹz",
+   "past": "lˈædəɹd",
+   "progressive": "lˈædəɹɪŋ"
+  },
+  {
+   "stem": "ɹəplˈAs",
+   "plural": "ɹəplˈAsᵻz",
+   "past": "ɹəplˈAst",
+   "progressive": "ɹəplˈAsɪŋ"
+  },
+  {
+   "stem": "hˈiməsˌil",
+   "plural": "hˈiməsˌilz",
+   "past": "hˈiməsˌild",
+   "progressive": "hˈiməsˌilɪŋ"
+  },
+  {
+   "stem": "lˈæpstɹAk",
+   "plural": "lˈæpstɹAks",
+   "past": "lˈæpstɹAkt",
+   "progressive": "lˈæpstɹAkɪŋ"
+  },
+  {
+   "stem": "sˌɪɹdˈɑɹjə",
+   "plural": "sˌɪɹdˈɑɹjəz",
+   "past": "sˌɪɹdˈɑɹjəd",
+   "progressive": "sˌɪɹdˈɑɹjəɪŋ"
+  },
+  {
+   "stem": "skˈʌlpʧəɹəl",
+   "plural": "skˈʌlpʧəɹəlz",
+   "past": "skˈʌlpʧəɹəld",
+   "progressive": "skˈʌlpʧəɹəlɪŋ"
+  },
+  {
+   "stem": "ˌʌnsnˈæp",
+   "plural": "ˌʌnsnˈæps",
+   "past": "ˌʌnsnˈæpt",
+   "progressive": "ˌʌnsnˈæpɪŋ"
+  },
+  {
+   "stem": "tɹˈɪməɹəs",
+   "plural": "tɹˈɪməɹəsᵻz",
+   "past": "tɹˈɪməɹəst",
+   "progressive": "tɹˈɪməɹəsɪŋ"
+  },
+  {
+   "stem": "əkɹˈɔstɪk",
+   "plural": "əkɹˈɔstɪks",
+   "past": "əkɹˈɔstɪkt",
+   "progressive": "əkɹˈɔstɪkɪŋ"
+  },
+  {
+   "stem": "tɹˈæpɪst",
+   "plural": "tɹˈæpɪsts",
+   "past": "tɹˈæpɪstᵻd",
+   "progressive": "tɹˈæpɪstɪŋ"
+  },
+  {
+   "stem": "ɡˈæftə",
+   "plural": "ɡˈæftəz",
+   "past": "ɡˈæftəd",
+   "progressive": "ɡˈæftəɪŋ"
+  },
+  {
+   "stem": "ˌʌnhˈWzəld",
+   "plural": "ˌʌnhˈWzəldz",
+   "past": "ˌʌnhˈWzəldᵻd",
+   "progressive": "ˌʌnhˈWzəldɪŋ"
+  },
+  {
+   "stem": "sˈOlstəɹ",
+   "plural": "sˈOlstəɹz",
+   "past": "sˈOlstəɹd",
+   "progressive": "sˈOlstəɹɪŋ"
+  },
+  {
+   "stem": "fˈOksinɪs",
+   "plural": "fˈOksinɪsᵻz",
+   "past": "fˈOksinɪst",
+   "progressive": "fˈOksinɪsɪŋ"
+  },
+  {
+   "stem": "kəlˈæbəɹəɾɪv",
+   "plural": "kəlˈæbəɹəɾɪvz",
+   "past": "kəlˈæbəɹəɾɪvd",
+   "progressive": "kəlˈæbəɹəɾɪvɪŋ"
+  },
+  {
+   "stem": "fˈAətᵊn",
+   "plural": "fˈAətᵊnz",
+   "past": "fˈAətᵊnd",
+   "progressive": "fˈAətᵊnɪŋ"
+  },
+  {
+   "stem": "spˈIni",
+   "plural": "spˈIniz",
+   "past": "spˈInid",
+   "progressive": "spˈIniɪŋ"
+  },
+  {
+   "stem": "əbzˈɜɹvətˌɔɹi",
+   "plural": "əbzˈɜɹvətˌɔɹiz",
+   "past": "əbzˈɜɹvətˌɔɹid",
+   "progressive": "əbzˈɜɹvətˌɔɹiɪŋ"
+  },
+  {
+   "stem": "ˌæmniOsˌɛntˈisiz",
+   "plural": "ˌæmniOsˌɛntˈisizᵻz",
+   "past": "ˌæmniOsˌɛntˈisizd",
+   "progressive": "ˌæmniOsˌɛntˈisizɪŋ"
+  },
+  {
+   "stem": "kˈɪlɪŋ",
+   "plural": "kˈɪlɪŋz",
+   "past": "kˈɪlɪŋd",
+   "progressive": "kˈɪlɪŋɪŋ"
+  },
+  {
+   "stem": "æntˈiɡwə",
+   "plural": "æntˈiɡwəz",
+   "past": "æntˈiɡwəd",
+   "progressive": "æntˈiɡwəɪŋ"
+  },
+  {
+   "stem": "ʤˈʌʤʃˌɪp",
+   "plural": "ʤˈʌʤʃˌɪps",
+   "past": "ʤˈʌʤʃˌɪpt",
+   "progressive": "ʤˈʌʤʃˌɪpɪŋ"
+  },
+  {
+   "stem": "vˌApəɹˈɛɾO",
+   "plural": "vˌApəɹˈɛɾOz",
+   "past": "vˌApəɹˈɛɾOd",
+   "progressive": "vˌApəɹˈɛɾOɪŋ"
+  },
+  {
+   "stem": "ˌOvəɹkənsˈʌmpʃən",
+   "plural": "ˌOvəɹkənsˈʌmpʃənz",
+   "past": "ˌOvəɹkənsˈʌmpʃənd",
+   "progressive": "ˌOvəɹkənsˈʌmpʃənɪŋ"
+  },
+  {
+   "stem": "ˈikˌæt",
+   "plural": "ˈikˌæts",
+   "past": "ˈikˌæɾᵻd",
+   "progressive": "ˈikˌæɾɪŋ"
+  },
+  {
+   "stem": "wˈɜɹlˌɪtsəɹ",
+   "plural": "wˈɜɹlˌɪtsəɹz",
+   "past": "wˈɜɹlˌɪtsəɹd",
+   "progressive": "wˈɜɹlˌɪtsəɹɪŋ"
+  },
+  {
+   "stem": "pˈɛt",
+   "plural": "pˈɛts",
+   "past": "pˈɛɾᵻd",
+   "progressive": "pˈɛɾɪŋ"
+  },
+  {
+   "stem": "dˈɔɡ",
+   "plural": "dˈɔɡz",
+   "past": "dˈɔɡd",
+   "progressive": "dˈɔɡɪŋ"
+  },
+  {
+   "stem": "bˈʌs",
+   "plural": "bˈʌsᵻz",
+   "past": "bˈʌst",
+   "progressive": "bˈʌsɪŋ"
+  },
+  {
+   "stem": "ʧˈɜɹʧ",
+   "plural": "ʧˈɜɹʧᵻz",
+   "past": "ʧˈɜɹʧt",
+   "progressive": "ʧˈɜɹʧɪŋ"
+  },
+  {
+   "stem": "wˈAt",
+   "plural": "wˈAts",
+   "past": "wˈAɾᵻd",
+   "progressive": "wˈAɾɪŋ"
+  },
+  {
+   "stem": "nˈid",
+   "plural": "nˈidz",
+   "past": "nˈidᵻd",
+   "progressive": "nˈidɪŋ"
+  },
+  {
+   "stem": "mˈAk",
+   "plural": "mˈAks",
+   "past": "mˈAkt",
+   "progressive": "mˈAkɪŋ"
+  },
+  {
+   "stem": "ɹˈʌn",
+   "plural": "ɹˈʌnz",
+   "past": "ɹˈʌnd",
+   "progressive": "ɹˈʌnɪŋ"
+  },
+  {
+   "stem": "ˈʌ",
+   "plural": "ˈʌz",
+   "past": "ˈʌd",
+   "progressive": "ˈʌɪŋ"
+  }
+ ]
+}

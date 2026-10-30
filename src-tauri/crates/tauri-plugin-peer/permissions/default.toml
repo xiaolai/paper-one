@@ -1,0 +1,76 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = """
+The commands a Paper webview needs from the peer plugin: the endpoint's status,
+the device's role, the storage root; the
+paired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);
+sessions (ready, connect, send, recv, close) and blob transfers (fetch, hash);
+and the person identity (status, ensure, phrase, restore, forget, delegate) —
+WI-22.B1, whose root key never leaves the keychain except as the twelve words a
+reader asked to see.
+Every path the plugin touches is validated to lie inside the data root, and
+every session is accepted only from a persisted peer.
+
+And public sharing (phase 25): what this machine offers by content hash, the
+two independent switches per book (its bytes, and public annotations about it),
+publishing one annotation record, and asking who else serves a hash. Offering
+anything is PUBLICATION into a global index and cannot be undone; withdrawing
+stops this machine serving and does not un-tell. Default off, per book, per
+service, and asked again on every request.
+
+And the voice (phase 26): the key a reader publishes to strangers under, its
+durable sequence, rotation with the old key retained so what it published can
+still be withdrawn, and signing. The signing command is confined to
+`paper.public.<version>.envelope` bytes exactly as `peer_page_sign` is confined
+to circle pages, so neither key can be made to sign the other's.
+"""
+permissions = [
+    "allow-peer-status",
+    "allow-peer-local-role",
+    "allow-peer-set-local-role",
+    "allow-paper-data-root",
+    "allow-peer-list-peers",
+    "allow-peer-forget-peer",
+    "allow-peer-set-grants",
+    "allow-peer-has-grant",
+    "allow-peer-pair-begin",
+    "allow-peer-pair-cancel",
+    "allow-peer-pair-confirm",
+    "allow-peer-pair-from-uri",
+    "allow-peer-ready",
+    "allow-peer-connect",
+    "allow-peer-send",
+    "allow-peer-session-recv",
+    "allow-peer-close",
+    "allow-peer-blob-fetch",
+    "allow-peer-hash-file",
+    "allow-peer-person-status",
+    "allow-peer-person-ensure",
+    "allow-peer-person-phrase",
+    "allow-peer-person-restore",
+    "allow-peer-person-forget",
+    "allow-peer-person-delegate",
+    "allow-peer-circle-people",
+    "allow-peer-circle-introduce",
+    "allow-peer-circle-mine",
+    "allow-peer-circle-roster",
+    "allow-peer-page-sign",
+    "allow-peer-circle-remember",
+    "allow-peer-circle-revoke",
+    "allow-peer-circle-forget",
+    "allow-peer-share-id",
+    "allow-peer-share-offered",
+    "allow-peer-share-offer-bytes",
+    "allow-peer-share-offer-notes",
+    "allow-peer-share-withdraw",
+    "allow-peer-share-publish-note",
+    "allow-peer-share-resolve",
+    "allow-peer-share-fetch",
+    "allow-peer-share-fetch-notes",
+    "allow-peer-voice-status",
+    "allow-peer-voice-next-seq",
+    "allow-peer-voice-sign",
+    "allow-peer-voice-rotate",
+    "allow-peer-voice-sweep",
+]

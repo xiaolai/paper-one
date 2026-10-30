@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-has-grant"
+description = "Enables the peer_has_grant command without any pre-configured scope."
+commands.allow = ["peer_has_grant"]
+
+[[permission]]
+identifier = "deny-peer-has-grant"
+description = "Denies the peer_has_grant command without any pre-configured scope."
+commands.deny = ["peer_has_grant"]

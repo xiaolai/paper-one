@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-share-offer-bytes"
+description = "Enables the peer_share_offer_bytes command without any pre-configured scope."
+commands.allow = ["peer_share_offer_bytes"]
+
+[[permission]]
+identifier = "deny-peer-share-offer-bytes"
+description = "Denies the peer_share_offer_bytes command without any pre-configured scope."
+commands.deny = ["peer_share_offer_bytes"]

@@ -1,0 +1,69 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+
+    "dialog:allow-open",
+    "dialog:allow-save",
+
+    "peer:default",
+
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "fs:allow-read-file",
+    "fs:allow-read-dir",
+    "fs:allow-exists",
+
+    {
+      "identifier": "fs:allow-open",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
+    "fs:allow-seek",
+    "fs:allow-read",
+    "core:resources:allow-close",
+
+    {
+      "identifier": "fs:allow-stat",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
+
+    {
+      "identifier": "fs:allow-write-file",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
+    {
+      "identifier": "fs:allow-remove",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
+    {
+      "identifier": "fs:allow-rename",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
+    {
+      "identifier": "fs:allow-mkdir",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
+
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        {
+          "path": "$APPDATA"
+        },
+        {
+          "path": "$APPDATA/**"
+        }
+      ]
+    }
+  ]
+}

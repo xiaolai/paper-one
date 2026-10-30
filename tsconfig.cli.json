@@ -1,0 +1,21 @@
+{
+  // The CLI: `src/cli/**` — `paper`, the command table derived from the
+  // service table, and the two callers it runs commands through (phase 11,
+  // WI-11.4 and WI-11.6). Node types, like the hosts project it builds on.
+  //
+  // It references the hosts project because the in-process caller builds
+  // `KernelServices` through `src/hosts/node`; the empty `files` beside the
+  // `include` follows tsconfig.capabilities.json, so a tree with the
+  // directory removed is not TS18003.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src/cli",
+    "outDir": ".types/cli",
+    "tsBuildInfoFile": ".types/cli.tsbuildinfo",
+    "types": ["node"]
+  },
+  "files": [],
+  "include": ["src/cli/**/*"],
+  "exclude": ["src/cli/**/*.test.ts", "src/cli/**/*.test.tsx"],
+  "references": [{ "path": "./tsconfig.kernel.json" }, { "path": "./tsconfig.hosts.json" }, { "path": "./tsconfig.capabilities.json" }]
+}

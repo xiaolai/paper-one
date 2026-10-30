@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-share-fetch"
+description = "Enables the peer_share_fetch command without any pre-configured scope."
+commands.allow = ["peer_share_fetch"]
+
+[[permission]]
+identifier = "deny-peer-share-fetch"
+description = "Denies the peer_share_fetch command without any pre-configured scope."
+commands.deny = ["peer_share_fetch"]

@@ -1,0 +1,93 @@
+{
+  "$schema": "./capabilities.manifest.schema.json",
+  "capabilities": [
+    {
+      "id": "peer",
+      "requires": [],
+      "ts": "peer",
+      "platforms": [
+        "desktop",
+        "ios",
+        "android"
+      ],
+      "crate": "tauri-plugin-peer",
+      "plugin": "peer",
+      "permissions": [
+        "peer:default"
+      ]
+    },
+    {
+      "id": "sync",
+      "requires": [
+        "peer"
+      ],
+      "ts": "sync",
+      "platforms": [
+        "desktop",
+        "ios",
+        "android"
+      ]
+    },
+    {
+      "id": "circle",
+      "requires": [
+        "peer"
+      ],
+      "ts": "circle",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "public",
+      "requires": [
+        "peer"
+      ],
+      "ts": "public",
+      "platforms": [
+        "desktop",
+        "ios",
+        "android"
+      ]
+    },
+    {
+      "id": "voices",
+      "requires": [],
+      "ts": "voices",
+      "platforms": [
+        "desktop"
+      ],
+      "crate": "tauri-plugin-voices",
+      "plugin": "voices",
+      "permissions": [
+        "voices:default"
+      ]
+    },
+    {
+      "id": "passages",
+      "requires": [],
+      "ts": "passages",
+      "platforms": [
+        "desktop"
+      ],
+      "crate": "tauri-plugin-passages",
+      "plugin": "passages",
+      "permissions": [
+        "passages:default"
+      ]
+    },
+    {
+      "id": "webhost",
+      "requires": [],
+      "ts": "webhost",
+      "platforms": [
+        "desktop"
+      ],
+      "crate": "tauri-plugin-webhost",
+      "plugin": "webhost",
+      "permissions": [
+        "webhost:default"
+      ]
+    }
+  ]
+}

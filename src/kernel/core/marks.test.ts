@@ -1,0 +1,1180 @@
+import { describe, expect, it } from 'vitest'
+import {
+  MARK_STYLES,
+  READER_STYLES,
+  BOOKMARK_TEXT_MAX,
+  MAX_MARK_TEXT,
+  annotationsIn,
+  bookIdFor,
+  bookmarkFrom,
+  bookmarksIn,
+  boundedMark,
+  openingLine,
+  compareCfi,
+  compareMarks,
+  contentId,
+  isPlaced,
+  placedIn,
+  unplacedIn,
+  identityParts,
+  liveMarks,
+  marginMarks,
+  mergeMarks,
+  parseMarks,
+  placeMark,
+  removeMark,
+  sameClass,
+  updateNote,
+  upsertMark,
+  type Annotation,
+  type Mark,
+  validMarks,
+  readStoredMarks,
+  checkMarkIdentity,
+  MAX_MARK_NOTE,
+} from './marks'
+import { hlcOf } from './hlc'
+import { resolvedCfiForTesting } from './resolvedCfi.testkit'
+
+function mark(over: Partial<Mark> = {}): Mark {
+  return {
+    id: 'm1',
+    bookId: 'book-a',
+    cfi: 'epubcfi(/6/4!/4/2)',
+    sectionIndex: 0,
+    text: 'Call me Ishmael',
+    prefix: '',
+    suffix: '',
+    note: '',
+    kind: 'highlight',
+    tint: 'yellow',
+    style: 'fill',
+    chapter: 'Ch. 1',
+    createdAt: 1000,
+    ...over,
+  }
+}
+
+/**
+ * The same fixture, typed as the class it is.
+ *
+ * `marginMarks` takes `readonly Annotation[]` now — the column is an annotation
+ * surface and its signature says so — and `mark()` answers `Mark`, which is the
+ * wider type. This narrows without a cast by deciding the kind in an expression
+ * the compiler can follow.
+ */
+function annotation(over: Partial<Annotation> = {}): Annotation {
+  /* `Partial<Annotation>`, so a fixture cannot ask for `kind: 'bookmark'` here
+     and silently get a highlight — a test whose meaning changed without its
+     author noticing. */
+  return { ...mark(over), kind: over.kind ?? 'highlight' }
+}
+
+/**
+ * Stands in for a file too large to allocate — `identityParts` reads only `size`
+ * and `slice`, so this exercises the real branch without a 500MB buffer.
+ * Slices are returned as plain ranges so the test can read back WHERE it looked.
+ */
+interface Probe {
+  readonly start: number
+  readonly end: number
+}
+function fakeBlob(size: number) {
+  const blob = {
+    size,
+    slice: (start: number, end?: number): Probe => ({ start, end: end ?? size }),
+  }
+  return blob as unknown as Blob
+}
+
+describe('bookIdFor', () => {
+  /* A URL is READ rather than used as its address. It used to be trusted as-is,
+   * which gave the same bytes two identities depending on how they were opened,
+   * so marks made from the picker did not exist when the book was opened from
+   * its URL. */
+  it('identifies a URL by its content, not by its address', async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4])
+    const fetched: string[] = []
+    const original = globalThis.fetch
+    globalThis.fetch = ((url: string) => {
+      fetched.push(url)
+      return Promise.resolve(new Response(bytes))
+    }) as typeof fetch
+
+    try {
+      const fromUrl = await bookIdFor('https://example.com/moby.epub')
+      const fromFile = await bookIdFor(new File([bytes], 'moby.epub'))
+      expect(fetched).toEqual(['https://example.com/moby.epub'])
+      expect(fromUrl).toBe(fromFile)
+      // And the address is nowhere in the identity.
+      expect(fromUrl).not.toContain('example.com')
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  it('reports a URL it cannot read rather than inventing an identity for it', async () => {
+    const original = globalThis.fetch
+    globalThis.fetch = (() =>
+      Promise.resolve(new Response('', { status: 404 }))) as typeof fetch
+    try {
+      await expect(bookIdFor('https://example.com/gone.epub')).rejects.toThrow('404')
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  it('identifies a picked file by content, so re-picking it finds its marks', async () => {
+    const first = new File(['abcd'], 'moby.epub')
+    const second = new File(['abcd'], 'moby.epub')
+    // A different File object for the same book on disk — the case that makes
+    // object identity useless as a key.
+    expect(await bookIdFor(first)).toBe(await bookIdFor(second))
+  })
+
+  it('follows the book rather than the file name', async () => {
+    // Renamed, moved, re-downloaded: same book, same marks.
+    expect(await bookIdFor(new File(['abcd'], 'moby.epub'))).toBe(
+      await bookIdFor(new File(['abcd'], 'moby-dick (1).epub')),
+    )
+  })
+
+  it('separates different books', async () => {
+    expect(await bookIdFor(new File(['a'], 'a.epub'))).not.toBe(
+      await bookIdFor(new File(['b'], 'b.epub')),
+    )
+  })
+
+  it('separates same-sized books with the same name', async () => {
+    // The collision the old name-and-size identity had no way to see: one
+    // book's highlights, notes and cards appearing inside another.
+    expect(await bookIdFor(new File(['aaaa'], 'book.pdf'))).not.toBe(
+      await bookIdFor(new File(['bbbb'], 'book.pdf')),
+    )
+  })
+
+  /* The collision that was REPRODUCED, not imagined. Identity used to be the
+   * size plus the first and last 64KB, which is a statement about the ends of a
+   * file and says nothing about the middle. Both of these hashed to
+   * `file:97055b281d7b0385e0297135aece6323`, so one book's entire annotation
+   * history belonged to the other. */
+  it('separates books that differ only in the middle', async () => {
+    const size = 300 * 1024
+    const a = new Uint8Array(size).fill(7)
+    const b = new Uint8Array(size).fill(7)
+    b.fill(42, 150 * 1024, 151 * 1024) // one kilobyte, mid-file
+
+    expect(a.length).toBe(b.length)
+    // Same first and last 64KB — the entire basis of the old identity.
+    expect(a.slice(0, 64 * 1024)).toEqual(b.slice(0, 64 * 1024))
+    expect(a.slice(size - 64 * 1024)).toEqual(b.slice(size - 64 * 1024))
+
+    expect(await bookIdFor(new File([a], 'a.epub'))).not.toBe(
+      await bookIdFor(new File([b], 'b.epub')),
+    )
+  })
+
+  it('hashes a book of ordinary size whole, rather than sampling it', () => {
+    // 10MB is a large EPUB and a small PDF; both must get exact identity.
+    const blob = fakeBlob(10 * 1024 * 1024)
+    const parts = identityParts(blob)
+    expect(parts).toHaveLength(2) // the size prefix, then the blob itself
+    expect(parts[1]).toBe(blob) // not a slice of it
+  })
+
+  /* Above the limit identity is approximate, and this pins WHAT it samples so
+   * that "we sample the interior" cannot quietly become "we sample the ends"
+   * again. It does not — and cannot — assert that an arbitrary change is
+   * caught: gaps between probes are the trade, and are documented as such. */
+  it('probes the interior of a book too large to hash whole', () => {
+    const size = 500 * 1024 * 1024
+    const parts = identityParts(fakeBlob(size))
+    const slices = parts.slice(1) as unknown as Probe[]
+
+    expect(slices.length).toBeGreaterThan(2)
+    // Both ends, as before.
+    expect(slices[0]?.start).toBe(0)
+    expect(slices.at(-1)?.end).toBe(size)
+    // And the middle, which is what the old scheme never looked at.
+    const interior = slices.filter((s) => s.start > 0 && s.end < size)
+    expect(interior.length).toBeGreaterThanOrEqual(8)
+    expect(interior.some((s) => s.start > size * 0.4 && s.start < size * 0.6)).toBe(true)
+  })
+
+  /**
+   * ⚠️ **TWO DIFFERENT FILES, ONE ID — MEASURED, NOT REASONED ABOUT** (WI-21.4).
+   *
+   * The test above pins WHERE the sampling looks and says plainly that it
+   * "does not — and cannot — assert that an arbitrary change is caught". This
+   * one asserts the other half: that a change landing in a gap is genuinely
+   * invisible, on real blobs, through the real `contentId`.
+   *
+   * **It is correct-by-design behaviour and it exists so that the "Exact" label
+   * cannot be re-asserted by someone reading the key table too quickly.** The
+   * phase-21 design's own key table said `file:<bookId>` was exact, and it is
+   * not: above 64 MiB it is sampled, and a `file:` match was very nearly
+   * allowed to authorise painting a foreign CFI without checking the text.
+   * A comment can be skimmed past; a failing test cannot.
+   *
+   * Built from repeats of one 64 KiB chunk so only that chunk is ever held in
+   * JavaScript memory — the blobs are large, the working set is not.
+   */
+  it('gives two different 65 MiB files the same id when they differ only in a gap', async () => {
+    const CHUNK = 64 * 1024
+    const chunks = Math.ceil((65 * 1024 * 1024) / CHUNK)
+    const ordinary = new Uint8Array(CHUNK).fill(0x41)
+    const different = new Uint8Array(CHUNK).fill(0x42)
+    /* Chunk 15, at byte 983 040 — after the leading 64 KiB window and well
+       before the first interior probe, which for a blob this size lands at
+       ~4 009 261. Nothing samples it. */
+    const inAGap = 15
+    const build = (odd: number | null) =>
+      new Blob(Array.from({ length: chunks }, (_, at) => (at === odd ? different : ordinary)))
+
+    const a = build(null)
+    const b = build(inAGap)
+    expect(a.size).toBe(b.size)
+    expect(a.size).toBeGreaterThan(64 * 1024 * 1024)
+    /* The files really are different — asserted, because a test that compared
+       two identical blobs would pass while proving nothing at all. */
+    expect(new Uint8Array(await a.slice(inAGap * CHUNK, inAGap * CHUNK + 1).arrayBuffer())[0]).not.toBe(
+      new Uint8Array(await b.slice(inAGap * CHUNK, inAGap * CHUNK + 1).arrayBuffer())[0],
+    )
+
+    expect(await contentId(a)).toBe(await contentId(b))
+
+    /* AND THE INSTRUMENT IS PROVED TO WORK: the same difference inside the
+       leading window DOES change the id. Without this, a `contentId` that
+       ignored its input entirely would pass the assertion above. */
+    expect(await contentId(build(0))).not.toBe(await contentId(a))
+  })
+})
+
+describe('parseMarks and the context fields', () => {
+  /* Every mark anyone has already made predates these fields. Dropping such a
+   * row would lose a reader's own words over a field that is, by design, not
+   * read by anything yet — so absent must mean empty, not invalid. */
+  it('keeps a mark stored before context existed', () => {
+    const old = { ...mark(), prefix: undefined, suffix: undefined }
+    delete (old as Record<string, unknown>)['prefix']
+    delete (old as Record<string, unknown>)['suffix']
+
+    const parsed = parseMarks(JSON.stringify([old]))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.prefix).toBe('')
+    expect(parsed[0]?.suffix).toBe('')
+  })
+
+  it('normalises a malformed context rather than dropping the mark', () => {
+    for (const bad of [42, null, {}, ['x'], true]) {
+      const parsed = parseMarks(JSON.stringify([{ ...mark(), prefix: bad, suffix: bad }]))
+      expect(parsed, `prefix/suffix: ${JSON.stringify(bad)}`).toHaveLength(1)
+      expect(parsed[0]?.prefix).toBe('')
+    }
+  })
+
+  it('reads back a stored context unchanged', () => {
+    const parsed = parseMarks(JSON.stringify([mark({ prefix: 'Call me ', suffix: '. Some' })]))
+    expect(parsed[0]?.prefix).toBe('Call me ')
+    expect(parsed[0]?.suffix).toBe('. Some')
+  })
+
+  /* THE SAME BOUND `text` AND `note` ARE CUT AT, on the two fields beside them.
+     `book.mark.add` refuses a prefix past `MAX_MARK_TEXT`, but a hand-edited
+     file and a peer's merge do not pass the table — and a mark carrying a
+     chapter in `prefix` made every later answer that included it too large for
+     the transport. Cut, not dropped: the reader's highlight survives. */
+  it('cuts an over-long context at the bound the service table refuses at', () => {
+    const long = 'x'.repeat(MAX_MARK_TEXT + 500)
+    const parsed = parseMarks(JSON.stringify([mark({ prefix: long, suffix: long })]))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.prefix).toHaveLength(MAX_MARK_TEXT)
+    expect(parsed[0]?.suffix).toHaveLength(MAX_MARK_TEXT)
+  })
+})
+
+describe('compareCfi', () => {
+  /* Vectors from foliate-js's own `tests/epubcfi-tests.js` (MIT, John
+   * Factotum). They are here because a hand-rolled comparator passed five of
+   * them and failed two — both the ones carrying ASSERTIONS, which is what
+   * `view.getCFI` emits for any element with an id, so the failure was in
+   * ordinary books rather than exotic ones. Kept as a regression guard against
+   * anyone reimplementing this again. */
+  const cases: readonly [string, string, number][] = [
+    ['/6/4!/10', '/6/4!/10', 0],
+    ['/6/4!/2/3:0', '/6/4!/2', 1],
+    ['/6/4!/2/4/6/8/10/3:0', '/6/4!/4', -1],
+    ['/6/4[chap0^]!/1ref^^]!/4[body01^^]/10[para^]^,05^^]', '/6/4!/4/10', 0],
+    [
+      '/6/4[chap0^]!/1ref^^]!/4[body01^^],/10[para^]^,05^^],/15:10[foo^]]',
+      '/6/4!/4/12',
+      -1,
+    ],
+    ['/6/4', '/6/4!/2', -1],
+    ['/6/4!/2', '/6/4!/2!/2', -1],
+  ]
+
+  it('orders CFIs by document position, assertions and all', () => {
+    for (const [a, b, expected] of cases) {
+      expect(Math.sign(compareCfi(a, b))).toBe(Math.sign(expected))
+    }
+  })
+
+  it('never throws on an anchor that will not parse', () => {
+    /* Marks come out of storage, which is a trust boundary: one bad row must
+     * not take the whole Marginalia list down. Asserting "does not throw, returns a
+     * number" rather than a specific order, because where a malformed CFI sorts
+     * is foliate's business and not a promise Paper should pin. */
+    for (const bad of ['not a cfi', '', 'epubcfi(', 'epubcfi(/6/4', ' ']) {
+      expect(() => compareCfi(bad, 'epubcfi(/6/4!/2)')).not.toThrow()
+      expect(Number.isFinite(compareCfi(bad, 'epubcfi(/6/4!/2)'))).toBe(true)
+    }
+  })
+})
+
+describe('compareMarks', () => {
+  it('orders by document position, comparing numbers as numbers', () => {
+    /* Lexicographic order is wrong exactly where a book gets long: it walks
+     * digit by digit, so chapter 10 sorts between chapter 1 and chapter 2 and
+     * the Marginalia list stops reading in book order. */
+    const marks = [
+      mark({ id: 'ten', cfi: 'epubcfi(/6/10!/4/2)' }),
+      mark({ id: 'four', cfi: 'epubcfi(/6/4!/4/2)' }),
+      mark({ id: 'two', cfi: 'epubcfi(/6/2!/4/2)' }),
+    ]
+    expect([...marks].sort(compareMarks).map((m) => m.id)).toEqual(['two', 'four', 'ten'])
+  })
+
+  it('falls back to creation time for two marks on the same anchor', () => {
+    const first = mark({ id: 'first', createdAt: 1 })
+    const second = mark({ id: 'second', createdAt: 2 })
+    expect([second, first].sort(compareMarks).map((m) => m.id)).toEqual(['first', 'second'])
+  })
+})
+
+describe('upsertMark', () => {
+  it('replaces a mark on the same anchor rather than stacking a second one', () => {
+    const first = mark({ id: 'm1', note: '' })
+    const second = mark({ id: 'm2', note: 'a thought' })
+    const result = upsertMark([first], second)
+
+    /* One LIVE mark — the replaced row stays as a tombstone so the
+     * replacement can travel, and every read model hides it. */
+    const live = liveMarks(result)
+    expect(live).toHaveLength(1)
+    expect(live[0]?.id).toBe('m2')
+    expect(live[0]?.note).toBe('a thought')
+    expect(result.find((m) => m.id === 'm1')?.deletedAt).toBeDefined()
+  })
+
+  it('keeps a mark at the same anchor in a DIFFERENT book', () => {
+    // The anchor alone is not identity: two books can share a CFI.
+    const a = mark({ id: 'm1', bookId: 'book-a' })
+    const b = mark({ id: 'm2', bookId: 'book-b' })
+    expect(upsertMark([a], b)).toHaveLength(2)
+  })
+
+  /**
+   * ⚠️ **THE EMPTY CFI IS NOT AN ANCHOR TWO MARKS CAN SHARE.**
+   *
+   * Found by driving a real name-matched import: three marks crossed from
+   * another build, all three were stored with `cfi: ''`, and two of them left
+   * the store as one. Each `addMany` row superseded the row before it, so the
+   * import kept exactly ONE annotation however many arrived — and the one it
+   * destroyed was the only one carrying the reader's note. The notice said
+   * "3 marks kept without a place" while it happened.
+   *
+   * A bookmark survived alongside, which is `sameClass` doing its job and is
+   * why the failure looked like a partial success rather than an obvious bug.
+   */
+  const unplacedMark = (over: Partial<Mark> = {}): Mark =>
+    mark({ cfi: '', unplaced: { reason: 'foreign-build', fromBook: 'book:elsewhere' }, ...over })
+
+  it('does NOT supersede one unplaced mark with another — they share no anchor', () => {
+    const first = unplacedMark({ id: 'm1', text: 'driving off the spleen', note: 'a note' })
+    const second = unplacedMark({ id: 'm2', text: 'a damp, drizzly November' })
+
+    const live = liveMarks(upsertMark([first], second))
+
+    expect(live.map((one) => one.id)).toEqual(['m1', 'm2'])
+    expect(live.find((one) => one.id === 'm1')?.note).toBe('a note')
+  })
+
+  it('keeps every unplaced mark of a whole import, not just the last', () => {
+    /* The shape `addMany` applies: reduce over the batch, each row upserted
+     * onto the result of the last. Three in, three out. */
+    const batch = [
+      unplacedMark({ id: 'm1', text: 'one' }),
+      unplacedMark({ id: 'm2', text: 'two' }),
+      unplacedMark({ id: 'm3', text: 'three' }),
+    ]
+    const stored = batch.reduce<readonly Mark[]>((sofar, one) => upsertMark(sofar, one), [])
+    expect(liveMarks(stored).map((one) => one.id)).toEqual(['m1', 'm2', 'm3'])
+  })
+
+  it('still supersedes a PLACED mark at the same anchor, unplaced rows beside it or not', () => {
+    /* The rule this narrows must keep working, and an unplaced row in the
+     * same file must not shield the placed one from being replaced. */
+    const stranded = unplacedMark({ id: 'stranded' })
+    const held = mark({ id: 'held' })
+    const again = mark({ id: 'again', createdAt: 2000 })
+
+    const next = upsertMark([stranded, held], again)
+
+    expect(next.find((one) => one.id === 'held')?.deletedAt).toBeDefined()
+    expect(next.find((one) => one.id === 'stranded')?.deletedAt).toBeUndefined()
+    expect(next.find((one) => one.id === 'again')?.deletedAt).toBeUndefined()
+  })
+})
+
+describe('upsertMark is idempotent by id', () => {
+  /* Two rows sharing an id is a state everything downstream assumes cannot
+   * happen: `remove(id)` drops every match and `setNote(id)` rewrites every
+   * one. `dedupeById` resolves it on load by the merge rule — latest action
+   * wins — but the pair should never be written in the first place, which is
+   * what this describes. */
+  it('replaces a row of the same id rather than tombstoning it and appending a twin', () => {
+    const held = mark({ id: 'same', note: 'first' })
+    const again = mark({ id: 'same', note: 'second', createdAt: 2000 })
+
+    const next = upsertMark([held], again)
+
+    expect(next).toHaveLength(1)
+    expect(next[0]?.note).toBe('second')
+    expect(next[0]?.deletedAt).toBeUndefined()
+  })
+
+  it('still supersedes a DIFFERENT mark at the same anchor', () => {
+    const held = mark({ id: 'a' })
+    const other = mark({ id: 'b', createdAt: 2000 })
+    const next = upsertMark([held], other)
+    expect(next.find((m) => m.id === 'a')?.deletedAt).toBeDefined()
+    expect(next.find((m) => m.id === 'b')?.deletedAt).toBeUndefined()
+  })
+})
+
+describe('marginMarks', () => {
+  it('keeps what was written and drops bare highlights', () => {
+    const bare = annotation({ id: 'bare' })
+    const noted = annotation({ id: 'noted', note: 'why this matters' })
+
+    expect(marginMarks([bare, noted]).map((m) => m.id)).toEqual(['noted'])
+  })
+
+  it('leaves the column collapsed when every mark is a bare highlight', () => {
+    // The rule the reader sees: highlighting a line does not open a 250px
+    // column to show a dot repeating what the gold fill already says.
+    expect(marginMarks([annotation(), annotation({ id: 'm2' })])).toEqual([])
+  })
+})
+
+describe('updateNote and removeMark', () => {
+  it('writes a note onto one mark only', () => {
+    const marks = [mark({ id: 'm1' }), mark({ id: 'm2', cfi: 'x' })]
+    const next = updateNote(marks, 'm2', 'a note')
+    expect(next.find((m) => m.id === 'm1')?.note).toBe('')
+    expect(next.find((m) => m.id === 'm2')?.note).toBe('a note')
+  })
+
+  it('removes by id — a tombstone in the file, no row in the read model', () => {
+    const next = removeMark([mark({ id: 'm1' }), mark({ id: 'm2' })], 'm1')
+    // The row STAYS, stamped, so the deletion can travel to another device…
+    expect(next).toHaveLength(2)
+    expect(next.find((m) => m.id === 'm1')?.deletedAt).toBeDefined()
+    // …and every read model hides it.
+    expect(liveMarks(next).map((m) => m.id)).toEqual(['m2'])
+  })
+
+  it('is the input by identity for an id already deleted or not there', () => {
+    const gone = removeMark([mark({ id: 'm1' })], 'm1')
+    expect(removeMark(gone, 'm1')).toBe(gone)
+    expect(removeMark(gone, 'nobody')).toBe(gone)
+  })
+
+  it('leaves a tombstoned row alone on a note edit — resurrection is the merge’s call', () => {
+    const gone = removeMark([mark({ id: 'm1' })], 'm1')
+    expect(updateNote(gone, 'm1', 'a late thought')).toBe(gone)
+  })
+
+  it('stamps a note edit', () => {
+    const next = updateNote([mark({ id: 'm1' })], 'm1', 'a note')
+    expect(next.find((m) => m.id === 'm1')?.updatedAt).toBeDefined()
+  })
+})
+
+describe('parseMarks', () => {
+  it('reads back what was written', () => {
+    const marks = [mark()]
+    expect(parseMarks(JSON.stringify(marks))).toEqual(marks)
+  })
+
+  it('returns nothing for absent, malformed or non-array payloads', () => {
+    expect(parseMarks(null)).toEqual([])
+    expect(parseMarks('not json')).toEqual([])
+    expect(parseMarks('{"marks":[]}')).toEqual([])
+  })
+
+  /* Everything downstream addresses a mark by id and assumes one row per id:
+   * `remove` drops every match and `setNote` rewrites every match. Nothing
+   * enforced it, so a store carrying a duplicate id — a legacy write, a merge
+   * across devices — turned one delete into several, across books. The ids
+   * here differ in book and anchor precisely so a leak would be visible. */
+  it('keeps one row per id, so a by-id delete cannot take another book with it', () => {
+    const dupe = [
+      { ...mark(), id: 'shared', bookId: 'book-a', cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:5)' },
+      { ...mark(), id: 'shared', bookId: 'book-b', cfi: 'epubcfi(/6/8!/4/2,/1:9,/1:14)' },
+      { ...mark(), id: 'other', bookId: 'book-a' },
+    ]
+    const parsed = parseMarks(JSON.stringify(dupe))
+    expect(parsed).toHaveLength(2)
+    expect(parsed.map((m) => m.id)).toEqual(['shared', 'other'])
+    /* The FIRST row's position, and `mergeMarks`'s winner. These two carry
+       one stamp, so the tie falls to the serialised row — arbitrary, and the
+       same arbitrary a peer's merge of the same pair reaches, which is the
+       point of the two using one rule. */
+    expect(parsed[0]?.bookId).toBe('book-b')
+  })
+
+  /* ⚠️ **A TOMBSTONE FIRST AND ITS REPLACEMENT SECOND.** Keeping the first row
+     kept the tombstone and discarded the mark written after it — a mark the
+     reader could see, gone at the next load, deleted by the deduplicator
+     rather than by anybody. `upsertMark` no longer writes such a pair; a store
+     from before it stopped still holds them. */
+  it('keeps the later action when a duplicate id pairs a tombstone with a replacement', () => {
+    const dupe = [
+      { ...mark(), id: 'shared', note: 'deleted', deletedAt: '000000001000-0000-aaaaaaaaaaaaaaaa' },
+      { ...mark(), id: 'shared', note: 'written after', updatedAt: '000000002000-0000-aaaaaaaaaaaaaaaa' },
+    ]
+    const parsed = parseMarks(JSON.stringify(dupe))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.note).toBe('written after')
+    expect(parsed[0]?.deletedAt).toBeUndefined()
+  })
+
+  it('keeps the tombstone when it is the later action', () => {
+    const dupe = [
+      { ...mark(), id: 'shared', note: 'edited', updatedAt: '000000001000-0000-aaaaaaaaaaaaaaaa' },
+      { ...mark(), id: 'shared', note: 'then deleted', deletedAt: '000000002000-0000-aaaaaaaaaaaaaaaa' },
+    ]
+    const parsed = parseMarks(JSON.stringify(dupe))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.deletedAt).toBe('000000002000-0000-aaaaaaaaaaaaaaaa')
+  })
+
+  it('drops rows that fail validation and keeps the rest', () => {
+    // Storage is a trust boundary: one bad row must not cost the reader every
+    // other mark they have made.
+    const payload = JSON.stringify([mark({ id: 'good' }), { id: 'bad' }, null, 7])
+    const parsed = parseMarks(payload)
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.id).toBe('good')
+  })
+
+  it('rejects a record missing its section index', () => {
+    const { sectionIndex: _omitted, ...withoutSection } = mark()
+    expect(parseMarks(JSON.stringify([withoutSection]))).toEqual([])
+  })
+})
+
+describe('the two style lists, which are decisions rather than data', () => {
+  /**
+   * ⚠️ **BOTH ARRAYS COULD BE EMPTIED AND NOTHING FAILED.** The mutation gate
+   * found it: every case about the wave asserts what the STORE does with one,
+   * and none asserts what the lists SAY — so `MARK_STYLES` could have lost the
+   * wave, or `READER_STYLES` gained it, with every one of those cases still
+   * green. The difference between the two lists is the whole decision, and it
+   * is one edit from disappearing.
+   */
+  it('admits three styles from the disk and offers the reader two', () => {
+    /* `wave` is in the persisted union so an older row, or one from a peer,
+       still PARSES — and out of the reader's own list because a squiggle under
+       prose is every spell checker's "something is wrong here". */
+    expect([...MARK_STYLES]).toEqual(['fill', 'underline', 'wave'])
+    expect([...READER_STYLES]).toEqual(['fill', 'underline'])
+    expect(MARK_STYLES).toContain('wave')
+    expect(READER_STYLES).not.toContain('wave')
+  })
+})
+
+describe('the wave is not a style the reader may wear', () => {
+  /* Reserving a shape only means something if the store keeps it reserved. The
+     reader cannot CHOOSE a wave — `READER_STYLES` does not offer one, because a
+     squiggle under prose is every spell checker's "something is wrong here" and
+     that is the wrong note for *this is worth remembering* — but rows written
+     before that was true are on disk, and rows arrive from peers. `MARK_STYLES`
+     still admits a wave so such a row PARSES; what the read answers is the
+     nearest thing a reader could have meant. */
+  it('reads a stored wave back as a plain underline', () => {
+    const stored = JSON.stringify([{ ...mark(), kind: 'highlight', style: 'wave' }])
+    expect(parseMarks(stored)[0]?.style).toBe('underline')
+  })
+
+  it('does not disturb the styles the reader may still choose', () => {
+    for (const style of ['fill', 'underline'] as const) {
+      const stored = JSON.stringify([{ ...mark(), kind: 'highlight', style }])
+      expect(parseMarks(stored)[0]?.style, style).toBe(style)
+    }
+  })
+})
+
+describe('re-marking a passage keeps what was written about it', () => {
+  /* `mark(note, …)` is how every appearance change is applied, and ⌘D and the
+     palette both pass an empty note because they are not writing one. Taken
+     verbatim that emptied the note on any passage marked a second time — silent
+     data loss with no undo. The rule lives in `useMarking`; this pins the store
+     behaviour it depends on, which is that a replacement is matched by anchor. */
+  it('replaces a mark on the same anchor rather than stacking one', () => {
+    const first = mark({ id: 'm1', note: 'worth remembering' })
+    const second = mark({ id: 'm2', note: 'worth remembering', tint: 'green' })
+    /* ONE LIVE MARK, not one row: the replaced row stays as a tombstone so the
+       replacement can travel to another device, and every read model hides it.
+       What this pins is the note surviving a recolour, which is the same fact
+       either way. */
+    const live = liveMarks(upsertMark([first], second))
+    expect(live).toHaveLength(1)
+    expect(live[0]?.id).toBe('m2')
+    expect(live[0]?.tint).toBe('green')
+    expect(live[0]?.note).toBe('worth remembering')
+  })
+
+  it('leaves a mark on a different anchor alone', () => {
+    const here = mark({ id: 'm1', cfi: 'epubcfi(/6/4!/4/2)' })
+    const elsewhere = mark({ id: 'm2', cfi: 'epubcfi(/6/8!/4/2)' })
+    expect(liveMarks(upsertMark([here], elsewhere))).toHaveLength(2)
+  })
+})
+
+/**
+ * Bookmarks share the record, the file and the merge with annotations, and
+ * share none of their consumers. These are the rules that make the second half
+ * of that true — see `MarkKind` for why the two are one type rather than two.
+ */
+describe('bookmarks and annotations are told apart', () => {
+  const highlight = mark({ id: 'h', kind: 'highlight' })
+  const second = mark({ id: 'h2', kind: 'highlight', cfi: 'epubcfi(/6/4!/4/6)' })
+  const place = mark({ id: 'b', kind: 'bookmark', cfi: 'epubcfi(/6/4!/4/8)' })
+
+  it('splits a mixed list both ways, and nothing falls between them', () => {
+    const all = [highlight, place, second]
+    expect(annotationsIn(all).map((m) => m.id)).toEqual(['h', 'h2'])
+    expect(bookmarksIn(all).map((m) => m.id)).toEqual(['b'])
+    expect(annotationsIn(all).length + bookmarksIn(all).length).toBe(all.length)
+  })
+
+  /* The no-write convention every store's change detection rests on: a filter
+   * that removed nothing must hand back the SAME array, or the store publishes
+   * a change nobody can see and writes the file over itself. */
+  it('returns its input by identity when there is no bookmark to drop', () => {
+    const annotations = [highlight, second]
+    expect(annotationsIn(annotations)).toBe(annotations)
+  })
+
+  it('orders bookmarks by section first, then by CFI — `compareMarks`', () => {
+    /* BOTH HALVES, and the second is the one that was missing: with every
+     * fixture in a different section the CFI comparison never ran, so the test
+     * named a rule it did not exercise. The same-section pair is deliberately
+     * ordered so that plain string order would get it wrong — `/4/10` sorts
+     * before `/4/4` byte by byte, which is the exact defect `compareCfi`
+     * exists to avoid. */
+    const later = mark({ id: 'b2', kind: 'bookmark', sectionIndex: 3, cfi: 'epubcfi(/6/4!/4/2)' })
+    const earlier = mark({ id: 'b1', kind: 'bookmark', sectionIndex: 1, cfi: 'epubcfi(/6/4!/4/9)' })
+    expect(bookmarksIn([later, earlier]).map((m) => m.id)).toEqual(['b1', 'b2'])
+
+    const tenth = mark({ id: 'b4', kind: 'bookmark', sectionIndex: 1, cfi: 'epubcfi(/6/4!/4/10)' })
+    const fourth = mark({ id: 'b3', kind: 'bookmark', sectionIndex: 1, cfi: 'epubcfi(/6/4!/4/4)' })
+    expect(bookmarksIn([tenth, fourth]).map((m) => m.id)).toEqual(['b3', 'b4'])
+  })
+
+  /* The line replacement respects, and it is the CLASS question rather than
+   * `kind === kind`: a second annotation kind would inherit the answer without
+   * anyone writing it down, and what must never happen is a bookmark and a
+   * highlight superseding one another because they share an anchor. */
+  it('puts every annotation on one side of the line and a bookmark on the other', () => {
+    expect(sameClass(highlight, second)).toBe(true)
+    expect(sameClass(highlight, place)).toBe(false)
+    expect(sameClass(place, mark({ id: 'b2', kind: 'bookmark' }))).toBe(true)
+  })
+
+  /* THE FAILURE THIS PREVENTS: a bookmark anchors to the visible page, so it
+   * shares an anchor with whatever is highlighted on that page as a matter of
+   * course. Without the class guard the two take turns deleting each other,
+   * silently and with no undo. */
+  it('does not let a bookmark and a highlight at one anchor supersede each other', () => {
+    /* BOTH ROWS LIVE AFTER EACH INSERTION, not merely "the old one was not
+       tombstoned": dropping the INCOMING row entirely would have satisfied that
+       weaker assertion while losing the mark the reader just made. */
+    const kept = upsertMark([highlight], mark({ id: 'b', kind: 'bookmark' }))
+    expect(liveMarks(kept).map((m) => m.id).sort()).toEqual(['b', 'h'])
+
+    const back = upsertMark([place], mark({ id: 'h2', cfi: place.cfi }))
+    expect(liveMarks(back).map((m) => m.id).sort()).toEqual(['b', 'h2'])
+  })
+
+  it('still replaces a bookmark with a bookmark at the same anchor', () => {
+    const replaced = upsertMark([place], mark({ id: 'b2', kind: 'bookmark', cfi: place.cfi }))
+    expect(replaced.find((m) => m.id === 'b')?.deletedAt).toBeDefined()
+  })
+
+  /* A bookmark must never reach the margin, and it no longer CAN: `marginMarks`
+   * takes `readonly Annotation[]`, so handing it one is a compile error rather
+   * than a filtered row — the guarantee moved out of this assertion and into
+   * the signature. What is left to assert is the SECOND barrier, the one that
+   * is still a runtime predicate: `marginMarks` admits a mark for its note, and
+   * a bookmark has none. Asserted against the predicate itself rather than read
+   * off a fixture's fields, which was the old version's weakness — it checked
+   * that the bookmark builder writes an empty note, which is `bookmarkFrom`'s
+   * own test, and never asked what the margin does with one. */
+  it('would still keep a bookmark out of the margin if one reached the predicate', () => {
+    /* THE BOOKMARK IS ACTUALLY PUT THROUGH IT. Asserting that a bookmark
+       fixture has an empty note is `bookmarkFrom`'s test, not this one, and it
+       never asks the margin anything — which is what the previous version of
+       this did. The cast is the point rather than a shortcut: it stages
+       precisely the thing the type system now forbids, so what is left of the
+       runtime guard can be held to its promise. */
+    expect(marginMarks([place as Annotation])).toEqual([])
+
+    /* And the guard is a real filter rather than one that drops everything: the
+       one way IN is open to what it is for, something the reader wrote. */
+    expect(marginMarks([annotation({ id: 'n', note: 'said' })]).map((m) => m.id)).toEqual(['n'])
+    expect(marginMarks([annotation({ id: 'q', note: '' })])).toEqual([])
+  })
+})
+
+describe('openingLine', () => {
+  it('collapses every run of whitespace to one space and trims the ends', () => {
+    expect(openingLine('  a\n\n b \t c  ')).toBe('a b c')
+  })
+
+  /* A string index is a UTF-16 UNIT, so `slice(0, 140)` can land between the
+   * halves of a surrogate pair and store a lone surrogate — a character that
+   * is not a character, written to disk and sent over the wire. The emoji here
+   * straddles the limit deliberately. */
+  it('never cuts a character in half', () => {
+    const cut = openingLine('x'.repeat(BOOKMARK_TEXT_MAX - 1) + '\u{1F4D6}' + 'tail')
+    expect([...cut]).toHaveLength(BOOKMARK_TEXT_MAX)
+    expect(cut.endsWith('\u{1F4D6}')).toBe(true)
+    // No unpaired surrogate survived the cut.
+    expect(cut).toBe(cut.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/gu, ''))
+  })
+
+  it('is idempotent, so a row normalised on the way in survives a second pass', () => {
+    const once = openingLine('  a \n b  ')
+    expect(openingLine(once)).toBe(once)
+  })
+})
+
+describe('bookmarkFrom', () => {
+  const draft = {
+    bookId: 'book-a',
+    cfi: 'epubcfi(/6/4!/4/2)',
+    sectionIndex: 2,
+    text: 'Call me Ishmael',
+    prefix: 'before',
+    suffix: 'after',
+    chapter: 'Ch. 1',
+  }
+
+  it('makes a bookmark that carries no note and no appearance', () => {
+    const made = bookmarkFrom(draft)
+    expect(made.kind).toBe('bookmark')
+    expect(made.note).toBe('')
+    /* Exactly what a row WITHOUT these fields reads back as — see `readTint`
+     * and `readStyle`. Nothing paints a bookmark, so the honest value is the
+     * one that says nothing. */
+    expect(made.tint).toBe('yellow')
+    expect(made.style).toBe('fill')
+  })
+
+  /* A highlight's text is what the reader selected. A bookmark's is whatever
+   * was on screen — a whole page — and storing that puts a screenful of prose
+   * into `marks.json` and onto the wire for every bookmark. */
+  it('keeps only the opening line of the page it was made on', () => {
+    const long = bookmarkFrom({ ...draft, text: 'x'.repeat(BOOKMARK_TEXT_MAX * 3) })
+    expect(long.text).toHaveLength(BOOKMARK_TEXT_MAX)
+  })
+
+  it('collapses the page’s own layout before spending the budget on it', () => {
+    /* The shape a real capture arrives in — the text is walked out of rendered
+     * markup, so it carries that markup's newlines and indentation. Cutting
+     * first spent a quarter of the allowance on whitespace. */
+    const ragged = bookmarkFrom({ ...draft, text: '\n  y\n + ing \u279a\n   simplify\n ing\n' })
+    expect(ragged.text).toBe('y + ing \u279a simplify ing')
+  })
+
+  it('leaves the anchor, the section and the chapter exactly as given', () => {
+    const made = bookmarkFrom(draft)
+    expect(made.cfi).toBe(draft.cfi)
+    expect(made.sectionIndex).toBe(draft.sectionIndex)
+    expect(made.chapter).toBe(draft.chapter)
+    expect([made.prefix, made.suffix]).toEqual(['before', 'after'])
+  })
+
+  /* THE COMPATIBILITY FAILURE THIS GUARDS: `validMarks` filters rather than
+   * throws, so a validator that did not know the kind would drop every
+   * bookmark on disk on the first load after the upgrade, in silence. */
+  it('survives a round trip through storage', () => {
+    const stored = parseMarks(JSON.stringify([{ ...bookmarkFrom(draft), id: 'b', createdAt: 5 }]))
+    expect(stored).toHaveLength(1)
+    expect(stored[0]?.kind).toBe('bookmark')
+  })
+})
+
+/**
+ * A mark with no anchor in this library (WI-21.7).
+ *
+ * ⚠️ **`isMark` REFUSED AN EMPTY `cfi` AND THE REASONING WAS RIGHT** — *"nothing
+ * to resolve, so the mark can never be drawn — it sits in the Marginalia list
+ * forever pointing at nothing"*. What it forbade was an anchorless mark NOBODY
+ * MEANT. `unplaced` is the mark that says its anchorlessness is deliberate and
+ * where it came from, and the store keeps such marks in a class the painter is
+ * never handed.
+ *
+ * This is what let Stage 1's regression be undone: a name-matched import can
+ * keep the reader's quote, context, note and colour instead of losing all four,
+ * without a single foreign CFI being stored.
+ */
+describe('an unplaced mark', () => {
+  const UNPLACED = { reason: 'foreign-build' as const, fromBook: 'book:elsewhere' }
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: 'u1',
+    bookId: 'book:here',
+    cfi: '',
+    sectionIndex: 0,
+    text: 'Call me Ishmael',
+    note: 'the first line',
+    kind: 'highlight',
+    chapter: 'Loomings',
+    createdAt: 1000,
+    unplaced: UNPLACED,
+    ...over,
+  })
+
+  it('survives a load, which an empty cfi alone never did', () => {
+    const [mark] = parseMarks(JSON.stringify([row()]))!
+    expect(mark, 'the row was dropped').toBeDefined()
+    expect(mark!.cfi).toBe('')
+    expect(mark!.unplaced).toEqual(UNPLACED)
+    expect(mark!.text).toBe('Call me Ishmael')
+    expect(mark!.note).toBe('the first line')
+  })
+
+  it('is still refused when the empty anchor is not explained', () => {
+    /* THE ORIGINAL GUARD, UNCHANGED. A row with an empty cfi and no reason is
+       corruption, and admitting it would put a mark in the list pointing at
+       nothing — which is exactly what the refusal was written for. */
+    for (const bad of [undefined, true, {}, { reason: 'because' }, { reason: 'foreign-build' }, { reason: 'foreign-build', fromBook: '' }]) {
+      expect(parseMarks(JSON.stringify([row({ unplaced: bad })])), JSON.stringify(bad)).toEqual([])
+    }
+  })
+
+  it('re-validates the record rather than spreading the file through', () => {
+    /* `isMark` reads this to decide the empty cfi is legal; the projection has
+       to write the CHECKED value or a row could pass the gate on a well-formed
+       record and be stored with whatever the file held beside it. */
+    const [mark] = parseMarks(JSON.stringify([row({ unplaced: { ...UNPLACED, extra: 'ignored' } })]))!
+    expect(mark!.unplaced).toEqual(UNPLACED)
+  })
+
+  it('is not placed, and a mark with an anchor is', () => {
+    const [unplacedMark] = parseMarks(JSON.stringify([row()]))!
+    expect(isPlaced(unplacedMark!)).toBe(false)
+    expect(isPlaced(mark())).toBe(true)
+  })
+
+  it('is kept out of the drawable list and into the other one', () => {
+    /* ⚠️ THE SPLIT THE PAINTER DEPENDS ON. `annotationsIn` cannot do this job:
+       an unplaced mark IS about a passage, so Marginalia lists it and search
+       finds its text. Only `placedIn` answers "can this be drawn". */
+    const [unplacedMark] = parseMarks(JSON.stringify([row()]))!
+    const both = [mark(), unplacedMark!]
+    expect(placedIn(both).map((one) => one.id)).toEqual([mark().id])
+    expect(unplacedIn(annotationsIn(both)).map((one) => one.id)).toEqual(['u1'])
+  })
+
+  it('hands a list back by identity when there is nothing to drop', () => {
+    /* The no-write convention every store's change detection relies on. */
+    const placed = [mark()]
+    expect(placedIn(placed)).toBe(placed)
+  })
+
+  it('keeps a placeholder section rather than an out-of-range one', () => {
+    /* ⚠️ NOT −1. `isMark` refuses a negative index for a real reason — it
+       matches no section, so the mark would be undrawable BY ACCIDENT — and
+       safety resting on an out-of-range number is the shape `unplaced` exists
+       to replace. The class keeps it away from the painter; the number does
+       not have to. */
+    expect(parseMarks(JSON.stringify([row({ sectionIndex: -1 })]))).toEqual([])
+    const [ok] = parseMarks(JSON.stringify([row()]))!
+    expect(ok!.sectionIndex).toBe(0)
+  })
+})
+
+describe('placeMark', () => {
+  const unplaced = (over: Partial<Mark> = {}): Mark =>
+    mark({ cfi: '', unplaced: { reason: 'foreign-build', fromBook: 'book:elsewhere' }, ...over })
+
+  const at = hlcOf(1_000)
+
+  it('gives an unplaced mark its anchor and takes the class off it', () => {
+    /* THE WHOLE OF WI-22.A2 ON THIS SIDE. Marginalia lists an unplaced mark
+       with its jump control disabled and *"Paper has not found this passage
+       here yet."*; this is the write that retires that sentence. */
+    const [placed] = placeMark([unplaced()], 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)
+
+    expect(placed!.cfi).toBe('epubcfi(/6/8!/4/2)')
+    expect(placed!.sectionIndex).toBe(3)
+    expect(placed!.unplaced).toBeUndefined()
+    expect(isPlaced(placed!)).toBe(true)
+    /* ⚠️ REMOVED, not set to undefined. `exactOptionalPropertyTypes` is on, and
+       a present-but-undefined key is a different value to `isMark`, to the JSON
+       on disk and to the merge. `in` is what tells the two apart. */
+    expect('unplaced' in placed!).toBe(false)
+  })
+
+  it('stamps the edit, so the placement travels to a peer', () => {
+    /* A mark placed here and not stamped merges as OLDER than the unplaced copy
+       on another device, and comes back unplaced on the next sync — the same
+       shape `updateNote` and `setTint` stamp for. */
+    const [placed] = placeMark([unplaced()], 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)
+    expect(placed!.updatedAt).toEqual(at)
+  })
+
+  it("leaves a tombstoned row alone — resurrection is the merge's decision", () => {
+    /* `updateNote` and `setTint` both say this and it holds harder here: a pass
+       runs over every unplaced mark of a book without a reader having asked for
+       anything, so a deleted mark quietly coming back would have no gesture
+       behind it to explain itself. */
+    const dead = unplaced({ deletedAt: hlcOf(500) })
+    const list = [dead]
+    const after = placeMark(list, 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)
+
+    expect(after).toBe(list)
+    expect(after[0]!.cfi).toBe('')
+    expect(after[0]!.unplaced).toBeDefined()
+    expect(after[0]!.deletedAt).toEqual(hlcOf(500))
+  })
+
+  it('returns its input BY IDENTITY when there is nothing to place', () => {
+    /* The no-write convention every store's change detection relies on. Four
+       ways there is nothing to do, and each must not produce a new array — a
+       pass runs over every unplaced mark of a book on every open, so a copy per
+       call is a republish per open for no change. */
+    const dead = unplaced({ deletedAt: hlcOf(500) })
+    const already = mark({ id: 'm2' })
+    const list = [dead, already]
+
+    expect(placeMark(list, 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)).toBe(list)
+    expect(placeMark(list, 'm2', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)).toBe(list)
+    expect(placeMark(list, 'nobody', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)).toBe(list)
+  })
+
+  it('refuses an empty cfi and a section that is not a real index', () => {
+    /* Each is a state `isMark` refuses off disk, so writing one produces a mark
+       that is neither placed nor legally unplaced — rejected at the file after
+       the screen has already shown it placed. */
+    const list = [unplaced()]
+    expect(placeMark(list, 'm1', resolvedCfiForTesting(''), 3, at)).toBe(list)
+    expect(placeMark(list, 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), -1, at)).toBe(list)
+    expect(placeMark(list, 'm1', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 1.5, at)).toBe(list)
+  })
+
+  it('does not touch a mark it now overlaps', () => {
+    /* ⚠️ **DELIBERATE, and the opposite of what `add` does.** `add` tombstones
+       the row a selection resolved to, because there the reader gestured at
+       that passage. Here nobody gestured: a passage the reader marked in this
+       build and an imported mark of the same passage are two records that
+       happened to meet. Superseding either deletes a note somebody wrote.
+       Two highlights on one passage is visible and recoverable; a silently
+       deleted note is not. */
+    const mine = mark({ id: 'mine', cfi: 'epubcfi(/6/8!/4/2)', sectionIndex: 3, note: 'my note' })
+    const theirs = unplaced({ id: 'theirs' })
+    const after = placeMark([mine, theirs], 'theirs', resolvedCfiForTesting('epubcfi(/6/8!/4/2)'), 3, at)
+
+    expect(after).toHaveLength(2)
+    expect(after.every((one) => one.deletedAt === undefined)).toBe(true)
+    expect(after.find((one) => one.id === 'mine')!.note).toBe('my note')
+  })
+})
+
+describe('what leaves the door a stored row comes through', () => {
+  it('is the checked value of each named field and nothing the file added', () => {
+    const [kept] = validMarks([{ ...mark({ cfi: 'epubcfi(/6/2)' }), unplaced: 'junk', extra: 'ignored' }])
+    expect(kept).toBeDefined()
+    expect('unplaced' in kept!).toBe(false)
+    expect('extra' in kept!).toBe(false)
+    const [placed] = validMarks([{ ...mark({ cfi: '' }), unplaced: { reason: 'foreign-build', fromBook: 'book:other' } }])
+    expect(placed?.unplaced).toEqual({ reason: 'foreign-build', fromBook: 'book:other' })
+  })
+
+  it('cuts an over-long context without splitting a surrogate pair', () => {
+    const long = 'a'.repeat(MAX_MARK_TEXT - 1) + '😀' + 'tail'
+    const [kept] = validMarks([{ ...mark(), prefix: long, suffix: long, text: long }])
+    for (const field of [kept!.prefix, kept!.suffix, kept!.text]) {
+      expect(field.length).toBe(MAX_MARK_TEXT - 1)
+      expect(field.endsWith('a')).toBe(true)
+      expect(/[\uD800-\uDBFF]$/u.test(field)).toBe(false)
+    }
+    const whole = 'a'.repeat(MAX_MARK_TEXT - 2) + '😀' + 'tail'
+    expect(validMarks([{ ...mark(), prefix: whole }])[0]!.prefix.endsWith('😀')).toBe(true)
+  })
+})
+
+describe('the validator holds the identity fields to the record limits', () => {
+  const rows = (over: Record<string, unknown>) => parseMarks(JSON.stringify([{ ...mark(), ...over }]))
+
+  it('refuses a section index past the safe range', () => {
+    expect(rows({ sectionIndex: Number.MAX_SAFE_INTEGER + 2 })).toEqual([])
+    expect(rows({ sectionIndex: Number.MAX_SAFE_INTEGER })).toHaveLength(1)
+  })
+
+  it('refuses an id, a book or a position past the limits a record keeps', () => {
+    expect(rows({ id: 'x'.repeat(501) })).toEqual([])
+    expect(rows({ id: 'x'.repeat(500) })).toHaveLength(1)
+    expect(rows({ bookId: 'b'.repeat(501) })).toEqual([])
+    expect(rows({ bookId: 'b'.repeat(500) })).toHaveLength(1)
+    expect(rows({ cfi: 'c'.repeat(64_001) })).toEqual([])
+    expect(rows({ cfi: 'c'.repeat(64_000) })).toHaveLength(1)
+  })
+
+  /* A CHAPTER LABEL IS CUT, NOT REFUSED. It is display only, nothing bounded
+     it at the write, and refusing it dropped the whole mark on the read after
+     the reader had seen it saved. */
+  it('cuts a chapter past the limit rather than dropping the mark', () => {
+    expect(rows({ chapter: 'c'.repeat(501) })[0]?.chapter).toHaveLength(500)
+    expect(rows({ chapter: 'c'.repeat(500) })[0]?.chapter).toHaveLength(500)
+    /* Never on a lone high surrogate, as every other cut here. */
+    expect(rows({ chapter: `${'c'.repeat(499)}😀` })[0]?.chapter).toBe('c'.repeat(499))
+  })
+})
+
+/* A ROW THE READ REFUSES IS HANDED BACK, NOT LOST. The store rewrites the file
+   whole from what read, so a refused row used to be gone from disk at the next
+   highlight with nothing saying so. */
+describe('a row the read refuses', () => {
+  it('is kept aside verbatim, beside the marks that read', () => {
+    const bad = { ...mark({ id: 'stale' }), id: 'x'.repeat(501) }
+    const { marks, refused } = readStoredMarks([mark({ id: 'm1' }), bad, 'not a row'])
+    expect(marks.map((one) => one.id)).toEqual(['m1'])
+    expect(refused).toEqual([bad, 'not a row'])
+    expect(refused[0]).toBe(bad)
+  })
+
+  /**
+   * ⚠️ **A KIND THAT LEAVES `MARK_KINDS` IS A ROW ON SOMEBODY'S DISK.**
+   *
+   * `companion` was retired with the AI features. A row carrying it must be
+   * dropped ALONE — never taking the file, and never the payload a peer sent —
+   * which is the rule this whole describe exists for, applied to the one value
+   * this repository has actually removed from a persisted union.
+   *
+   * The 2026-09-19 audit read the removal as "one legacy row can cause the
+   * entire marks payload to be rejected repeatedly". It cannot: `readStoredMark`
+   * answers `null` for an unknown kind and `readStoredMarks` collects it into
+   * `refused` beside the rows that read, and `mergeRemote` warns and merges the
+   * rest. This case is here so that stays true — the claim was checkable, and
+   * the way to keep it checkable is a test rather than a paragraph.
+   */
+  it('drops a row carrying the retired `companion` kind, and keeps every row beside it', () => {
+    const retired = { ...mark({ id: 'from-an-older-build' }), kind: 'companion' }
+    const { marks, refused } = readStoredMarks([mark({ id: 'mine' }), retired, mark({ id: 'also-mine' })])
+
+    expect(marks.map((one) => one.id)).toEqual(['mine', 'also-mine'])
+    /* HANDED BACK VERBATIM, so the store writes it out again rather than
+       deleting a row it merely could not read — see `keptAside`. */
+    expect(refused).toEqual([retired])
+    expect(refused[0]).toBe(retired)
+  })
+
+  it('has its `unplaced` read ONCE — the gate and the projection are one read', () => {
+    let reads = 0
+    const row = {
+      ...mark({ id: 'm1', cfi: '' as never }),
+      get unplaced() {
+        reads += 1
+        return { reason: 'foreign-build', fromBook: 'book:other' }
+      },
+    }
+    const [one] = validMarks([row])
+    expect(one?.unplaced).toEqual({ reason: 'foreign-build', fromBook: 'book:other' })
+    expect(reads).toBe(1)
+  })
+})
+
+/* THE IDENTITY FIELDS ARE REFUSED AT THE WRITE. `boundedMark` cuts what can
+   be cut; an id or an anchor cut short is a different mark, so those are
+   refused — where a refusal is a failure the reader hears, not on the read,
+   where it was a mark saved, displayed, and quietly gone at the next load. */
+describe('the identity fields at the write door', () => {
+  it('refuses an id, a book id or an anchor past the record’s bound, and passes one at it', () => {
+    expect(() => checkMarkIdentity(mark({ id: 'x'.repeat(501) }))).toThrow(/mark id/u)
+    expect(() => checkMarkIdentity(mark({ bookId: 'x'.repeat(501) }))).toThrow(/book id/u)
+    expect(() => checkMarkIdentity(mark({ cfi: 'x'.repeat(64_001) as never }))).toThrow(/anchor/u)
+    expect(() => checkMarkIdentity(mark({ id: 'x'.repeat(500), bookId: 'b'.repeat(500), cfi: 'x'.repeat(64_000) as never }))).not.toThrow()
+  })
+
+  it('refuses to place a mark at an anchor past the bound rather than install one the read would refuse', () => {
+    const waiting = mark({ id: 'm1', cfi: '' as never, unplaced: { reason: 'foreign-build', fromBook: 'book:other' } })
+    expect(() => placeMark([waiting], 'm1', resolvedCfiForTesting('x'.repeat(64_001)), 3)).toThrow(/anchor/u)
+    /* At the bound, placed. */
+    expect(placeMark([waiting], 'm1', resolvedCfiForTesting('x'.repeat(64_000)), 3)[0]?.cfi).toHaveLength(64_000)
+  })
+})
+
+/* THE WRITE DOOR CUTS WHAT THE READ WOULD CUT, so a mark is the same on the
+   day it is made and the day it is reloaded. `updateNote` did this for a note;
+   `boundedMark` does it for every cut field of a new mark. */
+describe('a new mark is cut at the write', () => {
+  it('cuts the label, the quote, its context and the note to the read’s bounds, and leaves a bounded mark as it is', () => {
+    const long = mark({ chapter: 'c'.repeat(600), text: 'x'.repeat(MAX_MARK_TEXT + 5), prefix: 'p'.repeat(MAX_MARK_TEXT + 5), suffix: 's'.repeat(MAX_MARK_TEXT + 5), note: 'n'.repeat(MAX_MARK_NOTE + 5) })
+    const cut = boundedMark(long)
+    expect(cut.chapter).toHaveLength(500)
+    expect(cut.text).toHaveLength(MAX_MARK_TEXT)
+    expect(cut.prefix).toHaveLength(MAX_MARK_TEXT)
+    expect(cut.suffix).toHaveLength(MAX_MARK_TEXT)
+    expect(cut.note).toHaveLength(MAX_MARK_NOTE)
+    /* What the write keeps is exactly what the read answers. */
+    expect(parseMarks(JSON.stringify([cut]))[0]).toEqual(cut)
+    const fine = mark({ chapter: 'Chapter One' })
+    expect(boundedMark(fine)).toBe(fine)
+  })
+})
+
+describe('a note is cut at the write', () => {
+  it('keeps exactly what the reader will read back', () => {
+    const [row] = updateNote([mark({ id: 'm1' })], 'm1', 'x'.repeat(MAX_MARK_NOTE + 1_000))
+    expect(row?.note).toHaveLength(MAX_MARK_NOTE)
+    /* The same long note again is no edit: the cut is what is compared. */
+    const held = updateNote([mark({ id: 'm1' })], 'm1', 'x'.repeat(MAX_MARK_NOTE + 1_000))
+    expect(updateNote(held, 'm1', 'x'.repeat(MAX_MARK_NOTE + 5))).toBe(held)
+  })
+})
+
+describe('re-delivering rows that are already held', () => {
+  /**
+   * ⚠️ **A NO-WRITE HAS TO BE DECIDED BY CONTENT, NOT BY OBJECT IDENTITY.** Sync
+   * hands these rows over PARSED, so every delivery is a fresh object graph —
+   * `mergeMarks(held, sameRowsAgain)` compares nothing that is `===` anything.
+   * The tie-break at the end of `laterMark` keeps the row already held for
+   * exactly that reason, and `mergeMarks` reads its answer by identity to
+   * decide whether anything changed: taking the incoming twin instead would
+   * report a change, write the store and redraw the book on every round of a
+   * sync that delivered nothing new.
+   */
+  it('changes nothing, though every row arrives as a new object', () => {
+    const held = [mark({ id: 'one' }), mark({ id: 'two', cfi: 'epubcfi(/6/4!/4/4,/1:0,/1:4)' })]
+    const again = held.map((row) => ({ ...row }))
+    expect(again[0], 'the fixture must not hand back the same objects').not.toBe(held[0])
+    expect(mergeMarks(held, again), 'a redelivery was reported as a change').toBe(held)
+  })
+
+  it('still takes a row that differs, at the same stamp', () => {
+    /* So the tie-break cannot pass by refusing everything: same id, same
+       stamp, different content — somebody has to win, and it is decided rather
+       than left to arrival order. */
+    const held = [mark({ id: 'one', note: '' })]
+    const differing = [mark({ id: 'one', note: 'a note added elsewhere' })]
+    const merged = mergeMarks(held, differing)
+    expect(merged, 'a real difference was dropped').not.toBe(held)
+    expect(merged.map((row) => row.note).sort()).toEqual(['a note added elsewhere'])
+  })
+})

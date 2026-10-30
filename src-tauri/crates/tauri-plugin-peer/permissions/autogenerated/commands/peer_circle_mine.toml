@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-circle-mine"
+description = "Enables the peer_circle_mine command without any pre-configured scope."
+commands.allow = ["peer_circle_mine"]
+
+[[permission]]
+identifier = "deny-peer-circle-mine"
+description = "Denies the peer_circle_mine command without any pre-configured scope."
+commands.deny = ["peer_circle_mine"]

@@ -1,0 +1,497 @@
+import { constants } from 'node:fs'
+import { access, appendFile, link, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import {
+  /* THE PURE WALKS, not second copies of them — see the barrel's note. The
+     TAURI binding is deliberately not exported there; these walks are,
+     because both hosts must run the same ones. */
+  messageOf,
+  sizePortOver,
+  type FileSystem,
+  type IndexFs,
+  type SizePort,
+} from '../../kernel'
+
+/**
+ * The kernel's two filesystem seams, over `node:fs` (phase 11, WI-11.2).
+ *
+ * `src/kernel/core` was measured at 14 095 lines with exactly TWO files
+ * importing Tauri — `bookFiles.ts` and `bookVault.ts` — and both are seam
+ * IMPLEMENTATIONS over interfaces the core already defines. This file is the
+ * other implementation of the same two interfaces. No logic moved to write
+ * it; nothing here decides anything about a book.
+ *
+ * The two seams stay distinct, as `bookVault.ts`'s own header insists:
+ *
+ *   - `IndexFs` (= `VaultFs` + `readDir`) is the LIBRARY's filesystem —
+ *     `books/<id>/book.json`, `index.json`, `trash/`, `sync/journal.jsonl`.
+ *     Bytes in, bytes out, relative to the data directory.
+ *   - `FileSystem` is the FLAT STORE's — one JSON document read as text,
+ *     written atomically, and moved aside when it will not parse.
+ *
+ * EVERY PATH IS RELATIVE TO THE ROOT, and `under()` proves it before any call
+ * touches the disk. The kernel builds its paths through `folderOf`, which
+ * already sanitises a book id into `[A-Za-z0-9_]`, so this is the second lock
+ * rather than the first — but a host is a trust boundary, and a host that
+ * accepted `../` would make the sanitiser the only thing between a hostile
+ * record and the rest of the disk.
+ *
+ * WHAT `under()` DOES NOT DO, stated because a reader will otherwise assume
+ * it: it is a check on the PATH, not on the filesystem. A symlink inside the
+ * data directory is followed like any other, so `trash` pointing somewhere
+ * else is somewhere else this host reads and deletes.
+ *
+ * That is deliberate rather than overlooked. Resolving every component with
+ * `realpath` and refusing anything outside the root would break a library
+ * kept on an external volume and symlinked into place, which is a setup
+ * people genuinely have — and it would buy nothing against the attacker it
+ * appears to stop, because anyone who can plant a symlink inside the data
+ * directory can already write anything they like into the library it holds.
+ * The threat this guards is a CONSTRUCTED path — an id, a name, a value off
+ * the wire — reaching outside the root, and that it does guard, exactly.
+ *
+ * Behaviour is matched to the Tauri adapters deliberately, including where
+ * they throw: `readDir` on a missing directory THROWS, because the library
+ * scan is the one caller that must tell "no library yet" from "unreadable",
+ * and `remove` on a missing file throws for the same reason `@tauri-apps/
+ * plugin-fs` does. A host that quietly answered "fine" to both would make
+ * every test that passes here pass for a reason the app does not share.
+ */
+
+
+/**
+ * The absolute path of `path` inside `root`, or a throw.
+ *
+ * `relative` rather than a `startsWith` on the joined string: `startsWith`
+ * says `/data/library-backup` is inside `/data/library`, which it is not.
+ * An empty relative path is the root itself, which several callers name
+ * (`mkdir('')` at boot).
+ */
+export function under(root: string, path: string): string {
+  if (isAbsolute(path)) throw new Error(`node fs: ${JSON.stringify(path)} is absolute; paths are relative to the data directory`)
+  /* The root RESOLVED first, so the comparison below is between two absolute
+   * paths. A relative root would make `relative()` answer about the process's
+   * working directory rather than about the library. */
+  const base = resolve(root)
+  const full = resolve(base, path)
+  const rel = relative(base, full)
+  if (rel === '') return full
+  /* AN ABSOLUTE `rel` IS AN ESCAPE, and it is the one this guard missed.
+   *
+   * On Windows a DRIVE-RELATIVE path — `D:outside` — is not absolute, so it
+   * passes the check above. Resolved against a root on another drive it
+   * becomes `D:\outside`, and `relative()` cannot express a path between two
+   * drives, so it returns that absolute path unchanged. It begins with
+   * neither `..` nor the root, so the containment test accepted it and every
+   * adapter operation — including the recursive `remove` — was free to work
+   * outside the data directory.
+   *
+   * POSIX never produces an absolute `rel`, so this costs nothing there; it
+   * is checked unconditionally rather than under a platform test, because a
+   * guard that only runs on the platform it was written on is how this class
+   * of hole survives review. */
+  if (isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) {
+    throw new Error(`node fs: ${JSON.stringify(path)} leaves the data directory`)
+  }
+  return full
+}
+
+/** Distinguishes one write's temp file from another's. */
+let nextTemp = 0
+
+const missing = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && (error as { code?: string }).code === 'ENOENT'
+
+/**
+ * The library's filesystem, rooted at `root`.
+ *
+ * `appendFile` is present and real, so the sync journal costs one write per
+ * line rather than a rewrite of the whole file — the fallback the interface
+ * documents is correct and O(n) per append, "a price only tests should pay",
+ * and a Node host running against a real library is not a test.
+ */
+export function nodeIndexFs(root: string): IndexFs {
+  const at = (path: string) => under(root, path)
+  return {
+    readFile: async (path) => new Uint8Array(await readFile(at(path))),
+    writeFile: async (path, bytes) => {
+      await writeFile(at(path), bytes)
+    },
+    exists: async (path) => {
+      /* RESOLVED FIRST, outside the `try`. Inside it, a path that leaves the
+       * data directory throws and is swallowed by the `catch` — so a
+       * traversal attempt answers "no such file" instead of being refused,
+       * and the refusal this seam exists for becomes a soft no. */
+      const target = at(path)
+      try {
+        await access(target, constants.F_OK)
+        return true
+      } catch (cause) {
+        /* ONLY "NOT THERE" IS FALSE.
+         *
+         * Every error used to be, so a directory the process could not
+         * traverse (`EACCES`), or a descriptor limit (`EMFILE`), or an I/O
+         * failure all answered "no such file". Callers across this repository
+         * lean on `exists()` precisely to tell absence from failure — the
+         * journal decides whether to overwrite a file by it, the trash
+         * decides whether a book was already restored, the content layer
+         * decides whether a folder is empty. Reporting a failure as absence
+         * turns every one of those into the wrong branch, silently.
+         *
+         * `ENOENT` and `ENOTDIR` are absence — the second is a path whose
+         * PARENT is not a directory, so the target cannot exist either.
+         * Anything else is raised. */
+        const code = (cause as { code?: unknown })?.code
+        if (code === 'ENOENT' || code === 'ENOTDIR') return false
+        throw cause
+      }
+    },
+    mkdir: async (path) => {
+      await mkdir(at(path), { recursive: true })
+    },
+    remove: async (path) => {
+      await rm(at(path), { force: false })
+    },
+    rename: async (from, to) => {
+      await rename(at(from), at(to))
+    },
+    removeDir: async (path) => {
+      await rm(at(path), { recursive: true, force: true })
+    },
+    appendFile: async (path, bytes) => {
+      await appendFile(at(path), bytes)
+    },
+    /* THE WHOLE ATOMIC WRITE, SYNCED — `VaultFs.writeAtomic`, over `node:fs`
+     * (phase 20, D3). Temp in the same directory and private to this write,
+     * `write`, `fsync`, `rename`, then the directory synced so the rename is
+     * on disk too. The level is honoured as far as Node can: `fs.fsync` is
+     * `fsync(2)`, which on macOS is the barrier and not `F_FULLFSYNC` — the
+     * app's Rust command has both; a `paper book add` survives a crash and
+     * not necessarily a power cut, and says so here rather than implying
+     * otherwise. */
+    writeAtomic: async (path, bytes, _level) => {
+      const target = at(path)
+      const dir = dirname(target)
+      await mkdir(dir, { recursive: true })
+      const writing = `${target}.${process.pid}.${nextTemp++}.writing`
+      try {
+        const handle = await open(writing, 'w')
+        try {
+          await handle.writeFile(bytes)
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
+        await rename(writing, target)
+      } catch (cause) {
+        await rm(writing, { force: true }).catch(() => {})
+        throw cause
+      }
+      await syncDir(dir)
+    },
+    /* The sync journal's barrier, over a real descriptor. A directory is
+     * synced the same way.
+     *
+     * ⚠️ **THE HANDLE IS OPENED FOR WRITING ON WINDOWS, AND MUST BE.** This
+     * said "`fsync(2)` on a read handle — enough to flush, and it needs no
+     * permission a barrier does not", which is true of `fsync(2)` and false
+     * of what Windows runs. Node's `handle.sync()` is `FlushFileBuffers`
+     * there, and that requires a handle with WRITE access: on an `'r'` handle
+     * it fails `EPERM`, every time, on every file. Nothing on a Mac or a
+     * Linux box can see it — `fsync(2)` on an `O_RDONLY` descriptor is
+     * perfectly legal — and it took every write the CLI makes down with it,
+     * which is why a dozen `src/cli/` cases answered exit 1 with
+     * `paper: EPERM: operation not permitted` the first time the Windows leg
+     * ran them.
+     *
+     * `'r+'` is read-write without truncation, so it is the same barrier on
+     * both: POSIX does not care which of the two it gets, and Windows only
+     * works with this one. */
+    fsync: async (path, _level) => {
+      const target = at(path)
+      if ((await stat(target)).isDirectory()) {
+        await syncDir(target)
+        return
+      }
+      const handle = await open(target, windows ? 'r+' : 'r')
+      try {
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+    },
+    /* A REAL SEEK, for the same reason the Tauri adapter has one: `content.read`
+     * serves a book a slice at a time, and the interface's fallback is O(n) per
+     * slice — quadratic over a book, with a 300 MB scanned PDF re-read once per
+     * megabyte served.
+     *
+     * The handle is closed in a `finally`, because a leaked one holds a
+     * descriptor until the process ends and a CLI serving a shelf opens many.
+     *
+     * `read` answers what it has, not what was asked: a short answer at the end
+     * of a file is normal, so this loops until the slice is full or the file
+     * runs out. */
+    readRange: async (path, offset, length) => {
+      const handle = await open(at(path), 'r')
+      try {
+        const buffer = new Uint8Array(length)
+        let filled = 0
+        while (filled < length) {
+          const { bytesRead } = await handle.read(buffer, filled, length - filled, offset + filled)
+          if (bytesRead === 0) break
+          filled += bytesRead
+        }
+        return buffer.subarray(0, filled)
+      } finally {
+        await handle.close()
+      }
+    },
+    readDir: async (path) => {
+      const entries = await readdir(at(path), { withFileTypes: true })
+      return entries.map((entry) => ({ name: entry.name, isDirectory: entry.isDirectory() }))
+    },
+  }
+}
+
+/**
+ * The flat store's filesystem, rooted at `root`.
+ *
+ * `write` goes through a temporary neighbour and a rename, exactly as
+ * `appStorage.ts` does and for the same reason: a truncated store loses EVERY
+ * mark rather than one, and `writeFile` over an existing path truncates
+ * before it writes. A rename over a complete file is atomic on every
+ * filesystem this ships to.
+ */
+export function nodeTextFs(root: string): FileSystem {
+  const at = (path: string) => under(root, path)
+  return {
+    read: async (path) => {
+      try {
+        return await readFile(at(path), 'utf8')
+      } catch (error) {
+        if (missing(error)) return null
+        throw error
+      }
+    },
+    write: async (path, text) => {
+      const target = at(path)
+      /* UNIQUE PER WRITE, not one `.writing` shared by every writer.
+       *
+       * Two processes over one library — `paper` beside the app, or two
+       * `paper` runs — both wrote the same temp path and both renamed it, so
+       * one write's bytes were published under the other's rename and the
+       * loser silently lost its content. The pid and a counter make the
+       * temp name private to this write; the rename is still the atomic
+       * publish it always was. */
+      const writing = `${target}.${process.pid}.${nextTemp++}.writing`
+      try {
+        await writeFile(writing, text, 'utf8')
+        await rename(writing, target)
+      } catch (cause) {
+        await rm(writing, { force: true }).catch(() => {})
+        throw cause
+      }
+    },
+    quarantine: async (path, to) => {
+      /* A SECOND CORRUPTION MUST NOT ERASE THE FIRST.
+       *
+       * `rename` REPLACES its destination on POSIX, so quarantining twice to
+       * the same `.corrupt` name destroyed the earlier copy — the one holding
+       * whatever the reader might still have recovered. The point of moving a
+       * damaged file aside is that it is still there.
+       *
+       * The plain name is used when it is free, so the ordinary single-fault
+       * case keeps the name the caller asked for and the tests expect. A
+       * collision takes a suffix, and the loop is bounded: if a hundred
+       * quarantines of one file have accumulated, something is wrong that a
+       * hundred-and-first copy will not clarify. */
+      /* THE SOURCE IS VALIDATED BEFORE ANY PROBE. `at` is the traversal
+       * check; run last, a hostile `path` had 101 destination existence
+       * probes to itself before anything refused it. */
+      const source = at(path)
+      const target = at(to)
+      let destination = target
+      /* ⚠️ THE LAST CANDIDATE WAS NEVER TESTED. The loop assigned
+       * `${target}.${n}` and then EXITED, so a run that reached `n === 100`
+       * finished holding `.100` without ever asking whether it existed — and
+       * the POSIX `rename` below replaces its destination. The one path whose
+       * whole purpose is not to destroy an earlier quarantine destroyed one,
+       * in exactly the case that means something has gone badly wrong.
+       *
+       * `found` is what turns "the search ran out" into a refusal. A
+       * hundred-and-first copy clarifies nothing; overwriting the hundredth
+       * clarifies less. */
+      /* ⚠️ **THE NAME IS CLAIMED BY `link`, NOT BY LOOKING FIRST.**
+       *
+       * This asked `access` whether a candidate was free and then `rename`d
+       * onto it — and POSIX `rename` REPLACES its destination, so two
+       * quarantines racing (the app beside a `paper`, or two `paper` runs)
+       * both saw the same name free and the second silently destroyed the
+       * first: the one outcome this whole function exists to prevent, in the
+       * situation that produces it. `link` is atomic and fails `EEXIST` when
+       * the name is taken — the same primitive the advisory lock publishes
+       * with, and for the same reason. The source is unlinked only after a
+       * link succeeded, so a crash between the two leaves the file under BOTH
+       * names rather than under neither.
+       *
+       * `access` still runs first, because a fresh `.corrupt` is the ordinary
+       * case and `link` on an occupied name would otherwise raise once per
+       * candidate; the claim, not the look, is what decides. */
+      let linked = false
+      let last: unknown = null
+      for (let n = 0; n <= 100 && !linked; n += 1) {
+        if (n > 0) destination = `${target}.${n}`
+        try {
+          await access(destination, constants.F_OK)
+          /* Taken. `ENOENT`/`ENOTDIR` below is the free one; anything else is
+           * a candidate this process cannot judge, and skipping it is the
+           * same safe direction. */
+          continue
+        } catch (cause) {
+          const code = (cause as { code?: string }).code
+          if (code !== 'ENOENT' && code !== 'ENOTDIR') continue
+        }
+        try {
+          await link(source, destination)
+          linked = true
+        } catch (cause) {
+          last = cause
+          const code = (cause as { code?: string }).code
+          /* SOMEBODY ELSE GOT THERE FIRST — try the next name. Any other
+           * failure is this filesystem refusing hard links at all (a FAT
+           * volume, some network mounts), and the rename is the honest
+           * fallback: it is what this did before, race and all, and losing
+           * the quarantine entirely would be worse than racing for it. */
+          if (code !== 'EEXIST') {
+            await rename(source, destination)
+            return
+          }
+        }
+      }
+      if (!linked) {
+        throw new Error(
+          `cannot quarantine ${path}: ${target} and .1 through .100 all exist. ` +
+            'Something is producing corrupt files faster than they can be looked at; ' +
+            'move the existing quarantines aside before this can continue.' +
+            (last === null ? '' : ` (last: ${messageOf(last)})`),
+        )
+      }
+      /* The copy is safe under its own name; this one is the caller's to lose. */
+      await rm(source, { force: true })
+    },
+  }
+}
+
+/**
+ * A directory's entries, on disk — the half that makes a rename durable
+ * (Pillai et al., OSDI 2014). Ignored where the filesystem refuses it
+ * (`EINVAL`, `ENOTSUP`) and where a directory cannot be opened as a file
+ * (Windows), as PostgreSQL and SQLite do: the rename is what it is there.
+ */
+/** The one platform whose refusals below are a shape rather than a fault. */
+const windows = process.platform === 'win32'
+
+async function syncDir(dir: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>>
+  try {
+    handle = await open(dir, 'r')
+  } catch (cause) {
+    /* ONLY THE PLATFORM'S OWN REFUSALS ARE TOLERATED. Windows cannot open a
+     * directory as a file (`EPERM`/`EACCES`/`EISDIR`/`UNKNOWN`,
+     * engine-dependent), and that is what the header's "the rename is what it
+     * is there" covers. A blanket return also swallowed `EMFILE`, `ENFILE` and
+     * real I/O errors — reporting "durable" with the directory never opened,
+     * which is the silent-skip shape `writeAtomic`'s contract exists to
+     * refuse.
+     *
+     * ⚠️ **AND THE WINDOWS CODES WERE SWALLOWED EVERYWHERE.** The comment
+     * justified them as one platform's limitation and the code applied them
+     * to all three: on POSIX, `open(dir, 'r')` does not fail with `EACCES`
+     * unless the process genuinely cannot read the directory it has just
+     * written into, which is a real fault and not a platform's shape. So the
+     * excuse is gated on the platform that needs it. `ENOTSUP` and `EINVAL`
+     * stay unconditional: those are a FILESYSTEM saying it does not do this,
+     * which any of the three can host. */
+    const code = (cause as { code?: string }).code
+    if (code === 'ENOTSUP' || code === 'EINVAL') return
+    if (windows && (code === 'EPERM' || code === 'EACCES' || code === 'EISDIR' || code === 'UNKNOWN')) return
+    throw cause
+  }
+  try {
+    await handle.sync()
+  } catch (cause) {
+    /* Same split: a filesystem that does not implement `fsync` on a directory
+     * answers `EINVAL`/`ENOTSUP` anywhere, and `FlushFileBuffers` on a
+     * directory handle is the Windows-only refusal. */
+    const code = (cause as { code?: string }).code
+    const excused = code === 'EINVAL' || code === 'ENOTSUP' || (windows && (code === 'EISDIR' || code === 'EPERM' || code === 'UNKNOWN'))
+    if (!excused) throw cause
+  } finally {
+    await handle.close()
+  }
+}
+
+/**
+ * Bytes on disk, over `node:fs` — the kernel's `SizePort` (phase 11).
+ *
+ * `stat`, not a read: measuring a 200 MB PDF by decoding it would make
+ * `paper content locate` cost as much as opening the book. The whole-library
+ * walk is one `stat` per file, which on the 1 959-book library WI-8.6
+ * measured is a few thousand syscalls — a price an explicit `paper shelf
+ * status` may pay and nothing else calls.
+ *
+ * A file that is not there is `null`, never zero. "Nobody can say" and
+ * "empty" are different answers and a caller has to be able to tell them
+ * apart before opening a blob stream.
+ */
+export function nodeSizePort(root: string): SizePort {
+  const bytesAt = async (path: string): Promise<number | null> => {
+    /* THE TRAVERSAL CHECK IS OUTSIDE THE CATCH. Inside it, a path that
+     * `under` refuses came back as `null` — "no bytes" — where every other
+     * host operation refuses out loud; a traversal is a caller defect, not a
+     * missing file. */
+    const full = under(root, path)
+    try {
+      const info = await stat(full)
+      return info.isFile() ? info.size : null
+    } catch {
+      return null
+    }
+  }
+  /**
+   * ⚠️ **`libraryBytes` USED TO BE A SECOND COPY OF THE WALK**, and the two
+   * copies answered different questions: this one walked the data root, the
+   * kernel's walked `books/`. So `shelf.status.bytes` depended on which host
+   * you asked, and the desktop's answer omitted `index.json`, the store, the
+   * sync metadata and the trash.
+   *
+   * One walk now, in `bookSizes.ts`, run over Node's `stat` and `readdir`.
+   * `contentBytes` stays here because it has a real difference — see below.
+   */
+  const shared = sizePortOver({
+    bytesAt,
+    readDir: async (path: string) =>
+      (await readdir(under(root, path), { withFileTypes: true })).map((entry) => ({
+        name: entry.name,
+        isDirectory: entry.isDirectory(),
+      })),
+  })
+  return {
+    bytesAt,
+    /* BOTH SHARED WALKS, not one. `contentBytes` was still a local copy of
+     * the `CONTENT_EXTENSIONS` loop `sizePortOver` already carries — the
+     * comment beside it claimed "a real difference" that no longer existed,
+     * which is exactly the drift the shared abstraction was bought to
+     * prevent (see the `libraryBytes` incident above). */
+    contentBytes: shared.contentBytes,
+    libraryBytes: shared.libraryBytes,
+  }
+}
+
+/** The data directory itself, made if it is not there. Returned absolute, so
+ *  every later message names one path rather than two spellings of it. */
+export async function makeDataDir(dir: string): Promise<string> {
+  const root = resolve(dir)
+  await mkdir(root, { recursive: true })
+  return root
+}

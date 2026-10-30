@@ -1,0 +1,476 @@
+/* The vocabulary a CAPABILITY draws with — the kernel's controls, as public API.
+ *
+ * WHY THIS FILE EXISTS. A capability contributes panes and settings sections,
+ * and the kernel renders them (`renderContribution`). But a capability may
+ * import the kernel only through `src/kernel/index.ts`
+ * (`kernel-public-entry-only`), and the kernel's own controls are a CSS Module
+ * — `controls.module.css`, whose class names are hashed at build time and
+ * reachable only by importing it. So a capability had no way to ask for a
+ * Paper button, and the two that shipped drew with raw `<button>`/`<input>`
+ * and two hand-rolled inline objects. They rendered in the browser's default
+ * chrome: a system-blue submit button and a default-bordered field, inside a
+ * pane where everything else was Paper's. The boundary did not cause that —
+ * it removed the lazy option and nothing replaced it. This is the replacement.
+ *
+ * GLOBAL, not a module, and that is the whole mechanism: a global class name
+ * is a STRING, so the kernel can hand it across the boundary as data
+ * (`core/capabilityUi.ts`, re-exported from the public entry) without a
+ * capability importing a stylesheet, and without the React-free entry growing
+ * a CSS import. `capabilityUi.test.ts` holds the names here and the names
+ * exported there to each other — a name that styles nothing renders silently
+ * unstyled, which is the failure this whole file is fixing.
+ *
+ * IT DOES NOT DUPLICATE `controls.module.css`. Both are written from the same
+ * tokens — `--control-pill`, `--radius-pill`, `--accent`, `--text-ui` — so
+ * they agree because the scale is the single source, not because two blocks
+ * are being kept in step by hand. That is the difference between this and the
+ * drift `controls.module.css` was lifted out to prevent: two consumers of one
+ * scale, not two copies of one block. `tokens.test.ts` reads this file like
+ * every other and fails on a raw value, which is what keeps that true.
+ *
+ * WHAT IS IN IT is what the two real capability surfaces need — the Devices
+ * section and the Storage section — and nothing else. A vocabulary invented
+ * ahead of a caller is a vocabulary nobody's use has corrected yet.
+ */
+
+/* --- structure ---------------------------------------------------------- */
+
+/* THE SECTION CARRIES THE INSET, once, for everything in it.
+ *
+ * The kernel's own settings rows are `padding: 0 var(--space-10)` (see
+ * `.settingRow`), and a contributed section had none — so "This device" sat
+ * ten pixels to the left of "Flow" directly above it, and every hint,
+ * button row and code block under it sat there too. Two columns of labels in
+ * one list, which is the kind of thing that reads as wrong before anybody can
+ * say why.
+ *
+ * Put HERE rather than on each child because the alternative is remembering
+ * it on every rule this file grows, and the one that forgets is invisible
+ * until somebody photographs the pane. A capability that adds a control gets
+ * the alignment by being inside a section. */
+.paper-cap-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-inline: var(--space-10);
+}
+
+/* A label and its value, the shape every settings row in the app already has,
+   so a contributed row sits in the same rhythm as the kernel's own.
+
+   `--row-book`, NOT `--row-compact`, and the ramp says which: compact is for a
+   list that is SCANNED — a scope, a chapter, a search result — and book is for
+   "a setting … a row that is read". A contributed row is a settings row, and
+   at 36px against the kernel's 46px the pane had two rhythms in one column.
+
+   A MINIMUM rather than a height, because unlike `.settingRow` these rows hold
+   things that wrap: a pairing sentence, a form, a confirmation with a code in
+   it. Fixed, those overflow their own row. */
+.paper-cap-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  min-height: var(--row-book);
+  font-size: var(--text-ui);
+}
+
+/* The label half: takes the slack and truncates, so a long device name pushes
+   the value off the row rather than wrapping it under the label. */
+.paper-cap-grow {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The value half — quiet, because the label is what the reader is scanning. */
+.paper-cap-value {
+  color: var(--muted);
+  font-size: var(--text-small);
+}
+
+/* A sentence under a row, explaining what the control just above it means.
+   Its own class rather than a `.paper-cap-value` in a div: it is a block, it
+   wraps, and it carries the bottom margin that separates it from the next row. */
+.paper-cap-hint {
+  margin-bottom: var(--space-6);
+  color: var(--muted);
+  font-size: var(--text-small);
+  line-height: var(--leading-ui);
+}
+
+/* Buttons offered together. */
+.paper-cap-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+  /* Vertical only — the horizontal inset is the section's, so this row lines
+     up with the labels above and below it. */
+  padding-block: var(--space-4);
+}
+
+/* --- buttons ------------------------------------------------------------ */
+
+/* THE DEFAULT IS THE QUIET ONE, deliberately. Almost every action a capability
+   offers is secondary — "Pair a new device…", "Sync now", "Revoke" — and a
+   pane of filled accent buttons reads as a form to complete rather than a
+   panel of settings. The primary below is for the one action a surface is
+   actually FOR. */
+.paper-cap-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  height: var(--control-sm);
+  padding: 0 var(--space-12);
+  /* THE LABEL IS ONE LINE. A button in a row beside a title that truncates
+     will be squeezed by it, and a flex item's default `min-width: auto` lets
+     it shrink until its own words wrap — which is what the Storage pane's
+     eviction button did next to a long book title, when it was still called
+     "Remove download": a two-line button in a one-line row. The label is one
+     word now, which does not repeal the rule — the next long one would do it
+     again. The
+     row's slack belongs to the label (`paper-cap-grow`); the action keeps its
+     width. */
+  flex: 0 0 auto;
+  white-space: nowrap;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: inherit;
+  box-shadow: var(--ring-inset) var(--line-2);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+  transition: background var(--motion-popover);
+}
+
+.paper-cap-button:hover,
+.paper-cap-button:focus-visible {
+  background: var(--wash);
+}
+
+.paper-cap-button-primary {
+  background: var(--accent);
+  color: var(--surface);
+  box-shadow: none;
+  font-weight: var(--weight-semibold);
+}
+
+.paper-cap-button-primary:hover,
+.paper-cap-button-primary:focus-visible {
+  background: var(--accent);
+}
+
+/* ⚠️ **A DISABLED CONTRIBUTED BUTTON LOOKED EXACTLY LIKE A LIVE ONE, AND STILL
+   LIT UP UNDER THE POINTER.** This vocabulary had no disabled state at all,
+   while 54 contributed controls across 16 files already set the attribute —
+   every Pair mid-pairing, every Evict mid-eviction, every Create over an empty
+   field — so the whole of the feedback for pressing one was nothing happening.
+   Worse than nothing, in fact: `:hover` MATCHES a disabled element, so the wash
+   above fired under the pointer and said the control was live.
+
+   §07's one rule for this is 45%, which is `--opacity-disabled`. The wash is
+   taken back on the same states that set it, so the two cannot disagree —
+   `:focus-visible` is named although a disabled button cannot be focused,
+   because the rule being undone names it and a reader comparing them should
+   not have to work out which halves correspond.
+
+   ⚠️ **AFTER THE PRIMARY'S OWN RULES, AND THAT IS LOAD-BEARING.** The override
+   below and `.paper-cap-button:disabled:hover` have the same specificity, so
+   order alone decides which of them a disabled primary takes. */
+.paper-cap-button:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: default;
+}
+
+.paper-cap-button:disabled:hover,
+.paper-cap-button:disabled:focus-visible {
+  background: transparent;
+}
+
+/* The filled one KEEPS ITS FILL. `transparent` above would strip it on hover,
+   which turns "not available yet" into "gone" — and the dimming the reader
+   should see is the opacity, which applies to the fill and the label together. */
+.paper-cap-button-primary:disabled:hover,
+.paper-cap-button-primary:disabled:focus-visible {
+  background: var(--accent);
+}
+
+/* Destructive, and coloured rather than filled: it sits in a row beside
+   ordinary actions, and a filled red block in a settings list reads as an
+   error that has already happened rather than as an action available. The
+   kernel's own row menu makes the same choice — see `menuItem[data-danger]`. */
+.paper-cap-button-danger {
+  color: var(--danger);
+}
+
+.paper-cap-button-danger:hover,
+.paper-cap-button-danger:focus-visible {
+  background: var(--wash);
+  color: var(--danger);
+}
+
+/* --- fields ------------------------------------------------------------- */
+
+/* A FILLED PILL, WHICH IS WHAT A FIELD LOOKS LIKE IN THIS APP.
+ *
+ * The pane's own text entry — the Companion composer and the pane search —
+ * is a `--wash` pill with a bare input inside it and no border anywhere (see
+ * `.composer` / `.searchInput`). This drew a bordered rectangle instead, and
+ * on two counts it could not have been further from the rest of the pane:
+ *
+ *   HEIGHT. It took `--control-field`, whose own definition says it is "the
+ *   command palette's own field, which is the largest control in the app …
+ *   deliberately a step above `CONTROL.lg` — the ramp describes controls that
+ *   sit among other controls, and this one does not". This one does: it sits
+ *   in a row beside a 28px Pair button. 52 against 28, in a row whose text is
+ *   `--text-small`. `--control-sm` is the ramp's own answer — "a chip, a
+ *   stepper, AN INLINE FIELD — a control inside a row" — and it is what the
+ *   button beside it already uses, so the pair now matches by construction.
+ *
+ *   SHAPE. A 10px-radius bordered box next to a fully-rounded pill button,
+ *   in a pane that draws no field borders anywhere else. The border is what
+ *   made it read as a web form dropped into Paper.
+ */
+.paper-cap-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--control-sm);
+  padding: 0 var(--space-12);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--wash);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--text-small);
+}
+
+/* A QR THAT BELONGS TO THE PAGE IT IS ON.
+ *
+ * The plugin renders it with the `qrcode` crate's SVG writer, which emits a
+ * WHITE RECT and BLACK MODULES at `min_dimensions(240, 240)`. Drawn as an
+ * `<img src="data:image/svg+xml,…">` that is a hard white card with black on
+ * it, pasted onto whatever theme the reader chose — no stylesheet can reach
+ * inside a data URI to say otherwise, which is why it looked imported rather
+ * than drawn.
+ *
+ * Inlined instead, the SVG is in the document and ordinary CSS reaches it: a
+ * `fill` PRESENTATION ATTRIBUTE loses to a `fill` PROPERTY, so the two rules
+ * below beat the crate's own colours without the crate knowing. The card
+ * becomes the page and the modules become ink.
+ *
+ * SIZED HERE, NOT IN THE MARKUP. The SVG carries its own 240px floor from
+ * `min_dimensions`; `width: 100%` against a bounded figure lets the pane
+ * decide instead, and `height: auto` keeps it square without the markup
+ * restating a number the SVG already knows.
+ */
+.paper-cap-qr {
+  width: var(--qr-size);
+  max-width: 100%;
+  align-self: center;
+}
+
+.paper-cap-qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* The crate's white card. */
+.paper-cap-qr svg rect {
+  fill: transparent;
+}
+
+/* The modules, in the reader's ink rather than in black. */
+.paper-cap-qr svg path {
+  fill: currentColor;
+}
+
+/* THE RING ON A FILLED PILL SITS ON IT, NOT OUTSIDE IT.
+ *
+ * §07's global ring is `outline-offset: var(--space-2)`, and that is right for
+ * the control it was written against: the composer's and the pane search's
+ * input is BARE AND TRANSPARENT inside a pill its PARENT draws, so the two
+ * pixels land in the parent's own fill and the whole thing reads as one
+ * focused control.
+ *
+ * This field is the pill. Making the input itself the filled shape is what the
+ * rule above exists to do, and it left the ring floating two pixels clear of
+ * the fill with the pane's background showing through the gap — a pill drawn
+ * around a pill. Nothing was wrong with either rule alone; the offset simply
+ * describes an element whose visible edge is its border box, and this one's
+ * visible edge is its background.
+ *
+ * A negative offset puts the ring back on the edge it belongs to, which is
+ * what `.noteInput` in `SidePane.module.css` already does for the same reason
+ * and by the same amount. Not zero: on a 999px radius the two curves meet at a
+ * tangent, and a hairline of pane background survives antialiasing between
+ * them.
+ */
+.paper-cap-field:focus-visible {
+  outline-offset: -1px;
+}
+
+.paper-cap-field::placeholder {
+  color: var(--muted);
+}
+
+/* A MULTI-LINE FIELD, WHICH `.paper-cap-field` CANNOT BE MADE INTO.
+ *
+ * Every reason that one is a pill is a reason it cannot hold a paragraph: it
+ * is `--control-sm` tall, fixed, so it would show one line of what may be
+ * twenty, and a `--radius-pill` corner cuts the ends off the first and last
+ * lines of a block of prose. Widening a class until it covers a second shape
+ * is how a vocabulary stops describing anything.
+ *
+ * SO IT IS THE KERNEL'S OWN NOTE EDITOR'S SHAPE, not a second opinion about
+ * what a text box looks like. `.noteInput` in `SidePane.module.css` is the only
+ * other multi-line field in the app — a bordered rectangle at the control
+ * radius, the body's leading, the reader's own type — and this takes the same
+ * steps from the same scale. The file header's rule, applied: two consumers of
+ * one scale, not two copies of one block.
+ */
+.paper-cap-textarea {
+  width: 100%;
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink);
+  /* The container's face, which is the app's — the same opt-in `.paper-cap-field`
+     makes with `font: inherit`. A textarea's user-agent default is monospace,
+     and what goes in here is prose. */
+  font-family: inherit;
+  font-size: var(--text-small);
+  line-height: var(--leading-body);
+  /* VERTICAL ONLY. A textarea the reader can drag wider than its section
+     overflows the pane, and the pane's width is not theirs to choose. */
+  resize: vertical;
+  /* ABOUT EIGHT LINES, as a floor rather than a height — a derivation because
+     the spacing scale stops at 56 and this is a text box, not a gap. The one
+     thing that goes in here today is 861 characters, which is roughly twenty
+     lines at this width, so a box sized to hold all of it would be taller than
+     the section it sits in; eight is enough to read a paragraph of it at once,
+     and `resize` hands the rest to whoever wants it. */
+  min-height: calc(var(--space-56) * 3);
+}
+
+/* THE RING SITS ON THE BORDER, not two pixels clear of it — §07's global
+   offset describes a control whose visible edge is its background, and this
+   one's is its border box. `.noteInput` reaches the same value for the same
+   reason, and `.paper-cap-field` above says so at greater length. */
+.paper-cap-textarea:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -1px;
+}
+
+/* A field holding a number, sized to the number. `flex: none` so it does not
+   take the row's slack the way the text field is meant to. */
+.paper-cap-field-narrow {
+  flex: 0 0 auto;
+  width: var(--tag-editor-w);
+  max-width: 30%;
+  /* NO NATIVE STEPPER. `<input type="number">` draws the platform's own
+     spinner — grey chevrons in a box with its own metrics and its own idea of
+     a hover — which is precisely the browser chrome this whole file exists to
+     get out of Paper's panes. The value is typed, and the arrow keys still
+     step it; what goes is the drawing. */
+  appearance: textfield;
+}
+
+.paper-cap-field-narrow::-webkit-outer-spin-button,
+.paper-cap-field-narrow::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+/* The reader's own accent on a native checkbox, which is the whole of what was
+   missing: the control was unstyled, not the wrong control. */
+.paper-cap-toggle {
+  flex: 0 0 auto;
+  width: var(--icon-control);
+  height: var(--icon-control);
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* --- blocks ------------------------------------------------------------- */
+
+/* A pairing URL: long, unbreakable, and meant to be selected rather than read. */
+.paper-cap-code {
+  display: block;
+  padding: var(--space-8) var(--space-10);
+  border-radius: var(--radius-chip);
+  background: var(--wash);
+  color: var(--muted);
+  font-size: var(--text-micro);
+  overflow-wrap: anywhere;
+  /* ⚠️ ONE CLICK TAKES THE WHOLE STRING, which is what a pairing link wants:
+     it is a hundred characters nobody can retype. It is emphatically NOT what a
+     recovery phrase wants — see `.paper-cap-phrase`, which exists because this
+     class was used for one. */
+  user-select: all;
+}
+
+/**
+ * The twelve words, laid out to be COPIED ONTO PAPER rather than into a
+ * clipboard.
+ *
+ * ⚠️ **THE PHRASE USED TO RENDER AS `.paper-cap-code`, WHICH IS
+ * `user-select: all`.** A single click selected the reader's entire root key —
+ * the class had been written to make a hundred-character pairing URL grabbable,
+ * and the most dangerous secret in the product inherited it. The screen was
+ * optimised for copying the one thing its own warning says to write on paper,
+ * and a reader did exactly that.
+ *
+ * `user-select: text` is the difference between an accident and an intention: a
+ * password manager is a legitimate destination and still reachable by a
+ * deliberate drag; a stray click is not enough any more.
+ *
+ * Numbered, because a phrase is checked word by word against what you wrote
+ * down, and an unnumbered run of twelve is checked by squinting.
+ */
+.paper-cap-phrase {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-6) var(--space-10);
+  margin: var(--space-8) 0;
+  padding: var(--space-10);
+  border-radius: var(--radius-chip);
+  background: var(--wash);
+  user-select: text;
+}
+
+.paper-cap-phrase li {
+  display: flex;
+  gap: var(--space-6);
+  align-items: baseline;
+  font-size: var(--text-micro);
+  color: var(--ink);
+}
+
+.paper-cap-phrase li::before {
+  content: counter(list-item);
+  /* A SCALE STEP, NOT `1.4em`. Two digits of tabular numerals at the micro
+     size fit inside 16px, and the design system has a step for it — a raw
+     value here is a second opinion about spacing that nothing else shares. */
+  min-width: var(--space-16);
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.paper-cap-figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  padding: var(--space-8) 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .paper-cap-button {
+    transition: none;
+  }
+}

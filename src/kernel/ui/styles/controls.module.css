@@ -1,0 +1,201 @@
+/* Controls that appear in more than one place, defined once.
+ *
+ * §07's primary action was written out twice — `.add` on the library's shelf
+ * and `.primaryButton` in the reader — as two byte-identical blocks in two
+ * stylesheets, each maintained by whoever happened to be editing that screen.
+ * They had not drifted yet; a shared accent, radius or height changing in one
+ * of them is how they would.
+ *
+ * A module rather than a global class, so the composing files keep their own
+ * scoping and their own names for it: CSS Modules resolves `composes` at build
+ * time and emits both class names on the element.
+ */
+
+.primary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  height: var(--control-pill);
+  padding: 0 var(--space-16);
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--surface);
+  font-family: inherit;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+
+/* A primary action carrying its mark and no words.
+ *
+ * IT HAS TO LIVE HERE, next to `.primary`, and that is a cascade fact rather
+ * than a preference. `composes` emits BOTH class names onto the element and
+ * decides nothing about which wins — that is left to source order at equal
+ * specificity. Written in the consuming stylesheet, this lost: the element got
+ * `_add_ _primary_`, the injected `.primary` came last, and its `0 16px`
+ * padding beat the `0` next to it. The button measured a correct 34px wide
+ * with 32px of that eaten by padding, which no build step reports and which
+ * looks nearly right.
+ *
+ * Declared after `.primary` in the same file, it wins by the same rule that
+ * made it lose.
+ *
+ * The width is the height, so the pill becomes a circle; `--control-pill` is
+ * read rather than the 34 restated, or the shape could come apart from the ramp. */
+.iconOnly {
+  width: var(--control-pill);
+  padding: 0;
+  justify-content: center;
+}
+
+/* The second of two actions offered together — the one that is real but rarer.
+ *
+ * HERE FOR THE REASON THE HEADER GIVES, one instance later. It was written out
+ * in `Reader.module.css` as `.secondaryButton`, and the library's empty state
+ * now needs the same thing; writing it a second time is how the pair drifts,
+ * which is exactly what `.primary` was lifted here to prevent.
+ *
+ * `--line-2`, the themed border token the rest of the app draws edges with.
+ * The version this replaces asked for `--rule`, which does not exist in
+ * `tokens.css` — so its hardcoded fallback did all the work and, being a fixed
+ * black at 15%, did not follow the theme: on Night that is black on dark, which
+ * is no edge at all. */
+.secondary {
+  composes: primary;
+  background: transparent;
+  color: inherit;
+  box-shadow: var(--ring-inset) var(--line-2);
+}
+
+/* --- the row menu ------------------------------------------------------ */
+
+/* "More about this thing": an ellipsis on a row, and the menu it opens. It
+   was written for the shelf's book cards and is here because the Library
+   panel's tag rows want the same thing — one vocabulary for "more", so a
+   reader who has learned it on a card recognises it on a tag. Written twice it
+   would drift, which is what this file exists to prevent.
+
+   ALWAYS DRAWN. Hover-only was tried on the shelf, on the reasoning that a
+   surface covered in affordances is a management screen — but a control that
+   exists only under the pointer is one a trackpad-less or touch reader never
+   finds. Drawn quiet — muted ink, no fill — it is a mark until it is wanted,
+   and hover and open give it the fill. */
+.more {
+  display: grid;
+  place-items: center;
+  width: var(--control-xs);
+  height: var(--control-xs);
+  /* No padding of its own — the browser's default is reset globally, in
+     `global.css`, which explains what it was doing to this button in
+     particular. */
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--motion-popover), color var(--motion-popover);
+}
+
+.more:hover,
+.more:focus-visible,
+.more[data-open='true'] {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+/* Placed from the VIEWPORT by `usePlacement`, since the surfaces that open it
+   clip their overflow. */
+.menu {
+  position: fixed;
+  z-index: var(--z-menu);
+  min-width: var(--menu-min-w);
+  padding: var(--space-4);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop), var(--ring) var(--line-2);
+}
+
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  width: 100%;
+  padding: var(--space-8) var(--space-10);
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--text-ui);
+  text-align: start;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.menuItem:hover,
+.menuItem:focus-visible {
+  background: var(--wash);
+}
+
+.menuItem[data-danger='true'] {
+  color: var(--danger);
+}
+
+/* Confirming changes the row's words rather than growing a pill: the second
+   click is destructive and an icon cannot say "are you sure", so the row says
+   it, and it collides with nothing because it is already the width of the menu. */
+.menuItem[data-confirming='true'] {
+  background: var(--danger);
+  color: var(--surface);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .more,
+  .menuItem {
+    transition: none;
+  }
+}
+
+/* THE WAY BACK FROM A REMOVAL, shared by the Library panel and the tag editor
+ * over a selection — the two surfaces that can take a tag off many books at
+ * once. Here rather than in either of them because two copies of a line that
+ * says the same thing drift, and this one carries a number the reader is being
+ * asked to trust. */
+.undoLine {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-height: var(--row-compact);
+  padding: 0 var(--space-10);
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+.undoText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.undoButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: var(--control-xs);
+  padding: 0 var(--space-8);
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+}
+
+.undoButton:hover,
+.undoButton:focus-visible {
+  background: var(--wash);
+}

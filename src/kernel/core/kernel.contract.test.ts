@@ -1,0 +1,1182 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { INDEX_DIRTY_FILE, INDEX_FILE } from './bookIndex'
+import { coverPathIn, folderOf, marksPathIn, recordPath, trashOf, type BookRecord } from './bookFolder'
+import type { Card } from './cards'
+import { createDiagnostics, redact } from './diagnostics'
+import { fakeFs, jsonAt, type FakeFs } from './fakeFs.testkit'
+import { ZERO_DEVICE, asHlc, deviceOf, hlcOf, parseHlc } from './hlc'
+import type { Mark } from './marks'
+import type { MarkStorage } from './marks'
+import { BLOB_FOLDER, NOOP_RECORDER, type MutationRecorder, type MutationToken } from './ports'
+import { createKernelServices, type KernelServices } from './services'
+import { createCoverFactsPass } from './coverFacts'
+import { BRIGHTNESS } from './metrics'
+import { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY, createSettingsStore } from './settings'
+import { refusalOf } from '../../kernel/testkit'
+
+/**
+ * THE KERNEL-API RULE, as a test: the desktop UI and a remote service adapter
+ * call the same non-React kernel API, or the second one drifts into a second
+ * truth. So the same cases run twice below — once straight through the
+ * services, once through a stand-in for a service handler that takes JSON
+ * messages — and the two runs must leave the same files on disk and the same
+ * snapshots in memory.
+ *
+ * Then the properties every adapter relies on: a subscriber hears once per
+ * mutation; a mutator's promise settles only once the write is on disk; every
+ * writer is bracketed by the `MutationRecorder`, in order; and the ports
+ * behave as their contracts say.
+ */
+
+/* ---------------------------------------------------------------- fixtures */
+
+const NOW = 1_700_000_000_000
+
+const REC_A: BookRecord = { title: 'Moby-Dick', author: 'Herman Melville', ext: 'epub', addedAt: NOW }
+const REC_B: BookRecord = { title: 'Walden', author: 'Henry David Thoreau', ext: 'epub', addedAt: NOW }
+
+const mark = (id: string, sectionIndex: number, note = ''): Mark => ({
+  id,
+  bookId: 'book:a',
+  cfi: `epubcfi(/6/${4 + sectionIndex * 2}!/4/2,/1:0,/1:5)`,
+  sectionIndex,
+  text: `passage ${id}`,
+  prefix: '',
+  suffix: '',
+  note,
+  kind: 'highlight',
+  tint: 'yellow',
+  style: 'fill',
+  chapter: 'One',
+  createdAt: NOW + sectionIndex,
+})
+const MARK_1 = mark('m1', 0)
+const MARK_2 = mark('m2', 1)
+
+const card = (id: string): Card => ({
+  id,
+  bookId: 'book:a',
+  kind: 'Excerpt',
+  body: `card ${id}`,
+  answer: '',
+  source: 'One',
+  cfi: null,
+  createdAt: NOW,
+})
+const CARD_1 = card('c1')
+const CARD_2 = card('c2')
+
+/** A `MarkStorage` over a map, with `flush` so the async contract has an edge to test. */
+function memoryStorage(seed: Record<string, string> = {}) {
+  const map = new Map(Object.entries(seed))
+  const storage: MarkStorage & {
+    readonly map: Map<string, string>
+    flush: () => Promise<void>
+    /** Make every flush wait until the returned release is called. */
+    hold: () => () => void
+  } = {
+    map,
+    getItem: (key) => map.get(key) ?? null,
+    setItem: (key, value) => void map.set(key, value),
+    flush: () => Promise.resolve(),
+    hold: () => {
+      let release = () => {}
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      storage.flush = () => gate
+      return () => {
+        release()
+        storage.flush = () => Promise.resolve()
+      }
+    },
+  }
+  return storage
+}
+
+interface World {
+  readonly fs: FakeFs
+  readonly storage: ReturnType<typeof memoryStorage>
+  readonly kernel: KernelServices
+}
+
+function world(recorder: MutationRecorder = NOOP_RECORDER): World {
+  const fs = fakeFs()
+  const storage = memoryStorage()
+  const kernel = createKernelServices({ fs, storage, recorder })
+  return { fs, storage, kernel }
+}
+
+/** Everything a run leaves behind: files by path, and the three snapshots. */
+function outcome({ fs, storage, kernel }: World) {
+  const files: Record<string, unknown> = {}
+  for (const path of [...fs.store.keys()].sort()) {
+    const text = new TextDecoder().decode(fs.store.get(path)!)
+    files[path] = path.endsWith('.json') ? JSON.parse(text) : text
+  }
+  return {
+    files,
+    flat: Object.fromEntries([...storage.map.entries()].map(([k, v]) => [k, JSON.parse(v) as unknown])),
+    library: kernel.library.getSnapshot(),
+    marks: kernel.marks.getSnapshot(),
+    cards: kernel.cards.getSnapshot(),
+  }
+}
+
+/* ------------------------------------------------- the remote-style adapter */
+
+/**
+ * What a service handler on the peer channel will look like: a JSON message
+ * in, one kernel call out. Deliberately thin — the point of the rule is that
+ * there is nothing else for it to be.
+ */
+type Message =
+  | { op: 'add'; bookId: string; record: BookRecord; sparse?: boolean }
+  | { op: 'update'; bookId: string; change: Partial<BookRecord> }
+  | { op: 'position'; bookId: string; position: string; progress: number }
+  | { op: 'finished'; bookId: string; finished: boolean }
+  | { op: 'remove'; bookId: string }
+  | { op: 'restore'; bookId: string }
+  | { op: 'tag'; bookId: string; tag: string }
+  | { op: 'untag'; bookId: string; tag: string }
+  | { op: 'mark'; mark: Mark }
+  | { op: 'note'; bookId: string; id: string; note: string }
+  | { op: 'unmark'; bookId: string; id: string }
+  | { op: 'card'; card: Card }
+  | { op: 'discard'; id: string }
+
+async function handle(kernel: KernelServices, wire: string): Promise<void> {
+  const message = JSON.parse(wire) as Message
+  switch (message.op) {
+    case 'add':
+      await kernel.library.add(message.bookId, message.record, message.sparse)
+      return
+    case 'update':
+      return kernel.library.update(message.bookId, (record) => ({ ...record, ...message.change }))
+    case 'position':
+      return kernel.library.rememberPosition(message.bookId, message.position, message.progress)
+    case 'finished':
+      return kernel.library.setFinished(message.bookId, message.finished)
+    case 'remove':
+      return kernel.library.remove(message.bookId)
+    case 'restore':
+      return void (await kernel.library.restore(message.bookId))
+    case 'tag':
+      return kernel.library.tag(message.bookId, message.tag)
+    case 'untag':
+      return kernel.library.untag(message.bookId, message.tag)
+    case 'mark':
+      return kernel.marks.add(message.mark)
+    case 'note':
+      return kernel.marks.updateNote(message.id, message.note, message.bookId)
+    case 'unmark':
+      return kernel.marks.remove(message.id, message.bookId)
+    case 'card':
+      return kernel.cards.add(message.card)
+    case 'discard':
+      return kernel.cards.remove(message.id)
+  }
+}
+
+const send = (kernel: KernelServices, message: Message) => handle(kernel, JSON.stringify(message))
+
+/* ------------------------------------------------------------- the cases */
+
+/** The shared shape of the scenario: what happens, in order. */
+async function throughTheServices({ kernel }: World): Promise<void> {
+  const { library, marks, cards } = kernel
+  await marks.open('book:a')
+  await library.add('book:a', REC_A)
+  await library.add('book:b', REC_B)
+  await library.update('book:a', (record) => ({ ...record, subjects: ['Whaling'] }))
+  await library.rememberPosition('book:a', 'epubcfi(/6/4!/4/2)', 0.25)
+  await library.rememberPosition('book:a', 'epubcfi(/6/4!/4/2)', 0.25) // moved nothing: no write
+  await library.setFinished('book:a', true)
+  await library.tag('book:a', 'Sea')
+  await library.tag('book:a', 'sea') // folded: the same tag
+  await library.untag('book:b', 'nothing') // not there: no write
+  await marks.add(MARK_1)
+  await marks.add(MARK_2)
+  await marks.updateNote(MARK_1.id, 'the whale')
+  await marks.remove(MARK_2.id)
+  await cards.add(CARD_1)
+  await cards.add(CARD_2)
+  await cards.remove(CARD_2.id)
+  await library.remove('book:b')
+  await library.restore('book:b')
+}
+
+async function throughTheAdapter({ kernel }: World): Promise<void> {
+  await kernel.marks.open('book:a')
+  await send(kernel, { op: 'add', bookId: 'book:a', record: REC_A })
+  await send(kernel, { op: 'add', bookId: 'book:b', record: REC_B })
+  await send(kernel, { op: 'update', bookId: 'book:a', change: { subjects: ['Whaling'] } })
+  await send(kernel, { op: 'position', bookId: 'book:a', position: 'epubcfi(/6/4!/4/2)', progress: 0.25 })
+  await send(kernel, { op: 'position', bookId: 'book:a', position: 'epubcfi(/6/4!/4/2)', progress: 0.25 })
+  await send(kernel, { op: 'finished', bookId: 'book:a', finished: true })
+  await send(kernel, { op: 'tag', bookId: 'book:a', tag: 'Sea' })
+  await send(kernel, { op: 'tag', bookId: 'book:a', tag: 'sea' })
+  await send(kernel, { op: 'untag', bookId: 'book:b', tag: 'nothing' })
+  await send(kernel, { op: 'mark', mark: MARK_1 })
+  await send(kernel, { op: 'mark', mark: MARK_2 })
+  await send(kernel, { op: 'note', bookId: 'book:a', id: MARK_1.id, note: 'the whale' })
+  await send(kernel, { op: 'unmark', bookId: 'book:a', id: MARK_2.id })
+  await send(kernel, { op: 'card', card: CARD_1 })
+  await send(kernel, { op: 'card', card: CARD_2 })
+  await send(kernel, { op: 'discard', id: CARD_2.id })
+  await send(kernel, { op: 'remove', bookId: 'book:b' })
+  await send(kernel, { op: 'restore', bookId: 'book:b' })
+}
+
+beforeEach(() => {
+  vi.setSystemTime(NOW)
+})
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+describe('the same cases through the services and through a remote-style adapter', () => {
+  it('leave identical files, flat-store contents and snapshots', async () => {
+    const direct = world()
+    await throughTheServices(direct)
+    await direct.kernel.drain()
+
+    const remote = world()
+    await throughTheAdapter(remote)
+    await remote.kernel.drain()
+
+    const a = outcome(direct)
+    const b = outcome(remote)
+    expect(b.files).toEqual(a.files)
+    expect(b.flat).toEqual(a.flat)
+    expect(b.library).toEqual(a.library)
+    expect(b.marks).toEqual(a.marks)
+    expect(b.cards).toEqual(a.cards)
+  })
+
+  it('and what they leave is the state the cases describe', async () => {
+    const w = world()
+    await throughTheServices(w)
+    await w.kernel.drain()
+    const { fs, kernel } = w
+
+    // book:a — finished, tagged once (folded), on disk and in the snapshot.
+    expect(jsonAt(fs, recordPath('book:a'))).toMatchObject({
+      title: 'Moby-Dick',
+      subjects: ['Whaling'],
+      position: 'epubcfi(/6/4!/4/2)',
+      progress: 0.25,
+      finished: true,
+      tags: ['Sea'],
+    })
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === 'book:a')).toMatchObject({
+      position: 'epubcfi(/6/4!/4/2)',
+      finished: true,
+      tags: ['Sea'],
+    })
+    // book:b — removed, then restored: back in its folder, no trash entry, on the shelf.
+    expect(fs.store.has(recordPath('book:b'))).toBe(true)
+    expect(await fs.exists(trashOf('book:b'))).toBe(false)
+    expect(kernel.library.getSnapshot().map((one) => one.bookId).sort()).toEqual(['book:a', 'book:b'])
+    // The index describes the shelf as it ended up.
+    expect((jsonAt(fs, INDEX_FILE) as { books: { bookId: string }[] }).books.map((one) => one.bookId).sort()).toEqual([
+      'book:a',
+      'book:b',
+    ])
+    /* marks — one LIVE, with its note and its edit stamp; the removed one
+     * stays in the FILE as a tombstone (a deletion has to be able to travel)
+     * and is hidden from `current`, which is a read model. The stamps are
+     * deterministic in their millisecond and their device — the wall clock
+     * is frozen at NOW and no sync is composed, so the default clock stamps
+     * under the zero device — and the counter ticks once per stamp, so two
+     * writes in one frozen millisecond are still two stamps. */
+    const written = jsonAt(fs, marksPathIn('book:a')) as [{ updatedAt: string }, { deletedAt: string }]
+    const edited = { ...MARK_1, note: 'the whale', updatedAt: written[0].updatedAt }
+    expect(written).toEqual([edited, { ...MARK_2, deletedAt: written[1].deletedAt }])
+    for (const stamp of [written[0].updatedAt, written[1].deletedAt]) {
+      expect(parseHlc(stamp).ms).toBe(NOW)
+      expect(deviceOf(asHlc(stamp))).toBe(ZERO_DEVICE)
+    }
+    expect(kernel.marks.getSnapshot().current).toEqual([edited])
+    expect(kernel.marks.getSnapshot().persistent).toBe(true)
+    // cards — one live in the snapshot; the discarded one a tombstone in the flat store.
+    const cards = JSON.parse(w.storage.map.get('paper.cards.v1')!) as [{ deletedAt: string }, unknown]
+    expect(parseHlc(cards[0].deletedAt).ms).toBe(NOW)
+    expect(deviceOf(asHlc(cards[0].deletedAt))).toBe(ZERO_DEVICE)
+    expect(cards).toEqual([
+      { ...CARD_2, deletedAt: cards[0].deletedAt },
+      CARD_1,
+    ])
+    expect(kernel.cards.getSnapshot().all).toEqual([CARD_1])
+  })
+})
+
+describe('a subscriber hears exactly once per mutation', () => {
+  it('for the library, the marks and the cards', async () => {
+    const w = world()
+    const { library, marks, cards } = w.kernel
+    await marks.open('book:a')
+    await library.add('book:a', REC_A)
+    await library.add('book:b', REC_B)
+    await w.kernel.drain()
+
+    const heard = { library: 0, marks: 0, cards: 0 }
+    library.subscribe(() => void (heard.library += 1))
+    marks.subscribe(() => void (heard.marks += 1))
+    cards.subscribe(() => void (heard.cards += 1))
+
+    await library.update('book:a', (record) => ({ ...record, subjects: ['Whaling'] }))
+    expect(heard.library).toBe(1)
+    await library.setFinished('book:a', true)
+    expect(heard.library).toBe(2)
+    await library.rememberPosition('book:a', 'epubcfi(/6/4!/4/2)', 0.25)
+    expect(heard.library).toBe(3)
+    await library.tag('book:a', 'Sea')
+    expect(heard.library).toBe(4)
+    await library.remove('book:b')
+    expect(heard.library).toBe(5)
+    await library.restore('book:b')
+    expect(heard.library).toBe(6)
+    /* `add` of a book that is already there: the optimistic row is the merge,
+     * and the disk agrees, so the confirmation is silent. */
+    await library.add('book:a', { ...REC_A, title: 'Moby-Dick; or, The Whale' })
+    expect(heard.library).toBe(7)
+
+    await marks.add(MARK_1)
+    expect(heard.marks).toBe(1)
+    await marks.updateNote(MARK_1.id, 'note')
+    expect(heard.marks).toBe(2)
+    await marks.remove(MARK_1.id)
+    expect(heard.marks).toBe(3)
+
+    await cards.add(CARD_1)
+    expect(heard.cards).toBe(1)
+    await cards.remove(CARD_1.id)
+    expect(heard.cards).toBe(2)
+
+    // A change that changes nothing is heard by nobody.
+    await library.update('book:a', (record) => record)
+    await library.setFinished('book:a', true)
+    await library.rememberPosition('book:a', 'epubcfi(/6/4!/4/2)', 0.25)
+    await cards.apply((prev) => prev)
+    await marks.updateNote(MARK_1.id, 'gone', 'book:a')
+    expect(heard).toEqual({ library: 7, marks: 3, cards: 2 })
+  })
+
+  it('and once for a whole remote batch', async () => {
+    const w = world()
+    const { library } = w.kernel
+    await library.add('book:a', REC_A)
+    await library.add('book:b', REC_B)
+    await w.kernel.drain()
+    let heard = 0
+    library.subscribe(() => void (heard += 1))
+    let indexWrites = 0
+    const write = w.fs.writeFile
+    w.fs.writeFile = async (path, bytes) => {
+      if (path.startsWith(INDEX_FILE)) indexWrites += 1
+      return write(path, bytes)
+    }
+    await library.applyRemoteRows([
+      { bookId: 'book:a', change: (record) => ({ ...record, finished: true }) },
+      { bookId: 'book:b', change: (record) => ({ ...record, progress: 0.5 }) },
+      { bookId: 'book:zzz', change: (record) => ({ ...record, progress: 1 }) },
+    ])
+    expect(heard).toBe(1)
+    expect(indexWrites).toBe(1)
+    expect(jsonAt(w.fs, recordPath('book:a'))).toMatchObject({ finished: true })
+    expect(jsonAt(w.fs, recordPath('book:b'))).toMatchObject({ progress: 0.5 })
+  })
+})
+
+describe('MarkStore.mergeRemote respects tombstones — the ledger contract (phase 6)', () => {
+  const stamp = (ms: number) => hlcOf(ms, 'a1b2c3d4e5f60718')
+
+  it('an incoming tombstone deletes; a stale row changes nothing; a newer edit resurrects', async () => {
+    const w = world()
+    const { marks } = w.kernel
+    await w.kernel.library.add('book:a', REC_A)
+    await marks.open('book:a')
+    await marks.add(MARK_1)
+    await w.kernel.drain()
+
+    // A tombstone stamped after the local edit deletes the mark — from the
+    // read model at once, from the file never (the row stays, stamped).
+    const dead = { ...MARK_1, deletedAt: stamp(NOW + 10) }
+    await marks.mergeRemote('book:a', [dead])
+    expect(marks.getSnapshot().current).toEqual([])
+    expect(jsonAt(w.fs, marksPathIn('book:a'))).toEqual([dead])
+
+    // A STALE incoming row — older than the tombstone — changes nothing:
+    // an ack is merged, never assigned.
+    await marks.mergeRemote('book:a', [{ ...MARK_1, updatedAt: stamp(NOW + 5) }])
+    expect(jsonAt(w.fs, marksPathIn('book:a'))).toEqual([dead])
+    expect(marks.getSnapshot().current).toEqual([])
+
+    // And an edit stamped after the tombstone brings the mark back —
+    // "latest action wins" cuts both ways, stated plainly.
+    const revived = { ...MARK_1, note: 'written again', updatedAt: stamp(NOW + 20) }
+    await marks.mergeRemote('book:a', [revived])
+    expect(marks.getSnapshot().current).toEqual([revived])
+    expect(jsonAt(w.fs, marksPathIn('book:a'))).toEqual([revived])
+  })
+
+  it('still rejects a mark that belongs to another book', async () => {
+    const w = world()
+    await w.kernel.library.add('book:a', REC_A)
+    await expect(
+      w.kernel.marks.mergeRemote('book:a', [{ ...MARK_1, bookId: 'book:b' }]),
+    ).rejects.toThrow(/belongs to/)
+  })
+})
+
+describe("a mutator's promise settles only once the write is durable", () => {
+  /** Hold every file write until released; count on the caller to release. */
+  function gate(fs: FakeFs) {
+    let open!: () => void
+    const held = new Promise<void>((resolve) => {
+      open = resolve
+    })
+    const write = fs.writeFile
+    fs.writeFile = async (path, bytes) => {
+      await held
+      return write(path, bytes)
+    }
+    return open
+  }
+  const settleOf = (p: Promise<unknown>) => {
+    let state = 'pending'
+    p.then(
+      () => void (state = 'resolved'),
+      () => void (state = 'rejected'),
+    )
+    return () => state
+  }
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  it('for a record write', async () => {
+    const w = world()
+    await w.kernel.library.add('book:a', REC_A)
+    await w.kernel.drain()
+    const open = gate(w.fs)
+    const done = settleOf(w.kernel.library.update('book:a', (record) => ({ ...record, finished: true })))
+    await tick()
+    expect(done()).toBe('pending')
+    expect(jsonAt(w.fs, recordPath('book:a'))).not.toMatchObject({ finished: true })
+    open()
+    await tick()
+    expect(done()).toBe('resolved')
+    expect(jsonAt(w.fs, recordPath('book:a'))).toMatchObject({ finished: true })
+  })
+
+  it('for a marks write', async () => {
+    const w = world()
+    await w.kernel.marks.open('book:a')
+    await w.kernel.library.add('book:a', REC_A)
+    await w.kernel.drain()
+    const open = gate(w.fs)
+    const done = settleOf(w.kernel.marks.add(MARK_1))
+    await tick()
+    expect(done()).toBe('pending')
+    expect(w.fs.store.has(marksPathIn('book:a'))).toBe(false)
+    open()
+    await tick()
+    expect(done()).toBe('resolved')
+    expect(jsonAt(w.fs, marksPathIn('book:a'))).toEqual([MARK_1])
+  })
+
+  it('for a card write, which is durable when the flat store has flushed', async () => {
+    const w = world()
+    const release = w.storage.hold()
+    const done = settleOf(w.kernel.cards.add(CARD_1))
+    await tick()
+    expect(done()).toBe('pending')
+    release()
+    await tick()
+    expect(done()).toBe('resolved')
+    expect(JSON.parse(w.storage.map.get('paper.cards.v1')!)).toEqual([CARD_1])
+  })
+
+  it('and rejects with the write error, leaving the store saying so', async () => {
+    const w = world()
+    await w.kernel.marks.open('book:a')
+    await w.kernel.library.add('book:a', REC_A)
+    await w.kernel.drain()
+    w.fs.writeFile = async () => {
+      throw new Error('disk full')
+    }
+    await expect(w.kernel.library.update('book:a', (record) => ({ ...record, finished: true }))).rejects.toThrow('disk full')
+    await expect(w.kernel.marks.add(MARK_1)).rejects.toThrow('disk full')
+    expect(w.kernel.marks.getSnapshot().persistent).toBe(false)
+    w.storage.setItem = () => {
+      throw new Error('quota')
+    }
+    await expect(w.kernel.cards.add(CARD_1)).rejects.toThrow('quota')
+    expect(w.kernel.cards.getSnapshot().persistent).toBe(false)
+  })
+})
+
+/**
+ * `drain` — the one moment that cannot be deferred: the window closing.
+ *
+ * ⚠️ **IT WAS THREE AWAITS IN A ROW, AND BOTH WAYS THAT LOST WORK WERE MEASURED
+ * HERE.** The index was flushed BEFORE the queue went idle, so a position tick
+ * still on the queue marked the index dirty after its flush had run and the
+ * drain resolved with `index.dirty` on disk. And a flush that rejected skipped
+ * the idle and the flat store's flush outright — a failure in the shelf's cache
+ * abandoning the settings and cards that had nothing to do with it.
+ */
+describe('drain', () => {
+  it('flushes the index after the writes it waited for, so a queued tick leaves nothing dirty', async () => {
+    const w = world()
+    await w.kernel.library.add('book:a', REC_A)
+    await w.kernel.drain()
+    /* NOT AWAITED. The tick is on the queue and marks the index dirty only when
+       its record lands — which is after a drain that starts now has begun. */
+    const tick = w.kernel.library.rememberPosition('book:a', 'epubcfi(/6/4!/4/2/1:0)', 0.5)
+    await w.kernel.drain()
+    await tick
+    expect(w.fs.store.has(INDEX_DIRTY_FILE), 'the drain resolved with the index still behind a tick').toBe(false)
+  })
+
+  it('attempts every stage when the index flush fails, and still raises that failure', async () => {
+    const w = world()
+    await w.kernel.library.add('book:a', REC_A)
+    await w.kernel.library.rememberPosition('book:a', 'epubcfi(/6/4!/4/2/1:0)', 0.5)
+    const write = w.fs.writeFile
+    w.fs.writeFile = async (path, bytes) => {
+      if (path.startsWith(INDEX_FILE)) throw new Error('the index would not write')
+      return write(path, bytes)
+    }
+    let flushed = 0
+    w.storage.flush = async () => {
+      flushed += 1
+    }
+
+    const cause = await w.kernel.drain().then(
+      () => null,
+      (error: unknown) => error,
+    )
+    expect(flushed, 'the flat store was abandoned because the index failed').toBe(1)
+    expect(cause).toBeInstanceOf(Error)
+    expect((cause as Error).message).toMatch(/the index would not write/u)
+  })
+})
+
+describe('every writer is bracketed by the recorder, begin before the write and commit after', () => {
+  function spyRecorder(log: string[]): MutationRecorder {
+    let n = 0
+    return {
+      begin: async (book, what) => {
+        n += 1
+        log.push(`begin ${what} ${book} #${n}`)
+        return { book, what, n } as MutationToken & { n: number }
+      },
+      commit: async (token) => {
+        log.push(`commit ${token.what} ${token.book} #${(token as MutationToken & { n: number }).n}`)
+      },
+    }
+  }
+  /** The log with the fs's own writes interleaved, so ORDER is what is asserted. */
+  function watched(recorder: MutationRecorder, log: string[]) {
+    const w = world(recorder)
+    const write = w.fs.writeFile
+    w.fs.writeFile = async (path, bytes) => {
+      log.push(`write ${path}`)
+      return write(path, bytes)
+    }
+    const rename = w.fs.rename
+    w.fs.rename = async (from, to) => {
+      log.push(`rename ${from} -> ${to}`)
+      return rename(from, to)
+    }
+    const set = w.storage.setItem
+    w.storage.setItem = (key, value) => {
+      log.push(`set ${key}`)
+      set(key, value)
+    }
+    return w
+  }
+  const between = (log: string[], from: string, to: string) =>
+    log.slice(log.indexOf(from) + 1, log.indexOf(to))
+
+  it('for the record, marks, removal, restore, cover, content, cards and refresh writers', async () => {
+    const log: string[] = []
+    const w = watched(spyRecorder(log), log)
+    const { library, marks, cards } = w.kernel
+    await marks.open('book:a')
+
+    await library.add('book:a', REC_A)
+    expect(between(log, 'begin record book:a #1', 'commit record book:a #1')).toEqual([
+      `write ${recordPath('book:a')}.writing`,
+      `rename ${recordPath('book:a')}.writing -> ${recordPath('book:a')}`,
+    ])
+
+    await library.update('book:a', (record) => ({ ...record, finished: true }))
+    expect(between(log, 'begin record book:a #2', 'commit record book:a #2')).toEqual([
+      `write ${recordPath('book:a')}.writing`,
+      `rename ${recordPath('book:a')}.writing -> ${recordPath('book:a')}`,
+    ])
+
+    await marks.add(MARK_1)
+    expect(between(log, 'begin marks book:a #3', 'commit marks book:a #3')).toEqual([
+      `write ${marksPathIn('book:a')}.writing`,
+      `rename ${marksPathIn('book:a')}.writing -> ${marksPathIn('book:a')}`,
+    ])
+
+    await library.keepContent('book:a', 'moby.epub', new Blob(['WHALE']))
+    expect(between(log, 'begin content book:a #4', 'commit content book:a #4')).toEqual([
+      `write ${folderOf('book:a')}/content.epub.writing`,
+      `rename ${folderOf('book:a')}/content.epub.writing -> ${folderOf('book:a')}/content.epub`,
+    ])
+
+    /* The cover: `keepCover` needs an image decoder this environment does not
+     * have, so it writes nothing and says so — the bracket still closes. */
+    await library.keepJacket('book:a', new Blob(['not an image']))
+    expect(log).toContain('begin cover book:a #5')
+    expect(log).toContain('commit cover book:a #5')
+    expect(w.fs.store.has(coverPathIn('book:a'))).toBe(false)
+
+    await library.refreshContent('book:a')
+    expect(log.indexOf('begin content book:a #6')).toBeLessThan(log.indexOf('commit content book:a #6'))
+    expect(w.kernel.library.getSnapshot()[0]).toMatchObject({ hasContent: true })
+
+    /* Cards bracket under the CANONICAL cards book '' — one cross-book
+     * surface, one recorder stream, whichever card was touched. */
+    await cards.add(CARD_1)
+    expect(between(log, 'begin cards  #7', 'commit cards  #7')).toEqual(['set paper.cards.v1'])
+
+    await library.remove('book:a')
+    const removal = between(log, 'begin removed book:a #8', 'commit removed book:a #8')
+    /* THE PRESENCE REGISTER BEFORE THE TRASH RENAME — the order `presence.ts`
+     * stakes replication on: a crash between the two leaves a removal that
+     * recovery can finish, never one nothing recorded. */
+    const presenceLanded = removal.indexOf(`rename sync/removed.json.writing -> sync/removed.json`)
+    const folderMoved = removal.indexOf(`rename ${folderOf('book:a')} -> ${trashOf('book:a')}`)
+    expect(presenceLanded).toBeGreaterThanOrEqual(0)
+    expect(folderMoved).toBeGreaterThan(presenceLanded)
+    expect(removal).toContain(`write ${trashOf('book:a')}/.removed`)
+
+    await library.restore('book:a')
+    const restored = between(log, 'begin removed book:a #9', 'commit removed book:a #9')
+    expect(restored.some((line) => line.startsWith(`rename ${trashOf('book:a')}/`))).toBe(true)
+
+    // Every begin has its commit, in order, and nothing is written outside a bracket.
+    const begins = log.filter((line) => line.startsWith('begin '))
+    const commits = log.filter((line) => line.startsWith('commit '))
+    expect(commits.map((line) => line.replace('commit', 'begin'))).toEqual(begins)
+    let open = 0
+    for (const line of log) {
+      if (line.startsWith('begin ')) open += 1
+      else if (line.startsWith('commit ')) open -= 1
+      else if (line.startsWith('write ') && !line.startsWith(`write ${INDEX_FILE}`)) expect(open).toBeGreaterThan(0)
+      else if (line.startsWith('set ')) expect(open).toBeGreaterThan(0)
+    }
+  })
+
+  it('leaves no commit when the write throws — the dangling begin is what a crash would leave', async () => {
+    const log: string[] = []
+    const w = watched(spyRecorder(log), log)
+    await w.kernel.library.add('book:a', REC_A)
+    w.fs.writeFile = async () => {
+      throw new Error('disk full')
+    }
+    expect((await refusalOf(w.kernel.library.update('book:a', (record) => ({ ...record, finished: true })))).message, 'the disk’s refusal, not a wrapper that hides it').toBe('disk full')
+    expect(log).toContain('begin record book:a #2')
+    expect(log).not.toContain('commit record book:a #2')
+  })
+
+  it('and the no-op recorder is the default and changes nothing', async () => {
+    const withDefault = world()
+    const withNoop = world(NOOP_RECORDER)
+    await throughTheServices(withDefault)
+    await throughTheServices(withNoop)
+    await withDefault.kernel.drain()
+    await withNoop.kernel.drain()
+    expect(outcome(withNoop).files).toEqual(outcome(withDefault).files)
+    const token = await NOOP_RECORDER.begin('book:a', 'record')
+    expect(token).toEqual({ book: 'book:a', what: 'record' })
+    await expect(NOOP_RECORDER.commit(token, 'digest')).resolves.toBeUndefined()
+  })
+})
+
+/**
+ * `BLOB_FOLDER` — WHAT A BOOK'S FOLDER MAY BE CALLED.
+ *
+ * These cases lived in a suite for `contentBlobPort`, a port the kernel
+ * published and nothing ever used; the transfers that ship resolve their paths
+ * in Rust. The port is gone — and these cases are NOT, because they are the
+ * strongest thing holding this pattern to its shape: the parity check beside
+ * it compares the regex's SOURCE TEXT against the Rust ("contains `80`"), so
+ * `{1,800}` would satisfy it, and `book.add` refuses an id by this pattern
+ * alone.
+ *
+ * `safeId` maps everything outside `[A-Za-z0-9]` to `_`, so a legal folder is
+ * exactly that alphabet plus the underscore, bounded — a longer one is past
+ * what the blob contract allows and, on some filesystems, past the component
+ * limit, so the book's content operations would refuse it later or the folder
+ * would not be creatable at all.
+ */
+describe('BLOB_FOLDER', () => {
+  it('accepts a folder name `safeId` can actually produce', () => {
+    for (const good of ['book_abc', 'a', 'A_1', '_', 'x'.repeat(80)]) {
+      expect(BLOB_FOLDER.test(good), good).toBe(true)
+    }
+  })
+
+  it('refuses anything that is not one', () => {
+    for (const bad of ['..', '../x', 'a/b', '/etc', '', 'book:abc', 'x'.repeat(81), 'a b', 'a\\b', 'a.b', 'a-b', 'né']) {
+      expect(BLOB_FOLDER.test(bad), bad).toBe(false)
+    }
+  })
+
+  /* ANCHORED AT BOTH ENDS. An unanchored pattern matches the legal part of an
+   * illegal name, which is exactly how a traversal gets through a check that
+   * looks right. */
+  it('is anchored, so a legal prefix does not make an illegal name legal', () => {
+    expect(BLOB_FOLDER.test('book_abc/../../etc')).toBe(false)
+    expect(BLOB_FOLDER.test('\nbook_abc')).toBe(false)
+    expect(BLOB_FOLDER.test('book_abc\n')).toBe(false)
+  })
+
+  /* NOT STICKY OR GLOBAL: `lastIndex` on a shared regex makes alternate calls
+   * with the same input answer differently. */
+  it('answers the same for the same name twice', () => {
+    expect(BLOB_FOLDER.test('book_abc')).toBe(BLOB_FOLDER.test('book_abc'))
+    expect(BLOB_FOLDER.global).toBe(false)
+    expect(BLOB_FOLDER.sticky).toBe(false)
+  })
+})
+
+describe('removeBlob — the closed-name delete twin of the blob port (WI-10.2)', () => {
+  const BOOK = 'book:a'
+  const FOLDER = folderOf(BOOK)
+
+  function blobWorld() {
+    const w = world()
+    w.fs.store.set(recordPath(BOOK), new TextEncoder().encode(JSON.stringify(REC_A)))
+    w.fs.store.set(`${FOLDER}/content.epub`, new TextEncoder().encode('bytes'))
+    w.fs.store.set(`${FOLDER}/cover.jpg`, new TextEncoder().encode('jacket'))
+    w.fs.store.set(`${FOLDER}/cover.webp`, new TextEncoder().encode('legacy jacket'))
+    return w
+  }
+
+  it('removes a closed-name blob — content, cover, and the legacy evict-only cover', async () => {
+    const w = blobWorld()
+    await w.kernel.removeBlob(BOOK, 'content.epub')
+    await w.kernel.removeBlob(BOOK, 'cover.jpg')
+    await w.kernel.removeBlob(BOOK, 'cover.webp')
+    expect(w.fs.store.has(`${FOLDER}/content.epub`)).toBe(false)
+    expect(w.fs.store.has(`${FOLDER}/cover.jpg`)).toBe(false)
+    expect(w.fs.store.has(`${FOLDER}/cover.webp`)).toBe(false)
+    // The record it sat beside is untouched.
+    expect(w.fs.store.has(recordPath(BOOK))).toBe(true)
+  })
+
+  it('takes the jacket’s facts off the record with the jacket — WI-23.C5', async () => {
+    /* A world whose library HOLDS the book, so the record has a row to carry the facts. */
+    const w = blobWorld()
+    const facts = { name: 'cover.jpg' as const, size: 6, hash: 'ab'.repeat(32) }
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual(facts)
+    await kernel.removeBlob(BOOK, 'cover.jpg')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+    /* The content's removal says nothing about the jacket. */
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.removeBlob(BOOK, 'content.epub')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual(facts)
+    /* THE FACTS OF THIS NAME, NOT ANY FACTS. The book holds both names; the
+       facts describe the JPEG, and removing the legacy WebP beside it used to
+       discard them — a valid measurement of a file still there. */
+    w.fs.store.set(`${FOLDER}/cover.jpg`, new TextEncoder().encode('jacket'))
+    await kernel.removeBlob(BOOK, 'cover.webp')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual(facts)
+    /* The legacy name's removal clears facts that describe IT, as the current name's does. */
+    w.fs.store.set(`${FOLDER}/cover.webp`, new TextEncoder().encode('legacy jacket'))
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: { ...facts, name: 'cover.webp' as const } }))
+    await kernel.removeBlob(BOOK, 'cover.webp')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+    /* And a blob that was not there clears nothing: facts describing a file
+       nothing deleted are not this call's to take. */
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.removeBlob(BOOK, 'cover.jpg')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.removeBlob(BOOK, 'cover.jpg')
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual(facts)
+  })
+
+  it('measures a jacket INSIDE its lane, so a removal and a same-name replacement each leave the facts of the file that is there', async () => {
+    /* THE CLASS BEHIND THE TWO-TASK WINDOW, FROM THE OTHER SIDE. A pass that
+       measured the jacket outside the lane queued its stamp behind a removal
+       and restored facts for a deleted file; a path check let a same-name
+       replacement receive the old digest. Measured in the lane, the stamp
+       describes the file at the moment it is written, and a removal queued
+       behind the measurement clears it again. */
+    const w = blobWorld()
+    /* One jacket only: the legacy sibling would be measured, rightly, once the JPEG went. */
+    w.fs.store.delete(`${FOLDER}/cover.webp`)
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    /* The hasher answers for the bytes on disk, and can be held. */
+    let hold: Promise<void> = Promise.resolve()
+    const hashFile = vi.fn(async (_segment: string, name: string) => {
+      await hold
+      const bytes = w.fs.store.get(`${FOLDER}/${name}`)
+      if (!bytes) throw new Error('gone')
+      return { blake3: (bytes[0] === 0x6a ? 'aa' : 'bb').repeat(32), size: bytes.length }
+    })
+    const pass = createCoverFactsPass({ fs: w.fs, library: kernel.library, hashes: () => ({ hashFile }) })
+    let release: () => void = () => {}
+    hold = new Promise<void>((done) => {
+      release = done
+    })
+    /* The pass takes the lane first and measures; the removal waits behind it.
+       (The pass begins on a microtask; a turn of the clock lets it take the lane.) */
+    const measuring = pass.runOnce()
+    await new Promise((done) => setTimeout(done, 0))
+    const removal = kernel.removeBlob(BOOK, 'cover.jpg')
+    release()
+    expect(await measuring).toBe(1)
+    await removal
+    await kernel.drain()
+    /* Stamped for the file that was there, then cleared with it: no facts, no file. */
+    expect(w.fs.store.has(`${FOLDER}/cover.jpg`)).toBe(false)
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+    /* A jacket kept again under the same name is measured as ITSELF, in its lane. */
+    const bound = kernel.bindHashPort({ hashFile })
+    w.fs.store.set(`${FOLDER}/cover.jpg`, new TextEncoder().encode('new jacket'))
+    await kernel.library.keepJacket(BOOK, new Blob(['ignored']))
+    await kernel.drain()
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)?.coverFacts).toEqual({ name: 'cover.jpg', size: 10, hash: 'bb'.repeat(32) })
+    bound.dispose()
+  })
+
+  it('refuses to delete a cover whose record is there and will not read, and says so — no facts left for a file that is gone', async () => {
+    const w = blobWorld()
+    w.fs.store.set(recordPath(BOOK), new TextEncoder().encode('not json at all'))
+    /* The clause this fixture actually causes. A record that is PRESENT and
+       unparseable is damage; a read that fails outright is a different fact
+       with its own sentence. They shared one message until the two were
+       separated, so a pattern matching the shared wording could not tell which
+       check had fired. */
+    await expect(w.kernel.removeBlob(BOOK, 'cover.jpg')).rejects.toThrow(/does not parse/u)
+    expect(w.fs.store.has(`${FOLDER}/cover.jpg`)).toBe(true)
+  })
+
+  it('clears the facts even when the recorder’s commit fails after the unlink, and raises that failure', async () => {
+    /* The bytes left and the journal did not say so: the facts still go — a
+       record describing a file that is not there is the worse outcome — and
+       the caller hears the recorder's failure once the lane is done. This
+       used to throw past the cleanup altogether. */
+    const w = blobWorld()
+    const facts = { name: 'cover.jpg' as const, size: 6, hash: 'ab'.repeat(32) }
+    let failCover = false
+    const recorder: MutationRecorder = {
+      begin: async (book, what) => ({ book, what }),
+      commit: async (token) => {
+        if (failCover && token.what === 'cover') throw new Error('journal commit failed')
+      },
+    }
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      recorder,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.drain()
+    failCover = true
+    await expect(kernel.removeBlob(BOOK, 'cover.jpg')).rejects.toThrow('journal commit failed')
+    await kernel.drain()
+    expect(w.fs.store.has(`${FOLDER}/cover.jpg`)).toBe(false)
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+  })
+
+  it('clears the facts BEFORE the file goes — a failure beginning the cover bracket leaves a jacket with no facts, never facts with no jacket', async () => {
+    /* Two brackets, the record's first: a crash or a journal failure between
+       them leaves a present jacket the next pass measures again — and never
+       stale facts for a file that is gone, which the circle would publish
+       and this device could not serve. The other order had that window. */
+    const w = blobWorld()
+    const facts = { name: 'cover.jpg' as const, size: 6, hash: 'ab'.repeat(32) }
+    const order: string[] = []
+    let refuseCover = false
+    const recorder: MutationRecorder = {
+      begin: async (book, what) => {
+        if (refuseCover && what === 'cover') throw new Error('the journal would not open')
+        order.push(`begin ${what}`)
+        return { book, what }
+      },
+      commit: async (token) => {
+        order.push(`commit ${token.what}`)
+      },
+    }
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      recorder,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.drain()
+    order.length = 0
+    await kernel.removeBlob(BOOK, 'cover.jpg')
+    await kernel.drain()
+    expect(order).toEqual(['begin record', 'commit record', 'begin cover', 'commit cover'])
+    /* And with the second bracket refused: the facts are gone, the jacket is still there, and the caller hears it. */
+    w.fs.store.set(`${FOLDER}/cover.jpg`, new TextEncoder().encode('jacket'))
+    await kernel.library.update(BOOK, (held) => ({ ...held, coverFacts: facts }))
+    await kernel.drain()
+    refuseCover = true
+    await expect(kernel.removeBlob(BOOK, 'cover.jpg')).rejects.toThrow('the journal would not open')
+    await kernel.drain()
+    expect(w.fs.store.has(`${FOLDER}/cover.jpg`)).toBe(true)
+    expect(kernel.library.getSnapshot().find((one) => one.bookId === BOOK)).not.toHaveProperty('coverFacts')
+  })
+
+  it('removing a blob that is not there is done, not an error', async () => {
+    const w = world()
+    await expect(w.kernel.removeBlob(BOOK, 'content.epub')).resolves.toBeUndefined()
+  })
+
+  it('writes nothing for a refusal — not even the index — so an absent blob, a content deletion or an ownership refusal cannot be failed by it', async () => {
+    /* A refusal in the lane used to rewrite the index to take back an
+       optimistic row that these had never published — and an index that
+       would not write turned a no-op into a failure. */
+    const w = blobWorld()
+    let indexWrites = 0
+    const writeFile = w.fs.writeFile.bind(w.fs)
+    w.fs.writeFile = async (path, bytes) => {
+      if (path.startsWith(INDEX_FILE)) {
+        indexWrites += 1
+        throw new Error('the index would not write')
+      }
+      await writeFile(path, bytes)
+    }
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    /* Absent: the documented no-op, whole. */
+    await expect(kernel.removeBlob(BOOK, 'cover.png' as never)).rejects.toThrow(/not a blob the kernel removes/u)
+    await expect(kernel.removeBlob('book:absent', 'cover.jpg')).resolves.toBeUndefined()
+    /* Content: deleted, no record to change, no index to write. */
+    await expect(kernel.removeBlob(BOOK, 'content.epub')).resolves.toBeUndefined()
+    expect(w.fs.store.has(`${FOLDER}/content.epub`)).toBe(false)
+    /* A cover with no facts of its name on the record: deleted, nothing else. */
+    await expect(kernel.removeBlob(BOOK, 'cover.webp')).resolves.toBeUndefined()
+    expect(w.fs.store.has(`${FOLDER}/cover.webp`)).toBe(false)
+    await kernel.drain()
+    expect(indexWrites).toBe(0)
+  })
+
+  it('refuses book.json, a ../ escape, and a name outside the closed set', async () => {
+    const w = blobWorld()
+    for (const bad of ['book.json', '../book.json', 'marks.json', 'content.exe', 'content.', 'cover.png', '']) {
+      await expect(w.kernel.removeBlob(BOOK, bad as 'cover.jpg'), bad).rejects.toThrow(/not a blob/)
+    }
+    // Nothing was deleted by any refused call.
+    expect(w.fs.store.size).toBe(4)
+  })
+
+  it('a hostile book id cannot name a path — the folder is sanitised', async () => {
+    const w = blobWorld()
+    w.fs.store.set('elsewhere/content.epub', new TextEncoder().encode('not a book'))
+    await w.kernel.removeBlob('../../elsewhere', 'content.epub')
+    expect(w.fs.store.has('elsewhere/content.epub')).toBe(true)
+  })
+
+  it('without a filesystem a good name is a no-op and a bad name still throws', async () => {
+    const kernel = createKernelServices({ fs: null, storage: null })
+    await expect(kernel.removeBlob(BOOK, 'content.epub')).resolves.toBeUndefined()
+    await expect(kernel.removeBlob(BOOK, 'book.json' as 'cover.jpg')).rejects.toThrow(/not a blob/)
+  })
+})
+
+describe('SettingsStore', () => {
+  it('round-trips through the flat store under one versioned key', () => {
+    const storage = memoryStorage()
+    const first = createSettingsStore({ storage })
+    expect(first.get(KERNEL_SETTINGS.theme)).toBe('paper')
+    first.set(KERNEL_SETTINGS.theme, 'night')
+    first.set(KERNEL_SETTINGS.textSize, 19)
+    expect(JSON.parse(storage.map.get(SETTINGS_STORAGE_KEY)!)).toEqual({
+      version: 1,
+      values: { 'kernel.theme': 'night', 'kernel.textSize': 19 },
+    })
+    const second = createSettingsStore({ storage })
+    expect(second.get(KERNEL_SETTINGS.theme)).toBe('night')
+    expect(second.get(KERNEL_SETTINGS.textSize)).toBe(19)
+    expect(second.get(KERNEL_SETTINGS.typeface)).toBe('literata')
+  })
+
+  it('starts from defaults with nothing stored, and writes the envelope on the first set', () => {
+    const storage = memoryStorage()
+    const store = createSettingsStore({ storage })
+    expect(storage.map.has(SETTINGS_STORAGE_KEY)).toBe(false)
+    expect(store.get(KERNEL_SETTINGS.side)).toBe('right')
+    store.set(KERNEL_SETTINGS.side, 'left')
+    expect(JSON.parse(storage.map.get(SETTINGS_STORAGE_KEY)!)).toMatchObject({ version: 1 })
+  })
+
+  it('migrates an older envelope through the hook, keeping its values by default', () => {
+    const storage = memoryStorage({
+      [SETTINGS_STORAGE_KEY]: JSON.stringify({ values: { 'kernel.theme': 'sage' } }),
+    })
+    expect(createSettingsStore({ storage }).get(KERNEL_SETTINGS.theme)).toBe('sage')
+    const seen: unknown[] = []
+    const migrated = createSettingsStore({
+      storage,
+      migrate: (found) => {
+        seen.push(found)
+        return { 'kernel.theme': 'slate' }
+      },
+    })
+    expect(seen).toEqual([{ version: 0, values: { 'kernel.theme': 'sage' } }])
+    expect(migrated.get(KERNEL_SETTINGS.theme)).toBe('slate')
+    // And a missing envelope reaches the hook as null.
+    const fresh: unknown[] = []
+    createSettingsStore({ storage: memoryStorage(), migrate: (found) => (fresh.push(found), {}) })
+    expect(fresh).toEqual([null])
+  })
+
+  it('ignores unknown keys and malformed values, and keeps the unknown keys on disk', () => {
+    const storage = memoryStorage({
+      [SETTINGS_STORAGE_KEY]: JSON.stringify({
+        version: 1,
+        values: {
+          'kernel.theme': 42,
+          'kernel.stepIdx': 1.5,
+          'kernel.brightness': 999,
+          'sync.interval': 30,
+          'kernel.side': 'left',
+        },
+      }),
+    })
+    const store = createSettingsStore({ storage })
+    expect(store.get(KERNEL_SETTINGS.theme)).toBe('paper')
+    // A size that is not a positive number is not a size, so it falls back…
+    expect(store.get(KERNEL_SETTINGS.textSize)).toBe(KERNEL_SETTINGS.textSize.fallback)
+    /* …while an integer past the end of this build's ramp CLAMPS rather than
+       falling back: it is not malformed, it is describing the end of a scale
+       this build has less of, and falling back would throw away a reader's
+       deliberate "as far as it goes". */
+    expect(store.get(KERNEL_SETTINGS.brightness)).toBe(BRIGHTNESS.steps.length - 1)
+    expect(store.get(KERNEL_SETTINGS.side)).toBe('left')
+    store.set(KERNEL_SETTINGS.theme, 'sepia')
+    expect(JSON.parse(storage.map.get(SETTINGS_STORAGE_KEY)!).values).toMatchObject({ 'sync.interval': 30, 'kernel.theme': 'sepia' })
+  })
+
+  it('notifies once per change and not for a set that changes nothing', () => {
+    const store = createSettingsStore({ storage: memoryStorage() })
+    let heard = 0
+    store.subscribe(() => void (heard += 1))
+    const before = store.getSnapshot()
+    store.set(KERNEL_SETTINGS.rulerOn, true)
+    expect(heard).toBe(1)
+    expect(store.getSnapshot()).not.toBe(before)
+    const after = store.getSnapshot()
+    store.set(KERNEL_SETTINGS.rulerOn, true)
+    expect(heard).toBe(1)
+    expect(store.getSnapshot()).toBe(after)
+  })
+
+  it('lives for the session with no storage at all', () => {
+    const store = createSettingsStore({ storage: null })
+    store.set(KERNEL_SETTINGS.theme, 'night')
+    expect(store.get(KERNEL_SETTINGS.theme)).toBe('night')
+  })
+})
+
+describe('Diagnostics', () => {
+  it('redacts secrets, tokens, keys, bodies, text, peers and endpoints, however nested', () => {
+    expect(
+      redact({
+        token: 'abc',
+        authToken: 'def',
+        peer_id: 'p1',
+        count: 3,
+        nested: { body: 'the envelope', ok: true, list: [{ text: 'a passage', page: 2 }] },
+        endpoint: 'https://x',
+        context: 'kept: not a whole word',
+      }),
+    ).toEqual({
+      token: '[redacted]',
+      authToken: '[redacted]',
+      peer_id: '[redacted]',
+      count: 3,
+      nested: { body: '[redacted]', ok: true, list: [{ text: '[redacted]', page: 2 }] },
+      endpoint: '[redacted]',
+      context: 'kept: not a whole word',
+    })
+  })
+
+  it('writes to the sink under its scope, redacted, and a child under a dotted scope', () => {
+    const lines: [string, string, Record<string, unknown>][] = []
+    const sink = {
+      info: (m: string, f: Record<string, unknown>) => void lines.push(['info', m, f]),
+      warn: (m: string, f: Record<string, unknown>) => void lines.push(['warn', m, f]),
+      error: (m: string, f: Record<string, unknown>) => void lines.push(['error', m, f]),
+    }
+    const diag = createDiagnostics({ sink })
+    diag.info('boot', { books: 2 })
+    diag.child('sync').warn('pull-failed', { peerId: 'p1', reason: 'timeout' })
+    diag.child('sync').child('journal').error('torn', {})
+    expect(lines).toEqual([
+      ['info', '[paper:kernel] boot', { books: 2 }],
+      ['warn', '[paper:kernel.sync] pull-failed', { peerId: '[redacted]', reason: 'timeout' }],
+      ['error', '[paper:kernel.sync.journal] torn', {}],
+    ])
+  })
+
+  it('is the no-op when disabled', () => {
+    const sink = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const diag = createDiagnostics({ sink, enabled: false })
+    diag.error('anything', { secret: 'x' })
+    diag.child('sync').info('anything')
+    expect(sink.info).not.toHaveBeenCalled()
+    expect(sink.error).not.toHaveBeenCalled()
+  })
+})
+
+describe('a jacket the store keeps is measured — WI-23.C5', () => {
+  it('stamps the record’s cover facts through the hash port once the jacket is there, and leaves them when no port is bound', async () => {
+    const BOOK = 'book:a'
+    const w = world()
+    w.fs.store.set(recordPath(BOOK), new TextEncoder().encode(JSON.stringify(REC_A)))
+    /* Already on disk: `keepCover` keeps what is there rather than decoding, which this environment cannot. */
+    w.fs.store.set(coverPathIn(BOOK), new TextEncoder().encode('jacket'))
+    const kernel = createKernelServices({
+      fs: w.fs,
+      storage: w.storage,
+      initialBooks: [{ bookId: BOOK, title: REC_A.title, author: REC_A.author, hasContent: true }],
+    })
+    await kernel.library.keepJacket(BOOK, new Blob(['ignored']))
+    await kernel.drain()
+    expect(kernel.library.getSnapshot()[0]).not.toHaveProperty('coverFacts')
+    const hashFile = vi.fn(() => Promise.resolve({ blake3: 'ab'.repeat(32), size: 6 }))
+    const bound = kernel.bindHashPort({ hashFile })
+    await kernel.library.keepJacket(BOOK, new Blob(['ignored']))
+    await kernel.drain()
+    expect(hashFile).toHaveBeenCalledWith(folderOf(BOOK).slice(folderOf(BOOK).lastIndexOf('/') + 1), 'cover.jpg')
+    expect(kernel.library.getSnapshot()[0]?.coverFacts).toEqual({ name: 'cover.jpg', size: 6, hash: 'ab'.repeat(32) })
+    bound.dispose()
+  })
+})

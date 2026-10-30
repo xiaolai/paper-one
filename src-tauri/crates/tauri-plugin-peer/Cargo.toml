@@ -1,0 +1,195 @@
+[package]
+name = "tauri-plugin-peer"
+version = "0.1.0"
+description = "Paper's peer transport: an iroh endpoint, identity, pairing and blob streams, behind Tauri commands"
+authors = ["Paper"]
+license = "MIT"
+edition = "2021"
+# iroh 1.0.3 and iroh-mdns-address-lookup 0.4.0 declare 1.91; the app crate
+# says the same, and the toolchain itself is pinned by the root
+# rust-toolchain.toml.
+rust-version = "1.91"
+# Not a crates.io crate: it is a workspace member of the app and reaches the
+# app by path only.
+publish = false
+# `tauri_plugin::Builder` refuses to build without `links`, and it must equal
+# the package name: that is how the app's tauri-build finds this plugin's
+# permission files (through the DEP_TAURI_PLUGIN_PEER_* variables cargo
+# exports for a linked crate).
+links = "tauri-plugin-peer"
+
+[lib]
+name = "tauri_plugin_peer"
+path = "src/lib.rs"
+
+# One switch per mobile platform. Empty today: nothing in the scaffold differs
+# by feature (mobile behaviour is keyed on `cfg(mobile)`, which the plugin
+# build emits from the target). They exist so the app's `ios` / `android`
+# features have somewhere to forward to when platform-only dependencies land
+# (a Swift/Kotlin half, the barcode scanner's hooks) — and so WI-5.9's
+# "Cargo features describe the same set as the manifest" check has one name
+# per platform on the plugin side as well as the app's.
+[features]
+ios = []
+android = []
+
+[build-dependencies]
+tauri-plugin = { version = "2.6", features = ["build"] }
+
+[dependencies]
+# default-features = false: the plugin does not choose the webview or the
+# app-level features; the app does. Only the runtime types are needed here.
+tauri = { version = "2.11.3", default-features = false }
+# The one resolution of the data root, shared with the app and the other plugin.
+paper-data-root = { path = "../paper-data-root" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# rt + sync for the lazily started node (`OnceCell`, mutexes, channels), fs
+# for file work without blocking Tauri's async runtime, io-util for the
+# framed streams (`AsyncReadExt` over iroh's `RecvStream`), time for the
+# pairing/handshake timeouts, macros for `select!` in the session loops.
+tokio = { version = "1", features = ["rt", "fs", "sync", "io-util", "time", "macros"] }
+# Frames cross the plugin as `Bytes` so an inbox drain does not copy.
+bytes = "1"
+# The pairing URI (`paper://pair?…`): parsing and percent-encoding of the
+# address hints and the relay URL, instead of a hand-rolled query parser.
+url = "2"
+# The 128-bit pairing secret. 0.10, the line iroh-base already pulls in.
+rand = "0.10"
+# base32 (no padding) for the secret in the pairing URI: shorter than hex in
+# a QR, and no ambiguous characters.
+data-encoding = "2"
+
+# The transport (dev-docs/mobile-sync/plan.md III.2.1). `tls-ring`, not
+# `tls-aws-lc-rs`: aws-lc-rs needs a C/asm build (cmake, and on Android an
+# NDK-configured clang) that has no place in a cross-compiled mobile plugin;
+# ring cross-compiles with nothing but the target's linker. `default-features =
+# false` states that choice; note that iroh-mdns-address-lookup re-enables
+# iroh's defaults through unification, which is fine — the defaults are
+# `metrics`, `fast-apple-datapath`, `portmapper`, `tls-ring`, and none of
+# them is aws-lc-rs (WI-5.8's tree check proves it).
+iroh = { version = "1", default-features = false, features = ["tls-ring"] }
+# LAN discovery on desktop; best-effort on Android; not used on iOS in v1
+# (raw multicast needs Apple's entitlement — plan III.2.7).
+iroh-mdns-address-lookup = "0.4"
+# Blob integrity and the pairing MAC.
+blake3 = "1"
+# The one thing the plugin logs on its own: mDNS failing to start (the app
+# bridges `log` through tauri-plugin-log).
+log = "0.4"
+# The pairing QR is rendered in Rust as SVG so the secret never enters JS
+# state; no raster output, so no `image`.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# The PERSON root key — WI-22.B1. `identity.rs`'s key is the DEVICE's and is an
+# iroh `SecretKey`; this is the root that says several devices are one reader,
+# and it signs delegations rather than opening connections.
+#
+# `ed25519-dalek` is ALREADY IN THE TREE (iroh's own signatures resolve to it),
+# so this adds a direct path to a crate that was being compiled anyway rather
+# than a new one. `zeroize` so a secret does not outlive its scope in freed
+# memory. Not `serde`: a key is carried as bytes at the one seam that needs it,
+# and deriving Serialize on a signing key is how one ends up in a log line.
+#
+# ⚠️ **`rand_core` WAS ON THIS LIST AND NOTHING USED IT.** The comment said it
+# was "for minting from the OS CSPRNG", and this crate mints nothing that way:
+# every signing key is `SigningKey::from_bytes` over a seed, and the seed comes
+# from `rand::random` — `person.rs` states that choice at length and records an
+# earlier draft that reached for `OsRng` and did not compile. A feature nobody
+# needs still widens the graph and still has to be understood by the next
+# reader. Found by audit.
+ed25519-dalek = { version = "3", features = ["zeroize"] }
+# Twelve words — `identity.md` §"The shape". 128 bits, not 256: *"Twenty-four
+# words is Bitcoin's paranoia budget; the prize here is joining a reading
+# circle."* `default-features = false` keeps the other ten wordlists out; the
+# phrase is English because the checksum is over the wordlist and a reader who
+# switches language must not silently get a different key.
+bip39 = { version = "2", default-features = false, features = ["std", "zeroize"] }
+# The keychain is a CACHE for the root, never its backup — see
+# `identity.md` §"The keychain cannot be the durable store": nothing sets
+# `kSecAttrSynchronizable`, so an entry dies with the machine, and adding a
+# replacement device is the whole reason the root exists. The phrase is the
+# durable copy.
+#
+# ⚠️ **THE FEATURE LIST IS COPIED FROM `tauri-plugin-inference` DELIBERATELY,
+# INCLUDING WHAT IT LEAVES OUT.** That crate's manifest carries the full
+# measurement: adding `crypto-rust` — the one-line fix for Linux's unencrypted
+# Secret Service session — resolves keyring's weak feature references and adds
+# 22 packages to `Cargo.lock` that are never compiled, which is enough to break
+# `check-third-party-notices`'s `cargo metadata --offline --locked`. Two
+# manifests naming different feature sets for one crate is also how a
+# unification surprise arrives. Read that note before changing this one.
+#
+# ⚠️ **`crypto-rust` IS ON THE LIST NOW, AND THE MEASURED BLOCKER IS GONE.**
+# It was recorded as blocked because the notices check ran `cargo metadata
+# --offline --locked`, and `--offline` exits 101 on any lockfile package
+# missing from the local registry. `refresh-rust-notices.mjs` no longer passes
+# `--offline` — its own header says so in as many words — and the answer is
+# committed as `scripts/lib/rust-crates.json` for the suite that runs before
+# any cargo step. So the trade that comment described no longer exists, and
+# what was left standing was a reader's RECOVERY PHRASE crossing the session
+# D-Bus in the clear on Linux. A blocker removed elsewhere has to be
+# re-checked where it was recorded. Found by audit.
+keyring = { workspace = true }
+# Verified range transfer on the SHARE endpoint — phase 25, WI-25.3. It carries
+# `bao-tree` 0.16, which is the BLAKE3 verified streaming that makes a chunk
+# trustworthy AS IT LANDS rather than after the whole file; that is the whole
+# reason it is here, and `share/acceptance.rs` measures it by corrupting one
+# provider's file after import and requiring the fetch from the honest one to
+# still complete.
+#
+# ⚠️ **IT DEPENDS ON `iroh = "1.0.0"`, THE SAME MAJOR LINE AS THE PINNED 1.0.3**,
+# so it resolves to ONE iroh rather than pulling a second. Checked by running
+# it, not by reading: `cargo add` reported 26 new packages and no second iroh.
+#
+# `default-features = false` drops `rpc`, which would pull `noq` and an irpc
+# endpoint this plugin has no use for — the store is reached in-process. Kept:
+# `fs-store`, because a public store must survive a restart, and because
+# `ImportMode::TryReference` lets a book be served from the vault in place
+# rather than copied into a second library.
+#
+# The old `blobs.rs` path is UNTOUCHED. It answers a different question — this
+# file, from a peer I know — with its own auth, resume and budgets. Converging
+# them is a later decision.
+iroh-blobs = { version = "0.103", default-features = false, features = ["fs-store"] }
+# hash → provider, over the BitTorrent mainline DHT — WI-25.7.
+#
+# ⚠️ **NOTHING OPENS A DHT SOCKET UNTIL A READER OFFERS A BOOK *OR LOOKS ONE
+# UP*.** Joining means bootstrapping against public routers, and it happens on
+# the first call to `ShareNode::dht()` — which is `announce`, `withdraw` AND
+# `resolve`. Searching is as loud as publishing in the sense that matters here:
+# it puts this machine on those routers. This comment named only publication,
+# which reads as a promise that a reader who never offers anything never joins,
+# and `peer_share_resolve` is a command a surface can call. Found by audit.
+#
+# What IS true is that it is lazy and opt-in: behind a lazy `OnceCell`, and
+# `ShareConfig.dht` is `false` in every test — nothing in `cargo test` touches
+# the real DHT, which `AGENTS.md` states as a rule. Publication is additionally
+# behind `SharePolicy` (default off, per book, per service).
+#
+# `default-features = false` with `async` only: `full` is `async` today and a
+# feature that grows is a feature that grows silently. `mainline::Testnet` —
+# a handful of nodes on loopback — is what turned an untestable spike into five
+# passing tests, and it comes with the crate rather than with a feature.
+#
+# ⚠️ **IT WANTS `ed25519-dalek = "3.0.0-pre.1"` AND WE PIN `"3"`**, which
+# unifies: `cargo add` reported 8 new packages and no second dalek. A second
+# copy of the signing crate would be two verifiers behind one `SecretKey`.
+mainline = { version = "8", default-features = false, features = ["async"] }
+# `StreamExt::next()` over `mainline`'s `GetStream`. ALREADY IN THE TREE — it is
+# `mainline`'s own dependency under the `async` feature — so this adds a direct
+# path to a crate that was being compiled anyway rather than a new one, which is
+# the same argument `ed25519-dalek` above makes for itself. The alternative was
+# hand-polling a `Stream` at two call sites.
+futures-lite = { version = "2", default-features = false, features = ["std"] }
+
+# `O_NOFOLLOW` for the blob file opens, so a planted final-component symlink
+# fails the open rather than being followed out of the data root. Unix only;
+# already in the tree via tokio/iroh, so no new compilation. Windows uses a
+# pre-open `symlink_metadata` check instead (reparse points need privilege).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# A runtime for the one test that binds an endpoint; the app supplies its own.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

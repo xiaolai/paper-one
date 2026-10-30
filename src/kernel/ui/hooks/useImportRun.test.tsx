@@ -1,0 +1,1057 @@
+// @vitest-environment jsdom
+import { describe, expect, it, vi } from 'vitest'
+import { act, createElement, type ReactNode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { useImportRun, type Imports, type ImportRun } from './useImportRun'
+import type { ImportOutcome } from '../../core/importFolder'
+
+/* React refuses to treat `act` as a test boundary without this, and says so on
+   stderr rather than failing. */
+;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
+/** A promise the test opens when it wants the work to proceed. */
+function deferred(): { readonly promise: Promise<void>; open(): void } {
+  let open: () => void = () => {}
+  const promise = new Promise<void>((resolve) => {
+    open = resolve
+  })
+  return { promise, open: () => open() }
+}
+
+const kept = (name: string): ImportOutcome => ({ path: name, status: 'added', name, bookId: name })
+
+function harness(shelve: (outcomes: readonly ImportOutcome[]) => Promise<number>) {
+  const notices: string[] = []
+  let latest: Imports | null = null
+  function Probe(): ReactNode {
+    latest = useImportRun({ shelve, batch: 2, notice: (text) => void notices.push(text) })
+    return null
+  }
+  const host = document.createElement('div')
+  document.body.append(host)
+  const root = createRoot(host)
+  act(() => root.render(createElement(Probe)))
+  return {
+    notices,
+    imports: (): Imports => {
+      if (latest === null) throw new Error('the probe never rendered')
+      return latest
+    },
+    unmount: () => {
+      act(() => root.unmount())
+      host.remove()
+    },
+  }
+}
+
+/**
+ * THE IMPORT LIFECYCLE, ONCE.
+ *
+ * Two routes copy books in, and each had written out the same six things: a
+ * generation token, an abort controller, the progress bar's lifetime, a
+ * handover chained one batch behind the copying, the settle the notice waits
+ * on, and the cleanup. They had drifted in three ways by the time an audit
+ * read them side by side — one cleared its progress before the shelf writes
+ * settled, one walked past its own settle when superseded, and one superseded
+ * the other in silence. Every case below is one of those.
+ */
+describe('the import coordinator', () => {
+  it('reports nothing at rest', () => {
+    const world = harness(async () => 0)
+    expect(world.imports().progress).toBeNull()
+    expect(world.imports().busy).toBe(false)
+    world.unmount()
+  })
+
+  it('shelves what the work hands over, and says what happened', async () => {
+    const written: ImportOutcome[][] = []
+    const world = harness(async (batch) => {
+      written.push([...batch])
+      return 0
+    })
+
+    await act(async () => {
+      await world.imports().run(
+        async (run) => {
+          run.shelve(kept('a'))
+          run.shelve(kept('b'))
+          run.shelve(kept('c'))
+          return [kept('a'), kept('b'), kept('c')]
+        },
+        { summarise: (outcomes, unsaved) => `${outcomes.length} in, ${unsaved} unsaved`, onFailure: () => {} },
+      )
+    })
+
+    expect(written.flat().map((one) => one.name)).toEqual(['a', 'b', 'c'])
+    expect(world.notices).toEqual(['3 in, 0 unsaved'])
+    expect(world.imports().progress, 'the bar was left on screen').toBeNull()
+    world.unmount()
+  })
+
+  /**
+   * ⚠️ THE BAR GOES AWAY AFTER THE SHELF WRITES LAND, NOT BEFORE THEM.
+   *
+   * One route cleared it in a `finally` that ran before the settle, so every
+   * control came back while records were still being written — the reader
+   * could start a second import into a shelf the first had not finished
+   * writing. The bar is what says "this is still happening".
+   */
+  it('stays busy until the shelf writes have settled', async () => {
+    const writing = deferred()
+    const world = harness(async () => {
+      await writing.promise
+      return 0
+    })
+
+    let running: Promise<boolean> | null = null
+    await act(async () => {
+      running = world.imports().run(
+        async (run) => {
+          run.shelve(kept('a'))
+          return [kept('a')]
+        },
+        { summarise: () => 'done', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+
+    expect(world.imports().busy, 'the bar cleared before the writes landed').toBe(true)
+    expect(world.imports().progress, 'the bar cleared before the writes landed').not.toBeNull()
+    /* Raised at nothing done of nothing known, since this work never reported. */
+    expect(world.imports().progress).toEqual({ done: 0, total: 0 })
+    expect(world.notices, 'success was claimed before the writes landed').toEqual([])
+
+    await act(async () => {
+      writing.open()
+      await running
+    })
+    expect(world.imports().busy).toBe(false)
+    expect(world.notices).toEqual(['done'])
+    world.unmount()
+  })
+
+  /**
+   * ⚠️ A SUPERSEDED RUN STILL SHELVES WHAT IT COPIED.
+   *
+   * The bytes are on disk either way, and a copy with no shelf record is
+   * invisible to the library and to removal alike — an orphan nobody can
+   * reach. The token governs the NOTICE, never the bookkeeping.
+   */
+  it('shelves a superseded run’s books, and lets it say nothing', async () => {
+    const written: ImportOutcome[] = []
+    const world = harness(async (batch) => {
+      written.push(...batch)
+      return 0
+    })
+
+    const gate = deferred()
+    let older: Promise<boolean> | null = null
+    await act(async () => {
+      older = world.imports().run(
+        async (run) => {
+          run.shelve(kept('before'))
+          await gate.promise
+          /* ⚠️ AFTER IT HAS BEEN SUPERSEDED, which is the case that matters: a
+             walk goes on copying for as long as it takes to notice the signal,
+             and every book it lands in that window still needs a record. */
+          run.shelve(kept('after'))
+          return [kept('before'), kept('after')]
+        },
+        { summarise: () => 'older finished', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+
+    /* A newer intake retires it — the case a drop during a folder walk makes. */
+    act(() => world.imports().supersede())
+    await act(async () => {
+      gate.open()
+      await older
+    })
+
+    expect(written.map((one) => one.name), 'a superseded run left its copies recordless').toEqual([
+      'before',
+      'after',
+    ])
+    expect(world.notices, 'a superseded run reported over the newer one').toEqual([])
+    world.unmount()
+  })
+
+  /* AND ITS SIGNAL IS ABORTED, so it stops COPYING and not merely reporting. */
+  it('answers whether it was still current once the settle had finished', async () => {
+    const gate = deferred()
+    const world = harness(async () => {
+      /* The shelf write is what is slow: the work has finished and answered
+         "current" by the time the supersession lands. */
+      await gate.promise
+      return 0
+    })
+    let older: Promise<boolean> | null = null
+    await act(async () => {
+      older = world.imports().run(
+        async (run) => {
+          run.shelve(kept('one'))
+          expect(run.current()).toBe(true)
+          return [kept('one')]
+        },
+        { summarise: () => 'older finished', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+    act(() => world.imports().supersede())
+    await act(async () => {
+      gate.open()
+      await expect(older).resolves.toBe(false)
+    })
+    /* And a run nothing retired says so. */
+    await act(async () => {
+      await expect(
+        world.imports().run(async () => [kept('two')], { summarise: () => 'done', onFailure: () => {} }),
+      ).resolves.toBe(true)
+    })
+    world.unmount()
+  })
+
+  it('aborts a superseded run’s signal', async () => {
+    const world = harness(async () => 0)
+    let seen: ImportRun | null = null
+    const gate = deferred()
+    let running: Promise<boolean> | null = null
+    await act(async () => {
+      running = world.imports().run(
+        async (run) => {
+          seen = run
+          await gate.promise
+          return []
+        },
+        { summarise: () => 'x', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+
+    expect((seen as ImportRun | null)?.signal.aborted).toBe(false)
+    act(() => world.imports().supersede())
+    expect((seen as ImportRun | null)?.signal.aborted, 'the work was never told to stop').toBe(true)
+    await act(async () => {
+      gate.open()
+      await running
+    })
+    world.unmount()
+  })
+
+  /**
+   * ⚠️ **A TEARDOWN HAS TO OUTLAST THE HANDOVER, NOT JUST THE COPYING**
+   * (2026-09-13 audit, #96). The shutdown drained the write queue without
+   * asking the import anything, and the handover is chained one batch BEHIND
+   * the copying — so a book already copied could have its shelf write queued
+   * after the drain had finished. Bytes on disk with no record is a book the
+   * library cannot see and removal cannot reach.
+   */
+  it('stops the work and waits for what it copied to be shelved', async () => {
+    const writing = deferred()
+    const written: ImportOutcome[] = []
+    const world = harness(async (books) => {
+      written.push(...books)
+      await writing.promise
+      return 0
+    })
+
+    let seen: ImportRun | null = null
+    let running: Promise<boolean> | null = null
+    const copying = deferred()
+    await act(async () => {
+      running = world.imports().run(
+        async (run) => {
+          seen = run
+          run.shelve(kept('a'))
+          await copying.promise
+          return [kept('a')]
+        },
+        { summarise: () => 'done', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+
+    let stopped = false
+    await act(async () => {
+      void world
+        .imports()
+        .stop()
+        .then(() => {
+          stopped = true
+        })
+      await Promise.resolve()
+    })
+    expect((seen as ImportRun | null)?.signal.aborted, 'the copying was never told to stop').toBe(true)
+
+    /* The work has let go, but its handover has not landed — and THIS is the
+       window the drain used to run in. */
+    await act(async () => {
+      copying.open()
+      await Promise.resolve()
+    })
+    expect(stopped, 'the teardown went ahead while a shelf write was still in flight').toBe(false)
+
+    await act(async () => {
+      writing.open()
+      await running
+    })
+    expect(stopped).toBe(true)
+    expect(written.map((book) => book.bookId)).toEqual(['a'])
+    world.unmount()
+  })
+
+  /* ⚠️ **EVERY RUN IT ABORTED, NOT ONLY THE LAST** (2026-09-13 audit, #96,
+     round 3). `stop` waited on the newest run's promise, so a run a later one
+     had superseded — still flushing the books it copied — was abandoned to a
+     drain that had already been let go. */
+  it('waits for a superseded run’s shelf writes too, not only the newest run’s', async () => {
+    const older = deferred()
+    const world = harness(async (books) => {
+      if (books.some((book) => book.bookId === 'old')) await older.promise
+      return 0
+    })
+    const say = { summarise: () => 'done', onFailure: () => {} }
+    await act(async () => {
+      void world.imports().run(async (run) => {
+        run.shelve(kept('old'))
+        return [kept('old')]
+      }, say)
+      await Promise.resolve()
+    })
+    await act(async () => {
+      void world.imports().run(async () => [], say)
+      await Promise.resolve()
+    })
+
+    let stopped = false
+    await act(async () => {
+      void world
+        .imports()
+        .stop()
+        .then(() => {
+          stopped = true
+        })
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve()
+    })
+    expect(stopped, 'the teardown went ahead while a superseded run was still shelving').toBe(false)
+
+    await act(async () => {
+      older.open()
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve()
+    })
+    expect(stopped).toBe(true)
+    world.unmount()
+  })
+
+  /* ⚠️ **AND IT TAKES NOTHING NEW ONCE STOPPED** (round 3). A drop landing
+     while the window closed started a copy after the stop had been answered —
+     the same orphan, one step later. Stopped is for the rest of this window's
+     life: the teardown it serves ends the capabilities with it. */
+  it('refuses new work once stopped, running nothing and taking no reservation', async () => {
+    const world = harness(async () => 0)
+    await act(async () => {
+      await world.imports().stop()
+    })
+    let worked = false
+    let admitted: boolean | null = null
+    await act(async () => {
+      admitted = await world.imports().run(async () => {
+        worked = true
+        return []
+      }, { summarise: () => 'done', onFailure: () => {} })
+    })
+    expect(worked, 'a copy started after the teardown had been told the import was stopped').toBe(false)
+    expect(admitted).toBe(false)
+    expect(world.imports().reserve()).toBeNull()
+    expect(world.imports().progress).toBeNull()
+    world.unmount()
+  })
+
+  it('resolves at once when there is nothing to stop', async () => {
+    const world = harness(async () => 0)
+    await act(async () => {
+      await world.imports().stop()
+    })
+    expect(world.imports().busy).toBe(false)
+    world.unmount()
+  })
+
+  it('reports progress while it runs, and ignores a superseded run’s', async () => {
+    const world = harness(async () => 0)
+    const gate = deferred()
+    let running: Promise<boolean> | null = null
+    let seen: ImportRun | null = null
+    await act(async () => {
+      running = world.imports().run(
+        async (run) => {
+          seen = run
+          run.report({ done: 3, total: 10 })
+          await gate.promise
+          run.report({ done: 9, total: 10 })
+          return []
+        },
+        { summarise: () => 'x', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+    expect(world.imports().progress).toEqual({ done: 3, total: 10 })
+
+    act(() => world.imports().supersede())
+    await act(async () => {
+      gate.open()
+      await running
+    })
+    expect(
+      world.imports().progress,
+      'a superseded run reported into the current one’s bar',
+    ).not.toEqual({ done: 9, total: 10 })
+    void seen
+    world.unmount()
+  })
+
+  /**
+   * ⚠️ **THE BAR OUTLIVED A BARE `supersede()`.**
+   *
+   * A retiring run returns before clearing the bar so it cannot pull down the
+   * one its replacement raised — which assumed every supersession comes from
+   * another `run`. A single-book pick or drop supersedes and runs nothing, so
+   * the bar had no owner and stayed up: `busy` true for the rest of the
+   * session, and the folder route refuses to start while busy.
+   */
+  it('takes the bar down when the run that raised it is retired by nothing', async () => {
+    const world = harness(async () => 0)
+    const gate = deferred()
+    let running: Promise<boolean> | null = null
+    await act(async () => {
+      running = world.imports().run(
+        async (run) => {
+          run.report({ done: 1, total: 4 })
+          await gate.promise
+          return []
+        },
+        { summarise: () => 'x', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+    expect(world.imports().busy).toBe(true)
+
+    /* No replacement run — this is `addAndOpen`'s single-book path. */
+    act(() => world.imports().supersede())
+    await act(async () => {
+      gate.open()
+      await running
+    })
+    expect(world.imports().progress, 'the bar was left up with nothing running').toBeNull()
+    expect(world.imports().busy, 'every later import would be refused').toBe(false)
+    /* AND AS OF NOW, not only as of the render: the folder route asks `reserve`,
+       which answers from the bar as it is, not as it was drawn. */
+    const next = world.imports().reserve()
+    expect(next, 'the bar came down on screen and stayed up for the next import').not.toBeNull()
+    next!.release()
+    world.unmount()
+  })
+
+  /* AND THE REPLACEMENT'S BAR IS LEFT ALONE, which is what the bare return was
+     protecting. */
+  it('leaves the replacement run’s bar up when the older one settles', async () => {
+    const world = harness(async () => 0)
+    const older = deferred()
+    const newer = deferred()
+    let first: Promise<boolean> | null = null
+    let second: Promise<boolean> | null = null
+    await act(async () => {
+      first = world.imports().run(
+        async (run) => {
+          run.report({ done: 1, total: 9 })
+          await older.promise
+          return []
+        },
+        { summarise: () => 'first', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+    await act(async () => {
+      second = world.imports().run(
+        async (run) => {
+          run.report({ done: 2, total: 5 })
+          await newer.promise
+          return []
+        },
+        { summarise: () => 'second', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      older.open()
+      await first
+    })
+    expect(world.imports().progress, 'the older run took down the newer one’s bar').toEqual({
+      done: 2,
+      total: 5,
+    })
+
+    await act(async () => {
+      newer.open()
+      await second
+    })
+    expect(world.imports().progress).toBeNull()
+    world.unmount()
+  })
+
+  /* AND A SUPERSEDED RUN THAT GOES ON COPYING DOES NOT REPORT INTO IT. A walk
+     keeps copying until it next reads its signal, and every book it lands in
+     that window is progress about an import the reader has replaced. */
+  it('keeps a superseded run’s progress out of the bar its replacement raised', async () => {
+    const world = harness(async () => 0)
+    const older = deferred()
+    const newer = deferred()
+    const say = { summarise: () => 'x', onFailure: () => {} }
+    let first: Promise<boolean> | null = null
+    let second: Promise<boolean> | null = null
+    await act(async () => {
+      first = world.imports().run(async (run) => {
+        await older.promise
+        run.report({ done: 9, total: 10 })
+        return []
+      }, say)
+      await Promise.resolve()
+    })
+    await act(async () => {
+      second = world.imports().run(async (run) => {
+        run.report({ done: 2, total: 5 })
+        await newer.promise
+        return []
+      }, say)
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      older.open()
+      await first
+    })
+    expect(world.imports().progress, 'a superseded run reported into the current one’s bar').toEqual({
+      done: 2,
+      total: 5,
+    })
+
+    await act(async () => {
+      newer.open()
+      await second
+    })
+    world.unmount()
+  })
+
+  /* THE SIGNAL IS LET GO BY THE RUN THAT OWNS IT, AND BY NO OTHER. A superseded
+     run settling late used to be one comparison away from dropping its
+     REPLACEMENT's controller — after which the next intake, or the teardown,
+     aborted nothing and the replacement went on copying. */
+  it('lets a superseded run settle without letting go of its replacement’s signal', async () => {
+    const world = harness(async () => 0)
+    const older = deferred()
+    const newer = deferred()
+    const say = { summarise: () => 'x', onFailure: () => {} }
+    let first: Promise<boolean> | null = null
+    let second: Promise<boolean> | null = null
+    let replacement: ImportRun | null = null
+    await act(async () => {
+      first = world.imports().run(async () => {
+        await older.promise
+        return []
+      }, say)
+      await Promise.resolve()
+    })
+    await act(async () => {
+      second = world.imports().run(async (run) => {
+        replacement = run
+        await newer.promise
+        return []
+      }, say)
+      await Promise.resolve()
+    })
+    await act(async () => {
+      older.open()
+      await first
+    })
+
+    act(() => void world.imports().supersede())
+    expect((replacement as ImportRun | null)?.signal.aborted, 'the replacement was never told to stop').toBe(true)
+
+    await act(async () => {
+      newer.open()
+      await second
+    })
+    world.unmount()
+  })
+
+  /* AND A RUN THAT HAS FINISHED IS NOT TOLD TO STOP. Its work has returned; an
+     abort landing on its signal afterwards reaches whatever that work left
+     listening, for an import that is already over. */
+  it('leaves a finished run’s signal alone when a later intake supersedes', async () => {
+    const world = harness(async () => 0)
+    let finished: ImportRun | null = null
+    await act(async () => {
+      await world.imports().run(
+        async (run) => {
+          finished = run
+          return []
+        },
+        { summarise: () => 'done', onFailure: () => {} },
+      )
+    })
+
+    act(() => void world.imports().supersede())
+    expect((finished as ImportRun | null)?.signal.aborted, 'an import already over was aborted').toBe(false)
+    world.unmount()
+  })
+
+  /* ⌘Q WAITS FOR AN IMPORT STILL COPYING — see the case above — AND FOR NOTHING
+     ELSE. A run that has already settled holds no write the drain could miss,
+     so a teardown after it goes straight through. */
+  it('does not hold a teardown for a run that had already finished', async () => {
+    const world = harness(async () => 0)
+    await act(async () => {
+      await world.imports().run(async (run) => {
+        run.shelve(kept('a'))
+        return [kept('a')]
+      }, { summarise: () => 'done', onFailure: () => {} })
+    })
+
+    let stopped = false
+    await act(async () => {
+      void world
+        .imports()
+        .stop()
+        .then(() => {
+          stopped = true
+        })
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve()
+    })
+    expect(stopped, 'a finished import held the drain').toBe(true)
+    world.unmount()
+  })
+
+  /* A failure is the caller's to word — the two routes say different things —
+     and the lifecycle closes either way. */
+  it('closes the lifecycle when the work throws, and hands the cause over', async () => {
+    const onFailure = vi.fn()
+    const world = harness(async () => 0)
+    await act(async () => {
+      await world.imports().run(
+        async () => {
+          throw new Error('the walk failed')
+        },
+        { summarise: () => 'never', onFailure },
+      )
+    })
+    expect(onFailure).toHaveBeenCalledTimes(1)
+    expect((onFailure.mock.calls[0]?.[0] as Error).message).toBe('the walk failed')
+    expect(world.notices, 'a failure was summarised as a success').toEqual([])
+    expect(world.imports().busy, 'the bar was stranded by the failure').toBe(false)
+    world.unmount()
+  })
+
+  /* AND IT STILL SHELVES WHAT IT COPIED BEFORE FAILING, for the same reason a
+     superseded run does. */
+  it('shelves what a failed run copied before it threw', async () => {
+    const written: ImportOutcome[] = []
+    const world = harness(async (batch) => {
+      written.push(...batch)
+      return 0
+    })
+    await act(async () => {
+      await world.imports().run(
+        async (run) => {
+          run.shelve(kept('landed'))
+          throw new Error('and then it failed')
+        },
+        { summarise: () => 'never', onFailure: () => {} },
+      )
+    })
+    expect(written.map((one) => one.name)).toEqual(['landed'])
+    world.unmount()
+  })
+
+  /**
+   * ⚠️ AND WHEN THE SETTLE ITSELF REJECTS, WHICH IS NOT THE WORK FAILING.
+   *
+   * `settled()` is the chain of shelf writes, and one rejected write used to
+   * throw straight out of `run` — past `setProgress(null)`, past `onFailure`,
+   * past everything. The bar stayed on screen and `busy` stayed true for the
+   * rest of the session: the folder route refuses to start while busy, so it
+   * refused every later import, and the drop route went on superseding a run
+   * that had already finished. A terminal catch was added at the call site and
+   * said the right sentence; it could not put the bar away, because the state
+   * is in here. This is the assertion that stops it coming back — `run` must
+   * not reject for anything a caller can produce.
+   */
+  it('closes the lifecycle when a shelf write rejects', async () => {
+    const onFailure = vi.fn()
+    const world = harness(async () => {
+      throw new Error('the disk is full')
+    })
+
+    await act(async () => {
+      await world.imports().run(
+        async (run) => {
+          run.shelve(kept('a'))
+          return [kept('a')]
+        },
+        { summarise: () => 'never', onFailure },
+      )
+    })
+
+    expect(onFailure, 'a rejected shelf write was never reported').toHaveBeenCalledTimes(1)
+    expect((onFailure.mock.calls[0]?.[0] as Error).message).toBe('the disk is full')
+    expect(world.notices, 'a failed import was summarised as a success').toEqual([])
+    expect(world.imports().progress, 'the bar was stranded by the settle').toBeNull()
+    expect(world.imports().busy, 'every later import would now be refused').toBe(false)
+    world.unmount()
+  })
+
+  /* WHEN BOTH FAIL, THE WORK'S CAUSE IS THE ONE REPORTED — it is the one that
+     explains the other — and the settle's is logged rather than dropped. */
+  it('reports the work’s failure over the settle’s, and loses neither', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const onFailure = vi.fn()
+    const world = harness(async () => {
+      throw new Error('the disk is full')
+    })
+
+    await act(async () => {
+      await world.imports().run(
+        async (run) => {
+          run.shelve(kept('a'))
+          throw new Error('the walk failed')
+        },
+        { summarise: () => 'never', onFailure },
+      )
+    })
+
+    expect((onFailure.mock.calls[0]?.[0] as Error).message).toBe('the walk failed')
+    expect(
+      logged.mock.calls.some((call) => (call[1] as Error | undefined)?.message === 'the disk is full'),
+      'the settle’s cause was swallowed',
+    ).toBe(true)
+    expect(logged).toHaveBeenCalledWith(
+      'Paper: the import also failed to record what it copied',
+      expect.objectContaining({ message: 'the disk is full' }),
+    )
+    expect(world.imports().busy).toBe(false)
+    logged.mockRestore()
+    world.unmount()
+  })
+
+  it('carries the unsaved count into the summary', async () => {
+    const world = harness(async (batch) => batch.length)
+    await act(async () => {
+      await world.imports().run(
+        async (run) => {
+          run.shelve(kept('a'))
+          return [kept('a')]
+        },
+        { summarise: (_outcomes, unsaved) => `${unsaved} did not land`, onFailure: () => {} },
+      )
+    })
+    expect(world.notices).toEqual(['1 did not land'])
+    world.unmount()
+  })
+})
+
+/**
+ * ⚠️ **A GUARD READ FROM THE LAST RENDER IS NOT A RESERVATION** (2026-09-13
+ * audit, #98, round 3). The folder route asked `busy` before its picker and
+ * again after it, and `busy` is state: two choices landing in one turn both
+ * read the render from before either had raised the bar, and the second
+ * superseded the run the first had been admitted to. A reservation is taken
+ * and spent synchronously, so nothing between the two sees a stale answer.
+ */
+describe('a reservation', () => {
+  const say = { summarise: () => 'done', onFailure: () => {} }
+  const turns = async () => {
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve()
+  }
+
+  it('is held by one route at a time, and given back when released', () => {
+    const world = harness(async () => 0)
+    const first = world.imports().reserve()
+    expect(first).not.toBeNull()
+    expect(world.imports().reserve(), 'two routes held the next run at once').toBeNull()
+    first!.release()
+    const again = world.imports().reserve()
+    expect(again, 'a released reservation was never given back').not.toBeNull()
+    again!.release()
+    world.unmount()
+  })
+
+  it('is refused while a run is up, before the render that draws its bar', async () => {
+    const world = harness(async () => 0)
+    const copying = deferred()
+    let refused: unknown = 'never asked'
+    await act(async () => {
+      void world.imports().run(async () => {
+        await copying.promise
+        return []
+      }, say)
+      refused = world.imports().reserve()
+      await Promise.resolve()
+    })
+    expect(refused, 'a reservation was granted over a run the last render had not drawn').toBeNull()
+    await act(async () => {
+      copying.open()
+      await turns()
+    })
+    world.unmount()
+  })
+
+  it('runs nothing when an import started after it was taken, and is spent either way', async () => {
+    const world = harness(async () => 0)
+    const reservation = world.imports().reserve()!
+    const copying = deferred()
+    let spent: unknown = 'never asked'
+    let worked = false
+    await act(async () => {
+      /* The drop route supersedes rather than reserving, so it can start while
+         a folder route is still choosing. */
+      void world.imports().run(async () => {
+        await copying.promise
+        return []
+      }, say)
+      spent = reservation.run(async () => {
+        worked = true
+        return []
+      }, say)
+      await Promise.resolve()
+    })
+    expect(spent, 'the admitted run was superseded by a folder chosen after it').toBeNull()
+    expect(worked).toBe(false)
+    await act(async () => {
+      copying.open()
+      await turns()
+    })
+    const next = world.imports().reserve()
+    expect(next, 'a refused reservation was never given back').not.toBeNull()
+    next!.release()
+    world.unmount()
+  })
+
+  /* ⚠️ **AND WHEN THAT IMPORT HAS FINISHED BY THE TIME IT IS SPENT** (2026-09-14,
+     #98, round 4). The refusal asked whether a bar was up NOW, so a drop that
+     started and finished while the picker was open left nothing to see, and the
+     stale choice started work behind it. */
+  it('runs nothing when an import started and finished after it was taken', async () => {
+    const world = harness(async () => 0)
+    const reservation = world.imports().reserve()!
+    await act(async () => {
+      await world.imports().run(async () => [], say)
+    })
+    expect(world.imports().busy, 'the premise: nothing is running any more').toBe(false)
+
+    let worked = false
+    const spent = reservation.run(async () => {
+      worked = true
+      return []
+    }, say)
+    expect(spent, 'a choice made before an import ran was admitted after it').toBeNull()
+    expect(worked).toBe(false)
+    const next = world.imports().reserve()
+    expect(next, 'a refused reservation was never given back').not.toBeNull()
+    next!.release()
+    world.unmount()
+  })
+
+  /* The same for an intake that runs nothing: a single-book pick or drop
+     supersedes, and is an import the reservation was taken before. */
+  it('runs nothing when an intake superseded after it was taken', () => {
+    const world = harness(async () => 0)
+    const reservation = world.imports().reserve()!
+    act(() => void world.imports().supersede())
+    let worked = false
+    expect(
+      reservation.run(async () => {
+        worked = true
+        return []
+      }, say),
+    ).toBeNull()
+    expect(worked).toBe(false)
+    world.unmount()
+  })
+
+  it('spends itself on the run it admits, which holds the lifecycle from that turn', async () => {
+    const world = harness(async () => 0)
+    const reservation = world.imports().reserve()!
+    const copying = deferred()
+    let admitted: Promise<boolean> | null = null
+    let second: unknown = 'never asked'
+    await act(async () => {
+      admitted = reservation.run(async () => {
+        await copying.promise
+        return []
+      }, say)
+      second = world.imports().reserve()
+      await Promise.resolve()
+    })
+    expect(admitted).not.toBeNull()
+    expect(second, 'a second route was admitted beside the first').toBeNull()
+    await act(async () => {
+      copying.open()
+      expect(await admitted!).toBe(true)
+    })
+    world.unmount()
+  })
+
+  /* RELEASE IS IDEMPOTENT, AND ONLY EVER GIVES BACK ITS OWN. A cancelled picker
+     releasing twice — or spending a reservation it had already released — must
+     not hand back the one another route holds now. */
+  it('gives back only itself, however often it is released or spent afterwards', () => {
+    const world = harness(async () => 0)
+    const older = world.imports().reserve()!
+    older.release()
+    const newer = world.imports().reserve()!
+
+    older.release()
+    expect(world.imports().reserve(), 'releasing it again gave back the reservation held now').toBeNull()
+
+    let worked = false
+    expect(
+      older.run(async () => {
+        worked = true
+        return []
+      }, say),
+    ).toBeNull()
+    expect(worked).toBe(false)
+    expect(world.imports().reserve(), 'spending it after its release gave back the reservation held now').toBeNull()
+
+    newer.release()
+    const again = world.imports().reserve()
+    expect(again).not.toBeNull()
+    again!.release()
+    world.unmount()
+  })
+
+  it('runs nothing once released', () => {
+    const world = harness(async () => 0)
+    const reservation = world.imports().reserve()!
+    reservation.release()
+    let worked = false
+    expect(
+      reservation.run(async () => {
+        worked = true
+        return []
+      }, say),
+    ).toBeNull()
+    expect(worked).toBe(false)
+    world.unmount()
+  })
+
+  /* THE SAME CLASS ON THE OTHER ROUTE. A drop names the import it replaced, and
+     read that from `busy` — so a run started in the same turn was replaced in
+     silence. `supersede` says what it retired, as of the moment it retired it. */
+  it('lets supersede say whether it retired a running import, before any render', async () => {
+    const world = harness(async () => 0)
+    expect(world.imports().supersede()).toBe(false)
+    const copying = deferred()
+    let replaced: unknown = 'never asked'
+    await act(async () => {
+      void world.imports().run(async () => {
+        await copying.promise
+        return []
+      }, say)
+      replaced = world.imports().supersede()
+      await Promise.resolve()
+    })
+    expect(replaced, 'a run started in the same turn was replaced in silence').toBe(true)
+    await act(async () => {
+      copying.open()
+      await turns()
+    })
+    world.unmount()
+  })
+})
+
+describe('a caller whose last word throws', () => {
+  it('does not make the run reject: the promise settles true and the failure is said on the console', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const world = harness(async () => 0)
+    let outcome: boolean | null = null
+    await act(async () => {
+      outcome = await world.imports().run(async () => [kept('one')], {
+        summarise: () => {
+          throw new Error('no words')
+        },
+        onFailure: () => {},
+      })
+    })
+    expect(outcome).toBe(true)
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('could not say'), expect.objectContaining({ message: 'no words' }))
+    expect(world.imports().busy).toBe(false)
+    spy.mockRestore()
+    world.unmount()
+  })
+})
+
+describe('the run follows its options', () => {
+  it('shelves through the shelve it was last given, not the one it was made with', async () => {
+    const first = vi.fn(async () => 0)
+    const second = vi.fn(async () => 0)
+    let latest: Imports | null = null
+    let current = first
+    function Probe(): ReactNode {
+      latest = useImportRun({ shelve: current, batch: 2, notice: () => {} })
+      return null
+    }
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    act(() => root.render(createElement(Probe)))
+    current = second
+    act(() => root.render(createElement(Probe)))
+    await act(async () => {
+      await latest!.run(
+        async (run) => {
+          run.shelve(kept('one'))
+          return [kept('one')]
+        },
+        { summarise: () => 'done', onFailure: () => {} },
+      )
+    })
+    expect(second).toHaveBeenCalled()
+    expect(first).not.toHaveBeenCalled()
+    act(() => root.unmount())
+    host.remove()
+  })
+
+  /* THE FOLDER ROUTE RUNS THROUGH A RESERVATION, so the reservation has to
+     follow the options too — or a walk shelves through the writer of the render
+     that first mounted the coordinator. */
+  it('admits a reservation’s run through the shelve it was last given', async () => {
+    const first = vi.fn(async () => 0)
+    const second = vi.fn(async () => 0)
+    let latest: Imports | null = null
+    let current = first
+    function Probe(): ReactNode {
+      latest = useImportRun({ shelve: current, batch: 2, notice: () => {} })
+      return null
+    }
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    act(() => root.render(createElement(Probe)))
+    current = second
+    act(() => root.render(createElement(Probe)))
+    await act(async () => {
+      await latest!.reserve()!.run(
+        async (run) => {
+          run.shelve(kept('one'))
+          return [kept('one')]
+        },
+        { summarise: () => 'done', onFailure: () => {} },
+      )
+    })
+    expect(second).toHaveBeenCalledTimes(1)
+    expect(first).not.toHaveBeenCalled()
+    act(() => root.unmount())
+    host.remove()
+  })
+})

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-status"
+description = "Enables the peer_status command without any pre-configured scope."
+commands.allow = ["peer_status"]
+
+[[permission]]
+identifier = "deny-peer-status"
+description = "Denies the peer_status command without any pre-configured scope."
+commands.deny = ["peer_status"]

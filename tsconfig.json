@@ -1,0 +1,16 @@
+{
+  // A solution file: no inputs of its own, only the projects that make up the
+  // graph, built in dependency order by `tsc -b` (`pnpm typecheck`). The
+  // per-project files say what each one is; `tsconfig.base.json` holds the
+  // shared compiler options.
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.kernel.json" },
+    { "path": "./tsconfig.capabilities.json" },
+    { "path": "./tsconfig.hosts.json" },
+    { "path": "./tsconfig.cli.json" },
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.test.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}

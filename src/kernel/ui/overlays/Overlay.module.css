@@ -1,0 +1,236 @@
+/* §12 layer 30 — the scrim, and the sheet that sits on it.
+ *
+ * Both anchor to `.window`, which holds the reader AND the pane. That matters:
+ * anchored to the reader's own column the scrim would dim the text and leave
+ * the pane at full brightness beside it, which reads as the pane being the
+ * thing in front rather than the overlay.
+ */
+
+.scrim {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-scrim);
+  background: var(--scrim);
+  animation: fade var(--motion-popover) both;
+}
+
+/* The sheet sits above its own scrim. One step, not a new layer: §12 has
+ * nothing between 30 and 40, and the figure viewer owns 40. */
+.sheet {
+  position: absolute;
+  z-index: var(--z-scrim);
+  top: var(--sheet-top);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(var(--sheet-max), calc(100% - 2 * var(--sheet-inset)));
+  max-height: min(var(--sheet-max-h), calc(100% - var(--sheet-top) - var(--sheet-inset)));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  box-shadow: var(--shadow-pop);
+  animation: rise var(--motion-popover) both;
+}
+
+@keyframes fade {
+  from { opacity: 0 }
+  to { opacity: 1 }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(var(--space-6));
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scrim,
+  .sheet {
+    animation: none;
+  }
+}
+
+/* --- the query field ------------------------------------------------- */
+
+.field {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  padding: 0 var(--space-16);
+  height: var(--control-field);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: var(--text-body);
+}
+
+.input::placeholder {
+  color: var(--muted);
+}
+
+/* --- results --------------------------------------------------------- */
+
+.list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-6);
+}
+
+.group {
+  padding: var(--space-10) var(--space-10) var(--space-4);
+  font-size: var(--text-caption);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--track-caps-wide);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  width: 100%;
+  padding: var(--space-10) var(--space-10);
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: var(--text-ui);
+  text-align: start;
+  cursor: pointer;
+}
+
+/* The active row is keyboard-driven, so it is styled by attribute rather than
+ * by :hover — the pointer and the arrow keys must not disagree about which row
+ * Enter will run. */
+.row[data-active='true'] {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+.rowLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowSub {
+  display: block;
+  font-size: var(--text-caption);
+  color: var(--muted);
+}
+
+/* §07: colour never carries meaning alone, so an active setting is ticked as
+ * well as tinted. */
+.rowOn {
+  color: var(--accent);
+  font-size: var(--text-caption);
+  font-weight: var(--weight-semibold);
+}
+
+.combo {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--muted);
+}
+
+.row[data-disabled='true'] {
+  cursor: default;
+  color: var(--muted);
+}
+
+.empty {
+  padding: var(--space-28) var(--space-16);
+  text-align: center;
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
+  color: var(--muted);
+}
+
+/* A JACKET, not a control — so it takes the shelf's own proportion rather than
+   a control height, and it was 26 wide by 34 tall, which is that proportion
+   arrived at by hand. Stated as the aspect it always was, it cannot drift out
+   of step with the covers everywhere else. */
+.cover {
+  flex: 0 0 auto;
+  height: var(--control-pill);
+  aspect-ratio: var(--cover-aspect);
+  border-radius: var(--radius-mark);
+  border: 1px solid var(--line-2);
+}
+
+/* ---- the trash sheet ---------------------------------------------------
+   A row here is not a button. Every other list in this file runs on click —
+   the switcher opens, the palette executes — and this one carries a control
+   INSIDE it, so making the row itself pressable would nest a button in a
+   button and give the reader two targets for two different acts. */
+.row[data-static='true'] {
+  cursor: default;
+}
+
+/* How long is left, which is the part that decides whether to act now. */
+.rowNote {
+  color: var(--ink-2);
+}
+
+/* The one control on the row. Quiet until wanted: the shelf is scanned, and a
+   column of filled buttons would read as a form to be completed. */
+.rowAction {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-4) var(--space-10);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: var(--text-caption);
+  cursor: pointer;
+}
+
+.rowAction:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* --- the plate variant ------------------------------------------------ */
+
+/* Showing a thing, not offering controls. It fills the window because the
+   reason the reader opened it is that the thing was too small on the page.
+   The surface, border and shadow of a card would all be furniture around an
+   image, so they go; the scrim behind is what separates it from the page. */
+.sheet[data-variant='plate'] {
+  top: var(--space-16);
+  width: calc(100% - 2 * var(--space-16));
+  max-width: none;
+  max-height: calc(100% - 2 * var(--space-16));
+  height: calc(100% - 2 * var(--space-16));
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}

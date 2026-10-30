@@ -1,0 +1,303 @@
+/**
+ * Where a reader stopped, kept in the browser (phase 18).
+ *
+ * ## Why this is not `book.set` — and what it is beside now
+ *
+ * The desktop keeps a reading position on the book's record, and it syncs. The
+ * browser client could not: the pump granted it `readingGrant` and nothing
+ * else, so every write in the service table was refused — deliberately,
+ * because a hostile EPUB shares this origin and a socket it opens carries the
+ * reader's session. Widening that for a position would have been widening it
+ * for `book.set`, which carries every field of the record.
+ *
+ * Since WI-20.30 the position ALSO travels: `book.position` is its own row
+ * under its own grant, `position:write`, which covers nothing else and which
+ * the pump binds to the book this session opened — after the CSP was measured
+ * to stop a book's script on both engines and the loader was taught to refuse
+ * one. `remotePositions.ts` is that side. This store is the device's own
+ * copy: the place to start from when the shelf is asleep, and the stamp the
+ * shelf's is compared against when it is not — newer wins, whichever device
+ * wrote it.
+ *
+ * ## What it still costs, said plainly
+ *
+ * A position written while the link is down reaches the shelf when the link
+ * is back, not before; and two devices reading the same book at once will
+ * each open where the OTHER left off, which is the honest meaning of a
+ * shared position and not a defect.
+ *
+ * ## Why `localStorage` is not the credential problem
+ *
+ * §6 of the plan is emphatic that the credential is NOT in storage, because a
+ * book's script would share this origin and could read it. A reading position
+ * is the opposite kind of value: a book that could read one learns where its
+ * own reader is, which it already knows. `make-hostile-epub.py` probes both
+ * storages for anything resembling `paper_session`, and this writes nothing of
+ * the sort.
+ *
+ * ## Failing soft is the contract
+ *
+ * Storage throws on a full quota, in private browsing on some engines, and
+ * whenever a reader has disabled it. **A lost position must never be a lost
+ * book**, so every path here answers "no position" rather than raising. That is
+ * why `get` returns `null` for a malformed store instead of repairing it — and
+ * why `set`, `touch` and `forget` stand down over one rather than replacing it
+ * with what this session happens to know.
+ */
+
+/** The one key. Namespaced, because the origin is shared with nothing else. */
+const KEY = 'paper.reading-positions'
+
+/**
+ * How many books keep a position.
+ *
+ * A library is 1 961 books here and `localStorage` is about 5 MB per origin; a
+ * CFI is a hundred-odd characters, so the whole library would fit. The cap is
+ * not about the arithmetic — it is that an unbounded store has no worst case,
+ * and a quota error is silent and permanent once reached.
+ *
+ * Least-recently-READ is what gets dropped, which is the honest order: a book
+ * nobody has opened in five hundred books' time is one whose position nobody is
+ * about to want.
+ */
+const KEEP = 500
+
+interface Stored {
+  /** The CFI foliate reported. */
+  readonly cfi: string
+  /** When the POSITION was written — the stamp the shelf's is compared
+   *  against. Never moved by `touch`: see the note there. */
+  readonly at: number
+  /** When the book was last OPENED, for the eviction order only. Absent in
+   *  rows written before the field existed; `at` stands in. */
+  readonly readAt?: number
+}
+
+export interface ReadingPositions {
+  /** Where this book was left, or null. */
+  get(bookId: string): string | null
+  /**
+   * Where this book was left AND when, or null — what the start-of-reading
+   * decision compares against the shelf's stamp (WI-20.30). `at` is this
+   * device's clock at the last write, epoch milliseconds; a row read from a
+   * store that never recorded one answers 0, which loses to any shelf stamp.
+   */
+  held(bookId: string): { readonly cfi: string; readonly at: number } | null
+  /** Remember where this book is now. Safe to call on every page turn. */
+  set(bookId: string, cfi: string | null): void
+  /**
+   * This book is being read NOW — refresh its place in the eviction order
+   * without moving its position. Called when a book is opened.
+   *
+   * `at` orders eviction and `set` only writes it when the cfi changes, so
+   * without this it meant "last moved" rather than "last read": a reader who
+   * reopens a favourite at the same line never refreshed it, and the book they
+   * had open could age past the cap and be evicted. A no-op for a book with no
+   * stored position — opening a book for the first time is `set`'s job.
+   */
+  touch(bookId: string): void
+  /** Forget one book — for a book the shelf no longer has. */
+  forget(bookId: string): void
+}
+
+/** Everything this module needs from storage, so a test needs no browser. */
+export interface PositionStore {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+}
+
+/** A map with no prototype — see the note in `read`. */
+const empty = (): Record<string, Stored> => Object.create(null) as Record<string, Stored>
+
+/**
+ * The stored map — an empty one where nothing is stored, `null` where
+ * something is and this could not read it.
+ *
+ * ⚠️ **THE TWO USED TO BE ONE ANSWER, AND EVERY WRITE HERE IS A
+ * READ-MODIFY-WRITE.** An unreadable store read as no positions, so the next
+ * page turn wrote one position over the whole of it — the repair the paragraph
+ * below refuses, performed one line later by `set`. `null` is what tells the
+ * writers to stand down (2026-09-13 audit).
+ */
+function read(store: PositionStore): Record<string, Stored> | null {
+  /* ONE CATCH FOR A STORE THAT WILL NOT READ AND ONE THAT WILL NOT PARSE,
+     because they are one answer. Reading can throw too — Safari's private mode
+     has done exactly this. There were two catches returning the same `null`,
+     and emptying the first changed nothing a test could see: `raw` stayed
+     unset and `JSON.parse` threw into the second. */
+  try {
+    const raw = store.getItem(KEY)
+    if (raw === null) return empty()
+    const parsed: unknown = JSON.parse(raw)
+    if (
+      typeof parsed !== 'object' ||
+      // Stryker disable next-line ConditionalExpression: `Object.entries(null)` throws inside this same `try`, and its catch answers the same null.
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return null
+    }
+    /* NO PROTOTYPE, because a book id is a KEY FROM STORAGE and storage is not
+     * trusted input. `__proto__` is a perfectly valid string and assigning to
+     * it on an object literal does not create an entry — it REPLACES the
+     * object's prototype. A row under that key therefore vanished on read, and
+     * a hostile or merely corrupt store could reach every later lookup on this
+     * map through the prototype it had just installed. `constructor` and
+     * `toString` are the same shape one step down: `bookId in all` and
+     * `all[bookId]` both answer for keys nothing ever wrote.
+     *
+     * `Object.create(null)` has no prototype to replace and no inherited names
+     * to collide with, which settles all three at once. `Object.entries` and
+     * `Object.fromEntries` below are already own-property-only, so the write
+     * path needs nothing further. */
+    const out: Record<string, Stored> = Object.create(null) as Record<string, Stored>
+    for (const [bookId, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (
+        value === null ||
+        // Stryker disable next-line ConditionalExpression: `JSON.parse` makes no primitive with a `cfi`, so the cfi check below skips one anyway.
+        typeof value !== 'object'
+      ) {
+        continue
+      }
+      const row = value as Record<string, unknown>
+      /* A ROW WITHOUT A CFI IS NOT A POSITION. `at` is allowed to be missing —
+       * it only orders eviction — but a missing or empty cfi would send a
+       * reader to the start of the book while claiming to restore them. */
+      if (typeof row['cfi'] !== 'string' || row['cfi'] === '') continue
+      /* FINITE OR ZERO. `typeof` alone let a stored `1e400` through as
+       * `Infinity`, which beats every real stamp forever — in the eviction
+       * order AND in the shelf comparison. A timestamp that is not a real
+       * moment is treated like one that was never recorded. */
+      const stamp = (value: unknown): number =>
+        Number.isFinite(value) &&
+        // Stryker disable next-line ConditionalExpression: `Number.isFinite` never coerces, so it is already false for every non-number; this half narrows the type.
+        typeof value === 'number'
+          ? value
+          : 0
+      const readAt = stamp(row['readAt'])
+      out[bookId] = { cfi: row['cfi'], at: stamp(row['at']), ...(readAt !== 0 ? { readAt } : {}) }
+    }
+    return out
+  } catch {
+    /* NOT REPAIRED, NOT CLEARED. A store this cannot parse is one something
+     * else may own; overwriting it would be this module deciding that. Losing
+     * this session's positions is the whole cost, and only while the bytes are
+     * unreadable. */
+    return null
+  }
+}
+
+/**
+ * Reading positions over `store`.
+ *
+ * `now` is injected so eviction order is testable without waiting.
+ */
+export function readingPositions(
+  store: PositionStore,
+  now: () => number = () => Date.now(),
+): ReadingPositions {
+  const write = (all: Record<string, Stored>): void => {
+    /* OLDEST FIRST OUT, and only when there are more than the cap. Sorting
+     * every write is O(n log n) on at most `KEEP` entries, which is nothing
+     * beside the JSON round trip that follows it. */
+    const entries = Object.entries(all)
+    /* EVICTION SORTS ON "LAST READ", which is `readAt` where one exists and
+     * the write stamp where none does — the two questions this store answers
+     * are kept in two fields, so recency can move without the position's own
+     * stamp moving with it. */
+    const recency = (one: Stored): number => one.readAt ?? one.at
+    const kept =
+      entries.length <= KEEP
+        ? entries
+        : entries.sort(([, a], [, b]) => recency(b) - recency(a)).slice(0, KEEP)
+    try {
+      store.setItem(KEY, JSON.stringify(Object.fromEntries(kept)))
+    } catch {
+      /* A FULL QUOTA LOSES A POSITION, NOT A BOOK. There is nothing useful to
+       * do here: the reader is mid-page-turn, and an alert about storage would
+       * be the app interrupting reading to report on itself. */
+    }
+  }
+
+  /* ONE ANSWER FOR BOTH QUESTIONS: a store that would not read has no row for
+     a reader and nothing for a writer to modify, so the two can no longer
+     disagree about it the way they did. */
+  const rowFor = (bookId: string): Stored | undefined => read(store)?.[bookId]
+
+  return {
+    get: (bookId) => rowFor(bookId)?.cfi ?? null,
+
+    held: (bookId) => {
+      const row = rowFor(bookId)
+      return row === undefined ? null : { cfi: row.cfi, at: row.at }
+    },
+
+    set: (bookId, cfi) => {
+      /* A NULL CFI IS NOT A POSITION. The fixed-layout renderer reports one for
+       * some documents, and storing it would overwrite a good position with
+       * nothing — so the previous one stands, which is the better answer. */
+      if (cfi === null || cfi === '') return
+      const all = read(store)
+      /* NOTHING IS WRITTEN OVER A STORE THAT WOULD NOT READ — see `read`. */
+      if (all === null) return
+      /* AN UNCHANGED CFI IS SKIPPED — recency is `touch`'s job now, in its
+       * own field. This comment used to claim the opposite ("still refreshes
+       * `at`") over a line that returned early: the refresh moved to `touch`
+       * and the prose did not move with it. */
+      const held = all[bookId]
+      if (held?.cfi === cfi) return
+      write({ ...all, [bookId]: { cfi, at: now(), readAt: now() } })
+    },
+
+    touch: (bookId) => {
+      /* RECENCY IS NOT THE SAME QUESTION AS POSITION, and `at` must not
+       * answer both — it DID, and merely OPENING a book moved the stamp the
+       * shelf comparison trusts. The interleaving that made it a live
+       * defect: the desktop reads on to chapter 30 at 12:30; the phone is
+       * opened OFFLINE at 13:00 — no page turned — and `touch` stamped its
+       * old position 13:00; reopened online, "13:00 beats 12:30" made the
+       * STALE phone position the newer one, and the phone dragged the
+       * shelf's record back to where it was yesterday (WI-20.30's rule is
+       * newest WRITE wins, not newest glance).
+       *
+       * So recency lives in `readAt`, which only eviction reads. The
+       * position's own `at` moves when the position does.
+       *
+       * A separate verb rather than making `set` always write, deliberately.
+       * `set` runs on every relocate the renderer raises, many of which report
+       * an unchanged cfi; writing on each would put a `localStorage`
+       * serialisation of up to 500 entries in the page-turn path for no new
+       * information. This runs once, when a book is opened. */
+      const all = read(store)
+      if (all === null) return
+      const held = all[bookId]
+      if (held === undefined) return
+      write({ ...all, [bookId]: { ...held, readAt: now() } })
+    },
+
+    forget: (bookId) => {
+      const all = read(store)
+      if (all === null) return
+      if (!(bookId in all)) return
+      const { [bookId]: _gone, ...rest } = all
+      write(rest)
+    },
+  }
+}
+
+/**
+ * The browser's own storage, or a store that remembers nothing.
+ *
+ * `localStorage` is a getter that THROWS in some configurations rather than
+ * being absent — Chrome does this when a reader blocks site data — so touching
+ * it needs the same care as using it.
+ */
+export function browserPositions(): ReadingPositions {
+  try {
+    return readingPositions(window.localStorage)
+  } catch {
+    // Stryker disable next-line ObjectLiteral,ArrowFunction: a store that reads as nothing or will not read at all answers every call the same — no position, no write.
+    const nothing: PositionStore = { getItem: () => null, setItem: () => {} }
+    return readingPositions(nothing)
+  }
+}

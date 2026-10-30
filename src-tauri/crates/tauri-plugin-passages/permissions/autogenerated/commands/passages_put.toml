@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-passages-put"
+description = "Enables the passages_put command without any pre-configured scope."
+commands.allow = ["passages_put"]
+
+[[permission]]
+identifier = "deny-passages-put"
+description = "Denies the passages_put command without any pre-configured scope."
+commands.deny = ["passages_put"]

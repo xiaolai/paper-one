@@ -1,0 +1,283 @@
+//! What holds the command inventory's three copies together, and the decisions
+//! the clip commands make before they reach a store.
+
+use super::{describes, effective_rate, family_of, rate_milli, readable, render_key_of, ClipAsk};
+use crate::clips;
+use crate::manifest::Family;
+
+/// The three lists name the same commands.
+///
+/// ⚠️ **THIS TEST IS THE MECHANISM, AND THE REPETITION IS THE COST OF THE
+/// MACRO.** `tauri::generate_handler!` needs its paths as literal tokens at
+/// expansion time, and `build.rs` runs before the crate compiles, so neither
+/// list can be derived from the other without a third artifact that would
+/// itself become a fourth place to keep in step. `tauri-plugin-peer` reached
+/// the same conclusion, having tried.
+///
+/// ⚠️ **AND A COMMAND MISSING FROM `build.rs` IS STILL REACHABLE** — omission
+/// there only stops its permission pair being generated, and a hand-written
+/// `allow-` file grants it like any other. That is why this reads all three
+/// rather than trusting the generator.
+#[test]
+fn lists_agree() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let plugin = std::fs::read_to_string(root.join("src/plugin.rs")).expect("plugin.rs");
+    let build = std::fs::read_to_string(root.join("build.rs")).expect("build.rs");
+    let permissions =
+        std::fs::read_to_string(root.join("permissions/default.toml")).expect("default.toml");
+    let source = std::fs::read_to_string(root.join("src/commands.rs")).expect("commands.rs");
+
+    // Every `#[tauri::command]` in this file, by the name it is declared with.
+    //
+    // ⚠️ **A LINE THAT IS THE ATTRIBUTE, NOT A LINE THAT CONTAINS IT.** The
+    // first version split the file on the attribute's text and found SEVEN
+    // where there are six: a doc comment a few lines up explains what a
+    // `#[tauri::command] async fn` costs, and to a `split` that is an
+    // attribute. It then took the next `pub fn` — `VoicesState::set_root` —
+    // and failed asking why a setter was not registered as a command. This
+    // repository has met the same shape twice before: `check-browser-safe`
+    // counted `@tauri-apps` inside doc comments, and prose beginning with the
+    // words of a `Stryker disable` looks like a directive to a grep and is
+    // nothing to the tool. Read the attribute as a LINE OF ITS OWN, which is
+    // where a real one on a top-level item always sits.
+    let mut declared: Vec<String> = Vec::new();
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != "#[tauri::command]" {
+            continue;
+        }
+        // The signature may be on the next line or a few below it, past
+        // further attributes, but never past another command.
+        for next in lines.by_ref() {
+            let trimmed = next.trim_start();
+            let Some(rest) = trimmed
+                .strip_prefix("pub async fn ")
+                .or_else(|| trimmed.strip_prefix("pub fn "))
+            else {
+                continue;
+            };
+            let end = rest
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(rest.len());
+            declared.push(rest[..end].to_owned());
+            break;
+        }
+    }
+    assert!(
+        !declared.is_empty(),
+        "no commands found — the parse is wrong, not the code"
+    );
+    assert!(
+        !declared.iter().any(|name| !name.starts_with("voices_")),
+        "a name that is not a command slipped into the parse: {declared:?}"
+    );
+
+    for name in &declared {
+        assert!(
+            plugin.contains(&format!("commands::{name}")),
+            "{name} is declared but not registered in plugin.rs"
+        );
+        assert!(
+            build.contains(&format!("\"{name}\"")),
+            "{name} is declared but not in build.rs's COMMANDS, so it has no permission pair"
+        );
+        // `voices_catalogue` becomes `allow-voices-catalogue`.
+        let granted = format!("allow-{}", name.replace('_', "-"));
+        assert!(
+            permissions.contains(&granted),
+            "{name} is declared but {granted} is not in permissions/default.toml, \
+             so the webview cannot call it"
+        );
+    }
+
+    // And nothing is granted that is not declared, which is the direction that
+    // leaves a command reachable after it has been deleted.
+    for line in permissions.lines() {
+        let line = line.trim().trim_matches(|c| c == '"' || c == ',');
+        if let Some(rest) = line.strip_prefix("allow-") {
+            let name = rest.replace('-', "_");
+            assert!(
+                declared.contains(&name),
+                "{line} is granted but no such command is declared"
+            );
+        }
+    }
+
+    /* ⚠️ **THERE IS A FOURTH PLACE AFTER ALL, AND IT IS GENERATED — MEASURED
+     * 2026-09-30.** `tauri-plugin`'s generator writes one file per command under
+     * `permissions/autogenerated/commands/` and then builds `reference.md` from
+     * **the directory**, not from `COMMANDS`. So taking a command out of
+     * `COMMANDS` leaves its `.toml` behind and `reference.md` goes on publishing
+     * an `allow-` and a `deny-` for a command that no longer exists — a grant in
+     * the schema for nothing, which is exactly the direction the loop above
+     * exists to close and could not see.
+     *
+     * Found by removing `voices_render` in phase 34: the build succeeded, the
+     * three lists agreed, and `reference.md` grew 146 lines while still
+     * documenting the command that had just gone. The stale file had to be
+     * deleted by hand before the generator would write a correct reference.
+     *
+     * The DIRECTORY is what this reads, so the fix for a failure is `rm` and a
+     * rebuild. */
+    let generated = root.join("permissions/autogenerated/commands");
+    let mut files: Vec<String> = std::fs::read_dir(&generated)
+        .expect("the generated permissions directory")
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                return None;
+            }
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_owned)
+        })
+        .collect();
+    files.sort();
+    assert!(
+        !files.is_empty(),
+        "no generated permissions found — the read is wrong, not the code"
+    );
+    let mut expected = declared.clone();
+    expected.sort();
+    assert_eq!(
+        files, expected,
+        "the generated permissions do not match the declared commands. A file with \
+         no command is STALE — the generator never removes one — and `reference.md` \
+         goes on granting it; delete it and rebuild."
+    );
+}
+
+/// ⚠️ **THE KEY'S SPOKEN DIGEST IS THE STORE'S IDENTITY AND WAS NEVER CHECKED
+/// AGAINST THE TEXT BESIDE IT — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.** The
+/// two arrive in one command, so a caller whose key described other text filed
+/// that other text's samples and timings under this identity — and a later lookup
+/// answered them. The reader hears the wrong words and nothing fails.
+#[test]
+fn a_key_that_does_not_describe_its_text_is_refused_by_name() {
+    let ask = |digest: &str| ClipAsk {
+        book: "book:a".to_owned(),
+        section: Some(3),
+        pack: "english-kokoro".to_owned(),
+        voice: "af_heart".to_owned(),
+        rate: Some(1.0),
+        text_digest: "fnv1a64:1:0000000000000001".to_owned(),
+        spoken_digest: digest.to_owned(),
+    };
+    const TEXT: &str = "Call me Ishmael.";
+
+    /* ⚠️ **THROUGH `render_key_of`, WHICH IS WHAT THE COMMAND CALLS.** The first
+    version of this case asserted on `describes` alone, and the CALL to it in
+    `voices_clip_render` could then be deleted with every test still green — the
+    shape this repository records as *a guard nobody has seen work*. The digest
+    is derived inside the key's own constructor now, so there is no call for a
+    test to stand in for. */
+    let key = render_key_of(&ask(&clips::text_digest(TEXT)), None, TEXT).expect("the key agrees");
+    assert_eq!(
+        key.spoken_digest,
+        clips::text_digest(TEXT),
+        "the digest in the key is the digest of the text, by construction"
+    );
+
+    /* THE CASE: text B under text A's digest. Both are well-formed digests, so
+    nothing about the SHAPE of the key is wrong — which is why only comparing it
+    against the text can catch it. */
+    let why = render_key_of(&ask(&clips::text_digest("Call me Ahab.")), None, TEXT)
+        .expect_err("the key describes other text");
+    assert!(
+        why.contains("does not describe this text"),
+        "{why} should say what is wrong"
+    );
+    assert!(
+        why.contains(&clips::text_digest(TEXT)),
+        "{why} should carry the digest the text really has, so the caller can see the difference"
+    );
+
+    // A digest of the right length and the wrong hash, which is the near miss.
+    let mut wrong = clips::text_digest(TEXT);
+    wrong.pop();
+    wrong.push('0');
+    assert!(render_key_of(&ask(&wrong), None, TEXT).is_err());
+    // And nothing at all is not a pass.
+    assert!(render_key_of(&ask(""), None, TEXT).is_err());
+    // The comparison itself, on its own, so both halves of it are pinned.
+    assert!(describes("a", "a").is_ok());
+    assert!(describes("a", "b").is_err());
+}
+
+/// ⚠️ **THE KEY MUST SAY WHAT THE RENDER DID, AND FOR A CHINESE CHAPTER THAT IS
+/// NOT WHAT THE READER ASKED FOR — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.**
+/// `read_with_qwen` takes no speed: the bridge has no parameter for one. Keyed on
+/// the ASKED rate, the store filed a 1.0× render under `1500`, so the identity
+/// claimed a speed the samples did not have and a reader moving between speeds got
+/// two clips of byte-identical audio, each lying about what it was.
+#[test]
+fn the_rate_in_a_key_is_the_one_the_engine_will_really_use() {
+    // Kokoro takes the speed, so the key carries it.
+    assert_eq!(effective_rate(Some(1.5), Some(Family::Kokoro)), Some(1.5));
+    assert_eq!(
+        rate_milli(effective_rate(Some(1.5), Some(Family::Kokoro))),
+        1500
+    );
+
+    // Qwen does not, so every Chinese clip is keyed at the model's own pace.
+    assert_eq!(effective_rate(Some(1.5), Some(Family::Qwen)), None);
+    assert_eq!(
+        rate_milli(effective_rate(Some(1.5), Some(Family::Qwen))),
+        1000
+    );
+    assert_eq!(
+        rate_milli(effective_rate(Some(0.5), Some(Family::Qwen))),
+        rate_milli(effective_rate(Some(1.5), Some(Family::Qwen))),
+        "two speeds of one Chinese section are one clip, because they are one render"
+    );
+
+    /* A pack this build does not know is going to be refused anyway, so the asked
+    rate is carried through rather than normalised into a key nothing will use. */
+    assert_eq!(effective_rate(Some(1.5), None), Some(1.5));
+}
+
+/// The family is read from the embedded catalogue, so this is a lookup and not
+/// I/O — and an id nothing declares answers `None` rather than guessing.
+#[test]
+fn a_pack_id_resolves_to_the_engine_that_reads_it() {
+    assert_eq!(family_of("english-kokoro"), Some(Family::Kokoro));
+    assert_eq!(family_of("chinese-qwen"), Some(Family::Qwen));
+    assert_eq!(family_of("no-such-pack"), None);
+    assert_eq!(family_of(""), None);
+}
+
+/// ⚠️ **AN UNREADABLE PACK DIRECTORY USED TO READ AS "NOT INSTALLED" — FOUND BY AN
+/// INDEPENDENT AUDIT, 2026-09-30.** `.unwrap_or(false)` collapsed the two, so a
+/// permission error gave the reader the one sentence they can do nothing about:
+/// the pack is there, Settings says so, and reading aloud refuses it as absent.
+/// Eighteen stores in this tree have had to separate absent from unreadable; this
+/// is the same rule in the place that decides whether a book can be read at all.
+#[test]
+fn a_pack_that_cannot_be_checked_is_not_reported_as_absent() {
+    assert!(readable(Ok(true), "english-kokoro").is_ok());
+
+    let absent = readable(Ok(false), "english-kokoro").expect_err("not there");
+    assert_eq!(absent, "english-kokoro is not installed");
+
+    let unreadable = readable(
+        Err(crate::error::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ))),
+        "english-kokoro",
+    )
+    .expect_err("could not tell");
+    assert!(
+        unreadable.contains("could not be checked"),
+        "{unreadable} must not claim the pack is absent"
+    );
+    assert!(
+        !unreadable.contains("is not installed"),
+        "{unreadable} is the sentence a reader can do nothing about"
+    );
+    assert!(
+        unreadable.contains("denied"),
+        "{unreadable} should carry the reason, which is the only actionable part"
+    );
+}

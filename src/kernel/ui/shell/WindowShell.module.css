@@ -1,0 +1,175 @@
+/* The desktop shell.
+ *
+ * One reading surface and one side pane. The pane lives INSIDE the window
+ * rather than beside it, which has two consequences worth stating:
+ *
+ *   1. The titlebar spans the whole window for free. When the pane sat outside
+ *      it, the bar stopped where the reader stopped — leaving the strip above
+ *      the pane undraggable and, on Windows and Linux, putting the close
+ *      button hundreds of pixels inside the window's trailing edge.
+ *   2. The pane is a leading card like any other side column (§05), so it
+ *      shares LeadingCard rather than carrying its own background, margin and
+ *      radius.
+ */
+
+.root {
+  /* 100dvh, not 100vh: WebKit resolves the two differently across macOS
+   * versions and the difference shows up as a scrollbar on the shell. */
+  height: 100dvh;
+  display: flex;
+  background: var(--wash);
+  color: var(--ink);
+  overflow: hidden;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/*
+ * Fills the OS window. It deliberately does NOT carry the prototype's 10px
+ * inset, 20px radius or drop shadow: those simulate the application window
+ * itself, drawn on a --wash field standing in for the desktop. The real window
+ * already has corners, a border and a shadow from the OS.
+ *
+ * ⚠️ **THIS SENTENCE USED TO NAME `--shadow-window`, AND THAT TOKEN IS GONE.**
+ * It was defined for Paper and re-valued by Night and drawn by nothing at all —
+ * this comment was its only appearance anywhere in the app. So the one place a
+ * reader could learn how the window is elevated pointed at a token that
+ * elevated nothing, in a sentence correctly explaining that we do not use it.
+ * `tokens.hygiene.test.ts` refuses a token nothing reads now, which is what
+ * found it; the prose is kept because the DECISION it records is still real.
+ */
+.window {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  overflow: hidden;
+  /* The macOS titlebar overlays this box, and the switcher, palette and
+   * figure viewer anchor to it. */
+  position: relative;
+}
+
+/* The row holding the reader and the pane.
+ *
+ * The containing block for the pane as a sheet, stated here rather than left to
+ * `.window`: a sheet has to occupy exactly the box the pane occupies as a
+ * track, and anchoring it one level up would hang it off the window instead. */
+.shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  position: relative;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* The containing block for a screen layered over the reader — see Library. */
+  position: relative;
+}
+
+/* §08: the pane opens on width, not transform, so the reader reflows with it
+ * instead of the pane sliding over the text.
+ *
+ * The slot stays mounted at zero width when closed. A transition needs an
+ * interpolable before and after; an unmounted element has neither, so the
+ * animation never ran and the pane simply appeared. */
+.paneSlot {
+  display: flex;
+  min-height: 0;
+  /* ⚠️ **`min-width: 0`, AND ONLY `min-height` WAS HERE.** A flex item's
+     `min-width` defaults to `auto`, which is its content's min-content size —
+     so `width: 0` below was silently clamped to the 400px card inside it, and
+     the closed slot kept a 416px column of the window. Invisible while the
+     card had a background of its own; obvious the moment a screen tried to
+     use the full width and got 1024 of 1440. The `min-height: 0` beside it is
+     the same fix for the other axis, written years earlier. */
+  min-width: 0;
+  overflow: hidden;
+  width: var(--pane-track);
+  transition: width var(--motion-pane);
+}
+
+.paneSlot[data-open='false'] {
+  width: 0;
+}
+
+.paneSlot[data-side='left'] {
+  order: -1;
+}
+
+.paneSlot[data-side='right'] {
+  order: 1;
+}
+
+/* Below §06's threshold the pane becomes a SHEET: it lifts out of the row and
+   floats over the reader rather than displacing it.
+ *
+ * The animation has to change with it. Open-on-width is right for a pane,
+ * because the reader is meant to reflow around it — but a sheet that animated
+ * its width would still be squeezing the measure it exists to protect, one
+ * frame at a time. So a sheet slides on transform, over a layout that never
+ * moves. `width` is pinned to the track so the card inside keeps its designed
+ * 400px however narrow the window gets. */
+.paneSlot[data-sheet='true'] {
+  position: absolute;
+  inset-block: 0;
+  width: var(--pane-track);
+  max-width: 100%;
+  z-index: var(--z-pane-sheet);
+  transition: transform var(--motion-pane);
+}
+
+.paneSlot[data-sheet='true'][data-side='left'] {
+  inset-inline-start: 0;
+}
+
+.paneSlot[data-sheet='true'][data-side='right'] {
+  inset-inline-end: 0;
+}
+
+/* Off its own edge, not off the left: a right-hand sheet leaves to the right.
+   `translate` rather than `inset` so nothing reflows behind it. */
+.paneSlot[data-sheet='true'][data-open='false'][data-side='right'] {
+  transform: translateX(100%);
+}
+
+.paneSlot[data-sheet='true'][data-open='false'][data-side='left'] {
+  transform: translateX(-100%);
+}
+
+/* A closed sheet keeps its width — see above — so it must not also keep its
+   track. This overrides the `width: 0` rule that closes a pane. */
+.paneSlot[data-sheet='true'][data-open='false'] {
+  width: var(--pane-track);
+}
+
+.paneScrim {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-pane-sheet-scrim);
+  border: none;
+  padding: 0;
+  background: var(--scrim);
+  cursor: default;
+  /* Fades with the sheet it belongs to, on §08's pane timing. */
+  animation: paneScrimIn var(--motion-pane);
+}
+
+@keyframes paneScrimIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

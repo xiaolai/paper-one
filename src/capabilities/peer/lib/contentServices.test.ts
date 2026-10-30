@@ -1,0 +1,470 @@
+import { describe, expect, it } from 'vitest'
+import { FORBIDDEN, refusalCode, seedBook, serveTable } from './serviceTable.testkit'
+
+/**
+ * `content.*` OVER THE REAL ROUTER — where a book's bytes are, and the one
+ * verb that deletes them.
+ *
+ * `content.evict` is destructive and DEVICE-LOCAL by construction: the outbox
+ * carries `record | marks | removed | cards`, so the `content` commit it
+ * journals exists and never pushes. Nothing here had focused coverage, and the
+ * failures it can produce are the quiet kind — an answer of `here: false` over
+ * a file that is plainly still on disk.
+ */
+
+const BYTES = new TextEncoder().encode('the whale')
+
+/** A shelf with one book whose folder holds the named content files. */
+/**
+ * A shelf holding one book with these content files.
+ *
+ * `bytes` gives a file its own contents. ⚠️ **IT EXISTS BECAUSE THE FILES WERE
+ * ALL THE SAME LENGTH**, which made `size` useless as an assertion: a
+ * `content.locate` that named one file and measured another produced identical
+ * numbers, and that is the defect the two-file case is named for.
+ */
+function withContent(
+  names: readonly string[],
+  bytes: Readonly<Record<string, string>> = {},
+  row: Record<string, unknown> = {},
+) {
+  return serveTable({
+    books: [seedBook('one', { hasContent: names.length > 0, ...row })],
+    files: Object.fromEntries(names.map((name) => [`books/one/${name}`, bytes[name] ?? 'the whale'])),
+  })
+}
+
+describe('content.locate', () => {
+  it('describes the file the folder actually holds', async () => {
+    const shelf = withContent(['content.epub'])
+    expect(await shelf.client.call('content.locate', { book: 'one' })).toMatchObject({
+      bookId: 'one',
+      here: true,
+      ext: 'epub',
+    })
+  })
+
+  /* ONE ANSWER ABOUT ONE FILE. A folder is not supposed to hold two content
+   * files, but it can — and `ext` and `size` picking differently reported one
+   * format with the other's byte count. */
+  it('names and measures the same file when a folder holds two', async () => {
+    /* ⚠️ **DIFFERENT LENGTHS, BECAUSE THE SIZE IS HALF THE ASSERTION.** The two
+     * files used to be indistinguishable by byte count, so `ext` and `size`
+     * describing DIFFERENT files — the exact defect this case is named for —
+     * would have produced identical numbers and passed. */
+    const shelf = withContent(['content.azw3', 'content.epub'], {
+      'content.azw3': 'a'.repeat(64),
+      'content.epub': 'e'.repeat(11),
+    })
+    const found = (await shelf.client.call('content.locate', { book: 'one' })) as {
+      ext: string
+      size: number | null
+    }
+    /* `CONTENT_EXTENSIONS` order, which is what the size port walks — not
+     * lexicographic, which would have said `azw3`. */
+    expect(found.ext).toBe('epub')
+    expect(
+      found.size,
+      'the answer named one file and measured the other',
+    ).toBe(11)
+  })
+
+  /**
+   * A FOLDER THAT IS GONE HAS NOTHING IN IT, and that is not the same as a
+   * folder nobody could read. Both used to collapse into "could not look",
+   * which falls back to the record's cached flag — so a book whose folder had
+   * been deleted was reported as still holding its bytes.
+   */
+  it('believes an absent folder over a stale hasContent', async () => {
+    const shelf = serveTable({ books: [seedBook('one', { hasContent: true })] })
+    /* The seeded record makes the folder exist, so take it away entirely. */
+    for (const key of [...shelf.fs.store.keys()]) if (key.startsWith('books/one/')) shelf.fs.store.delete(key)
+    expect(await shelf.client.call('content.locate', { book: 'one' })).toMatchObject({ here: false, size: null })
+  })
+
+  /* AND AN UNREADABLE ONE IS NOT AN EMPTY ONE. The record's flag is the
+   * fallback exactly here, and nowhere else. */
+  it('falls back to the record when the folder will not read', async () => {
+    const shelf = withContent(['content.epub'], {}, { ext: 'epub' })
+    shelf.fs.readDir = async () => {
+      throw new Error('EACCES')
+    }
+    expect(await shelf.client.call('content.locate', { book: 'one' })).toMatchObject({ here: true, ext: 'epub' })
+  })
+
+  it('refuses a book the shelf does not hold, by name', async () => {
+    const shelf = serveTable({ books: [] })
+    const failure = await shelf.client.call('content.locate', { book: 'nobody' }).catch((e: unknown) => e)
+    expect(refusalCode(failure)).toBe('not-found')
+    expect(String(failure)).toMatch(/no book nobody/)
+  })
+})
+
+describe('content.evict', () => {
+  it('deletes the bytes and answers with what the folder now holds', async () => {
+    const shelf = withContent(['content.epub'])
+    expect(await shelf.client.call('content.evict', { book: 'one' })).toMatchObject({ here: false, size: null })
+    expect(shelf.fs.store.has('books/one/content.epub')).toBe(false)
+    /* THE BOOK ITSELF SURVIVES. Eviction takes this device's copy, not the
+     * reader's record, their tags or their marks. */
+    expect(shelf.fs.store.has('books/one/book.json')).toBe(true)
+  })
+
+  /* EVERY stored content file, not the first. A folder holding two would
+   * otherwise have one deleted and the other left under a row saying the
+   * bytes are gone. */
+  it('deletes every content file in the folder', async () => {
+    const shelf = withContent(['content.epub', 'content.pdf'])
+    expect(await shelf.client.call('content.evict', { book: 'one' })).toMatchObject({ here: false })
+    expect([...shelf.fs.store.keys()].filter((k) => k.startsWith('books/one/content.'))).toEqual([])
+  })
+
+  /* THE COVER IS NOT CONTENT. `REMOVABLE_BLOB_NAMES` includes it for the
+   * cover cache's own eviction; this verb is about the book's bytes. */
+  it('leaves the cover alone', async () => {
+    const shelf = serveTable({
+      books: [seedBook('one', { hasContent: true })],
+      files: { 'books/one/content.epub': 'x', 'books/one/cover.jpg': 'jacket' },
+    })
+    await shelf.client.call('content.evict', { book: 'one' })
+    expect(shelf.fs.store.has('books/one/cover.jpg')).toBe(true)
+  })
+
+  /**
+   * A STALE `hasContent: true` OVER AN EMPTY FOLDER IS SETTLED, NOT IGNORED.
+   *
+   * A listing that succeeds and finds nothing, against a row still claiming
+   * the bytes are here, is exactly a stale cache — and skipping the refresh
+   * left `content.evict` answering `here: false` while the shelf went on
+   * offering the book as downloaded until a rescan happened to disagree.
+   */
+  it('settles a row that claims content the folder does not have', async () => {
+    const shelf = serveTable({
+      books: [seedBook('one', { hasContent: true })],
+      files: { 'books/one/book.json': JSON.stringify({ bookId: 'one', title: 'T', author: 'A' }) },
+    })
+    expect(await shelf.client.call('content.evict', { book: 'one' })).toMatchObject({ here: false })
+    const listed = (await shelf.client.call('book.get', { book: 'one' })) as { hasContent: boolean | null }
+    expect(listed.hasContent).toBe(false)
+  })
+
+  /* EVICTING WHAT IS NOT THERE IS DONE, not an error — the verb is
+   * idempotent, which is what makes it safe for a satchel to retry. */
+  it('is idempotent', async () => {
+    const shelf = withContent(['content.epub'])
+    const first = await shelf.client.call('content.evict', { book: 'one' })
+    const again = await shelf.client.call('content.evict', { book: 'one' })
+    expect(again).toEqual(first)
+  })
+
+  /**
+   * A FILE NO LISTING REPORTED MUST NOT SURVIVE THE EVICTION.
+   *
+   * A folder listing is a snapshot of a moment already past — a landing of a
+   * different extension arrives behind it, and a folder can refuse to be
+   * listed at all — so an eviction that deleted only what a listing named
+   * left the file on disk under an answer of `here: false`. The whole closed
+   * set is offered instead, and which of its names are really there is
+   * decided inside the book's lane, one `exists` apiece. The listing here
+   * cannot see `content.pdf` at all, which is the sharpest form of that.
+   */
+  it('removes a file the folder listing never reported', async () => {
+    const shelf = withContent(['content.epub'])
+    shelf.fs.store.set('books/one/content.pdf', BYTES)
+    const real = shelf.fs.readDir.bind(shelf.fs)
+    shelf.fs.readDir = async (path: string) =>
+      (await real(path)).filter((entry) => entry.name !== 'content.pdf')
+
+    expect(await shelf.client.call('content.evict', { book: 'one' })).toMatchObject({ here: false })
+    expect(shelf.fs.store.has('books/one/content.pdf')).toBe(false)
+    expect(shelf.fs.store.has('books/one/content.epub')).toBe(false)
+  })
+
+  it('refuses a book the shelf does not hold, and is forbidden without its grant', async () => {
+    expect(
+      refusalCode(await serveTable({}).client.call('content.evict', { book: 'nobody' }).catch((e: unknown) => e)),
+    ).toBe('not-found')
+    const locked = withContent(['content.epub'])
+    locked.setGrants(['book:read'])
+    expect(refusalCode(await locked.client.call('content.evict', { book: 'one' }).catch((e: unknown) => e))).toBe(
+      FORBIDDEN,
+    )
+    expect(locked.ran).not.toContain('content.evict')
+  })
+})
+
+/**
+ * `content.read` — the one path by which a book's bytes reach a browser.
+ *
+ * Everything else in this file describes bytes; this carries them. The generic
+ * read-service sweep in `readServices.test.ts` proves only that it answers
+ * SOMETHING of the declared shape, which a handler yielding one empty chunk
+ * would satisfy — and a client assembling that writes a zero-byte file and
+ * calls it a book.
+ *
+ * So the assertions here are about the bytes: that what arrives is what is on
+ * disk, that the chunks tile the file without gap or overlap, and that the end
+ * of the file ends the stream rather than raising.
+ *
+ * THE CHUNK SIZE IS NEVER NAMED. It is a tuning constant, and a test that
+ * spells it out is a second copy of it that drifts. What is asserted is the
+ * PROPERTY a chunk size has to have — uniform pages, contiguous offsets, and a
+ * concatenation equal to the file — which holds at any value.
+ */
+
+interface Chunk {
+  readonly bookId: string
+  readonly offset: number
+  readonly bytes: string
+}
+
+/** Every chunk of a `content.read`, pages flattened. */
+async function chunks(shelf: ReturnType<typeof serveTable>, body: Record<string, unknown>): Promise<Chunk[]> {
+  const out: Chunk[] = []
+  for await (const page of shelf.client.stream('content.read', body)) out.push(...(page as Chunk[]))
+  return out
+}
+
+/** The bytes those chunks carry, decoded and joined in the order they arrived. */
+function assembled(got: readonly Chunk[]): Uint8Array {
+  const parts = got.map((one) => Uint8Array.from(atob(one.bytes), (ch) => ch.charCodeAt(0)))
+  const total = parts.reduce((sum, part) => sum + part.length, 0)
+  const all = new Uint8Array(total)
+  let at = 0
+  for (const part of parts) {
+    all.set(part, at)
+    at += part.length
+  }
+  return all
+}
+
+const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
+
+describe('content.read', () => {
+  it('answers the bytes that are on disk', async () => {
+    const got = await chunks(withContent(['content.epub']), { book: 'one' })
+    expect(text(assembled(got))).toBe('the whale')
+    expect(got.every((one) => one.bookId === 'one')).toBe(true)
+  })
+
+  it('starts where it was asked to and stops after the length it was given', async () => {
+    const shelf = withContent(['content.epub'])
+    expect(text(assembled(await chunks(shelf, { book: 'one', offset: 4 })))).toBe('whale')
+    expect(text(assembled(await chunks(shelf, { book: 'one', offset: 4, length: 3 })))).toBe('wha')
+    /* THE FIRST CHUNK'S OFFSET IS THE CALLER'S, not zero — a client resuming a
+       download seeks by it, and a chunk mislabelled zero overwrites the start
+       of the file it was assembling. */
+    expect((await chunks(shelf, { book: 'one', offset: 4 }))[0]?.offset).toBe(4)
+  })
+
+  /* A READ PAST THE END IS NOT AN ERROR, and it is not a chunk of nothing
+     either. A zero-length chunk would be indistinguishable from a book whose
+     bytes are still coming. */
+  it('answers nothing past the end of the file, without raising', async () => {
+    expect(await chunks(withContent(['content.epub']), { book: 'one', offset: 9_000 })).toEqual([])
+  })
+
+  it('answers nothing for a zero length', async () => {
+    expect(await chunks(withContent(['content.epub']), { book: 'one', length: 0 })).toEqual([])
+  })
+
+  /**
+   * THE WHOLE REASON THIS IS A STREAM.
+   *
+   * A book is larger than a frame — the envelope caps one at 4 MiB and base64
+   * costs four bytes per three — so a handler that yielded the file in one
+   * piece would work on the fixture and fail on a real book, over the wire,
+   * where the failure is a dropped connection rather than a message.
+   *
+   * The chunk size itself is deliberately not named here; see the header.
+   */
+  it('tiles a book too large for one frame into contiguous equal pages', async () => {
+    /* ASCII, so a byte is a character and the fake filesystem's `TextEncoder`
+       does not change the length out from under the assertions. */
+    const big = 'abcdefgh'.repeat(200_000) // 1.6 MB, several chunks at any sane size
+    const shelf = serveTable({
+      books: [seedBook('one', { hasContent: true })],
+      files: { 'books/one/content.epub': big },
+    })
+    const got = await chunks(shelf, { book: 'one' })
+    expect(got.length).toBeGreaterThan(1)
+    expect(text(assembled(got))).toBe(big)
+
+    /* CONTIGUOUS AND NON-OVERLAPPING. Assembling by concatenation above would
+       hide an off-by-one in the offsets; a client that seeks by them would
+       not. */
+    let expected = 0
+    for (const one of got) {
+      expect(one.offset).toBe(expected)
+      expected += atob(one.bytes).length
+    }
+    expect(expected).toBe(big.length)
+
+    /* EVERY PAGE BUT THE LAST IS THE SAME SIZE — the property a fixed chunk
+       size has, asserted without naming the number. */
+    const sizes = got.map((one) => atob(one.bytes).length)
+    expect(new Set(sizes.slice(0, -1)).size).toBe(1)
+    expect(sizes[sizes.length - 1]).toBeLessThanOrEqual(sizes[0]!)
+  })
+
+  it('stops at the length asked for even when it spans chunks', async () => {
+    const big = 'abcdefgh'.repeat(200_000)
+    const shelf = serveTable({
+      books: [seedBook('one', { hasContent: true })],
+      files: { 'books/one/content.epub': big },
+    })
+    const want = 700_000
+    const got = await chunks(shelf, { book: 'one', length: want })
+    expect(assembled(got).length).toBe(want)
+    expect(got.length).toBeGreaterThan(1)
+  })
+
+  /* ONE FILE, ONE ANSWER. `content.locate` reports an `ext` and a `size`; this
+     streams bytes. Picking differently — first-sorted here, `CONTENT_EXTENSIONS`
+     order there — had `locate` describe the epub while `read` sent the azw3, so
+     a client sizing a buffer from one and filling it from the other got a
+     truncated book and no error anywhere. */
+  it('streams the same file content.locate describes when a folder holds two', async () => {
+    const shelf = serveTable({
+      books: [seedBook('one', { hasContent: true })],
+      files: {
+        'books/one/content.azw3': 'the wrong one',
+        'books/one/content.epub': 'the whale',
+      },
+    })
+    const found = (await shelf.client.call('content.locate', { book: 'one' })) as { ext: string }
+    expect(found.ext).toBe('epub')
+    expect(text(assembled(await chunks(shelf, { book: 'one' })))).toBe('the whale')
+  })
+
+  it('refuses a book whose folder holds no bytes, rather than streaming nothing', async () => {
+    /* NOT AN EMPTY STREAM. "This shelf does not have the bytes" and "this book
+       is zero bytes long" have to be different answers, or a client writes the
+       second when it was told the first. */
+    const shelf = withContent([])
+    expect(refusalCode(await chunks(shelf, { book: 'one' }).catch((e: unknown) => e))).toBe('not-found')
+  })
+
+  it('refuses a book the shelf does not hold, and is forbidden without its grant', async () => {
+    expect(refusalCode(await chunks(serveTable({}), { book: 'nobody' }).catch((e: unknown) => e))).toBe('not-found')
+    const locked = withContent(['content.epub'])
+    locked.setGrants(['mark:read'])
+    expect(refusalCode(await chunks(locked, { book: 'one' }).catch((e: unknown) => e))).toBe(FORBIDDEN)
+    /* THE HANDLER NEVER RAN. A refusal that arrives after the file was opened
+       leaks through timing what it withheld in the answer. */
+    expect(locked.ran).not.toContain('content.read')
+  })
+})
+
+/**
+ * `cover.read` — a book's jacket, and the ordinary case where there is none.
+ *
+ * THE DEFECT THIS FILE EXISTS TO PIN. `readRangeOf` hands the filesystem's own
+ * error up for a file that is not there; `content.read` never meets that,
+ * because `blobNames` has confirmed the file first. There is no such list for a
+ * cover and **most books have no jacket**, so the first version of this service
+ * answered `cover.read: internal: the service failed` for every one of them —
+ * measured against a real library, once per visible row.
+ *
+ * A refusal is not a picture. The shelf draws a tint for a book with no
+ * artwork, and it must reach that state without an error.
+ */
+async function coverChunks(shelf: ReturnType<typeof serveTable>, book: string): Promise<Chunk[]> {
+  const out: Chunk[] = []
+  for await (const page of shelf.client.stream('cover.read', { book })) out.push(...(page as Chunk[]))
+  return out
+}
+
+/**
+ * THE HASH THE CALLER EXPECTS (WI-20.30).
+ *
+ * A browser that lost its socket mid-read starts the read again on a fresh
+ * one — the WHOLE read, never a residual. What that cannot see by itself is
+ * the book having changed in between: a re-import, an enrichment that
+ * rewrote the file. `content.locate` already answers the shelf's
+ * `contentHash`; `content.read` takes it back as `expect` and REFUSES when
+ * the bytes it would serve are not the ones the caller was told about,
+ * rather than serving two versions of one book to one reader.
+ */
+describe('content.read and the hash the caller expects', () => {
+  const HASH = 'a'.repeat(64)
+
+  it('streams when the expected hash is the one the shelf holds', async () => {
+    const shelf = withContent(['content.epub'], {}, { contentHash: HASH })
+    expect(text(assembled(await chunks(shelf, { book: 'one', expect: HASH })))).toBe('the whale')
+  })
+
+  it('refuses a read whose expected hash the shelf no longer holds — the book changed under the reader', async () => {
+    const shelf = withContent(['content.epub'], {}, { contentHash: 'b'.repeat(64) })
+    const failure = await chunks(shelf, { book: 'one', expect: HASH }).catch((e: unknown) => e)
+    expect(refusalCode(failure)).toBe('conflict')
+    expect(String(failure)).toMatch(/changed/)
+  })
+
+  it('refuses an expectation this shelf cannot confirm, rather than vouching for bytes it never hashed', async () => {
+    /* NULL IS "NOBODY HERE CAN SAY" — the header of `content.ts` is emphatic
+       that a caller must tell it from zero. A caller who was told a hash and
+       is now told nothing cannot know whether the book is the same one. */
+    const shelf = withContent(['content.epub'])
+    expect(refusalCode(await chunks(shelf, { book: 'one', expect: HASH }).catch((e: unknown) => e))).toBe('conflict')
+  })
+
+  it('streams as before when nothing is expected', async () => {
+    const shelf = withContent(['content.epub'], {}, { contentHash: HASH })
+    expect(text(assembled(await chunks(shelf, { book: 'one' })))).toBe('the whale')
+  })
+})
+
+describe('cover.read', () => {
+  it('streams the jacket a folder holds', async () => {
+    const shelf = withContent(['content.epub', 'cover.jpg'])
+    const got = await coverChunks(shelf, 'one')
+    expect(new TextDecoder().decode(assembled(got))).toBe('the whale')
+    expect(got[0]).toMatchObject({ bookId: 'one', offset: 0 })
+  })
+
+  /* THE ORDINARY CASE, and the one that was an internal error. */
+  it('answers nothing — not a refusal — for a book with no jacket', async () => {
+    const shelf = withContent(['content.epub'])
+    await expect(coverChunks(shelf, 'one')).resolves.toEqual([])
+  })
+
+  it('answers nothing for a book whose folder is empty', async () => {
+    const shelf = withContent([])
+    await expect(coverChunks(shelf, 'one')).resolves.toEqual([])
+  })
+
+  /* THE OLDER NAME IS NOT A MISTAKE. `cover.webp` is where a jacket lived in a
+     library written before `cover.jpg` was made honest; a shelf that answered
+     "no cover" for every book imported before the rename would look exactly
+     like a shelf of books with no artwork. */
+  it('falls back to the legacy name', async () => {
+    const shelf = withContent(['content.epub', 'cover.webp'])
+    expect(new TextDecoder().decode(assembled(await coverChunks(shelf, 'one')))).toBe('the whale')
+  })
+
+  it('prefers the current name when a folder holds both', async () => {
+    const shelf = serveTable({
+      books: [seedBook('one', { hasContent: true })],
+      files: { 'books/one/cover.jpg': 'current', 'books/one/cover.webp': 'legacy' },
+    })
+    expect(new TextDecoder().decode(assembled(await coverChunks(shelf, 'one')))).toBe('current')
+  })
+
+  /* A MISSING BOOK IS STILL A REFUSAL. "No such book" is a caller's mistake;
+     "no jacket" is an ordinary fact about a book, and collapsing the two would
+     make a typo in a book id look like a book with no artwork. */
+  it('refuses a book the shelf does not have', async () => {
+    const shelf = withContent(['content.epub'])
+    expect(refusalCode(await coverChunks(shelf, 'nope').catch((e: unknown) => e))).toBe('not-found')
+  })
+
+  it('is a read service, so a read-only grant reaches it', async () => {
+    const shelf = serveTable({
+      books: [seedBook('one', { hasContent: true })],
+      files: { 'books/one/cover.jpg': 'the whale' },
+      grants: ['book:read'],
+    })
+    expect((await coverChunks(shelf, 'one')).length).toBeGreaterThan(0)
+  })
+})

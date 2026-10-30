@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-passages-indexed"
+description = "Enables the passages_indexed command without any pre-configured scope."
+commands.allow = ["passages_indexed"]
+
+[[permission]]
+identifier = "deny-passages-indexed"
+description = "Denies the passages_indexed command without any pre-configured scope."
+commands.deny = ["passages_indexed"]

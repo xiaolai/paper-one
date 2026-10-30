@@ -1,0 +1,724 @@
+// @vitest-environment jsdom
+import { act, cleanup, renderHook } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { BOOKS_DIR } from '../../core/bookFolder'
+import { INDEX_FILE, loadShelf, parseIndex, type IndexedBook } from '../../core/bookIndex'
+import { fakeFs } from '../../core/indexFsFake.testkit'
+import { writeQueue } from '../../core/writeQueue'
+import { asRow, createLibrary } from '../../core/libraryStore'
+import { useLibrary } from './useLibrary'
+import { keepCover } from '../../core/coverArt'
+
+/* The cover writer is MOCKED, for one seam only: `keepJacket` must not invoke
+ * it for a book whose record is gone, and invocation is the observable — the
+ * real `keepCover` needs a canvas jsdom does not have, and it catches its own
+ * failures, so under jsdom it would decline to write for the wrong reason and
+ * the guard under test would look correct whether or not it existed. */
+vi.mock('../../core/coverArt', () => ({ keepCover: vi.fn(async () => true) }))
+
+/**
+ * The one pure decision in `useLibrary` with a launch riding on it.
+ *
+ * `hasContent` is derived by the scan and is not a field of `BookRecord`, so
+ * every row rebuilt from a record has lost it unless `asRow` is handed it
+ * back. `loadShelf` refuses to trust an index in which any row lacks the flag
+ * — so a single flagless row, which every `add` used to produce, turned the
+ * cache off for the next launch and made opening a fresh library pay a full
+ * folder-by-folder scan every single time.
+ */
+describe('asRow', () => {
+  const record = { title: 'Moby-Dick', author: 'Melville' }
+
+  it('carries the flag it is handed', () => {
+    expect(asRow(record, 'book_a', true).hasContent).toBe(true)
+    expect(asRow(record, 'book_a', false).hasContent).toBe(false)
+  })
+
+  /* Carries knowledge, does not invent any: a row that was never measured
+   * stays unmeasured, rather than guessing a value the folder might contradict. */
+  it('adds nothing when the flag was never derived', () => {
+    expect(asRow(record, 'book_a', undefined)).not.toHaveProperty('hasContent')
+  })
+
+  it('stamps the id over whatever the record claims', () => {
+    expect(asRow({ ...record, bookId: 'stale' }, 'book_a', true).bookId).toBe('book_a')
+  })
+
+  /* The flag is the ROW's, never the record's: were it spread in from a record
+   * it would be one write away from landing inside `book.json`, which is the
+   * stored-flag disagreement `bookIndex` exists to rule out. */
+  it('takes the flag only from its own argument', () => {
+    const smuggled = { ...record, hasContent: true } as typeof record
+    expect(asRow(smuggled, 'book_a', false).hasContent).toBe(false)
+  })
+})
+
+/**
+ * The hook itself, mounted — the wiring the pure tests cannot see.
+ *
+ * These are LAUNCH-SHAPED tests: each one performs a session's writes through
+ * the real hook and the real write queue, then asks the question the next
+ * launch asks — does `loadShelf` believe the index this session left behind?
+ * `rescanned: false` IS the feature. The bug these pin was invisible to every
+ * unit test precisely because it lived in the wiring: `add` built rows that
+ * dropped the flag, the index inherited them, and the launch after a fresh
+ * import paid a full scan of the library before the window could draw.
+ *
+ * The index file appearing is the signal a session's writes have landed —
+ * `commit` chains the index write behind the book's own, so its presence
+ * means both are done. Waiting on `loadShelf` instead would be circular: a
+ * rescan WRITES the very index the assertion then trusts.
+ */
+describe('useLibrary, mounted', () => {
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  function mount(
+    files: Record<string, string>,
+    initial: readonly IndexedBook[] = [],
+    /** Wraps the fs the hook sees — for failure injection; the store stays shared. */
+    wrap?: (fs: ReturnType<typeof fakeFs>) => typeof fs,
+  ) {
+    const fs = fakeFs(files)
+    /* ONE queue AND ONE service, made outside the render callback — the
+     * callback runs on every render, and either made inside it would be
+     * replaced under the hook each time state moves, which is not the contract
+     * the app provides. The composition root builds these once too; the hook
+     * is an adapter over whatever instance it is handed. */
+    const queue = writeQueue()
+    const library = createLibrary({ fs: wrap ? wrap(fs) : fs, queue, initial })
+    const hook = renderHook(() => useLibrary(library))
+    return { fs, queue, library, hook }
+  }
+
+  const settled = (fs: ReturnType<typeof fakeFs>) =>
+    vi.waitFor(() => expect(fs.store.has(INDEX_FILE)).toBe(true))
+
+  it('writes an index the next launch can trust, for a book no scan has seen', async () => {
+    // An import's shape: the bytes are copied first, then the sparse add.
+    const { fs, hook } = mount({ [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE' })
+    await act(async () => {
+      hook.result.current.add(
+        'book_a',
+        { title: 'moby-dick', author: '', ext: 'epub', addedAt: 1 },
+        true,
+      )
+      await settled(fs)
+    })
+    const { books, rescanned } = await loadShelf(fs)
+    expect(rescanned).toBe(false)
+    // Measured off the folder by the write itself, not asserted by the caller.
+    expect(books[0]?.hasContent).toBe(true)
+  })
+
+  /* The same measurement is what tells the truth the other way: a record whose
+   * copy never landed is missing NOW, on the shelf that shows it, not on some
+   * later launch that happens to rescan. */
+  it('measures a copy that never landed as missing, and the cache holds', async () => {
+    const { fs, hook } = mount({})
+    await act(async () => {
+      hook.result.current.add('book_a', { title: 'ghost', author: '', ext: 'epub' }, true)
+      await settled(fs)
+    })
+    const { books, rescanned } = await loadShelf(fs)
+    expect(rescanned).toBe(false)
+    expect(books[0]?.hasContent).toBe(false)
+  })
+
+  /* The enrichment pass and the reader's own open both fold a parse into an
+   * existing row. The optimistic row is drawn before any disk answer comes
+   * back, and it must not un-know what the scan established — this is the
+   * exact line where every parse used to knock the flag off the shelf. */
+  it('keeps the flag on the row a parse replaces, before the disk answers', async () => {
+    const onDisk = {
+      [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({ title: 'moby-dick', author: '' }),
+      [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE',
+    }
+    const shelf: IndexedBook[] = [
+      { bookId: 'book_a', title: 'moby-dick', author: '', hasContent: true },
+    ]
+    const { fs, hook } = mount(onDisk, shelf)
+    act(() => {
+      hook.result.current.add('book_a', {
+        title: 'Moby-Dick',
+        author: 'Melville',
+        parsedAt: 1,
+      })
+    })
+    expect(hook.result.current.books[0]?.hasContent).toBe(true)
+    await act(async () => {
+      await settled(fs)
+    })
+  })
+
+  /* A SECOND sparse add of a book whose first add has not settled — a folder
+   * re-imported twice, back to back. The first add's disk answer is suppressed
+   * (`reconcile` declines under a queued neighbour), so the row's flag would
+   * stay unset forever unless the second add MEASURES rather than trusting
+   * what the row says: the flagless row is the launch-rescan defect through
+   * the one door that used to measure only rows already marked `false`. */
+  it('a re-import measures the flag a suppressed first add left off', async () => {
+    const { fs, hook } = mount({ [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE' })
+    const sparse = { title: 'moby-dick', author: '', ext: 'epub' }
+    await act(async () => {
+      hook.result.current.add('book_a', sparse, true)
+      hook.result.current.add('book_a', sparse, true)
+      await vi.waitFor(() => {
+        const raw = fs.store.get(INDEX_FILE)
+        expect(raw).toBeDefined()
+        expect(parseIndex(new TextDecoder().decode(raw!))?.[0]?.hasContent).toBe(true)
+      })
+    })
+    expect((await loadShelf(fs)).rescanned).toBe(false)
+  })
+
+  /* `update`'s callback contract is record-to-record, and nothing in it says
+   * "spread your input". A callback that BUILDS its result used to strip the
+   * derived flag from the row on the way through — the same defect `add` had,
+   * wearing the other mutator. */
+  it('an update that builds a fresh record cannot lose the flag', async () => {
+    const { fs, hook } = mount(
+      {
+        [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({ title: 'moby-dick', author: '' }),
+        [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE',
+      },
+      [{ bookId: 'book_a', title: 'moby-dick', author: '', hasContent: true }],
+    )
+    act(() => {
+      hook.result.current.update('book_a', (record) => ({
+        title: record.title,
+        author: record.author,
+        finished: true,
+      }))
+    })
+    expect(hook.result.current.books[0]?.hasContent).toBe(true)
+    await act(async () => {
+      await settled(fs)
+    })
+    const { books, rescanned } = await loadShelf(fs)
+    expect(rescanned).toBe(false)
+    expect(books[0]?.finished).toBe(true)
+    expect(books[0]?.hasContent).toBe(true)
+  })
+
+  /* Being in line BEHIND the removal was never enough: the cover writer makes
+   * the folder it writes into, so a jacket landing after a removal recreated
+   * the trashed folder as a directory holding nothing but a picture of a book
+   * that is gone. The record's absence is what "removed" looks like from
+   * inside the queue, and the jacket task has to ask. */
+  it('a jacket queued behind a removal writes nothing back', async () => {
+    const { fs, queue, hook } = mount(
+      {
+        [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({ title: 'moby-dick', author: '' }),
+        [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE',
+      },
+      [{ bookId: 'book_a', title: 'moby-dick', author: '', hasContent: true }],
+    )
+    await act(async () => {
+      hook.result.current.remove('book_a')
+      hook.result.current.keepJacket('book_a', new Blob(['jacket']))
+      await queue.idle()
+      await settled(fs)
+    })
+    expect(vi.mocked(keepCover)).not.toHaveBeenCalled()
+    // The book is in the trash, and nothing recreated its live folder.
+    expect([...fs.store.keys()].filter((k) => k.startsWith(`${BOOKS_DIR}/book_a/`))).toEqual([])
+  })
+
+  /* And the guard must not eat the ordinary case: a book that is still on the
+   * shelf gets its jacket. */
+  it('a jacket for a living book still lands', async () => {
+    const { fs, queue, hook } = mount(
+      {
+        [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({ title: 'moby-dick', author: '' }),
+        [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE',
+      },
+      [{ bookId: 'book_a', title: 'moby-dick', author: '', hasContent: true }],
+    )
+    await act(async () => {
+      hook.result.current.keepJacket('book_a', new Blob(['jacket']))
+      await queue.idle()
+    })
+    expect(vi.mocked(keepCover)).toHaveBeenCalledWith(fs, 'book_a', expect.anything())
+  })
+
+  /* A rekey reroutes the destination's lane onto the source's, so every write
+   * for the book — issued under either id, before or after the move — runs in
+   * one lane in the order it was asked for. This pins the composite: no
+   * deadlock (the stamp is inline in the same lane), no dropped edit, and the
+   * later write wins. */
+  it('writes issued across a rekey land in order, in one lane', async () => {
+    const { fs, queue, hook } = mount(
+      {
+        [`${BOOKS_DIR}/book_old/book.json`]: JSON.stringify({ title: 't', author: '' }),
+        [`${BOOKS_DIR}/book_old/content.epub`]: 'B',
+      },
+      [{ bookId: 'book_old', title: 't', author: '', hasContent: true }],
+    )
+    await act(async () => {
+      hook.result.current.update('book_old', (r) => ({ ...r, position: 'old-edit' }))
+      const carried = hook.result.current.rekeyBook('book_old', 'book:new')
+      // Issued while the rename is still queued: it must fall in line behind
+      // it, not race it from a lane of its own.
+      hook.result.current.update('book_old', (r) => ({ ...r, position: 'newer-edit' }))
+      await expect(carried).resolves.toBe('moved')
+      // And a write under the NEW id joins the same lane.
+      hook.result.current.tagBooks(['book:new'], ['Sea'])
+      await queue.idle()
+    })
+    const raw = fs.store.get(`${BOOKS_DIR}/book_new/book.json`)
+    expect(raw).toBeDefined()
+    const record = JSON.parse(new TextDecoder().decode(raw!)) as {
+      bookId?: string
+      position?: string
+      tags?: string[]
+    }
+    expect(record.bookId).toBe('book:new')
+    expect(record.position).toBe('newer-edit')
+    expect(record.tags).toEqual(['Sea'])
+  })
+
+  /* A write that FAILS must not leave its optimistic prediction in the row —
+   * the index is serialised from the rows, the trust check never re-reads an
+   * idle book's record, so a phantom edit in a trusted cache survives across
+   * launches. The repair is immediate: the folder wins, now. */
+  it('a write that fails puts the folder back in the row', async () => {
+    const { queue, hook } = mount(
+      {
+        [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({
+          title: 't',
+          author: '',
+          tags: ['kept'],
+        }),
+        [`${BOOKS_DIR}/book_a/content.epub`]: 'B',
+      },
+      [{ bookId: 'book_a', title: 't', author: '', tags: ['kept'], hasContent: true }],
+      (fs) => ({
+        ...fs,
+        writeFile: async (path, bytes) => {
+          if (path.startsWith(`${BOOKS_DIR}/book_a/`)) throw new Error('disk full')
+          return fs.writeFile(path, bytes)
+        },
+      }),
+    )
+    act(() => {
+      hook.result.current.update('book_a', (r) => ({ ...r, tags: ['phantom'] }))
+    })
+    expect(hook.result.current.books[0]?.tags).toEqual(['phantom'])
+    await act(async () => {
+      await queue.idle()
+    })
+    /* The repair is queued from the commit promise chain one microtask after
+     * the failing task settles, so `idle()` can resolve before it is even in
+     * the queue — polled with an act flush per attempt, because a state update
+     * queued while an `act` body is still open is not rendered until that body
+     * exits, and a waitFor inside it would poll a picture that cannot change. */
+    await vi.waitFor(async () => {
+      await act(async () => {})
+      expect(hook.result.current.books[0]?.tags).toEqual(['kept'])
+    })
+  })
+
+  /* And when even the repair cannot read the folder, the row comes OFF the
+   * shelf and out of the cache — there is no state it can honestly show. The
+   * index written without the book also omits its folder claim, so the next
+   * healthy launch disagrees with the listing, rescans, and shelves the book
+   * again from the folder — which is the truth. */
+  it('a failed write nothing readable backs takes the row off the shelf', async () => {
+    const { fs, queue, hook } = mount(
+      {
+        [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({ title: 't', author: '' }),
+        [`${BOOKS_DIR}/book_a/content.epub`]: 'B',
+        [INDEX_FILE]: JSON.stringify({
+          version: 1,
+          books: [{ bookId: 'book_a', title: 't', author: '', hasContent: true }],
+          folders: ['book_a'],
+        }),
+      },
+      [{ bookId: 'book_a', title: 't', author: '', hasContent: true }],
+      (fs) => ({
+        ...fs,
+        readFile: async (path) => {
+          if (path === `${BOOKS_DIR}/book_a/book.json`) throw new Error('EIO')
+          return fs.readFile(path)
+        },
+        writeFile: async (path, bytes) => {
+          if (path.startsWith(`${BOOKS_DIR}/book_a/`)) throw new Error('disk full')
+          return fs.writeFile(path, bytes)
+        },
+      }),
+    )
+    act(() => {
+      hook.result.current.update('book_a', (r) => ({ ...r, tags: ['phantom'] }))
+    })
+    await act(async () => {
+      await queue.idle()
+    })
+    await vi.waitFor(async () => {
+      await act(async () => {})
+      expect(hook.result.current.books).toHaveLength(0)
+      const raw = fs.store.get(INDEX_FILE)
+      expect(raw).toBeDefined()
+      expect(parseIndex(new TextDecoder().decode(raw!))).toEqual([])
+    })
+    // The next healthy launch rescans and the book comes back from its folder.
+    const shelf = await loadShelf(fs)
+    expect(shelf.rescanned).toBe(true)
+    expect(shelf.books).toHaveLength(1)
+  })
+
+  /* The cross-book shape the repair exists for: while book A's failing write
+   * is in flight, book B's successful commit serialises A's phantom row into
+   * the index — and folder membership is unchanged, so a launch would TRUST
+   * it, and an idle book's record is never re-read while the cache is
+   * trusted. The repair must reach the DISK, not just the rows. */
+  it('a phantom another book serialised is scrubbed from the cache', async () => {
+    const { fs, queue, hook } = mount(
+      {
+        [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({
+          title: 'a',
+          author: '',
+          tags: ['kept'],
+        }),
+        [`${BOOKS_DIR}/book_a/content.epub`]: 'A',
+        [`${BOOKS_DIR}/book_b/book.json`]: JSON.stringify({ title: 'b', author: '' }),
+        [`${BOOKS_DIR}/book_b/content.epub`]: 'B',
+      },
+      [
+        { bookId: 'book_a', title: 'a', author: '', tags: ['kept'], hasContent: true },
+        { bookId: 'book_b', title: 'b', author: '', hasContent: true },
+      ],
+      (fs) => ({
+        ...fs,
+        writeFile: async (path, bytes) => {
+          if (path.startsWith(`${BOOKS_DIR}/book_a/`)) throw new Error('disk full')
+          return fs.writeFile(path, bytes)
+        },
+      }),
+    )
+    act(() => {
+      hook.result.current.update('book_a', (r) => ({ ...r, tags: ['phantom'] }))
+      hook.result.current.update('book_b', (r) => ({ ...r, finished: true }))
+    })
+    await act(async () => {
+      await queue.idle()
+    })
+    await vi.waitFor(async () => {
+      await act(async () => {})
+      const raw = fs.store.get(INDEX_FILE)
+      expect(raw).toBeDefined()
+      const cached = parseIndex(new TextDecoder().decode(raw!))
+      expect(cached?.find((one) => one.bookId === 'book_a')?.tags).toEqual(['kept'])
+      expect(cached?.find((one) => one.bookId === 'book_b')?.finished).toBe(true)
+    })
+    // And a launch over this cache is entitled to trust it.
+    const shelf = await loadShelf(fs)
+    expect(shelf.rescanned).toBe(false)
+    expect(shelf.books.find((one) => one.bookId === 'book_a')?.tags).toEqual(['kept'])
+  })
+
+  /* The other mutator: a tag goes through `update`, whose row is a spread of
+   * the one it changes. One write, and the launch after it still trusts the
+   * cache — the flag survived the whole round trip. */
+  it('a tag write leaves the cache trusted too', async () => {
+    const { fs, hook } = mount(
+      { [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({ title: 'moby-dick', author: '' }) },
+      [{ bookId: 'book_a', title: 'moby-dick', author: '', hasContent: true }],
+    )
+    await act(async () => {
+      hook.result.current.tagBooks(['book_a'], ['Sea'])
+      await settled(fs)
+    })
+    const { books, rescanned } = await loadShelf(fs)
+    expect(rescanned).toBe(false)
+    expect(books[0]?.tags).toEqual(['Sea'])
+    expect(books[0]?.hasContent).toBe(true)
+  })
+})
+
+/**
+ * A folder import, at the size that broke.
+ *
+ * A real import copied 1,959 books correctly and shelved 1,877 of them. The 82
+ * missing ones were a CONTIGUOUS BLOCK AT THE TAIL — bytes on disk, no
+ * `book.json`, no row, no journal entry — because `shelveImported` called `add`
+ * once per book in one synchronous pass. Every call opens its own key on the
+ * write queue and each key starts draining immediately, so the whole library
+ * went into flight in a single tick and the end of the burst failed. `commit`
+ * then dropped each failed row and rewrote the index without it, and the only
+ * trace was a console line nobody had open.
+ *
+ * Both halves are pinned here: the fan-out is bounded, and a failure is
+ * COUNTED rather than swallowed. Either one alone leaves the defect — an
+ * unbounded burst that reports its failures is still lossy, and a bounded one
+ * that hides them is how this went unnoticed for a session.
+ */
+describe('addMany, the shape a folder import writes in', () => {
+  afterEach(cleanup)
+
+  const many = (count: number) =>
+    Array.from({ length: count }, (_unused, at) => ({
+      bookId: `book_${String(at).padStart(4, '0')}`,
+      record: { title: `Book ${String(at)}`, author: '', ext: 'epub' },
+      sparse: true,
+    }))
+
+  /**
+   * Counts writes IN FLIGHT, which is the quantity that broke — not total.
+   *
+   * THE DELAY IS THE MEASUREMENT, not padding. `fakeFs` resolves within the
+   * same microtask, so without it every write finishes before the next one
+   * starts and the peak reads 1 whatever the pool is set to — a test that
+   * passed with the bound removed entirely, which is to say a test of
+   * nothing. Every real write here is an IPC round-trip into the Tauri
+   * process, so a macrotask is the faithful model and not a trick.
+   */
+  function peaked(files: Record<string, string>) {
+    const fs = fakeFs(files)
+    let inFlight = 0
+    let peak = 0
+    const watched = {
+      ...fs,
+      writeFile: async (path: string, bytes: Uint8Array) => {
+        inFlight += 1
+        peak = Math.max(peak, inFlight)
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          return await fs.writeFile(path, bytes)
+        } finally {
+          inFlight -= 1
+        }
+      },
+    }
+    return { fs, watched, peak: () => peak }
+  }
+
+  it('never puts the whole import in flight at once', async () => {
+    const { fs, watched, peak } = peaked({})
+    const library = createLibrary({ fs: watched, queue: writeQueue(), initial: [] })
+    expect(await library.addMany(many(200))).toBe(0)
+    /* `add` resolves behind its own index write — see `commit` — so the cache
+     * being there is the proof every book's chain actually finished, rather
+     * than the pool having quietly dropped the tail. */
+    expect(fs.store.has(INDEX_FILE)).toBe(true)
+    /* The bound itself. 200 books used to mean 200 chains in one tick; the
+     * pool is 8 wide, and the slack is for the index write riding along
+     * beside them. Anything near 200 is the defect back. */
+    expect(peak()).toBeLessThanOrEqual(12)
+  })
+
+  /* Every book still lands. A bound on concurrency that quietly dropped the
+   * overflow would be the same bug wearing the fix's clothes. */
+  it('shelves every book it was given', async () => {
+    const fs = fakeFs({})
+    const library = createLibrary({ fs, queue: writeQueue(), initial: [] })
+    await library.addMany(many(200))
+    expect(library.getSnapshot()).toHaveLength(200)
+  })
+
+  /* THE COUNT IS THE POINT. This returned nothing and every caller let the
+   * promise go, so an import that lost 82 books reported "1,959 added". */
+  it('counts the books whose record could not be written', async () => {
+    const fs = fakeFs({})
+    const refuses = new Set(['book_0003', 'book_0007'])
+    const failing = {
+      ...fs,
+      writeFile: async (path: string, bytes: Uint8Array) => {
+        if ([...refuses].some((id) => path.includes(id))) throw new Error('disk full')
+        return fs.writeFile(path, bytes)
+      },
+    }
+    const library = createLibrary({ fs: failing, queue: writeQueue(), initial: [] })
+    expect(await library.addMany(many(10))).toBe(2)
+  })
+
+  /* One book that cannot be saved must not cost the other 1,958. */
+  it('keeps going past a book it could not save', async () => {
+    const fs = fakeFs({})
+    const failing = {
+      ...fs,
+      writeFile: async (path: string, bytes: Uint8Array) => {
+        if (path.includes('book_0000')) throw new Error('disk full')
+        return fs.writeFile(path, bytes)
+      },
+    }
+    const library = createLibrary({ fs: failing, queue: writeQueue(), initial: [] })
+    expect(await library.addMany(many(10))).toBe(1)
+    expect(library.getSnapshot().map((one) => one.bookId)).not.toContain('book_0000')
+    expect(library.getSnapshot()).toHaveLength(9)
+  })
+})
+
+/**
+ * A failed save is SHOWN, with its retry (WI-20.36).
+ *
+ * `letGo` reported every rejection to the console and nothing else — so a
+ * tag that never reached the disk looked, on the shelf, exactly like one that
+ * had. The store publishes the failure; the hook, which is the one holding
+ * the verb that failed, is what can offer to run it again.
+ */
+describe('useLibrary and a save that did not land', () => {
+  afterEach(cleanup)
+
+  const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => {})
+
+  function failing() {
+    let refuse = true
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({ title: 'Moby-Dick', author: '' }),
+      [`${BOOKS_DIR}/book_a/content.epub`]: 'B',
+    })
+    const wrapped = {
+      ...fs,
+      writeFile: async (path: string, bytes: Uint8Array) => {
+        if (refuse && path.startsWith(`${BOOKS_DIR}/book_a/`)) throw new Error('disk full')
+        return fs.writeFile(path, bytes)
+      },
+    }
+    const library = createLibrary({
+      fs: wrapped,
+      queue: writeQueue(),
+      initial: [{ bookId: 'book_a', title: 'Moby-Dick', author: '', hasContent: true }],
+    })
+    const hook = renderHook(() => useLibrary(library))
+    return { fs, library, hook, heal: () => (refuse = false) }
+  }
+
+  it('shows the failure with a retry, and the retry that lands clears it', async () => {
+    const warn = quiet()
+    const { fs, hook, heal } = failing()
+    await act(async () => {
+      hook.result.current.tag('book_a', 'Sea')
+      await vi.waitFor(() => expect(hook.result.current.saveFailure).not.toBeNull())
+    })
+    expect(hook.result.current.saveFailure?.message).toBe('Couldn’t save “Moby-Dick”')
+    expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+
+    heal()
+    await act(async () => {
+      hook.result.current.saveFailure?.retry?.()
+      await vi.waitFor(() => expect(hook.result.current.saveFailure).toBeNull())
+    })
+    const record = JSON.parse(new TextDecoder().decode(fs.store.get(`${BOOKS_DIR}/book_a/book.json`))) as {
+      tags?: string[]
+    }
+    expect(record.tags).toEqual(['Sea'])
+    warn.mockRestore()
+  })
+
+  /* A failure the hook did not run — a capability's handler writing through
+     the store directly — is shown, and offers no retry: the hook holds no verb
+     for it, and re-running the wrong one would be worse than none. */
+  it('offers no retry for a failure it did not run', async () => {
+    const warn = quiet()
+    const { library, hook } = failing()
+    await act(async () => {
+      await library.tag('book_a', 'Sea').catch(() => {})
+    })
+    expect(hook.result.current.saveFailure?.message).toBe('Couldn’t save “Moby-Dick”')
+    expect(hook.result.current.saveFailure?.retry).toBeNull()
+    warn.mockRestore()
+  })
+
+  it('can be dismissed', async () => {
+    const warn = quiet()
+    const { hook } = failing()
+    await act(async () => {
+      hook.result.current.tag('book_a', 'Sea')
+      await vi.waitFor(() => expect(hook.result.current.saveFailure).not.toBeNull())
+    })
+    act(() => hook.result.current.dismissSaveFailure())
+    expect(hook.result.current.saveFailure).toBeNull()
+    warn.mockRestore()
+  })
+
+  /**
+   * ⚠️ **TWO WRITES TO ONE BOOK BOTH MATCH THE BOOK.**
+   *
+   * Pairing by book stops the button under "Couldn't save A" re-running a
+   * write to B. It cannot tell two writes to A apart — the store publishes one
+   * failure, and both catches read whatever is current when they run — so the
+   * later claim quietly replaced the earlier one and the retry shown was
+   * whichever verb happened to arrive second. One of those verbs is `remove`.
+   *
+   * The failure is pinned here rather than raced, because the defect is the
+   * pairing rule and not the timing: a store answering one `SaveFailure` to
+   * both catches is exactly what a race produces, without the race.
+   */
+  describe('when two writes to the same book both fail', () => {
+    /** A store whose every failure is the SAME one, and whose writes reject. */
+    function oneFailure() {
+      const real = createLibrary({
+        fs: null,
+        queue: writeQueue(),
+        initial: [{ bookId: 'book_a', title: 'Moby-Dick', author: '', hasContent: true }],
+      })
+      const failure = {
+        bookId: 'book_a',
+        title: 'Moby-Dick',
+        what: 'record',
+        message: 'disk full',
+      } as const
+      const library = {
+        ...real,
+        lastFailure: () => failure,
+        tag: () => Promise.reject(new Error('disk full')),
+        remove: () => Promise.reject(new Error('disk full')),
+        renameTag: () => Promise.reject(new Error('disk full')),
+      }
+      return renderHook(() => useLibrary(library))
+    }
+
+    /* The failure is here from the first render, so `waitFor` on it resolving
+       would resolve BEFORE the rejection's catch has run. A turn of the event
+       loop is what the pairing actually waits on. */
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
+    it('offers the retry when only one verb claims it', async () => {
+      const warn = quiet()
+      const hook = oneFailure()
+      await act(async () => {
+        hook.result.current.tag('book_a', 'Sea')
+        await settle()
+      })
+      expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+      warn.mockRestore()
+    })
+
+    it('offers no retry rather than the wrong one', async () => {
+      const warn = quiet()
+      const hook = oneFailure()
+      await act(async () => {
+        hook.result.current.tag('book_a', 'Sea')
+        hook.result.current.remove('book_a')
+        await settle()
+      })
+      expect(
+        hook.result.current.saveFailure?.retry,
+        'the failure carried a verb nothing proved was the one that failed',
+      ).toBeNull()
+      warn.mockRestore()
+    })
+
+    /* A SHELF-WIDE VERB STILL STANDS ASIDE. It cannot tell whether the failure
+       is its own, so it is the weaker claim rather than a rival one, and it
+       must not spoil a claim that names the book. */
+    it('leaves a book-scoped claim alone when a shelf-wide verb also fails', async () => {
+      const warn = quiet()
+      const hook = oneFailure()
+      await act(async () => {
+        hook.result.current.tag('book_a', 'Sea')
+        await settle()
+      })
+      expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+      await act(async () => {
+        hook.result.current.renameTag('Sea', 'Ocean')
+        await settle()
+      })
+      expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+      warn.mockRestore()
+    })
+  })
+})

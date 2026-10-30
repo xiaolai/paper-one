@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-pair-begin"
+description = "Enables the peer_pair_begin command without any pre-configured scope."
+commands.allow = ["peer_pair_begin"]
+
+[[permission]]
+identifier = "deny-peer-pair-begin"
+description = "Denies the peer_pair_begin command without any pre-configured scope."
+commands.deny = ["peer_pair_begin"]

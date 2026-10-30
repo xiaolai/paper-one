@@ -1,0 +1,148 @@
+import { execFileSync, spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { DELETED_ENV } from './verify-without.mjs'
+
+/**
+ * NOTHING BUILT REACHES THE REPOSITORY.
+ *
+ * ## Why this is a gate and not a habit
+ *
+ * It has come close three times, each in a different directory, and each time
+ * the fix was a line in a `.gitignore` that only covered the case in front of
+ * whoever wrote it:
+ *
+ *   1. `gen/apple/assets/` — the frontend dist copied in for the iOS resources
+ *      phase. Caught, ignored, and a comment written there about it.
+ *   2. `gen/android/app/src/main/assets/` — the SAME thing on the other
+ *      platform, whose Tauri template ships without the equivalent rule. Not
+ *      caught: 73 files and 70 MB of macOS `.dylib`s reached a commit and were
+ *      one `git push` from being permanent. (They were removed from history
+ *      before anything was pushed.)
+ *   3. `gen/android/app/src/main/jniLibs/` — compiled Rust per Android ABI,
+ *      where the template ignores only files whose name ends in `.so`, and
+ *      nothing else in the directory.
+ *
+ * The first fix did not prevent the second, because a rule in one platform's
+ * ignore file cannot know about the other's. This list is the shared place.
+ *
+ * ## What it checks
+ *
+ * `git check-ignore` — not a string search of `.gitignore` files. A rule that
+ * exists but does not MATCH is the failure mode that matters, and only git can
+ * answer whether a path is ignored: the rules are spread across the repository
+ * root and two nested template files, with precedence between them.
+ *
+ * Paths are probed as files that need not exist. `git check-ignore` answers
+ * about a PATH, so this stays true on a machine that has never run an Android
+ * build — which is exactly where a missing rule would otherwise go unnoticed
+ * until it did.
+ */
+
+const REPO = fileURLToPath(new URL('..', import.meta.url))
+
+/**
+ * Everything a build writes into the working tree, with what writes it.
+ *
+ * Add a line here in the change that introduces a build step, not after
+ * something from it turns up in `git status`.
+ */
+const BUILT = [
+  { path: 'dist/index.html', by: 'pnpm build — the desktop frontend bundle' },
+  { path: 'dist-web/index.web.html', by: 'pnpm build:web — the browser client' },
+  { path: 'dist-mobile/index.html', by: 'pnpm build:ios / build:android — the phone bundle' },
+  { path: 'bin/paper.mjs', by: 'pnpm build:cli' },
+  { path: '.types/app.tsbuildinfo', by: 'pnpm typecheck' },
+  { path: 'vendor/pdfjs/pdf.worker.mjs', by: 'scripts/sync-pdfjs-assets.mjs' },
+  { path: 'src-tauri/target/debug/paper', by: 'cargo' },
+  /* THE TWO ASSET DIRECTORIES, which are the same defect on two platforms —
+     the frontend dist and every `bundle.resources` entry, copied in for
+     packaging. */
+  { path: 'src-tauri/gen/apple/assets/index.html', by: 'tauri ios build — resources phase' },
+  { path: 'src-tauri/gen/android/app/src/main/assets/index.html', by: 'tauri android build — asset merge' },
+  { path: 'src-tauri/gen/android/app/src/main/assets/runtime/runtime.manifest.json', by: 'tauri android build — bundle resources' },
+  /* COMPILED OUTPUT for each mobile platform. */
+  { path: 'src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/libpaper_lib.so', by: 'cargo, via the NDK' },
+  /* ⚠️ **NOT A `.so`, DELIBERATELY.** The Tauri template's own rule is
+     `/src/main/jniLibs/` followed by a `.so` glob, so the line above passes
+     with or without the directory rule this repo adds — mutation testing
+     showed exactly that, removing the directory rule and failing nothing. This
+     probe is what pins it: anything else the NDK leaves in that directory is
+     compiler output too. */
+  { path: 'src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/libpaper_lib.a', by: 'cargo, via the NDK' },
+  { path: 'src-tauri/gen/apple/build/arm64/Paper.app/Paper', by: 'xcodebuild' },
+  { path: 'src-tauri/gen/apple/Externals/Paper.a', by: 'tauri ios build' },
+  /* TOOL STATE that is not output but is equally not authored. */
+  { path: 'src-tauri/gen/android/.gradle/file-hashes.bin', by: 'gradle' },
+  { path: 'src-tauri/gen/android/app/build/outputs/apk/debug/app-debug.apk', by: 'gradle' },
+  { path: 'src-tauri/gen/apple/xcuserdata/state.xcuserstate', by: 'Xcode' },
+  { path: 'src-tauri/gen/apple/Pods/Manifest.lock', by: 'pod install' },
+]
+
+/** Whether git would ignore `path`, whether or not it exists. */
+function ignored(path) {
+  try {
+    execFileSync('git', ['check-ignore', '-q', '--no-index', path], { cwd: REPO })
+    return true
+  } catch {
+    return false
+  }
+}
+
+describe('build output never reaches the repository', () => {
+  /* ⚠️ **NOT INSIDE THE DELETION PROOF'S COPY, WHICH HAS NO `.git`.** `pnpm
+     verify:without <id>` copies the tree without it, so every probe below
+     answered "not ignored" there and all of them failed — on `main` too, found
+     2026-09-15. What git ignores is a property of the repository, which cutting
+     a capability does not change, and the real tree's `pnpm verify` runs this.
+     Only under the proof's own marker and only when git itself finds no work
+     tree, so a checkout git cannot read anywhere else still fails loudly. */
+  beforeEach((context) => {
+    const inside = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: REPO, encoding: 'utf8' }).stdout.trim()
+    if (process.env[DELETED_ENV] !== undefined && inside !== 'true') {
+      context.skip("the deletion proof's copy has no .git, so git cannot say what this repository ignores; the real tree's pnpm verify runs this")
+    }
+    /* ⚠️ **AND NOT INSIDE A COPY GIT IGNORES WHOLESALE, WHICH A STRYKER SANDBOX
+       IS.** The mutation gate copies the tree into `.stryker-tmp/sandbox-N/`,
+       which is inside the checkout and gitignored — so git DOES find a work
+       tree there and `check-ignore` answers "ignored" for every path under it,
+       `src/main.tsx` included. The probe then reports that a source file is
+       ignored, which is the case above failing, and with it the whole dry run:
+       `scripts/verify-without.mjs` scored nothing in the 2026-09-20 sweep for
+       exactly this, and "Stryker did not finish" is not a pass.
+
+       The condition is asked, not assumed, and it is asked with the SAME probe
+       every case below uses: a tree whose own root git ignores cannot answer
+       what this repository ignores. In a real checkout the root is not ignored
+       — measured — so this skips nowhere else and a broken `check-ignore`
+       still fails loudly. */
+    if (inside === 'true' && ignored('.')) {
+      context.skip('this tree is one git ignores wholesale — a Stryker sandbox under .stryker-tmp — so check-ignore answers "ignored" for everything in it, this repository included; the real tree runs this')
+    }
+  })
+
+  /* THE PROBE ITSELF FIRST. If `check-ignore` stopped working — a git that
+     does not know `--no-index`, a wrong cwd — every case below would report
+     "not ignored" and the suite would fail loudly rather than pass quietly.
+     This case is the other direction: a path that MUST NOT be ignored, so a
+     probe that answers "yes" to everything is caught too. */
+  it('the probe can tell ignored from tracked', () => {
+    expect(ignored('src/main.tsx'), 'the probe calls a source file ignored — it is answering nothing').toBe(false)
+    expect(ignored('dist/index.html'), 'the probe cannot see an obviously ignored path').toBe(true)
+  })
+
+  it.each(BUILT)('$path — written by $by', ({ path }) => {
+    expect(ignored(path), `${path} is build output and git does not ignore it`).toBe(true)
+  })
+
+  /* AND NOTHING BUILT IS ALREADY TRACKED. Ignoring a path does not untrack a
+     file added before the rule existed — which is precisely how the Android
+     assets got in and stayed in. */
+  it('none of it is tracked despite the rules', () => {
+    const tracked = execFileSync('git', ['ls-files', '--', ...BUILT.map((one) => one.path)], {
+      cwd: REPO,
+      encoding: 'utf8',
+    }).trim()
+    expect(tracked, 'these are ignored AND tracked — an ignore rule added after the fact').toBe('')
+  })
+})
