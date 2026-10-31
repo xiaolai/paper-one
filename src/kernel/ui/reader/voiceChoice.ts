@@ -94,7 +94,7 @@ export interface VoiceFacts {
    * Whether the engine speaks this voice on THIS machine.
    *
    * ⚠️ **WEB SPEECH MAY SEND THE TEXT TO A SERVER, AND THIS FILE'S HEADER USED TO
-   * PROMISE IT DOES NOT.** `speech.ts` opens with "no network, no credentials" —
+   * PROMISE IT DOES NOT.** `speaker.ts` opens with "no network, no credentials" —
    * true of every voice macOS installs, and not true of the API. The
    * specification allows a voice, INCLUDING THE DEFAULT, to be synthesised
    * remotely; Chrome's default voices are. Paper reads whole sections aloud, so

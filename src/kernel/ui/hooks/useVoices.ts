@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { speechAvailable } from '../reader/speech'
+import { speechAvailable } from '../reader/speaker'
 import type { VoiceFacts } from '../reader/voiceChoice'
 
 /**

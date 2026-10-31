@@ -1,18 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import {
-  Speaker,
-  collectText,
-  documentLang,
-  offsetIn,
-  placeOfRange,
-  rangeAt,
-  speechAvailable,
-  textAtPoint,
-  type DoneReason,
-  type SpeakPrefs,
-  type SpeakerCallbacks,
-  type SpokenText,
-} from './speech'
+import { Speaker, speechAvailable, type DoneReason, type SpeakPrefs, type SpeakerCallbacks } from './speaker'
+import { collectText, documentLang, offsetIn, placeOfRange, rangeAt, textAtPoint, type SpokenText } from './speech'
 import { placeSpokenWord, removeSpokenWord } from './rulerBand'
 import {
   blockIndexAt,
@@ -690,7 +678,7 @@ export function useSpeech(
            * utterance ended, its `end` event fired, and this read it as "the
            * section finished" and called `continueReading()`: pages walking
            * forward hunting the next section while the reader listened to one
-           * word being pronounced. `engineHeldBy` in `speech.ts` is what tells
+           * word being pronounced. `engineHeldBy` in `speaker.ts` is what tells
            * the two apart now. Treated as an end rather than an error, because
            * nothing failed — the reader asked for something else. */
           /* ⚠️ **`no-voice` ENDS THE READING, AND WOULD NOT HAVE BY ITSELF.** Every

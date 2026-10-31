@@ -18,7 +18,8 @@ import {
 } from './useSpeech'
 import { textDigest } from './clipKey'
 import { canonicalTextOf } from './passageText'
-import { Speaker, collectText, type SpeakPrefs } from './speech'
+import { Speaker, type SpeakPrefs } from './speaker'
+import { collectText } from './speech'
 
 /** Where the reader is before anything has resolved — the app's first render. */
 const NOWHERE: SpeechPlace = { bookId: null, sectionIndex: null }
