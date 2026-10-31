@@ -63,4 +63,50 @@ describe('the fake wire and the P2P switch', () => {
     await satchel.setP2p(false)
     await expect(shelf.connect(satchel.id)).rejects.toMatchObject({ kind: 'iroh' })
   })
+
+  /* The real offer lives in the endpoint that closed: nobody can reach it, and
+     going on again in the same run does not bring it back. */
+  describe('a pairing offer', () => {
+    const offered = async () => {
+      const { shelf, satchel } = linkedWires()
+      await shelf.ready()
+      await satchel.ready()
+      const pending: { readonly attemptId: string }[] = []
+      shelf.onPairingPending((event) => pending.push(event))
+      const offer = await shelf.pairBegin()
+      return { shelf, satchel, offer, pending }
+    }
+
+    it('cannot be claimed once its shelf has gone off', async () => {
+      const { shelf, satchel, offer, pending } = await offered()
+      await shelf.setP2p(false)
+      await expect(satchel.pairFromUri(offer.url)).rejects.toMatchObject({ kind: 'iroh' })
+      expect(pending).toEqual([])
+    })
+
+    it('cannot be claimed when its shelf goes on again in the same run', async () => {
+      const { shelf, satchel, offer, pending } = await offered()
+      await shelf.setP2p(false)
+      await shelf.setP2p(true)
+      await expect(satchel.pairFromUri(offer.url)).rejects.toMatchObject({ kind: 'iroh' })
+      expect(pending).toEqual([])
+    })
+
+    it('does not survive the restart that reopens the transport', async () => {
+      const { shelf, satchel, offer } = await offered()
+      await shelf.setP2p(false)
+      await shelf.setP2p(true)
+      shelf.restart()
+      await expect(satchel.pairFromUri(offer.url)).rejects.toMatchObject({ kind: 'noPendingPairing' })
+    })
+
+    it('leaves nothing to confirm when the shelf goes off mid-comparison', async () => {
+      const { shelf, satchel, offer, pending } = await offered()
+      await satchel.pairFromUri(offer.url)
+      await shelf.setP2p(false)
+      await shelf.setP2p(true)
+      shelf.restart()
+      await expect(shelf.pairConfirm(true, undefined, pending[0]!.attemptId)).rejects.toMatchObject({ kind: 'noPendingPairing' })
+    })
+  })
 })

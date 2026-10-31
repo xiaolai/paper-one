@@ -232,6 +232,9 @@ class FakeWireImpl implements FakeWire {
     this.p2pStored = on
     if (!on) {
       this.closedThisRun = true
+      /* A pairing lives in the endpoint that just closed, and goes with it. */
+      this.offer = null
+      this.pending = null
       for (const session of this.sessions.values()) this.closeSession(session, 'closed')
     }
     return { closed: this.closedThisRun, recordError: null }
@@ -385,7 +388,7 @@ class FakeWireImpl implements FakeWire {
     const parsed = /^paper:\/\/pair\?v=1&id=([^&]+)&s=([^&]+)$/.exec(uri)
     if (!parsed) throw peerError('pairUriInvalid', `not a pairing URI: ${uri}`)
     const shelf = this.links.get(parsed[1] as string)
-    if (!shelf || !this.online) throw peerError('iroh', 'shelf unreachable')
+    if (!shelf || !this.online || !shelf.transportUp) throw peerError('iroh', 'shelf unreachable')
     if (!shelf.offer || shelf.offer.secret !== parsed[2]) throw peerError('noPendingPairing', 'no such offer')
     /* ⚠️ **THE CLAIM IS SINGLE-SHOT, AND THIS OVERWROTE `pending`.** Two
        joiners could both be pending against one offer here, which the real
