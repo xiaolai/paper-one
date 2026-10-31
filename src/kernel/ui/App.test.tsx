@@ -10,6 +10,7 @@ import type { TrashedBook } from '../core/bookTrash'
 import { settleBeforeDrain } from '../core/beforeClose'
 import { createDiagnosticLog } from '../core/diagnosticsLog'
 import { KERNEL_SETTINGS } from '../core/settings'
+import { pluginsOff } from '../core/pluginSwitches'
 import { DEFAULT_STEP_IDX, PANE_TRACK, readingStep } from '../core/metrics'
 import { MAX_FILES } from '../core/importFolder'
 import { META_SCHEMA, folderOf } from '../core/bookFolder'
@@ -2372,6 +2373,22 @@ describe('the Settings panel, as the window hands it over', () => {
       screen.getByText(/These settings are not being saved/u),
       'a window that cannot save its settings let the reader believe it could',
     ).toBeTruthy()
+  })
+
+  /* TWO OPTIONAL PROPS BETWEEN THE COMPOSITION AND THE GROUP, in `App` and in
+     `SidePane`, and `Settings.test.tsx` supplies the group's props itself: drop
+     either and the group is merely never drawn, with nothing failing. */
+  it('draws the optional features from the composition, and the switch writes to the window’s settings', async () => {
+    const { services } = await mount(null, {
+      capability: { id: 'switchable', toggle: { title: 'Some feature', summary: 'What it does.' } },
+    })
+    await runCommand('Settings', 'Open Settings')
+    fireEvent.click(screen.getByRole('button', { name: /Optional features/u }))
+    const row = screen.getByRole('switch', { name: 'Some feature' })
+    expect(row.getAttribute('aria-checked'), 'a capability that composed was drawn as off').toBe('true')
+    fireEvent.click(row)
+    expect(services.settings.get(pluginsOff), 'the switch did not reach the settings App holds').toEqual(['switchable'])
+    expect(screen.getByText('Quit and reopen Paper to finish turning this off.')).toBeTruthy()
   })
 })
 
