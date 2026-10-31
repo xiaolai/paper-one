@@ -16,7 +16,7 @@ import {
   type ReadingEngine,
   type Speech,
 } from './useSpeech'
-import { NOWHERE_IN_PARTICULAR, useReadingSurface, type BookFacts, type SpeechPlace } from './readingSurface'
+import { useReadingSurface, type BookFacts, type SpeechPlace } from './readingSurface'
 import { textDigest } from './clipKey'
 import { canonicalTextOf } from './passageText'
 import { Speaker, type SpeakPrefs } from './speaker'
@@ -2838,25 +2838,6 @@ describe('a tap on a word, which is the direction phase 34 added', () => {
     unmount()
     expect(live, 'and none after the component goes').toBe(0)
     page.remove()
-  })
-})
-
-/**
- * ⚠️ **THE TWO SENTINELS HAD NO CASE — FOUND BY THE MUTATION SWEEP.** Each stands
- * for *the bookkeeping has not caught up yet*, and each is sent to the plugin as a
- * real key — so what is IN them decides whether the store answers a miss or, far
- * worse, something. Every string in both was replaceable and nothing failed.
- */
-describe('the value that means “nothing is known yet”', () => {
-  it('names no book and no section', () => {
-    expect(NOWHERE_IN_PARTICULAR).toEqual({ bookId: null, sectionIndex: null })
-  })
-
-  it('is what the app’s own first render passes, before anything has resolved', () => {
-    /* `bookId` is a content hash that resolves asynchronously and `sectionIndex`
-       arrives with the document, so this IS the value `App` holds at mount — see
-       the in-app run, where a `?? -1` in its place killed every Listen. */
-    expect(NOWHERE, 'the harness and the hook agree about it').toEqual(NOWHERE_IN_PARTICULAR)
   })
 })
 

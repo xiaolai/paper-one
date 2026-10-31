@@ -55,9 +55,6 @@ export interface SpeechPlace {
   readonly sectionIndex: number | null
 }
 
-/** The place before anything has resolved, which is the app's first render. */
-export const NOWHERE_IN_PARTICULAR: SpeechPlace = { bookId: null, sectionIndex: null }
-
 /**
  * Moving through the book.
  *
