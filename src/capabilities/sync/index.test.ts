@@ -2114,6 +2114,28 @@ describe('downloading a book to a satchel, and evicting it', () => {
     expect(text(run.fs.store.get('books/book_a/content.epub'))).toBe('bytes')
   })
 
+  /* Eviction never touches the link, so the closed link is no excuse for it. */
+  it('says an eviction failed after the switch has gone off', async () => {
+    let refusing = false
+    const { run } = await synced({
+      start: {
+        around: (services) => ({
+          ...services,
+          removeBlob: (bookId, name) => (refusing ? Promise.reject(new Error('the folder is locked')) : services.removeBlob(bookId, name)),
+        }),
+      },
+    })
+    await action('sync:download').run('book:a')
+    refusing = true
+    native.p2pWatcher?.(false)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+    await action('sync:evict').run('book:a')
+
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'degraded', detail: 'Sync failed' })
+    expect(text(run.fs.store.get('books/book_a/content.epub'))).toBe('bytes')
+  })
+
   it('does nothing, and says nothing, for a press that lands after the satchel stopped', async () => {
     const { run } = await synced()
     await action('sync:download').run('book:a')
@@ -2532,6 +2554,46 @@ describe('two satchels, one module', () => {
     expect(await newer.services.shelf()?.sync()).toEqual({ started: true, detail: null })
     await until(() => expect(hellos.of('second-satchel')).toBe(2))
     expect(named(newer.events, 'sync.session-failed'), 'the newer satchel lost the runtime it was using').toEqual([])
+  })
+
+  /* THE SWITCH'S SENTENCE IS THE RUNNING RUNTIME'S, like the slot it sits beside. */
+  it('keeps the newer satchel off when an older one stops', async () => {
+    const hellos = perDevice(null, Promise.resolve())
+    const { far, run } = await satchelWith(book('book:a', 'Alpha', 'bytes'), { serve: hellos.serve })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    const newer = await second(far)
+    await until(() => expect(hellos.of('second-satchel')).toBe(1))
+    native.p2pWatcher?.(false)
+
+    run.handle.dispose()
+
+    await expect(newer.services.shelf()?.sync()).resolves.toEqual({ started: false, detail: 'Peer-to-peer is off' })
+  })
+
+  it('does not take the older satchel’s switch for the newer one’s', async () => {
+    const hellos = perDevice(null, Promise.resolve())
+    const { far } = await satchelWith(book('book:a', 'Alpha', 'bytes'), { serve: hellos.serve })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    native.p2pWatcher?.(false)
+
+    const newer = await second(far)
+
+    await expect(newer.services.shelf()?.sync()).resolves.toEqual({ started: true, detail: null })
+  })
+
+  it('lets an older satchel’s watcher stop its own schedule without speaking for the newer one', async () => {
+    const hellos = perDevice(null, Promise.resolve())
+    const { far } = await satchelWith(book('book:a', 'Alpha', 'bytes'), { serve: hellos.serve })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    const olderWatcher = native.p2pWatcher
+    const newer = await second(far)
+    await until(() => expect(hellos.of('second-satchel')).toBe(1))
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+
+    olderWatcher?.(false)
+
+    expect(syncStatus.getSnapshot().state).toBe('ok')
+    await expect(newer.services.shelf()?.sync()).resolves.toEqual({ started: true, detail: null })
   })
 
   /* AND IT ASKS THE NEW RUNTIME'S PLUGIN NOTHING. A session that failed for a

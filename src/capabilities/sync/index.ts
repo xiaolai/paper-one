@@ -202,7 +202,11 @@ async function withShelf<T>(task: (channel: SyncChannel) => Promise<T>): Promise
   }
 }
 
-/** Set once the reader changes the P2P switch in a wired run; its sentence then stands. */
+/**
+ * Set once the reader changes the P2P switch in a wired run; its sentence then
+ * stands. It belongs to the runtime in `running`: one that is claiming the slot
+ * starts clear, and one that no longer holds it neither sets nor clears this.
+ */
 let switchedOff: string | null = null
 
 /**
@@ -227,7 +231,7 @@ async function refusalNames(): Promise<RefusalNames> {
  * hardware the reader may not own. The kind decides the sentence; the
  * shelf's own name and the book's title go where they belong.
  */
-async function degrade(refusal: SessionRefusal, owner: typeof running): Promise<void> {
+async function degrade(refusal: SessionRefusal, owner: typeof running, where: 'link' | 'local' = 'link'): Promise<void> {
   /* OWNED BY THE RUNTIME THAT WAS UP WHEN THE WORK BEGAN — the caller's own,
    * not whichever runtime holds the slot now. `refusalNames` asks the plugin
    * for the shelf's name, which is IPC, and a teardown or a restart lands
@@ -243,8 +247,9 @@ async function degrade(refusal: SessionRefusal, owner: typeof running): Promise<
   const names = await refusalNames()
   if (running !== owner) return
   /* The connection the reader just closed fails whatever was on it, and "isn't
-     reachable" would be the wrong reason. */
-  if (switchedOff !== null) return
+     reachable" would be the wrong reason. A local failure has nothing to do
+     with that connection, and its sentence is the only sign of it. */
+  if (where === 'link' && switchedOff !== null) return
   syncStatus.set({ state: 'degraded', detail: describeRefusal(refusal, names) })
 }
 
@@ -619,7 +624,7 @@ export const sync: Capability = {
         return removeDownloadAction(bookId).catch((thrown: unknown) =>
           /* Content that stayed put must not look removed — same signal as a
            * failed download. */
-          degrade({ ...refusalOf(thrown), book: bookId }, owner),
+          degrade({ ...refusalOf(thrown), book: bookId }, owner, 'local'),
         )
       },
     },
@@ -680,7 +685,7 @@ export const sync: Capability = {
       step('scheduler', () => scheduler?.stop())
       step('p2p-watch', () => {
         unwatchP2p()
-        switchedOff = null
+        if (running === myRunning) switchedOff = null
       })
       /* A stopped scheduler ignores `syncNow`, so the slot still holding one
        * changes nothing a caller can see — this lets it go. */
@@ -985,6 +990,7 @@ export const sync: Capability = {
       })
       myRunning = { port, ledger, shelfPeer, shelfName, titleOf, coverCache, fs, writes: services.writes, lane: services.library.lane }
       running = myRunning
+      switchedOff = null
       myStorageModel = createStorageModel({
         services,
         coverCache,
@@ -1239,8 +1245,9 @@ export const sync: Capability = {
        with it: every tick would only flash "Syncing…" and write a warning. */
     if (running !== null) {
       unwatchP2p = watchP2p((on) => {
-        switchedOff = switchDetail(on)
         scheduler?.stop()
+        if (running !== myRunning) return
+        switchedOff = switchDetail(on)
         syncStatus.set({ state: 'idle', detail: switchedOff })
       })
     }
