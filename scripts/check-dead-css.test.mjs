@@ -226,6 +226,56 @@ describe('what reads a class, once the source is parsed', () => {
   })
 })
 
+/*
+ * ⚠️ **ONLY A SELECTOR DECLARES.** A dot anywhere in the stylesheet used to count,
+ * so `url("./icon.svg")` declared `svg`, and `styles.svg` passed while reading
+ * as undefined at run time.
+ */
+describe('what declares a class', () => {
+  it.each([
+    ['a quoted url', '.live { background: url("./icon.svg"); }'],
+    ['a single-quoted url', ".live { background: url('./icon.svg'); }"],
+    ['a bare url', '.live { background: url(./icon.svg); }'],
+    ['a data url holding a semicolon', '.live { background: url(data:image/x;a.svg); }'],
+    ['a string value', '.live { content: "a.svg"; }'],
+    ['an import', "@import './theme.svg';\n.live { color: red; }"],
+    ['an at-rule condition', '@supports (background: url("./a.svg")) { .live { color: red; } }'],
+    ['an attribute value', '.live[href$=".svg"] { color: red; }'],
+    ['a comment with an apostrophe before it', "/* don't */\n.live { content: 'a.svg'; }"],
+  ])('is not %s', (_what, css) => {
+    const root = fixture({
+      'src/A.module.css': `${css}\n`,
+      'src/A.tsx': "import styles from './A.module.css'\nexport const A = () => [styles.live, styles.svg]\n",
+    })
+    expect(undefinedClasses(root).map((u) => u.name)).toEqual(['svg'])
+  })
+
+  it.each([
+    ['a plain rule', '.target { color: red; }'],
+    ['a compound selector', '.live.target { color: red; }'],
+    ['a selector list', '.live,\n.target { color: red; }'],
+    ['a pseudo-class argument', '.live:not(.target) { color: red; }'],
+    ['a combinator', '.live > .target { color: red; }'],
+    ['a rule inside an at-rule', '@media (min-width: 1px) { .target { color: red; } }'],
+    ['a nested rule after a declaration', '.live { color: red; .target { color: blue; } }'],
+    ['a rule after one with a url', '.live { background: url(./a.svg); }\n.target { color: red; }'],
+  ])('is %s', (_what, css) => {
+    const root = fixture({
+      'src/A.module.css': `.live { color: red; }\n${css}\n`,
+      'src/A.tsx': "import styles from './A.module.css'\nexport const A = () => [styles.live, styles.target]\n",
+    })
+    expect(undefinedClasses(root)).toEqual([])
+  })
+
+  it('reports no dead class for a dot in a comment, a string or a url', () => {
+    const root = fixture({
+      'src/A.module.css': '/*\n.mentioned is prose\n*/\n.live { background: url( .relative/a.svg); }\n',
+      'src/A.tsx': "import styles from './A.module.css'\nexport const A = () => styles.live\n",
+    })
+    expect(names(root)).toEqual([])
+  })
+})
+
 describe('a class reached under another import name', () => {
   /* `.popover` was deleted as unreachable while three files drew it, because
      they import the module as `editorStyles` and this gate read only `styles.`.

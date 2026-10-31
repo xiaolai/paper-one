@@ -110,9 +110,23 @@ function readsOffStyles(file) {
   })
 }
 
-/** Class selectors in a stylesheet, with its comments gone: prose declares nothing. */
+/**
+ * A stylesheet's selectors and nothing else, one prelude to a line.
+ *
+ * Comments, strings and `url(...)` go first and in one pass, because each can
+ * hold what opens another: an apostrophe in a comment, a `;` in a data URL. What
+ * stands before a `{` is then a prelude, and one starting `@` is a condition
+ * rather than a selector. What stands before a `;` or a `}` is a declaration.
+ */
+function selectorText(css) {
+  const bare = css.replace(/\/\*[\s\S]*?\*\/|"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|url\(\s*[^"'\s)][^)]*\)/g, '')
+  const preludes = [...bare.matchAll(/([^{};]*)\{/g)].map((m) => m[1].trim())
+  return preludes.filter((prelude) => !prelude.startsWith('@')).join('\n')
+}
+
+/** Class selectors in a stylesheet: only a selector declares one. */
 function declaredClasses(file) {
-  const text = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+  const text = selectorText(readFileSync(file, 'utf8'))
   return new Set([...text.matchAll(/\.(-?[A-Za-z_][A-Za-z0-9_-]*)/g)].map((m) => m[1]))
 }
 
@@ -187,7 +201,7 @@ export function deadClasses(root, roots = ROOTS) {
        both name classes; `--foo` and `0.5` do not, and a naive `\.[a-z]` finds
        both. */
     const declared = new Set()
-    for (const m of text.matchAll(/(^|[\s,>+~(])\.(-?[A-Za-z_][A-Za-z0-9_-]*)/gm)) declared.add(m[2])
+    for (const m of selectorText(text).matchAll(/(^|[\s,>+~(])\.(-?[A-Za-z_][A-Za-z0-9_-]*)/gm)) declared.add(m[2])
     for (const name of [...declared].sort()) {
       if (KEPT.test(name) || used.has(name)) continue
       /* The DECLARATION, not the first mention: a class is usually described in
