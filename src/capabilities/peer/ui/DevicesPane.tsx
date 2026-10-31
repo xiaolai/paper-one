@@ -47,7 +47,7 @@ import {
  */
 function P2pSwitchRow({ p2p }: { readonly p2p: P2pSwitch }) {
   const chosen = useSyncExternalStore(p2p.subscribe, p2p.chosen)
-  const [writing, setWriting] = useState(false)
+  const writing = useSyncExternalStore(p2p.subscribeWriting, p2p.writing)
   const [failure, setFailure] = useState<string | null>(null)
   return (
     <>
@@ -62,12 +62,8 @@ function P2pSwitchRow({ p2p }: { readonly p2p: P2pSwitch }) {
           disabled={writing}
           onClick={() => {
             const next = !chosen
-            setWriting(true)
             setFailure(null)
-            p2p
-              .set(next)
-              .catch((cause: unknown) => setFailure(messageOf(cause)))
-              .finally(() => setWriting(false))
+            p2p.set(next).catch((cause: unknown) => setFailure(messageOf(cause)))
           }}
         >
           {chosen ? 'On' : 'Off'}

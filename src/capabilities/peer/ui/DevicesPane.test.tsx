@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createP2pSwitch } from '../lib/p2pSwitch'
 import { DevicesPane } from './DevicesPane'
@@ -112,6 +112,31 @@ describe('the P2P switch', () => {
     land()
     await screen.findByText('Quit and reopen Paper to finish turning this off.')
     expect(toggle().getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('stays disabled through a write that outlives the pane that asked, until it lands', async () => {
+    let land = () => {}
+    const p2p = createP2pSwitch(true, () => new Promise<void>((resolve) => (land = resolve)))
+    const first = render(<DevicesPane model={fakeModel()} syncNow={null} p2p={p2p} />)
+    fireEvent.click(toggle())
+    first.unmount()
+    render(<DevicesPane model={fakeModel()} syncNow={null} p2p={p2p} />)
+    expect((toggle() as HTMLButtonElement).disabled).toBe(true)
+    land()
+    await screen.findByText('Quit and reopen Paper to finish turning this off.')
+    expect((toggle() as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('comes back enabled when a write that outlived its pane is refused', async () => {
+    let refuse = () => {}
+    const p2p = createP2pSwitch(true, () => new Promise<void>((_resolve, reject) => (refuse = () => reject(new Error('disk full')))))
+    const first = render(<DevicesPane model={fakeModel()} syncNow={null} p2p={p2p} />)
+    fireEvent.click(toggle())
+    first.unmount()
+    render(<DevicesPane model={fakeModel()} syncNow={null} p2p={p2p} />)
+    refuse()
+    await waitFor(() => expect((toggle() as HTMLButtonElement).disabled).toBe(false))
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
   })
 
   it('stays where it was and says why when the write is refused', async () => {
