@@ -51,6 +51,11 @@ const panePort = (): SpeechEnginePort => (pane ??= voicesPortOver())
 export const voices: Capability = {
   id: 'voices',
   requires: [],
+  toggle: {
+    title: 'Downloadable voices',
+    summary:
+      "Better voices for reading aloud, downloaded when you ask for them. Off, Paper reads with this device's own voices where they are good enough, and the voices you downloaded stay on this device.",
+  },
 
   settings: [
     {

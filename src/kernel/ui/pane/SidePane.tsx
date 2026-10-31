@@ -195,9 +195,9 @@ export interface SidePaneProps {
    * state, as one prop — same reason as `library`, and picked from
    * `SettingsProps` for the same reason: `offered`, the contributed `sections`
    * (WI-C.5), the capabilities that are `missing`, whether a choice is
-   * `persistent`.
+   * `persistent`, and the `optionalFeatures` a reader may switch.
    */
-  settings: Readonly<Pick<SettingsProps, 'offered' | 'sections' | 'missing' | 'persistent'>>
+  settings: Readonly<Pick<SettingsProps, 'offered' | 'sections' | 'missing' | 'persistent' | 'optionalFeatures'>>
   /**
    * The panes the composed capabilities contributed. They take the rail
    * AFTER the kernel's, in the composition's order, on the screens each one
@@ -465,6 +465,7 @@ export function SidePane({
             sections={settings.sections}
             missing={settings.missing}
             persistent={settings.persistent}
+            optionalFeatures={settings.optionalFeatures}
             theme={state.theme}
             themeFollowsOs={state.themeFollowsOs}
             pageLayout={state.pageLayout}

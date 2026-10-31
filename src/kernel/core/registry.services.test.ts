@@ -206,9 +206,10 @@ describe('what a capability is handed, and what is said when one fails', () => {
     composition.dispose()
   })
 
-  it('skips a dependant of an unavailable capability, and reports that as a failure of the dependant', async () => {
-    /* TODAY'S BEHAVIOUR, NAMED SO THAT THE CHANGE TO IT IS VISIBLE: the capability
-       that answered `false` is no failure, and the one that required it is. */
+  it('skips a dependant of an unavailable capability, and that is no failure of the dependant either', async () => {
+    /* THE CHANGE THIS TEST WAS WRITTEN TO MAKE VISIBLE: the dependant used to be
+       `requires-failed`, logged as an error and drawn as "not running", for a device
+       simply not having what it stands on. It stands as `needs` now. */
     const said: { event: string; fields: Record<string, unknown> }[] = []
     const base = api()
     const loud = { ...base, diagnostics: { ...base.diagnostics, error: (event: string, fields: Record<string, unknown>) => void said.push({ event, fields }) } }
@@ -217,8 +218,12 @@ describe('what a capability is handed, and what is said when one fails', () => {
     const dependant: Capability = { id: 'circle', requires: ['peer'], start }
     const composition = await composeCapabilities([unavailable, dependant], loud as never, signal())
     expect(start).not.toHaveBeenCalled()
-    expect(composition.failures.map((one) => [one.id, one.kind])).toEqual([['circle', 'requires-failed']])
-    expect(said.map((one) => one.fields)).toEqual([expect.objectContaining({ capability: 'circle', kind: 'requires-failed', because: 'peer' })])
+    expect(composition.failures).toEqual([])
+    expect(said).toEqual([])
+    expect(composition.standing).toEqual([
+      { id: 'peer', state: 'unavailable' },
+      { id: 'circle', state: 'needs', on: 'peer' },
+    ])
     composition.dispose()
   })
 

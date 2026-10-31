@@ -23,6 +23,8 @@ import { createDevicesModel, type DevicesModel } from './ui/devicesModel'
 import { createP2pSwitch, type P2pSwitch } from './lib/p2pSwitch'
 import { DevicesPane } from './ui/DevicesPane'
 
+export { P2P_SWITCH_TITLE } from './lib/p2pSwitch'
+
 /**
  * The `peer` capability — the transport (WI-C.1).
  *

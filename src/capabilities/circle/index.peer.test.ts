@@ -22,6 +22,7 @@ const pairing = vi.hoisted(() => ({ fire: null as null | ((event: { ok: boolean;
 /* The identity lifecycle the run subscribes to: the test fires one through `identity.fire`. */
 const ownIdentity = vi.hoisted(() => ({ fire: null as null | ((event: { kind: string; person?: string }) => void) }))
 vi.mock('../peer', () => ({
+  P2P_SWITCH_TITLE: 'Peer-to-peer',
   peerPort: () => slots.peer,
   personPort: () =>
     slots.person === null

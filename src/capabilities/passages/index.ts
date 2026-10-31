@@ -83,6 +83,10 @@ const BREATHE_MS = 0
 export const passages: Capability = {
   id: 'passages',
   requires: [],
+  toggle: {
+    title: 'Library search',
+    summary: 'Searches every book on your shelf. Off, Search looks in the open book, and the index stays on this device.',
+  },
 
   settings: [
     {

@@ -1,6 +1,12 @@
 import { notifyAll } from '../../../kernel'
 
 /**
+ * What the reader sees the switch called, here and on every row that follows it.
+ * One spelling, because "Follows Peer-to-peer" has to name a switch that exists.
+ */
+export const P2P_SWITCH_TITLE = 'Peer-to-peer'
+
+/**
  * The reader's P2P switch for one run of the app.
  *
  * Lives here rather than in the pane's state because Settings unmounts the pane

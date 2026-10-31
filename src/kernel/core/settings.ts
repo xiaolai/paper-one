@@ -575,7 +575,7 @@ const boolean = (raw: unknown): boolean | undefined => (typeof raw === 'boolean'
  * whole list. A non-array IS rejected, because that is a value of the wrong
  * shape rather than a list with a bad member.
  */
-const stringList = (raw: unknown): readonly string[] | undefined =>
+export const stringList = (raw: unknown): readonly string[] | undefined =>
   Array.isArray(raw) ? raw.filter((one): one is string => typeof one === 'string') : undefined
 
 /**

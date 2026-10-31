@@ -22,6 +22,7 @@ import { UNFINISHED_PANE_IDS } from '../../kernel/core/uiTypes'
 const EMPTY_COMPOSITION = {
   order: [],
   failures: [],
+  standing: [],
   panes: [],
   settings: [],
   bookActions: [],

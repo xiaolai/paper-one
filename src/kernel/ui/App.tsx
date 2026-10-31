@@ -25,6 +25,7 @@ import { openExternal } from './openExternal'
 import { hasOpenLayer, readerTakesInput, screenJump, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
 import type { KernelServices } from '../core/services'
+import { createPluginSwitches } from '../core/pluginSwitches'
 import type { Composition } from '../core/registry'
 import { useBook } from './hooks/useBook'
 import { useBookIntake } from './hooks/useBookIntake'
@@ -2004,6 +2005,17 @@ export function App({
    * builds that have an index. It is a stable function reference either way —
    * the port is made once by the capability. */
   const passageIndex = services.passages()
+  /* HERE AND NOT IN THE PANEL, for `createP2pSwitch`'s reason: Settings unmounts
+     when it closes, and the answer this run launched on has to outlive that. The
+     launch's answer is read off `standing`, so it is the one that was composed. */
+  const pluginSwitches = useMemo(
+    () =>
+      createPluginSwitches(
+        new Set(composition.standing.filter((one) => one.state === 'off').map((one) => one.id)),
+        services.settings,
+      ),
+    [composition.standing, services.settings],
+  )
 
   const openPassage = useOpenPassage({
     fs,
@@ -2743,6 +2755,7 @@ export function App({
               sections: composition.settings,
               missing: composition.failures,
               persistent: settingsPersistent,
+              optionalFeatures: { standing: composition.standing, switches: pluginSwitches },
             }}
             /* ⚠️ **SUPPLIED UNCONDITIONALLY — AND THIS SAID "ONLY WHILE
                DEVELOPER OPTIONS ARE ON"**, the contract `SidePaneProps.developer`

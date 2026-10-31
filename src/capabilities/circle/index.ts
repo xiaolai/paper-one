@@ -23,7 +23,7 @@ import { tellEach } from './lib/listeners'
 import { createSpendLedger, type SpendLedger } from './lib/spendLedger'
 import { listsPortOver, type ListsPort } from './lib/listsPort'
 import { purgePerson, readRelationship, writeRelationship } from './lib/relationships'
-import { p2pAvailable, peerPort, personPort, publishPort, type PublishPort } from '../peer'
+import { P2P_SWITCH_TITLE, p2pAvailable, peerPort, personPort, publishPort, type PublishPort } from '../peer'
 import { CirclePane } from './ui/CirclePane'
 import { ShareControl } from './ui/ShareControl'
 
@@ -348,6 +348,9 @@ export const circle: Capability = {
   id: 'circle',
   requires: ['peer'],
   available: () => p2pAvailable(),
+  /* Not a switch of its own: it is P2P and nothing else, so one switch governs it
+     and the reader is told which. */
+  follows: { title: 'Circle', switch: P2P_SWITCH_TITLE },
   /**
    * The circle's own SCREEN — WI-22.D3.
    *

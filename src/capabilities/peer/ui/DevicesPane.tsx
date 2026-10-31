@@ -1,7 +1,7 @@
 import { useState, useSyncExternalStore } from 'react'
 import { CAPABILITY_UI as ui, messageOf } from '../../../kernel'
 import { inlineQrSvg } from '../lib/qrSvg'
-import type { P2pSwitch } from '../lib/p2pSwitch'
+import { P2P_SWITCH_TITLE, type P2pSwitch } from '../lib/p2pSwitch'
 import type { DevicesModel } from './devicesModel'
 import {
   ROLE_CHOICES,
@@ -52,12 +52,12 @@ function P2pSwitchRow({ p2p }: { readonly p2p: P2pSwitch }) {
   return (
     <>
       <div className={ui.row}>
-        <span className={ui.grow}>Peer-to-peer</span>
+        <span className={ui.grow}>{P2P_SWITCH_TITLE}</span>
         <button
           type="button"
           role="switch"
           aria-checked={chosen}
-          aria-label="Peer-to-peer"
+          aria-label={P2P_SWITCH_TITLE}
           className={ui.button}
           disabled={writing}
           onClick={() => {

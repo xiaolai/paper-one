@@ -413,12 +413,38 @@ export interface Capability {
    * of this run and is not a failure for it. One that throws is a failure, and
    * the capability is left out too.
    *
-   * ⚠️ **NOT "AS IF NEVER COMPOSED", FOR A CAPABILITY THAT REQUIRES THIS ONE.** A
-   * dependant is skipped as `requires-failed` and reported as a failure, whereas
-   * a build that never composed the dependency is refused by name before anything
-   * starts. No composed capability requires one that can answer `false` today.
+   * A DEPENDANT READS AS `needs`, NOT AS A FAILURE. It said otherwise until the
+   * reader could switch things off: a dependant was skipped as `requires-failed`
+   * and logged as an error, although nothing had gone wrong. See `Standing`.
    */
   available?(): boolean | Promise<boolean>
+  /**
+   * PRESENCE MEANS THE READER MAY SWITCH THIS OFF, under "Optional features".
+   *
+   * The words are the capability's, because the kernel draws the row and may not
+   * name what it is drawing (`pnpm residue:check`). They are for a reader, so
+   * neither says plugin nor capability: a jigsaw word means nothing to somebody
+   * reading a book, which is `ContributionIcon`'s point too.
+   *
+   * A switch takes effect at the next launch, because no per-capability teardown
+   * exists and the app composes once. Off, `start` and `available` are never
+   * called and the capability contributes nothing; what it saved stays on disk.
+   *
+   * ⚠️ **ONLY WITH NOTHING NON-SWITCHABLE REQUIRING IT, AND ONLY WHEN OFF MEANS
+   * OFF.** A switch held in JS cannot stop what a crate began in its Rust `setup`,
+   * so a capability whose crate does work there may not have one. Both rules are
+   * in `app/optionalFeatures.contract.test.ts`.
+   */
+  readonly toggle?: { readonly title: string; readonly summary: string }
+  /**
+   * NOT SWITCHABLE HERE, AND THE READER IS TOLD WHICH SWITCH GOVERNS IT.
+   *
+   * Data rather than an id the kernel recognises, for `toggle`'s reason. `title`
+   * is what the row is called and `switch` is the name the governing switch shows
+   * the reader; the kernel writes the sentence around them. A capability has this
+   * or `toggle`, never both, which the same contract test holds.
+   */
+  readonly follows?: { readonly title: string; readonly switch: string }
   readonly panes?: readonly PaneContribution[]
   /** Whole screens — see `ScreenContribution`. */
   readonly screens?: readonly ScreenContribution[]
@@ -469,6 +495,9 @@ export interface Capability {
    * Called whether or not the capability started: it is a question about
    * module state, not about a live registration, and a capability that failed
    * to start may still have opened something.
+   *
+   * THE ONE EXCEPTION IS A CAPABILITY THE READER SWITCHED OFF, which never began
+   * anything to wait for. See `withoutSwitchedOff` in `registry.ts`.
    */
   quiesce?(): Promise<void>
 }

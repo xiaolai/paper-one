@@ -60,6 +60,7 @@ vi.mock('./lib/crypto', () => ({
   },
 }))
 vi.mock('../peer', () => ({
+  P2P_SWITCH_TITLE: 'Peer-to-peer',
   sharePort: () => ({
     offered: () => Promise.resolve([]),
     offerBytes: () => Promise.resolve(),

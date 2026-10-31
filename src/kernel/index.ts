@@ -150,8 +150,10 @@ export {
    * first render, while every unit test passed because each had been handed an
    * UNSCOPED store. */
   scopeSettings,
+  withoutSwitchedOff,
 } from './core/registry'
-export type { CapabilityErrorCode, Composition, CompositionOptions, Contributions } from './core/registry'
+export type { CapabilityErrorCode, Composition, CompositionOptions, Contributions, Standing } from './core/registry'
+export { readSwitchedOff } from './core/pluginSwitches'
 
 /* THE SERVICE TABLE — the one declaration the router registration, the client
  * stubs and the CLI's commands are all derived from (phase 11). Public because

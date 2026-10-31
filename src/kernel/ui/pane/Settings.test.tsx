@@ -15,6 +15,8 @@ import {
   READING_STEPS,
   SPACING,
 } from '../../core/metrics'
+import { createPluginSwitches } from '../../core/pluginSwitches'
+import { createSettingsStore, SETTINGS_STORAGE_KEY, SETTINGS_VERSION } from '../../core/settings'
 import { offeredFaces } from '../../core/typefaces'
 import type { VoicePack } from '../../core/ports'
 import styles from './SidePane.module.css'
@@ -1463,5 +1465,105 @@ describe('the voice the picker shows', () => {
     cleanup()
     const gone = pickerFor({ en: 'kokoro:af_bella' }, [compact], [{ ...englishPack, installed: false }])
     expect(gone.selectedOptions[0]?.textContent).toBe('None — no high-quality voice is available here')
+  })
+})
+
+describe('Optional features', () => {
+  const TOGGLE = { title: 'Some feature', summary: 'What it does.' }
+  const holding = (off: readonly string[]) => {
+    const kept = new Map([[SETTINGS_STORAGE_KEY, JSON.stringify({ version: SETTINGS_VERSION, values: { 'kernel.pluginsOff': off } })]])
+    return { getItem: (key: string) => kept.get(key) ?? null, setItem: (key: string, value: string) => void kept.set(key, value) }
+  }
+  const switches = (launchedOff: readonly string[] = [], stored: readonly string[] = launchedOff) =>
+    createPluginSwitches(new Set(launchedOff), createSettingsStore({ storage: holding(stored) }))
+
+  const open = () => fireEvent.click(screen.getByRole('button', { name: /Optional features/ }))
+
+  it('draws no group when nothing can be switched, and no band for it', () => {
+    const { props } = full()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'fixed', state: 'on' }], switches: switches() }} />)
+    expect(screen.queryByText('Optional features')).toBeNull()
+    expect(screen.queryByText('The app')).toBeNull()
+  })
+
+  it('draws a switch from the standing alone, with the words the row brought', () => {
+    const { props } = full()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'on' }], switches: switches() }} />)
+    expect(screen.getByText('The app')).toBeTruthy()
+    open()
+    expect(screen.getByRole('switch', { name: 'Some feature' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByText('What it does.')).toBeTruthy()
+  })
+
+  it('writes the choice and asks for the reopen, in the words the P2P switch uses', () => {
+    const { props } = full()
+    const held = switches()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'on' }], switches: held }} />)
+    open()
+    expect(screen.queryByText(/Quit and reopen Paper/)).toBeNull()
+    fireEvent.click(screen.getByRole('switch', { name: 'Some feature' }))
+    expect(held.isOff('one')).toBe(true)
+    expect(screen.getByRole('switch', { name: 'Some feature' }).getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByText('Quit and reopen Paper to finish turning this off.')).toBeTruthy()
+    /* Back to what this run launched on: nothing is left to finish. */
+    fireEvent.click(screen.getByRole('switch', { name: 'Some feature' }))
+    expect(screen.queryByText(/Quit and reopen Paper/)).toBeNull()
+  })
+
+  it('says turning on, for one this run launched without', () => {
+    const { props } = full()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'off' }], switches: switches(['one']) }} />)
+    open()
+    fireEvent.click(screen.getByRole('switch', { name: 'Some feature' }))
+    expect(screen.getByText('Quit and reopen Paper to finish turning this on.')).toBeTruthy()
+  })
+
+  it('draws a capability that follows another switch as words, with no switch of its own', () => {
+    const { props } = full()
+    const follows = { title: 'Follower', switch: 'That switch' }
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', follows, state: 'unavailable' }], switches: switches() }} />)
+    open()
+    expect(screen.getByText('Follower')).toBeTruthy()
+    expect(screen.getByText('Follows That switch')).toBeTruthy()
+    expect(screen.queryByRole('switch', { name: 'Follower' })).toBeNull()
+  })
+
+  it('names what a switched-on row is waiting for, by its words and never its id', () => {
+    const { props } = full()
+    const standing = [
+      { id: 'dep-id', toggle: { title: 'The dependency', summary: 's' }, state: 'off' },
+      { id: 'one', toggle: TOGGLE, state: 'needs', on: 'dep-id' },
+    ] as const
+    render(<Settings {...props} optionalFeatures={{ standing, switches: switches(['dep-id']) }} />)
+    open()
+    expect(screen.getByText('Needs The dependency.')).toBeTruthy()
+  })
+
+  it('does not name an id when what it needs has no row', () => {
+    const { props } = full()
+    const standing = [
+      { id: 'dep-id', state: 'unavailable' },
+      { id: 'one', toggle: TOGGLE, state: 'needs', on: 'dep-id' },
+    ] as const
+    render(<Settings {...props} optionalFeatures={{ standing, switches: switches() }} />)
+    open()
+    expect(screen.getByText('Needs another part of Paper that is off.')).toBeTruthy()
+    expect(screen.queryByText(/dep-id/)).toBeNull()
+  })
+
+  it('says when this device cannot have it', () => {
+    const { props } = full()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'unavailable' }], switches: switches() }} />)
+    open()
+    expect(screen.getByText('Not available on this device.')).toBeTruthy()
+  })
+
+  /* OFF AND NEEDS ARE NOT FAILURES, so they do not come with the failure's line. */
+  it('draws no "not running" line for anything left out on purpose', () => {
+    const { props } = full()
+    const standing = [{ id: 'one', toggle: TOGGLE, state: 'off' }] as const
+    render(<Settings {...props} missing={[]} optionalFeatures={{ standing, switches: switches(['one']) }} />)
+    open()
+    expect(screen.queryByText(/not running/)).toBeNull()
   })
 })
