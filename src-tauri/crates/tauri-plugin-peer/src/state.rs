@@ -137,12 +137,18 @@ impl PeerState {
     /// as its own task because a `timeout` around it would drop the close part
     /// way, and an endpoint abandoned there goes on answering strangers while
     /// the switch reads off.
+    ///
+    /// ⚠️ **OFF CLOSES EVEN WHEN THE RECORD FAILED.** A write can fail after its
+    /// rename, while syncing the directory, with the file already saying off; and
+    /// a reader who asked for off wants the connections gone whatever the disk
+    /// says. So a failed Off still closes, and the error still goes back: the
+    /// webview takes any answer to an Off as the transport having closed.
     pub async fn apply_switch(&self, root: PathBuf, on: bool) -> Result<()> {
-        crate::commands::off_thread(move || crate::p2p::set(&root, on)).await?;
+        let recorded = crate::commands::off_thread(move || crate::p2p::set(&root, on)).await;
         if !on && !closed_within(SWITCH_CLOSE_DEADLINE, self.begin_close()).await {
             log::warn!("peer: closing after the switch went off passed its deadline");
         }
-        Ok(())
+        recorded
     }
 
     /// Start the share endpoint if this device still has something offered.
@@ -471,6 +477,41 @@ mod tests {
                 .unwrap();
             assert!(running.node.endpoint().is_closed());
             assert!(!crate::p2p::is_on(scratch.path()).unwrap());
+        }
+
+        /// A file where the data folder should be: the write fails, as a disk
+        /// that refuses the sync after the rename would.
+        fn unwritable(label: &str) -> ScratchDir {
+            let scratch = ScratchDir::new(label);
+            let root = scratch.path().join("not-a-folder");
+            std::fs::write(&root, b"").unwrap();
+            scratch
+        }
+
+        #[tokio::test]
+        async fn turning_off_closes_a_running_node_even_when_the_record_fails() {
+            let scratch = unwritable("state-switch-off-unwritable");
+            let running = TestNode::start("state-switch-off-unwritable-node", Role::Shelf).await;
+            let state = PeerState::default();
+            state.node.set(running.node.clone()).ok().unwrap();
+            let answer = state
+                .apply_switch(scratch.path().join("not-a-folder"), false)
+                .await;
+            assert!(answer.is_err(), "the failed record has to reach the reader");
+            assert!(running.node.endpoint().is_closed());
+        }
+
+        #[tokio::test]
+        async fn a_failed_turn_on_closes_nothing() {
+            let scratch = unwritable("state-switch-on-unwritable");
+            let running = TestNode::start("state-switch-on-unwritable-node", Role::Shelf).await;
+            let state = PeerState::default();
+            state.node.set(running.node.clone()).ok().unwrap();
+            let answer = state
+                .apply_switch(scratch.path().join("not-a-folder"), true)
+                .await;
+            assert!(answer.is_err());
+            assert!(!running.node.endpoint().is_closed());
         }
 
         #[tokio::test]

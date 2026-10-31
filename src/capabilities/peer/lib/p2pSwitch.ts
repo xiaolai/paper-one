@@ -18,13 +18,13 @@ export interface P2pSwitch {
   readonly launchedOn: boolean
   /** The current answer, including a change made in this run. */
   readonly chosen: () => boolean
-  /** Whether what this run is doing still differs from the answer. */
+  /** Whether what this run is doing still differs from the answer. Settled when `writing` ends. */
   readonly needsReopen: () => boolean
   /** One write at a time, in the order asked: the last one asked is the answer. */
   readonly set: (on: boolean) => Promise<void>
   /** Whether a write has not finished, which can outlast the pane that asked. */
   readonly writing: () => boolean
-  /** Told when an answer lands, which can be after the pane that asked has gone. */
+  /** Told when an answer lands, which can be after the pane that asked has gone. A refused write is no answer. */
   readonly subscribe: (listener: () => void) => () => void
   /** Told when `writing` changes, a refused write included. */
   readonly subscribeWriting: (listener: () => void) => () => void
@@ -53,9 +53,14 @@ export function createP2pSwitch(launchedOn: boolean, write: (on: boolean) => Pro
       if (!queued) notifyAll(writingListeners, 'P2P switch writing')
       const landed = (async () => {
         if (queued) await ahead.catch(() => {})
-        await write(on)
-        chosen = on
-        if (launchedOn && !on) closed = true
+        /* A refused Off closed too (`PeerState::apply_switch`), so the row has to
+           say a launch is needed even though the answer did not change. */
+        try {
+          await write(on)
+          chosen = on
+        } finally {
+          if (launchedOn && !on) closed = true
+        }
         notifyAll(listeners, 'P2P switch')
       })().finally(() => {
         unfinished -= 1

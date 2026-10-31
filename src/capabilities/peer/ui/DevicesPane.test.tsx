@@ -171,15 +171,29 @@ describe('the P2P switch', () => {
     expect(toggle().getAttribute('aria-checked')).toBe('true')
   })
 
-  it('stays where it was and says why when the write is refused', async () => {
+  it('stays where it was and says why when turning on is refused', async () => {
     const set = async () => {
       throw new Error('disk full')
     }
-    render(<DevicesPane model={fakeModel()} syncNow={null} p2p={createP2pSwitch(true, set)} />)
+    render(<DevicesPane model={fakeModel()} syncNow={null} p2p={createP2pSwitch(false, set)} />)
+    fireEvent.click(toggle())
+    await screen.findByText('Could not change this: disk full')
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
+    expect(screen.queryByText(/Quit and reopen/)).toBeNull()
+  })
+
+  /* Rust closes on an Off whether or not the record landed, so the connections
+     are gone and the device controls would all be refused. */
+  it('says why and asks for a launch when turning off is refused, because the transport closed', async () => {
+    const set = async () => {
+      throw new Error('disk full')
+    }
+    render(<DevicesPane model={fakeModel()} syncNow={() => {}} p2p={createP2pSwitch(true, set)} />)
     fireEvent.click(toggle())
     await screen.findByText('Could not change this: disk full')
     expect(toggle().getAttribute('aria-checked')).toBe('true')
-    expect(screen.queryByText(/Quit and reopen/)).toBeNull()
+    await screen.findByText('Quit and reopen Paper to finish turning this on.')
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Sync now' })).toBeNull())
   })
 })
 

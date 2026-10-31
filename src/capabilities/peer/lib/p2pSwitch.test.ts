@@ -27,9 +27,9 @@ describe('the P2P switch across one run', () => {
   })
 
   it('keeps the old answer when the write is refused', async () => {
-    const p2p = createP2pSwitch(true, () => Promise.reject(new Error('disk full')))
-    await expect(p2p.set(false)).rejects.toThrow('disk full')
-    expect(p2p.chosen()).toBe(true)
+    const p2p = createP2pSwitch(false, () => Promise.reject(new Error('disk full')))
+    await expect(p2p.set(true)).rejects.toThrow('disk full')
+    expect(p2p.chosen()).toBe(false)
     expect(p2p.needsReopen()).toBe(false)
   })
 
@@ -81,6 +81,20 @@ describe('the P2P switch across one run', () => {
       started[1]!.land()
       await again
       expect(p2p.chosen()).toBe(false)
+    })
+
+    it('needs a launch after a refused Off, which closed the transport, and not after a refused On', async () => {
+      const refused = async () => {
+        throw new Error('disk full')
+      }
+      const launchedOn = createP2pSwitch(true, refused)
+      await expect(launchedOn.set(false)).rejects.toThrow('disk full')
+      expect(launchedOn.chosen()).toBe(true)
+      expect(launchedOn.needsReopen()).toBe(true)
+
+      const launchedOff = createP2pSwitch(false, refused)
+      await expect(launchedOff.set(true)).rejects.toThrow('disk full')
+      expect(launchedOff.needsReopen()).toBe(false)
     })
 
     it('calls the write before returning when nothing is ahead of it', () => {
