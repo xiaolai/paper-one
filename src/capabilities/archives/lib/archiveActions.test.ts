@@ -15,7 +15,7 @@ import { fakeFs } from '../../../kernel/testkit'
 import { addDrafts, createArchives, type ArchiveServices, type Archives } from './archiveActions'
 import { ArchiveOverLimit } from './marksArchive'
 import { exportMarksToFile, importMarksFromFile } from './marksFiles'
-import { importTagsFromFile } from './tagFiles'
+import { exportTagsToFile, importTagsFromFile } from './tagFiles'
 
 /* The file layer is the dialog and the disk; neither exists under jsdom, and
    what is under test is what this does with the archive it is handed. */
@@ -466,6 +466,18 @@ describe('archives — importing cards with no book on this shelf', () => {
 })
 
 describe('archives — an export too big to read back', () => {
+  it('says so for tags, and does not blame the disk', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(exportTagsToFile).mockRejectedValue(new ArchiveOverLimit('67108865 bytes, past 67108864'))
+    const library = { getSnapshot: () => [] } as unknown as Library
+    const notice = vi.fn()
+    const archives = wired({ library, marks: {} as MarkStore, cards: {} as Cards, notice })
+    archives.exportTags()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+    expect(notice.mock.calls).toEqual([['You have more tags than one file can hold and be read back — nothing was exported.']])
+    logged.mockRestore()
+  })
+
   it('says so, and does not blame the disk', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.mocked(exportMarksToFile).mockRejectedValue(new ArchiveOverLimit('200001 rows, past 200000'))

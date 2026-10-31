@@ -1,5 +1,5 @@
 import { ARCHIVE_MAX_BYTES, tooLarge, type FilePicker, type IndexedBook } from '../../../kernel'
-import { archiveName, exportTags, parseArchive, type TagArchive } from './tagArchive'
+import { archiveName, archiveText, exportTags, parseArchive, type TagArchive } from './tagArchive'
 
 /**
  * The archive's two ends: a file the reader chooses, and the document
@@ -24,13 +24,11 @@ export async function exportTagsToFile(
   books: readonly IndexedBook[],
   now: Date,
 ): Promise<boolean> {
+  /* Before the dialog: a filing too big to read back should not ask where to put it. */
+  const text = archiveText(exportTags(books))
   const file = await files.pickSave(archiveName(now), [{ name: 'Paper tags', extensions: ['json'] }])
   if (!file) return false
-  /* Pretty-printed on purpose. This is a document the reader keeps, may open in
-   * a text editor, and may well repair by hand — the whole reason it exists is
-   * that their filing was previously locked inside three hundred files. Two
-   * spaces of indent is a rounding error against that. */
-  await file.writeText(JSON.stringify(exportTags(books), null, 2))
+  await file.writeText(text)
   return true
 }
 

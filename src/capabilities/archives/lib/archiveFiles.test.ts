@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ARCHIVE_MAX_BYTES, type FilePicker, type IndexedBook, type PickedFile } from '../../../kernel'
+import { ArchiveOverLimit } from './marksArchive'
 import { exportMarksToFile, importMarksFromFile } from './marksFiles'
 import { exportTagsToFile, importTagsFromFile } from './tagFiles'
 
@@ -92,6 +93,15 @@ describe('exporting tags', () => {
 
     const { file } = picked('t.json')
     expect(await exportTagsToFile(picker(file), BOOKS, NOW)).toBe(true)
+  })
+
+  it('refuses a filing too big to read back before any dialog opens', async () => {
+    const { file, writeText } = picked('t.json')
+    const files = picker(file)
+    const huge = [{ ...BOOKS[0], title: 'x'.repeat(ARCHIVE_MAX_BYTES + 1) }] as unknown as IndexedBook[]
+    await expect(exportTagsToFile(files, huge, NOW)).rejects.toThrow(ArchiveOverLimit)
+    expect(files.pickSave).not.toHaveBeenCalled()
+    expect(writeText).not.toHaveBeenCalled()
   })
 
   it('writes a document a person can repair: two spaces of indent', async () => {

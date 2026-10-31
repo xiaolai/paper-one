@@ -83,6 +83,11 @@ const exportTagsNow = (): void => {
       )
     })
     .catch((cause: unknown) => {
+      if (cause instanceof ArchiveOverLimit) {
+        console.error('Paper: your filing is past what one archive can hold', cause)
+        notify('You have more tags than one file can hold and be read back — nothing was exported.')
+        return
+      }
       console.error('Paper: could not export your tags', cause)
       notify('Those tags could not be written.')
     })

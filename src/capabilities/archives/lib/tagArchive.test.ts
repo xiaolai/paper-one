@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { IndexedBook } from '../../../kernel'
-import { archiveName, exportTags, parseArchive, planImport, type TagArchive } from './tagArchive'
+import { ARCHIVE_MAX_BYTES, type IndexedBook } from '../../../kernel'
+import { ArchiveOverLimit } from './marksArchive'
+import { archiveName, archiveText, exportTags, parseArchive, planImport, type TagArchive } from './tagArchive'
 
 function book(over: Partial<IndexedBook> = {}): IndexedBook {
   return { bookId: 'b1', title: 'Moby-Dick', author: 'Melville', ...over }
@@ -131,6 +132,35 @@ describe('planning an import', () => {
     const plan = planImport(archiveOf([{ bookId: 'b1', title: 'x', author: '', tags: ['a'] }]), [])
     expect(plan.additions).toEqual([])
     expect(plan.unmatched).toBe(1)
+  })
+})
+
+/*
+ * WHAT IS EXPORTED MUST COME BACK. The reader refuses a tags file over
+ * `ARCHIVE_MAX_BYTES`, and nothing on the way out knew it. There is no row limit
+ * here to spend: this parser reads every row of a file it agrees to open.
+ */
+describe('an export at the limits of what can be read back', () => {
+  const carrying = (title: string): TagArchive => archiveOf([{ bookId: 'b1', title, author: '', tags: ['sea'] }])
+  const shell = JSON.stringify(carrying(''), null, 2).length
+  const fits = ARCHIVE_MAX_BYTES - shell
+
+  it('writes up to the size the reader will open, and reads every row back', () => {
+    const text = archiveText(carrying('x'.repeat(fits)))
+    expect(new TextEncoder().encode(text).length).toBe(ARCHIVE_MAX_BYTES)
+    const rows = Array.from({ length: 300_000 }, (_, at) => ({ bookId: `b${at}`, title: 't', author: '', tags: ['sea'] }))
+    expect(parseArchive(archiveText(archiveOf(rows)))?.books).toHaveLength(300_000)
+  })
+
+  it('refuses a file the reader would refuse by size, and counts bytes rather than characters', () => {
+    expect(() => archiveText(carrying('x'.repeat(fits + 1)))).toThrow(ArchiveOverLimit)
+    /* Three bytes each in UTF-8, one character each in a JavaScript string. */
+    expect(() => archiveText(carrying('漢'.repeat(Math.ceil(fits / 3) + 1)))).toThrow(ArchiveOverLimit)
+  })
+
+  it('writes what it has always written, pretty-printed, when the archive fits', () => {
+    const doc = exportTags([book({ tags: ['sea'] })])
+    expect(archiveText(doc)).toBe(JSON.stringify(doc, null, 2))
   })
 })
 

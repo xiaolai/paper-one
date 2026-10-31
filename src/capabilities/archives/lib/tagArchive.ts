@@ -1,4 +1,5 @@
-import { TAG_MAX, foldForMatching as fold, normalizeTag, tagKey, type IndexedBook } from '../../../kernel'
+import { ARCHIVE_MAX_BYTES, TAG_MAX, foldForMatching as fold, normalizeTag, tagKey, type IndexedBook } from '../../../kernel'
+import { ArchiveOverLimit } from './marksArchive'
 
 /**
  * The reader's filing, as a file they can keep.
@@ -78,6 +79,26 @@ export function exportTags(books: readonly IndexedBook[]): TagArchive {
     rows.push({ bookId: book.bookId, title: book.title, author: book.author, tags: [...tags] })
   }
   return { version: 1, books: rows }
+}
+
+/**
+ * The archive as the file it becomes, or a refusal.
+ *
+ * ⚠️ **THE READER'S ONE LIMIT, ASKED BEFORE THERE IS A FILE.** The importer refuses a
+ * file over `ARCHIVE_MAX_BYTES`, so a filing past it wrote a backup that reported a
+ * success and could not be opened again. `parseArchive` has no row limit, so bytes
+ * are the whole of it here. Refusing leaves any earlier backup standing, which an
+ * unreadable file overwriting it would not.
+ */
+export function archiveText(archive: TagArchive): string {
+  /* Pretty-printed on purpose. This is a document the reader keeps, may open in
+   * a text editor, and may well repair by hand — the whole reason it exists is
+   * that their filing was previously locked inside three hundred files. Two
+   * spaces of indent is a rounding error against that. */
+  const text = JSON.stringify(archive, null, 2)
+  const bytes = new TextEncoder().encode(text).length
+  if (bytes > ARCHIVE_MAX_BYTES) throw new ArchiveOverLimit(`${bytes} bytes, past ${ARCHIVE_MAX_BYTES}`)
+  return text
 }
 
 /** A bounded list of strings from a file nobody can vouch for. */
