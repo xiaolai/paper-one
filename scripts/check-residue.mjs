@@ -8,6 +8,10 @@ import { isProcessEntry } from './lib/entry.mjs'
  * `pnpm residue:check` — the kernel may not know a capability's name unless a
  * row here says why.
  *
+ * A STATIC HEURISTIC WITH NAMED LIMITS, not a proof: it reads one file's syntax and
+ * scopes, with no types resolved. A clean run says none of the forms below is
+ * present; WHAT IT CANNOT SEE lists what a clean run does not cover.
+ *
  * `boundaries` refuses a kernel IMPORT of a capability, and that is all it can
  * see. A capability can be cut by `capability:remove` while the kernel still
  * holds its storage path, its service slot or its confinement rule, and every
@@ -35,6 +39,10 @@ import { isProcessEntry } from './lib/entry.mjs'
  * services returned by a call or handed under another name and type
  * (`getServices().circle`, `Reflect.get(services, 'circle')`), and a class member,
  * a JSX attribute or an enum member, which are not the keys of an object value.
+ * A type counts as the services only when written as `KernelServices` or through a
+ * utility that keeps its members (see `MEMBER_KEEPING`), so `s: Local<KernelServices>`,
+ * `s: KernelServices | null` and an alias of the type hold nothing, whatever `Local`
+ * does with it. Services inside an array, in `[s] = [env.services]`, are not followed.
  *
  * A literal equal to the id and nothing more (`'circle'`) is not matched: the
  * shapes above are the ones the plan fixed, and `core/capability.ts` shows why a
@@ -102,17 +110,29 @@ function literalKeys(node) {
   return []
 }
 
+/* The utilities whose result has the members of their first argument. Any other
+   generic may hold the services without being them: `box.circle` on a
+   `Box<KernelServices>` is the box's own. */
+const MEMBER_KEEPING = new Set(['Pick', 'Omit', 'Partial', 'Required', 'Readonly', 'NonNullable'])
+
 /** A type that is the kernel's services, or is cut from them: `KernelServices`, `Pick<KernelServices, 'a'>`. */
 function namesServicesType(type) {
   if (!ts.isTypeReferenceNode(type)) return false
   const called = ts.isIdentifier(type.typeName) ? type.typeName.text : type.typeName.right.text
-  return called === 'KernelServices' || (type.typeArguments ?? []).some(namesServicesType)
+  if (called === 'KernelServices') return true
+  return MEMBER_KEEPING.has(called) && type.typeArguments !== undefined && namesServicesType(type.typeArguments[0])
 }
 
 /** The text of a key that says it: `a`, `'a'`, `['a']`. Null for `[a]`, which could be anything. */
 function keyText(name) {
   if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text
   return ts.isComputedPropertyName(name) && ts.isStringLiteralLike(name.expression) ? name.expression.text : null
+}
+
+/** What a pattern's value assigns to: `s` in `{ a: s }` and in `{ a: s = {} }`. */
+function assignedTarget(node) {
+  const inner = unwrapped(node)
+  return ts.isBinaryExpression(inner) && inner.operatorToken.kind === ts.SyntaxKind.EqualsToken ? assignedTarget(inner.left) : inner
 }
 
 /** Whether an object literal is the left of an assignment, so its keys read rather than write. */
@@ -173,7 +193,8 @@ export function namingsIn(text, fileName, ids) {
   let changed = false
 
   const hold = (identifier) => {
-    const symbol = checker.getSymbolAtLocation(identifier)
+    /* In `({ s = x } = o)` the name's own symbol is the key; the variable is the holder. */
+    const symbol = ts.isShorthandPropertyAssignment(identifier.parent) ? checker.getShorthandAssignmentValueSymbol(identifier.parent) : checker.getSymbolAtLocation(identifier)
     if (symbol === undefined || holders.has(symbol)) return
     holders.add(symbol)
     changed = true
@@ -215,8 +236,9 @@ export function namingsIn(text, fileName, ids) {
     if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && node.type && namesServicesType(node.type)) typed.push(node.name)
     if (ts.isBindingElement(node) && !node.dotDotDotToken && keyText(node.propertyName ?? node.name) === 'services') servicesKeys.push(node.name)
     if (ts.isPropertyAssignment(node) && ts.isObjectLiteralExpression(node.parent) && isDestructuringTarget(node.parent) && keyText(node.name) === 'services') {
-      servicesKeys.push(unwrapped(node.initializer))
+      servicesKeys.push(assignedTarget(node.initializer))
     }
+    if (ts.isShorthandPropertyAssignment(node) && node.objectAssignmentInitializer) flows.push([node.name, node.objectAssignmentInitializer])
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) flows.push([unwrapped(node.left), node.right])
     ts.forEachChild(node, scanForScopes)
   }
