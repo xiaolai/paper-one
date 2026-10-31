@@ -937,10 +937,13 @@ impl ShareNode {
 
     /// `work`, abandoned at its next await if this node closes first. Only for
     /// what reaches out: a withdrawal is left to finish, because finishing it is
-    /// what a reader turning P2P off wants.
+    /// what a reader turning P2P off wants. Biased, because `select!` polls its
+    /// branches in a random order, and work polled first after a close could put
+    /// traffic on the wire anyway.
     async fn unless_closed<T>(&self, work: impl Future<Output = T>) -> Option<T> {
         let mut closed = self.closed.subscribe();
         tokio::select! {
+            biased;
             _ = closed.wait_for(|closed| *closed) => None,
             done = work => Some(done),
         }
@@ -1476,6 +1479,23 @@ mod dht_after_close {
             .expect("the call outlived the close")
             .unwrap();
         assert_eq!(answered, None);
+    }
+
+    #[tokio::test]
+    async fn a_closed_node_never_polls_the_work_it_refuses() {
+        let (node, _dir) = discovering("share-dht-closed-first").await;
+        node.close().await;
+        /* Many times, because the unbiased form passes half of them by luck. */
+        for _ in 0..64 {
+            let mut polled = false;
+            let answered = node
+                .unless_closed(async {
+                    polled = true;
+                })
+                .await;
+            assert_eq!(answered, None);
+            assert!(!polled, "the work ran after the close");
+        }
     }
 
     #[tokio::test]
