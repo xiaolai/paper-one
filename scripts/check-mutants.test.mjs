@@ -5098,8 +5098,8 @@ describe('a survivor measured against the merge base', () => {
   /* ⚠️ **AND A SECOND WIDE PASS IS NOT ALWAYS AFFORDABLE.** It costs a whole
      sweep of the file again: measured on `session.ts`, 31 minutes against a
      12-minute narrow run. On this gate's own heaviest subject — itself, at an
-     estimated 179 to 357 minutes for one plain pass — starting a second one unbounded
-     is how a 345-minute CI step ends with no answer at all, which is worse than
+     about 545 minutes for one plain pass — starting a second one unbounded
+     is how a CI step ends with no answer at all, which is worse than
      the answer it was trying to correct. The file's own sweep is what a second
      one would cost, so that is what is spent against the budget; refusing leaves
      the NARROW bill standing, which is the safe direction, and says so. */
@@ -7711,75 +7711,127 @@ describe('the workflow sweeps in isolated shards of one frozen plan, reconciled 
     }
   })
 
-  /* (g) The slowest file measured, scaled from the 9 Stryker runners it had to
-     the 4 vCPUs an ubuntu-24.04 runner gives a shard, with a margin of two for a
-     slower core and a runner count Stryker may set one lower.
-   *
-   * ⚠️ **AND THE SLOWEST FILE IS THIS GATE, WHICH THE CHANGE THAT SHARDED IT
-   * GREW.** 18 min 5 s was measured when Stryker's own instrumenter counted
-   * 1 174 mutants in `check-mutants.mjs`; after that change and the three
-   * rounds of review fixes that followed it counts 2 941. Scaling the time by the count is an
-   * ESTIMATE — the new mutants sit in code the slowest tests here drive — and is
-   * replaced by the first measured `durationMs` for that file, not trusted past
-   * it.
-   *
-   * ⚠️ **AND THE SETTLE RUN HAS MADE BOTH HALVES OF THAT ARITHMETIC LOW, SO THE
-   * BOUND BELOW IS KNOWN TO BE AN UNDER-ESTIMATE AND NOT A MEASUREMENT**
-   * (2026-09-15). The count is 3 139 here now, measured with the instrumenter;
-   * and a file with a wall-clock timeout is swept TWICE, the second time alone —
-   * see `SETTLE_RUN`, which states the worst case. This file has 586 wall-clock
-   * timeouts of its own under load, so it settles on any loaded sweep. Neither
-   * number is raised here, because raising one without the other buys a green
-   * assertion over a bound nobody has measured: what replaces both is the first
-   * shard's own `durationMs` from a 4-vCPU CI run, and the workflow's step and
-   * job bounds re-derived from it. Until then a shard that overruns ENDS AT ITS
-   * STEP TIMEOUT, which leaves no receipt, which the aggregate refuses — red,
-   * never green. */
-  it('bounds a shard by the slowest file measured, scaled to the runner, and gives the heaviest files shards of their own', () => {
-    const MEASURED_MINUTES = 18 + 5 / 60
-    const COUNTED_WHEN_MEASURED = 1174
-    const COUNTED_NOW = 5148
-    const LOCAL_RUNNERS = 9
-    const CI_VCPUS = 4
-    /* No margin any more, and that is a finding rather than a repair: doubling this
-       for a slower core gives 357, past the 345 a step can have under GitHub's 360,
-       so no bound can promise it. Half of what the margin stood for is settled, the
-       CI log saying 4 runners; a core's speed is not. See SIZING in the workflow. */
-    const sized = Math.ceil((MEASURED_MINUTES * (COUNTED_NOW / COUNTED_WHEN_MEASURED) * LOCAL_RUNNERS) / CI_VCPUS)
-    const shard = job('mutants-shard')
-    const [sweep] = running(stepsOf(shard), SWEEPS)
+  /* (g) What one shard may be asked to do, replayed through the real `assignShards`
+     with what PR run 41201387001 measured: each planned file's mutants, and the minutes
+     it costs through head, merge base and widening. `bookFolder.ts` is projected, 21.1 +
+     148.3 + 148.3 = 318, because a 90-minute deadline killed its base settle run; a
+     settle run measured 0.94 to 1.03 of its first, and widening what the merge base cost.
 
-    expect(valueAt(shard, 4, 'runs-on')).toBe('ubuntu-24.04')
-    expect(Number(valueAt(sweep, 8, 'timeout-minutes'))).toBeGreaterThanOrEqual(sized)
-    const env = blockOf(job('mutants-plan'), 4, 'env')
-    const [shards, isolate] = [Number(valueAt(env, 6, 'SHARDS')), Number(valueAt(env, 6, 'ISOLATE'))]
-    expect(isolate).toBeGreaterThanOrEqual(1)
-    expect(shards).toBeGreaterThan(isolate)
-  })
-
-  /* ⚠️ **THE ONE FILE MEASURED ALL THE WAY THROUGH SETS THE STEP** (PR run
-     41201387001, 2026-10-31). `bookFolder.ts`: 21.1 minutes here, a first run at the
-     merge base of 74.15, and a settle run about as long (0.94 to 1.03 of the first,
-     measured on the files that finished one). That base run was killed by its deadline,
-     so what the file costs when it is allowed to finish is projected, and widening it
-     costs what the merge base did. It is the fourth heaviest by mutants, and sharing a
-     shard with it took a shard to 386 minutes on that run's own plan, past anything
-     GitHub allows a hosted job, so it needs a shard of its own — and a fifth, because
-     a branch that also changes this gate pushes it down one. */
-  it('bounds a shard by the heaviest file measured through head, base and widening, inside what a hosted job may run', () => {
-    const [HEAD, BASE_FIRST] = [21.1, 74.15]
-    const measuredThrough = HEAD + BASE_FIRST * 2 + BASE_FIRST * 2
+     ⚠️ **THIS GATE'S OWN FILE DOES NOT FIT, AND NO BOUND HERE MAKES IT FIT.** A sample
+     of it measured at acceptance (2026-11-01): 198 mutants in 20 min 57 s at concurrency
+     4, which is 25 runner-seconds a mutant, so 5 148 mutants take 545 minutes for ONE
+     pass. Fitting 345 needs 16. A branch that changes `check-mutants.mjs` therefore times
+     out on that shard, leaves no receipt, and the aggregate fails it: red, never green.
+     Where it should run instead is the owner's decision. What this test pins is what is
+     true: that file does not fit, and every OTHER subject does, even on a shared shard
+     beside it. */
+  it('fits every subject but this gate inside a shard’s step on the measured replay, and pins that this gate does not', () => {
+    const GATE_MUTANTS = 5148
+    const SAMPLE = { mutants: 198, seconds: 20 * 60 + 57, runners: 4 }
+    const gatePass = ((SAMPLE.seconds * SAMPLE.runners) / SAMPLE.mutants) * GATE_MUTANTS / SAMPLE.runners / 60
+    const MEASURED_RUN = [
+      ['src/kernel/core/libraryStore.ts', 1223, 119.3],
+      ['src/kernel/core/registry.ts', 867, 196.8],
+      ['src/capabilities/circle/lib/publish.ts', 831, 2.2],
+      ['src/kernel/core/bookFolder.ts', 798, 317.7],
+      ['src/capabilities/sync/index.ts', 692, 21.5],
+      ['src/capabilities/circle/lib/fetch.ts', 486, 1.3],
+      ['src/kernel/ui/pane/Marginalia.tsx', 480, 8],
+      ['src/capabilities/circle/lib/page.ts', 423, 1.2],
+      ['src/capabilities/circle/lib/store.ts', 414, 1.6],
+      ['src/capabilities/public/lib/publicStore.ts', 396, 11.7],
+      ['src/capabilities/public/lib/envelope.ts', 382, 1.2],
+      ['scripts/verify.mjs', 371, 56.4],
+      ['src/capabilities/circle/lib/protocol.ts', 360, 3.8],
+      ['src/kernel/ui/pane/LibraryPanel.tsx', 326, 36.5],
+      ['src/kernel/core/services/book.ts', 297, 6.8],
+      ['src/capabilities/peer/index.ts', 296, 19.3],
+      ['scripts/verify-without.mjs', 292, 4.7],
+      ['src/capabilities/circle/lib/workClaim.ts', 292, 9.4],
+      ['src/capabilities/circle/lib/shelf.ts', 274, 2.5],
+      ['src/kernel/core/services.ts', 273, 3.8],
+      ['src/capabilities/circle/lib/receive.ts', 272, 0.9],
+      ['src/capabilities/sync/lib/status.ts', 261, 11.8],
+      ['scripts/check-residue.mjs', 241, 1],
+      ['src/capabilities/circle/lib/circlePort.ts', 211, 7.1],
+      ['src/capabilities/circle/lib/circleView.ts', 209, 3.5],
+      ['src/capabilities/peer/lib/wire.ts', 206, 5.6],
+      ['src/capabilities/circle/index.ts', 191, 2.3],
+      ['src/capabilities/peer/ui/DevicesPane.tsx', 187, 7.1],
+      ['src/capabilities/circle/lib/exchange.ts', 186, 0.7],
+      ['scripts/check-dead-css.mjs', 176, 1.7],
+      ['src/capabilities/public/lib/publicPort.ts', 175, 1.4],
+      ['src/capabilities/circle/lib/lists.ts', 173, 0.7],
+      ['src/kernel/ui/pane/SidePane.tsx', 168, 2.3],
+      ['src/capabilities/public/index.ts', 165, 1.8],
+      ['src/capabilities/public/lib/order.ts', 164, 11.7],
+      ['src/capabilities/circle/lib/opinion.ts', 162, 1.4],
+      ['src/capabilities/circle/lib/log.ts', 161, 0.7],
+      ['src/capabilities/circle/lib/relationships.ts', 144, 1.1],
+      ['src/capabilities/public/lib/voicePort.ts', 144, 0.3],
+      ['src/kernel/ui/reader/reanchorPass.ts', 144, 3.6],
+      ['scripts/check-residue.selftest.mjs', 143, 0.6],
+      ['src/capabilities/public/lib/binding.ts', 134, 4.2],
+      ['src/capabilities/public/lib/overlay.ts', 132, 1.2],
+      ['src/kernel/ui/hooks/useOverlays.ts', 130, 10.5],
+      ['src/capabilities/circle/lib/workKey.ts', 129, 11.8],
+      ['src/capabilities/public/ui/VoiceDecisions.tsx', 125, 7.7],
+      ['src/kernel/ui/reader/engineVoice.ts', 115, 0.2],
+      ['src/capabilities/circle/lib/identity.ts', 110, 7.5],
+      ['src/capabilities/public/lib/bounds.ts', 104, 5.2],
+      ['src/capabilities/circle/lib/relationshipState.ts', 100, 0.3],
+      ['src/capabilities/public/ui/PublishControl.tsx', 93, 9.4],
+      ['src/kernel/ui/reader/markPaint.ts', 92, 0.2],
+      ['src/capabilities/circle/lib/sharing.ts', 83, 1],
+      ['src/kernel/ui/pane/Cards.tsx', 81, 3.6],
+      ['src/kernel/core/serviceTable.ts', 79, 11.3],
+      ['src/capabilities/circle/ui/ShareControl.tsx', 71, 2.7],
+      ['src/kernel/core/services/rows.ts', 68, 3.4],
+      ['src/capabilities/circle/ui/PairingSection.tsx', 65, 2.7],
+      ['src/capabilities/circle/lib/bound.ts', 64, 2.3],
+      ['src/capabilities/circle/lib/foreign.ts', 63, 3.4],
+      ['src/capabilities/public/lib/publicShare.ts', 63, 2.4],
+      ['src/capabilities/public/lib/publishPort.ts', 62, 0.7],
+      ['src/capabilities/circle/lib/list.ts', 49, 3.1],
+      ['src/capabilities/public/lib/crypto.ts', 49, 0.5],
+      ['src/capabilities/public/lib/presentation.ts', 48, 2.3],
+      ['src/capabilities/circle/lib/crypto.ts', 45, 0.3],
+      ['src/kernel/core/ports.ts', 40, 0.2],
+      ['src/capabilities/public/lib/publish.ts', 28, 0.1],
+      ['src/kernel/core/bookAccent.ts', 26, 21.8],
+      ['src/capabilities/peer/lib/p2pSwitch.ts', 20, 0.5],
+      ['src/kernel/core/foreignAnnotation.ts', 13, 3.2],
+      ['src/capabilities/circle/lib/listsPort.ts', 10, 0.8],
+      ['src/capabilities/circle/lib/spendLedger.ts', 9, 0.5],
+      ['src/capabilities/peer/lib/qrSvg.ts', 9, 1.9],
+      ['src/kernel/core/readingState.ts', 5, 0.1],
+    ]
     const shard = job('mutants-shard')
     const [sweep] = running(stepsOf(shard), SWEEPS)
     const step = Number(valueAt(sweep, 8, 'timeout-minutes'))
     const whole = Number(valueAt(shard, 4, 'timeout-minutes'))
     const env = blockOf(job('mutants-plan'), 4, 'env')
+    const [shards, isolate] = [Number(valueAt(env, 6, 'SHARDS')), Number(valueAt(env, 6, 'ISOLATE'))]
+    /** What each shard costs when `costs`, as `[path, mutants, minutes]`, are planned over the workflow's own numbers. */
+    const loadsOver = (costs) => {
+      const load = Array.from({ length: shards }, () => 0)
+      const subjects = costs.map(([named, mutants]) => ({ path: named, class: 'mutated', mutants }))
+      assignShards(subjects, shards, isolate).forEach((one, at) => (load[one - 1] += costs[at][2]))
+      return load
+    }
+    const [gateShard, ...rest] = loadsOver([['scripts/check-mutants.mjs', GATE_MUTANTS, gatePass], ...MEASURED_RUN])
 
-    expect(Math.ceil(measuredThrough)).toBe(318)
-    expect(step).toBeGreaterThanOrEqual(318)
-    expect(whole).toBeGreaterThan(step)
+    expect(valueAt(shard, 4, 'runs-on')).toBe('ubuntu-24.04')
+    /* Room after a step that timed out, for the upload that names what it finished,
+       and before it for setup and install; and GitHub's own limit for a hosted job. */
+    expect(whole - step).toBeGreaterThanOrEqual(10)
     expect(whole).toBeLessThanOrEqual(360)
-    expect(Number(valueAt(env, 6, 'ISOLATE'))).toBeGreaterThanOrEqual(5)
+    expect(shards).toBeGreaterThan(isolate)
+
+    expect(Math.max(...loadsOver(MEASURED_RUN))).toBeLessThanOrEqual(step)
+    expect(Math.round(gatePass)).toBe(545)
+    expect(gateShard).toBeGreaterThan(step)
+    expect(Math.max(...rest)).toBeLessThanOrEqual(step)
   })
 })
 

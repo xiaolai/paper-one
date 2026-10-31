@@ -356,14 +356,14 @@ jobs:
   # aggregate fails: a worse red than a named survivor, and still never a pass. The
   # same goes for a shard another branch's files fill differently.
   #
-  # ⚠️ AND `check-mutants.mjs` IS STILL AN ESTIMATE, because that run did not change
-  # it, and the bound does not cover it. Measured at 18.08 min when Stryker counted
-  # 1 174 mutants in it; it counts 5 148 now: 18.08 x 5148/1174 x 9 local runners / 4
-  # vCPUs = 179 for one pass, and 357 if a CI core is half as fast, which nobody has
-  # measured. Any survivor adds a base run of up to 180, and any repeated timeout a
-  # settle run of a whole pass. So a branch that changes this gate is expected to time
-  # out on that shard, and fail, unless it sweeps clean first time on a fast core. Replace
-  # the estimate with that shard's own `durationMs` once one exists.
+  # ⚠️ AND `check-mutants.mjs` CANNOT FINISH A PASS INSIDE THIS STEP. A sample of it
+  # measured at acceptance (2026-11-01): 198 mutants in 20 min 57 s at concurrency 4,
+  # which is 25 runner-seconds a mutant, so its 5 148 mutants take 545 minutes for ONE
+  # pass on a hosted runner. Fitting 345 needs 16. A branch that changes this gate times
+  # out on that shard, leaves no receipt, and fails: red, never green. Where its own
+  # sweep should run is the owner's decision, and no number here answers it. Every OTHER
+  # subject fits: with that file in the plan, 7 shards with 5 alone give it one shard,
+  # `bookFolder.ts` its 318, and at most 255 to a shared one.
   #
   # ⚠️ 4 vCPUs is what an `ubuntu-24.04` runner gives a PUBLIC repository; a
   # private one's standard runner has 2, which doubles the arithmetic.
