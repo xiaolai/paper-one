@@ -1009,12 +1009,12 @@ describe('the dependencies the merge base’s own tests are run with', () => {
         },
       })
 
-      /* Ten minutes for the install and ninety for the whole of it, each less
+      /* Ten minutes for the install and 180 for the whole of it, each less
          whatever had gone by when it was asked — one minute by the install, two
          by the child, on a clock that moves a minute a reading. */
       expect(given).toEqual([
         ['install', 10 * 60_000 - 60_000],
-        ['child', 90 * 60_000 - 2 * 60_000],
+        ['child', 180 * 60_000 - 2 * 60_000],
       ])
       /* And what it cost is the whole operation, by the same clock. */
       expect(answer.durationMs).toBe(3 * 60_000)
@@ -1025,8 +1025,8 @@ describe('the dependencies the merge base’s own tests are run with', () => {
     await inScratch('mutants-base-', async (root) => {
       const { at } = repository(root)
       let readings = 0
-      /* Two hours gone by the time the child would start. */
-      const clock = () => (readings += 1) * 60 * 60_000
+      /* Over three hours gone by the time the child would start. */
+      const clock = () => (readings += 1) * 181 * 60_000
 
       const refusal = await refusedBy(() =>
         measure(root, 'src/a.ts', at, {
@@ -1039,7 +1039,7 @@ describe('the dependencies the merge base’s own tests are run with', () => {
 
       expect(refusal.reason).toBe('expired')
       expect(refusal.message).toBe(
-        'check-mutants: measuring src/a.ts at the merge base took longer than the 90 minute(s) this gate allows for one ' +
+        'check-mutants: measuring src/a.ts at the merge base took longer than the 180 minute(s) this gate allows for one ' +
           'file, so what it owed there is unmeasured — and unmeasured is never permission',
       )
       expect(worktreesOf(root)).toEqual([])
@@ -1052,7 +1052,7 @@ describe('the dependencies the merge base’s own tests are run with', () => {
       const { at } = repository(root)
       let readings = 0
       /* The start, and then exactly the whole allowance gone. */
-      const clock = () => ((readings += 1) === 1 ? 0 : 90 * 60_000)
+      const clock = () => ((readings += 1) === 1 ? 0 : 180 * 60_000)
 
       const refusal = await refusedBy(() =>
         measure(root, 'src/a.ts', at, {

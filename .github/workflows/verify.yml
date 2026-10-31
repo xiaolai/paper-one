@@ -320,58 +320,61 @@ jobs:
   #                   the shards did, and fails unless every planned file has
   #                   exactly one passing result and every shard left a receipt.
   #
-  # SIZING. Sharding splits the files, never the slowest file, so no number of
-  # shards shortens the shard that holds `check-mutants.mjs`. It was measured at
-  # 18.08 min when Stryker counted 1 174 mutants in it; the change that sharded
-  # the sweep grew it to 2 941, and scaling by that count is an ESTIMATE, not a
-  # measurement: 18.08 x 2941/1174 x 9 local runners / 4 vCPUs = 102 min, doubled
-  # for a slower core and a runner count Stryker may set one lower = 204. The
-  # sweep STEP is bounded at 210 and the job at 225, so a step that times out
-  # still leaves the upload room to run. Replace the estimate with the first
-  # shard's own `durationMs` for that file once one exists. The two
-  # heaviest files by mutant count get shards of their own and the rest are
-  # balanced by mutant count over the other four — an ESTIMATE, since one mutant
-  # cost about fifteen times as much in `check-mutants.mjs` as in
-  # `check-browser-safe.mjs`. Every result records its measured duration, which
-  # is what a better balance would be built from.
+  # SIZING. Measured on PR run 41201387001 (2026-10-31), where a file's cost depends
+  # on whether a mutant survived in it. Minutes, on a runner that logged "Creating 4
+  # test runner process(es)":
+  #
+  #   setup, plan, upload     10 s, 7 s, 2 s; the aggregate ran in 20 s.
+  #   a sweep here            from durationMs. bookFolder.ts 21.1. The largest was
+  #                           registry.ts, 44.3, a first run and a settle run.
+  #   the merge base          the first run sweeps the file against EVERY test that
+  #                           reaches it, wider and dearer than the sweep here:
+  #                           bookFolder.ts 74.15. A settle run measured 0.94 to 1.03
+  #                           of its first, so that base costs 2 x 74.15 = 148.3.
+  #                           PROJECTED: BASE_DEADLINE_MS, then 90, killed the settle
+  #                           run. Taken once per base file however many subjects
+  #                           trace to it.
+  #   a charge to take        the subject swept again against that wider set. Shard
+  #                           gaps put it at about the merge base's cost (26.4 against
+  #                           28.7, 25 against 25.4, 7.7 against 8.5, 61 against 52.7).
+  #                           Refused past WIDEN_BUDGET_MS, which is 60 against
+  #                           registry.ts's 44.3.
+  #
+  # So one file can cost 21.1 + 148.3 + 148.3 = 318, and the sweep STEP is bounded at
+  # 345 (318 + 8.5 %) and the job at 355, inside GitHub's 360 for a hosted job, so a
+  # step that times out still leaves the upload room to run.
+  #
+  # Sharding splits the files, never the slowest file, and files are weighed by
+  # mutant count, not time: bookFolder.ts was fourth heaviest, at 798. `assignShards`
+  # over that run's plan, with those costs, gives a slowest shard of 386 at 6 shards
+  # with 2 alone, 458 at 6 with 3, 388 at 7 with 3, and 318 at 7 with 4 or 5. 7 and 5:
+  # a branch that also changes this gate, the heaviest of all, pushes bookFolder.ts down
+  # one, and 4 would then put it back on a shared shard.
+  #
+  # ⚠️ THE BOUND IS FOR WHAT WAS MEASURED, NOT FOR THE LIMITS. A file at both limits
+  # costs 60 + 180 + 180 = 420, past the step. It times out, leaves no receipt, and the
+  # aggregate fails: a worse red than a named survivor, and still never a pass. The
+  # same goes for a shard another branch's files fill differently.
+  #
+  # ⚠️ AND `check-mutants.mjs` CANNOT FINISH A PASS INSIDE THIS STEP. A sample of it
+  # measured at acceptance (2026-11-01): 198 mutants in 20 min 57 s at concurrency 4,
+  # which is 25 runner-seconds a mutant, so its 5 148 mutants take 545 minutes for ONE
+  # pass on a hosted runner. Fitting 345 needs 16. A branch that changes this gate times
+  # out on that shard, leaves no receipt, and fails: red, never green. Where its own
+  # sweep should run is the owner's decision, and no number here answers it. Every OTHER
+  # subject fits: with that file in the plan, 7 shards with 5 alone give it one shard,
+  # `bookFolder.ts` its 318, and at most 255 to a shared one.
   #
   # ⚠️ 4 vCPUs is what an `ubuntu-24.04` runner gives a PUBLIC repository; a
-  # private one's standard runner has 2, which doubles the arithmetic. Stryker
-  # prints "Creating N test runner process(es)" in every shard's log: read it on
-  # the first run before trusting the bound.
-  #
-  # ⚠️ AND THE ARITHMETIC ABOVE IS FOR ONE SWEEP PER FILE, WHICH STOPPED BEING
-  # WHAT A SWEEP COSTS. Since the merge-base comparison, a file's cost depends on
-  # whether a mutant survived in it:
-  #
-  #   no survivor          one sweep. The common path, and unchanged.
-  #   a survivor           + the merge base measured, which sweeps the file
-  #                        against EVERY test that reaches it rather than the
-  #                        nearest level — wider, so dearer than the sweep here.
-  #                        Measured 2026-09-17: session.ts 35 min quiet, 62 min
-  #                        loaded; wordSnap/flatten.ts 37 min. Capped per file by
-  #                        BASE_DEADLINE_MS (90 min), and taken ONCE per base
-  #                        file however many subjects trace to it.
-  #   a charge to take     + the subject swept again here against that wider set,
-  #                        which is refused outright when its own sweep already
-  #                        cost more than WIDEN_BUDGET_MS (20 min), so this one
-  #                        cannot double the heaviest file.
-  #
-  # So the bound below is no longer an estimate of the whole job on a branch that
-  # FAILS: one heavy file with survivors can spend most of a 210-minute step by
-  # itself. That is deliberate — every expensive path belongs to a build that was
-  # already going to be red — but it means a red branch can time out instead of
-  # reporting, which is a worse red. Re-derive from the first CI run that
-  # measures a base: every result records `durationMs`, and the aggregate prints
-  # what each base measurement cost.
+  # private one's standard runner has 2, which doubles the arithmetic.
   mutants-plan:
     name: mutants (plan)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      SHARDS: 6
-      ISOLATE: 2
+      SHARDS: 7
+      ISOLATE: 5
     outputs:
       count: ${{ steps.plan.outputs.count }}
       shards: ${{ steps.plan.outputs.shards }}
@@ -411,7 +414,7 @@ jobs:
     name: mutants (shard ${{ matrix.shard }})
     needs: mutants-plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 225
+    timeout-minutes: 355
     strategy:
       # A survivor in one shard must not cancel the others: the aggregate names
       # every failure at once only if every shard ran to its end.
@@ -436,7 +439,7 @@ jobs:
       # Bounded as a STEP, below the job: a step that times out fails, and the
       # upload after it still runs inside a job that has not.
       - name: Sweep this shard
-        timeout-minutes: 210
+        timeout-minutes: 345
         env:
           SHARD: ${{ matrix.shard }}/${{ needs.mutants-plan.outputs.count }}
         run: node scripts/check-mutants.mjs --shard "$SHARD" --manifest mutants-plan/plan.json --results mutants-results
