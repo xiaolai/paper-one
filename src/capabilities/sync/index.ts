@@ -203,7 +203,7 @@ async function withShelf<T>(task: (channel: SyncChannel) => Promise<T>): Promise
 }
 
 /**
- * Set once the reader changes the P2P switch in a wired run; its sentence then
+ * Set once the reader changes the P2P switch in this run; its sentence then
  * stands. It belongs to the runtime in `running`: one that is claiming the slot
  * starts clear, and one that no longer holds it neither sets nor clears this.
  */
@@ -1242,8 +1242,10 @@ export const sync: Capability = {
     }
 
     /* OFF CLOSES THE TRANSPORT FOR THE REST OF THE RUN, so the schedule stops
-       with it: every tick would only flash "Syncing…" and write a warning. */
-    if (running !== null) {
+       with it: every tick would only flash "Syncing…" and write a warning. A
+       run with no transport watches too: the line it set above is about the
+       switch, and that line has to follow it. */
+    if (!stopped) {
       unwatchP2p = watchP2p((on) => {
         scheduler?.stop()
         if (running !== myRunning) return

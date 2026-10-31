@@ -1518,6 +1518,48 @@ describe('a runtime with no transport', () => {
     }
   })
 
+  /* THE LINE WAS WRITTEN AT LAUNCH, and it is the Storage pane's only word on
+     it: turning the switch on in this run has to say what that takes. */
+  it('follows the switch in a run launched with it off', async () => {
+    const before = native.p2pOn
+    native.p2pOn = async () => false
+    try {
+      const run = await start({ fs: crashableFs(book('book:a', 'Alpha', 'bytes')), noPlugin: true })
+      expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+      native.p2pWatcher?.(true)
+      expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Quit and reopen Paper to use peer-to-peer' })
+
+      native.p2pWatcher?.(false)
+      expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+      run.handle.dispose()
+      expect(native.p2pWatcher).toBeNull()
+    } finally {
+      native.p2pOn = before
+    }
+  })
+
+  it('watches nothing when it was stopped before the launch finished', async () => {
+    const answer = gate()
+    const before = native.p2pOn
+    native.p2pOn = async () => {
+      await answer.promise
+      return false
+    }
+    try {
+      const controller = new AbortController()
+      const starting = start({ fs: crashableFs(book('book:a', 'Alpha', 'bytes')), noPlugin: true, controller })
+      await settled(10)
+      controller.abort()
+      answer.open()
+      await starting
+      expect(native.p2pWatcher).toBeNull()
+    } finally {
+      native.p2pOn = before
+    }
+  })
+
   it('journals the library it has, and says the peer plugin is unavailable', async () => {
     const run = await start({ fs: crashableFs(book('book:a', 'Alpha', 'bytes')), noPlugin: true })
 
