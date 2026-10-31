@@ -657,6 +657,25 @@ describe('a walk of the book', () => {
     expect(walk).not.toHaveBeenCalled()
   })
 
+  it('calls a finished walk incomplete if the book was replaced while it ran', async () => {
+    let driver: ReturnType<typeof opened>['driver'] | null = null
+    const sections = [{ text: 'Words.' }] as never
+    const walk = vi.fn<BookFacts['sectionTexts']>(async () => {
+      driver!.commit(nextOpening(one))
+      return { sections, complete: true }
+    })
+    const made = opened(walk)
+    const one = made.one
+    driver = made.driver
+    await expect(made.book.sectionTexts(() => false, NO_NOTES)).resolves.toEqual({ sections, complete: false })
+  })
+
+  it('keeps an incomplete walk incomplete with the book unchanged', async () => {
+    const sections = [{ text: 'Words.' }] as never
+    const { book } = opened(async () => ({ sections, complete: false }))
+    await expect(book.sectionTexts(() => false, NO_NOTES)).resolves.toEqual({ sections, complete: false })
+  })
+
   it('survives a chapter turn, which is the same opening', async () => {
     const walk = vi.fn<BookFacts['sectionTexts']>(async () => ({ sections: [], complete: true }))
     const { driver, book } = opened(walk)

@@ -153,7 +153,8 @@ export function readyBookOf(facts: BookFacts, current: () => number): ReadyBook 
     fixedLayout: facts.fixedLayout,
     sectionTexts: async (shouldStop, skip) => {
       if (!live()) return { sections: [], complete: false }
-      return facts.sectionTexts(facts.toc, () => shouldStop() || !live(), skip)
+      const walk = await facts.sectionTexts(facts.toc, () => shouldStop() || !live(), skip)
+      return live() ? walk : { ...walk, complete: false }
     },
   }
 }
