@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type CSSProperties } from 'react'
 import { Trash2 } from 'lucide-react'
+import { rowHue } from '../../core/bookAccent'
 import { CARD_KINDS, type CardKind } from '../../core/cards'
 import { ICON } from '../../core/metrics'
 import type { CardsView } from '../hooks/useCards'
@@ -128,7 +129,7 @@ export function Cards({ cards, bookId, onShelf, onGoTo }: CardsProps) {
       )}
 
       {shown.map((card) => (
-        <div key={card.id} className={styles.note}>
+        <div key={card.id} className={styles.note} style={{ '--note-hue': rowHue(card.id) } as CSSProperties}>
           <div className={styles.noteKind} data-kind={card.kind}>
             {card.kind}
           </div>

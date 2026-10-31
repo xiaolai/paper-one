@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
   Asterisk,
   /* Aliased: `Bookmark` is also the record type this file is largely about,
@@ -11,6 +11,7 @@ import {
   PenLine,
   Trash2,
 } from 'lucide-react'
+import { rowHue } from '../../core/bookAccent'
 import { cardFromMark } from '../../core/cards'
 import {
   compareMarks,
@@ -1173,11 +1174,9 @@ export function Marginalia({
           }}
           className={styles.note}
           data-kind={mark.kind}
-          /* A bookmark carries no tint, and `.note::before` falls back to
-             yellow for a row without one — so a place row would have grown a
-             gold rule meaning nothing. `data-place` suppresses it. */
+          /* A bookmark draws no colour bar — `data-place` suppresses it. */
           data-place={isBookmark(mark) ? 'true' : undefined}
-          data-tint={isBookmark(mark) ? undefined : mark.tint}
+          {...(isBookmark(mark) ? {} : { style: { '--note-hue': rowHue(mark.id) } as CSSProperties })}
           data-focused={mark.id === revealed}
         >
           {/* THE WORK, on rows that are not from the open book. Above whatever

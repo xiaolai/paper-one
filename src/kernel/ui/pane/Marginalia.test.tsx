@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Marginalia } from './Marginalia'
+import { rowHue } from '../../core/bookAccent'
 import styles from './SidePane.module.css'
 import { flushBeforeClose } from '../../core/beforeClose'
 import { MAX_MARK_NOTE, type Annotation, type Bookmark, type Mark } from '../../core/marks'
@@ -128,6 +129,25 @@ const listed = () => rowsDrawn().map((row) => row.querySelector('button')?.textC
 
 /** Whether the chip of that name is the one on. */
 const chipOn = (name: string) => screen.getByRole('button', { name }).getAttribute('aria-pressed')
+
+describe('the colour bar', () => {
+  const hue = (row: HTMLElement) => row.style.getPropertyValue('--note-hue')
+
+  it('is the row’s own on a mark, whatever its tint, and absent from a bookmark', () => {
+    draw({
+      all: [ANNOTATION({ id: 'm1', tint: 'green' }), ANNOTATION({ id: 'm2', tint: 'green', text: 'another' })],
+      allBookmarks: [BOOKMARK()],
+    })
+    const [first, second, place] = [
+      rowsDrawn().find((row) => row.textContent?.includes('call me ishmael'))!,
+      rowsDrawn().find((row) => row.textContent?.includes('another'))!,
+      rowsDrawn().find((row) => row.dataset['place'] === 'true')!,
+    ]
+    expect(hue(first)).toBe(String(rowHue('m1')))
+    expect(hue(second)).toBe(String(rowHue('m2')))
+    expect(hue(place)).toBe('')
+  })
+})
 
 describe('a row from the open book', () => {
   it('is enabled and jumps to its own place', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bookAccent, bookHue } from './bookAccent'
+import { bookAccent, bookHue, rowHue } from './bookAccent'
 
 /** The two shapes `bookIdFor` actually produces. */
 const fileId = (hex: string) => `file:${hex}`
@@ -73,5 +73,21 @@ describe('bookAccent', () => {
     expect(night).toContain('42% 62%')
     // Same book, same hue, either way.
     expect(day?.split(' ')[0]).toBe(night?.split(' ')[0])
+  })
+})
+
+describe('rowHue', () => {
+  const ids = Array.from({ length: 200 }, (_, i) => `00000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`)
+
+  it('gives a row the same hue every time, inside a hue', () => {
+    for (const id of ids) {
+      expect(rowHue(id)).toBe(rowHue(id))
+      expect(rowHue(id)).toBeGreaterThanOrEqual(0)
+      expect(rowHue(id)).toBeLessThan(360)
+    }
+  })
+
+  it('spreads ids that differ by a character across the wheel', () => {
+    expect(new Set(ids.map(rowHue)).size).toBeGreaterThan(100)
   })
 })

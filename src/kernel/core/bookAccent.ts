@@ -45,6 +45,16 @@ export function bookHue(bookId: string): number {
 }
 
 /**
+ * The hue of one row in a list of marks or cards, 0–359, from its id.
+ *
+ * Derived for the reason at the top of this file: a hue drawn at each render
+ * would change the whole list every time a note was saved.
+ */
+export function rowHue(rowId: string): number {
+  return fnv1a(rowId) % 360
+}
+
+/**
  * The book's accent as a CSS colour, or null when no book is open.
  *
  * Saturation and lightness are FIXED and the hue is the only free variable.

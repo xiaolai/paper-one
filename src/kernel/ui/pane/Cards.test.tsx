@@ -2,6 +2,7 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Cards } from './Cards'
+import { rowHue } from '../../core/bookAccent'
 import type { Card } from '../../core/cards'
 import type { CardsView } from '../hooks/useCards'
 import type { JumpTarget } from '../hooks/useJumps'
@@ -48,6 +49,16 @@ function draw(all: readonly Card[], onShelf?: (bookId: string) => boolean) {
 }
 
 const row = (body: string) => screen.getByRole('button', { name: new RegExp(body, 'i') })
+
+/* A ROW WITHOUT `--note-hue` DRAWS NO BAR AT ALL, and says nothing about it: the
+   shared `.note::before` has no fallback colour. */
+describe('a card row', () => {
+  it('carries its own hue for the colour bar', () => {
+    draw([CARD({ id: 'c7' })])
+    const drawn = row('who narrates').closest<HTMLElement>('[style]')
+    expect(drawn?.style.getPropertyValue('--note-hue')).toBe(String(rowHue('c7')))
+  })
+})
 
 describe('a card from the open book', () => {
   it('is enabled and jumps to its own anchor', () => {
