@@ -313,6 +313,8 @@
   width: 100%;
   text-align: start;
   padding: var(--space-12) var(--space-14);
+  /* The bar below, then one em of room after it. */
+  padding-inline-start: calc(var(--space-4) + var(--track-w) + var(--rule-room));
   margin-bottom: var(--space-8);
   border: 1px solid transparent;
   border-radius: var(--radius-card);

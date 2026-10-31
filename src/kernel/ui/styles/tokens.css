@@ -280,6 +280,10 @@
   --space-32: 32px;
   --space-40: 40px;
   --space-56: 56px;
+
+  /* The room after a bar down a row's edge. In `em`, so it follows the row's type:
+     a custom property is substituted as written and resolves where it is used. */
+  --rule-room: 1em;
 }
 
 /* ── TYPE ───────────────────────────────────────────────────────────────────
