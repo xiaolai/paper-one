@@ -178,6 +178,30 @@ describe('Composition.standing', () => {
 
 /* `sync` is the only tail today and cannot be off, so nothing in the app would
    notice this rule breaking until a second capability owed a tail. */
+describe('a composition aborted while `available` was being asked', () => {
+  /* The check above the question ran before it, and it can take as long as it
+     likes, so a cancelled launch went on to start the capability it asked about. */
+  it('starts nothing more, and takes back what it had started', async () => {
+    const control = new AbortController()
+    const dispose = vi.fn()
+    const first = started('first', { start: vi.fn(() => ({ dispose })) })
+    const second = started('second', {
+      available: () => {
+        control.abort()
+        return true
+      },
+    })
+    const services = createKernelServices({ fs: null, storage: null })
+
+    await expect(composeCapabilities([first, second], kernelApi(services), control.signal)).rejects.toThrow(
+      'capability "second" was not started: the composition was aborted',
+    )
+
+    expect(second.start).not.toHaveBeenCalled()
+    expect(dispose).toHaveBeenCalledOnce()
+  })
+})
+
 describe('the quit handshake and a switched-off capability', () => {
   const quiesce = async () => {}
 

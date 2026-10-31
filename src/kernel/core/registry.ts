@@ -1138,6 +1138,9 @@ export async function composeCapabilities(
       skip(cap.id, 'start-failed', cause)
       continue
     }
+    /* AGAIN, ACROSS THAT AWAIT: the check at the top of this loop was made before
+       `available` was asked, and an abort during it must not start anything. */
+    if (signal.aborted) rollback(undefined, cap.id, 'was not started: the composition was aborted')
     /* This capability's disposer stack: each resource it acquires registers
      * its own teardown through `onCleanup`. Run in reverse, it undoes a
      * half-finished `start` (so a throw leaves nothing) and, harmlessly
