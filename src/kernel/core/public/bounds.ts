@@ -71,16 +71,6 @@ export const MAX_BOOKS_WITH_PUBLIC = 2_000
 export const VERIFY_PER_TASK = 32
 
 /**
- * The most marks re-anchored before yielding.
- *
- * ⚠️ **THE RE-ANCHOR PASS YIELDS BETWEEN SECTIONS AND ITS INNER MARK LOOP DOES
- * NOT.** With the circle's handful of friends that was a short loop; with
- * public annotations the same loop is however many a flood published, in one
- * uninterruptible task, per section.
- */
-export const ANCHOR_PER_TASK = 64
-
-/**
  * The longest a single public task may hold the main thread, in ms.
  *
  * Handed to the kernel's `breathe`, which is what `publicStore` yields with
@@ -106,7 +96,6 @@ export interface PublicBounds {
   readonly heldBytesPerBook: number
   readonly booksWithPublic: number
   readonly verifyPerTask: number
-  readonly anchorPerTask: number
 }
 
 export const DEFAULT_PUBLIC_BOUNDS: PublicBounds = {
@@ -114,7 +103,6 @@ export const DEFAULT_PUBLIC_BOUNDS: PublicBounds = {
   heldBytesPerBook: MAX_HELD_BYTES_PER_BOOK,
   booksWithPublic: MAX_BOOKS_WITH_PUBLIC,
   verifyPerTask: VERIFY_PER_TASK,
-  anchorPerTask: ANCHOR_PER_TASK,
 }
 
 /**

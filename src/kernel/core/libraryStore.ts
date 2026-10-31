@@ -39,7 +39,7 @@ import {
   type RestoreOutcome,
 } from './bookTrash'
 import { hlcOf, type Hlc } from './hlc'
-import type { ReadingState, Stars } from './circle/log'
+import type { ReadingState, Stars } from './readingState'
 import { normalizeTag, tagKey } from './library'
 import { NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type HashPort, type MutationRecorder } from './ports'
 import { PRESENCE_KEY, notePresence, readPresence } from './presence'

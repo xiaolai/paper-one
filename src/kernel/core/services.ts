@@ -1,5 +1,5 @@
 import { messageOf } from './messageOf'
-import type { PublicPassage } from './public/envelope'
+import type { PublicPassage } from './ports'
 import type { IndexFs, IndexedBook } from './bookIndex'
 import type { Disposable, ServiceContribution } from './capability'
 import { createCards, type CardStorage, type Cards } from './cardStore'

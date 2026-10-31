@@ -3,7 +3,7 @@ import type { Highlight } from './marks'
 import type { Diagnostics, SettingsStore } from './ports'
 import type { KernelServices } from './services'
 import type { ContributedPaneId, ContributedScreenId, PaneId, Screen } from './uiTypes'
-import type { OverlayContribution } from './circle/overlay'
+import type { OverlayContribution } from './overlay'
 
 /* Re-exported so a capability author reaches one module for the whole
    contribution vocabulary, the way `PaneContribution` is declared here. */
@@ -14,7 +14,7 @@ export type {
   ResolvePort,
   ResolveResult,
   ResolvedPassage,
-} from './circle/overlay'
+} from './overlay'
 
 /**
  * The contribution API — what a capability IS to the kernel.

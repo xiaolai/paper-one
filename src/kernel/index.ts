@@ -466,7 +466,8 @@ export {
   readPublicEnvelope,
   sealPublic,
 } from './core/public/envelope'
-export type { Minting, PublicCrypto, PublicEnvelope, PublicPassage, PublicRefusal, Unsealed, Unsigned } from './core/public/envelope'
+export type { Minting, PublicCrypto, PublicEnvelope, PublicRefusal, Unsealed, Unsigned } from './core/public/envelope'
+export type { PublicPassage } from './core/ports'
 export {
   EMPTY_PUBLIC_FILE,
   comparePublic,
@@ -500,7 +501,6 @@ export type { BindingRefusal, VoiceBinding, VoiceDecisions, VoiceStanding } from
 export { PUBLIC_WEIGHT, reconcile } from './core/public/presentation'
 export type { AnchorWeight, Contributor } from './core/public/presentation'
 export {
-  ANCHOR_PER_TASK,
   DEFAULT_PUBLIC_BOUNDS,
   MAX_BOOKS_WITH_PUBLIC,
   MAX_HELD_BYTES_PER_BOOK,
@@ -514,7 +514,8 @@ export {
   sliceFor,
 } from './core/public/bounds'
 export type { PublicBounds, Weighed } from './core/public/bounds'
-export type { ForeignAnnotation, ForeignEntry, ForeignOpinion, OverlayAudience } from './core/circle/foreign'
+export type { ForeignAnnotation, ForeignOpinion, OverlayAudience } from './core/foreignAnnotation'
+export type { ForeignEntry } from './core/circle/foreign'
 /* The overlay seam's vocabulary — a capability implementing one needs to name
    the request it is handed and the resolver inside it. */
 export type {
@@ -524,17 +525,9 @@ export type {
   ResolvedPassage,
   ResolvePort,
   ResolveResult,
-} from './core/circle/overlay'
-export {
-  drawable,
-  foreignWeight,
-  readersAmong,
-  offersShare,
-  offersUnshare,
-  overlayKey,
-  overlayKeyOf,
-  shareAbsentBecause,
-} from './core/circle/foreign'
+} from './core/overlay'
+export { foreignWeight, overlayKey, overlayKeyOf, readersAmong } from './core/foreignAnnotation'
+export { drawable, offersShare, offersUnshare, shareAbsentBecause } from './core/circle/foreign'
 export type { Publishability } from './core/circle/foreign'
 /* The page protocol. Pure, and deliberately so — the crypto is INJECTED, which
    is what keeps `page.ts` inside `check-browser-safe.mjs`'s pinned set while
@@ -558,7 +551,9 @@ export {
 } from './core/circle/page'
 export type { Page, PageCrypto, PageRefusal, SignedKind, VersionRange } from './core/circle/page'
 /* The log a page carries, and the fold that turns one into what is held. */
-export { READING_STATES, STARS, compacted, compareEntries, fold, mergeLogs, nextSeq, resolved } from './core/circle/log'
+export { READING_STATES, STARS } from './core/readingState'
+export type { ReadingState, Stars } from './core/readingState'
+export { compacted, compareEntries, fold, mergeLogs, nextSeq, resolved } from './core/circle/log'
 export type {
   Entry,
   Folded,
@@ -566,10 +561,8 @@ export type {
   HeldReview,
   HeldWork,
   Passage,
-  ReadingState,
   Register,
   ShelvedWork,
-  Stars,
 } from './core/circle/log'
 /* What a book is called when two libraries have to agree it is the same book.
    Never a hash of the file — `wire.md` §"`workKey` cannot be the log key". */

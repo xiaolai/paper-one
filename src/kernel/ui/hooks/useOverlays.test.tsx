@@ -2,8 +2,8 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolvedCfiForTesting } from '../../core/resolvedCfi.testkit'
-import type { ForeignAnnotation, OverlayAudience } from '../../core/circle/foreign'
-import type { OverlayContribution } from '../../core/circle/overlay'
+import type { ForeignAnnotation, OverlayAudience } from '../../core/foreignAnnotation'
+import type { OverlayContribution } from '../../core/overlay'
 import { useOverlays, type OverlayDeps } from './useOverlays'
 
 /** WI-22.D1's host half — collecting what capabilities contribute. */

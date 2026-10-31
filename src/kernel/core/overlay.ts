@@ -1,5 +1,5 @@
-import type { ForeignAnnotation } from './foreign'
-import type { ResolvedCfi } from '../resolvedCfi'
+import type { ForeignAnnotation } from './foreignAnnotation'
+import type { ResolvedCfi } from './resolvedCfi'
 
 /**
  * The overlay seam — WI-22.D1, and the FOURTH contribution type.

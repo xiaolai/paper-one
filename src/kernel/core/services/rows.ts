@@ -1,5 +1,5 @@
 import type { IndexedBook } from '../bookIndex'
-import type { Stars } from '../circle/log'
+import type { Stars } from '../readingState'
 import type { Card } from '../cards'
 import type { Mark } from '../marks'
 import type { TrashedBook } from '../bookTrash'

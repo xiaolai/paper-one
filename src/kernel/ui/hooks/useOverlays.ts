@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { overlayKey, readersAmong, type ForeignAnnotation } from '../../core/circle/foreign'
-import type { OverlayContribution, ResolvePort } from '../../core/circle/overlay'
+import { overlayKey, readersAmong, type ForeignAnnotation } from '../../core/foreignAnnotation'
+import type { OverlayContribution, ResolvePort } from '../../core/overlay'
 import type { ForeignAnchor } from '../reader/markPaint'
 
 /**

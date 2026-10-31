@@ -1,4 +1,5 @@
 import { canonicalJson } from '../canonicalJson'
+import type { PublicPassage } from '../ports'
 
 /**
  * What a stranger's annotation IS on the wire — WI-26.2.
@@ -61,16 +62,6 @@ export type PublicOp =
 
 export const PUBLIC_OPS: readonly PublicOp[] = ['note', 'unnote']
 
-
-/** What travels: the quote and its neighbours. Never an anchor. */
-export interface PublicPassage {
-  readonly quote: string
-  readonly prefix: string
-  readonly suffix: string
-  readonly chapter: string
-  /** The reader's own words, when they chose to publish them. */
-  readonly note?: string
-}
 
 /**
  * One public statement, signed.

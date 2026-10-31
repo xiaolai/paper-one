@@ -1,4 +1,3 @@
-import { ANCHOR_PER_TASK } from '../../core/public/bounds'
 import {
   cfiFor,
   distinguishable,
@@ -8,6 +7,16 @@ import {
   type ResolvedCfi,
   type TextIndex,
 } from './reanchor'
+
+/**
+ * The most marks re-anchored before yielding.
+ *
+ * ⚠️ **THE RE-ANCHOR PASS YIELDS BETWEEN SECTIONS AND ITS INNER MARK LOOP DOES
+ * NOT.** With the circle's handful of friends that was a short loop; with
+ * public annotations the same loop is however many a flood published, in one
+ * uninterruptible task, per section.
+ */
+export const ANCHOR_PER_TASK = 64
 
 /**
  * WI-22.A2 — **the pass that makes an unplaced mark reachable.**

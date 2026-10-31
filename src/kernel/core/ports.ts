@@ -817,3 +817,17 @@ export interface SettingsStore {
   /** Every stored value by key. A new object after each change, else the same one. */
   getSnapshot(): Readonly<Record<string, unknown>>
 }
+
+/**
+ * What travels in a public annotation: the quote and its neighbours, never an
+ * anchor. A port type because the kernel's `PrivateAudience` slot answers with
+ * these, between `public` and `circle`, which do not depend on each other.
+ */
+export interface PublicPassage {
+  readonly quote: string
+  readonly prefix: string
+  readonly suffix: string
+  readonly chapter: string
+  /** The reader's own words, when they chose to publish them. */
+  readonly note?: string
+}

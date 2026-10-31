@@ -1,5 +1,6 @@
 import { canonicalJson } from '../canonicalJson'
 import { type Hlc } from '../hlc'
+import type { ReadingState, Stars } from '../readingState'
 
 /**
  * The shared log — WI-22.C1 and WI-22.C2, and WI-23.B1's four kinds.
@@ -69,14 +70,6 @@ export interface Passage {
   /** The TOC label at the time of marking, for a list that reads sensibly. */
   readonly chapter: string
 }
-
-/** Where a reader is with a book — Douban's 想读 / 在读 / 读过. */
-export type ReadingState = 'want' | 'reading' | 'finished'
-export const READING_STATES: readonly ReadingState[] = ['want', 'reading', 'finished']
-
-/** One to five, and nothing else. A `4.2` is what Douban says. */
-export type Stars = 1 | 2 | 3 | 4 | 5
-export const STARS: readonly Stars[] = [1, 2, 3, 4, 5]
 
 /** What every entry carries: which stream it is in, where, and when. */
 export interface Stamped {

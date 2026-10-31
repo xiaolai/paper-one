@@ -1,5 +1,5 @@
 import { folderOf, type BookRecord } from '../bookFolder'
-import type { ReadingState, Stars } from '../circle/log'
+import type { ReadingState, Stars } from '../readingState'
 import { BLOB_FOLDER } from '../ports'
 import { listTrash } from '../bookTrash'
 import type { IndexedBook } from '../bookIndex'

@@ -21,7 +21,7 @@ import type {
   PositionSetRow,
 } from './services/rows'
 import type { ClientContribution } from './capability'
-import { READING_STATES } from './circle/log'
+import { READING_STATES } from './readingState'
 
 /**
  * THE SERVICE TABLE — one literal, from which the router registration, the

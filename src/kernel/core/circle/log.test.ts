@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { hlcOf } from '../hlc'
 import fc from 'fast-check'
-import { READING_STATES, STARS, compacted, compareEntries, fold, mergeLogs, nextSeq, type Entry, type Passage, type ReadingState, type Stars } from './log'
+import { compacted, compareEntries, fold, mergeLogs, nextSeq, type Entry, type Passage } from './log'
+import type { ReadingState, Stars } from '../readingState'
 
 /** WI-22.C1 and WI-22.C2 — the log, and the tombstone that names what it takes back. */
 
@@ -360,15 +361,6 @@ describe('compacted — with the four kinds', () => {
 
   it('serves no register when none was ever said', () => {
     expect(compacted([share('a', 1)], 'desk1').map((one) => one.op)).toEqual(['share'])
-  })
-})
-
-describe('the closed sets the record and the wire share', () => {
-  it('names three reading states and five stars, and no others', () => {
-    /* `parseRecord`, `isOpinion` and the wire all check membership here; a
-       word dropped from this list is a state no reader can have. */
-    expect(READING_STATES).toEqual(['want', 'reading', 'finished'])
-    expect(STARS).toEqual([1, 2, 3, 4, 5])
   })
 })
 

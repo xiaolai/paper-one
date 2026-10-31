@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  ANCHOR_PER_TASK,
   DEFAULT_PUBLIC_BOUNDS,
   MAX_HELD_BYTES_PER_BOOK,
   MAX_BOOKS_WITH_PUBLIC,
@@ -37,12 +36,11 @@ describe('sliceFor', () => {
     expect(() => sliceFor(10, 0)).toThrow(/not a batch size/u)
   })
 
-  it('has a batch size for each of the two loops WI-26.7 names', () => {
-    /* ⚠️ **SIGNATURE VERIFICATION IS NEW MAIN-THREAD WORK, AND THE RE-ANCHOR
-       PASS YIELDS BETWEEN SECTIONS BUT NOT INSIDE ONE.** Both are loops a
-       flood chooses the length of. */
+  it('has a batch size for signature verification, one of the two loops WI-26.7 names', () => {
+    /* ⚠️ **SIGNATURE VERIFICATION IS NEW MAIN-THREAD WORK.** A loop a flood
+       chooses the length of. The other, re-anchoring, is `reanchorPass`'s own
+       and is held in its test. */
     expect(VERIFY_PER_TASK).toBeGreaterThan(0)
-    expect(ANCHOR_PER_TASK).toBeGreaterThan(0)
   })
 })
 

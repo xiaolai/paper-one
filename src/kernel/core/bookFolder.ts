@@ -33,7 +33,7 @@ import { extensionFor, isMissingFile } from './bookVault'
 import { isFormat, type Format, type NamedSource } from './formats'
 import { compareHlc, hlcOf, isHlc, type Hlc } from './hlc'
 import { TAG_MAX, normalizeTag, tagKey } from './tags'
-import { READING_STATES, STARS, type ReadingState, type Stars } from './circle/log'
+import { READING_STATES, STARS, type ReadingState, type Stars } from './readingState'
 
 export const BOOKS_DIR = 'books'
 export const TRASH_DIR = 'trash'

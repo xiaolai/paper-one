@@ -4,13 +4,6 @@
     {
       "id": "circle",
       "file": "src/kernel/core/bookFolder.ts",
-      "match": "./circle/log",
-      "count": 1,
-      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/core/bookFolder.ts",
       "match": "/circle",
       "count": 1,
       "reason": "The folder layout is the kernel's, and it reserves circle's on-disk path inside a book folder; on-disk paths may not change"
@@ -38,24 +31,10 @@
     },
     {
       "id": "circle",
-      "file": "src/kernel/core/capability.ts",
-      "match": "./circle/overlay",
-      "count": 2,
-      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/core/circle/foreign.ts",
+      "file": "src/kernel/core/foreignAnnotation.ts",
       "match": "circle: an annotation with no publication cannot be keyed",
       "count": 1,
-      "reason": "An error message of circle's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/core/libraryStore.ts",
-      "match": "./circle/log",
-      "count": 1,
-      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+      "reason": "An error message prefixed with the name of the capability that first drew annotations; changing it is not this move and it names no behaviour of circle"
     },
     {
       "id": "sync",
@@ -170,39 +149,11 @@
       "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
     },
     {
-      "id": "public",
-      "file": "src/kernel/core/services.ts",
-      "match": "./public/envelope",
-      "count": 1,
-      "reason": "Imports a module under core/public/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/core/services/book.ts",
-      "match": "../circle/log",
-      "count": 1,
-      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
-    },
-    {
       "id": "passages",
       "file": "src/kernel/core/services/passage.ts",
       "match": "services.passages",
       "count": 1,
       "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/core/services/rows.ts",
-      "match": "../circle/log",
-      "count": 1,
-      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/core/serviceTable.ts",
-      "match": "./circle/log",
-      "count": 1,
-      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
     },
     {
       "id": "circle",
@@ -237,13 +188,6 @@
       "file": "src/kernel/index.ts",
       "match": "./core/circle/log",
       "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/index.ts",
-      "match": "./core/circle/overlay",
-      "count": 1,
       "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
     },
     {
@@ -329,34 +273,6 @@
       "match": "voices:",
       "count": 1,
       "reason": "A field naming reader voices in the reading settings, which belong to read-aloud in the kernel until Phase 5"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/ui/hooks/useOverlays.ts",
-      "match": "../../core/circle/foreign",
-      "count": 1,
-      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/ui/hooks/useOverlays.ts",
-      "match": "../../core/circle/overlay",
-      "count": 1,
-      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/ui/reader/markPaint.ts",
-      "match": "../../core/circle/foreign",
-      "count": 1,
-      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/ui/reader/reanchorPass.ts",
-      "match": "../../core/public/bounds",
-      "count": 1,
-      "reason": "Imports a module under core/public/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
     },
     {
       "id": "voices",

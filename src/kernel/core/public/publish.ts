@@ -1,4 +1,4 @@
-import type { PublicPassage } from './envelope'
+import type { PublicPassage } from '../ports'
 
 /**
  * Publishing to the circle and publishing to strangers are two acts — WI-26.4.

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { compareHlc, parseHlc } from './hlc'
 import { createKernelServices, monotonicClock } from './services'
 import type { Diagnostics } from './ports'
-import type { PublicPassage } from './public/envelope'
+import type { PublicPassage } from './ports'
 import { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY } from './settings'
 import { servicesWith, spyRecorder } from './servicesWorld.testkit'
 
