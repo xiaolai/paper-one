@@ -20,6 +20,12 @@
  * refused loudly rather than by leaving the method off, so `PickedFile` stays one
  * shape and a caller using it the wrong way finds out on the first run.
  *
+ * ⚠️ **AND THE PLATFORM'S OWN SENTENCES STOP HERE.** A file deleted between the pick
+ * and the read rejects with `failed to read file as text at path: …`, and handed on
+ * unchanged that gives the capability the very path the closure keeps. So every call
+ * across this line fails in a fixed sentence with no `cause`, and the original goes
+ * to the log on this side, the way the kernel's other adapters keep theirs.
+ *
  * Path-yielding picks (the audiobook's, whose Rust half takes a path) are a
  * different door with their own review. They do not belong on this one.
  */
@@ -62,6 +68,16 @@ export function fileNameOf(path: string): string {
   return path.split(/[\\/]/u).pop() ?? ''
 }
 
+/** A platform call whose failure says only `sentence`. Async, so a throw is caught as a rejection is. */
+async function across<T>(sentence: string, call: () => Promise<T>): Promise<T> {
+  try {
+    return await call()
+  } catch (cause) {
+    console.error(`Paper: ${sentence}`, cause)
+    throw new Error(sentence)
+  }
+}
+
 function handle(path: string, direction: 'read' | 'write', io: FilePickerIo): PickedFile {
   const refuse = (verb: string, asked: string) =>
     new Error(`A file picked to ${direction} cannot be ${verb}: the reader was asked to ${asked}`)
@@ -69,9 +85,18 @@ function handle(path: string, direction: 'read' | 'write', io: FilePickerIo): Pi
      had said it, and every member below reads `path` from the closure. */
   return Object.freeze<PickedFile>({
     name: fileNameOf(path),
-    size: () => (direction === 'read' ? io.size(path) : Promise.reject(refuse('measured', 'save'))),
-    readText: () => (direction === 'read' ? io.readText(path) : Promise.reject(refuse('read', 'save'))),
-    writeText: (text) => (direction === 'write' ? io.writeText(path, text) : Promise.reject(refuse('written', 'open'))),
+    size: () =>
+      direction === 'read'
+        ? across('The picked file could not be measured', () => io.size(path))
+        : Promise.reject(refuse('measured', 'save')),
+    readText: () =>
+      direction === 'read'
+        ? across('The picked file could not be read', () => io.readText(path))
+        : Promise.reject(refuse('read', 'save')),
+    writeText: (text) =>
+      direction === 'write'
+        ? across('The picked file could not be written', () => io.writeText(path, text))
+        : Promise.reject(refuse('written', 'open')),
   })
 }
 
@@ -80,15 +105,17 @@ function handle(path: string, direction: 'read' | 'write', io: FilePickerIo): Pi
 const chosenPath = (answer: unknown): string | null =>
   typeof answer === 'string' && answer !== '' ? answer : null
 
+const NO_DIALOG = 'The file dialog could not be shown'
+
 export function createFilePicker(io: FilePickerIo): FilePicker {
   return {
     available: true,
     pickOpen: async (filters) => {
-      const path = chosenPath(await io.showOpen(filters))
+      const path = chosenPath(await across(NO_DIALOG, () => io.showOpen(filters)))
       return path === null ? null : handle(path, 'read', io)
     },
     pickSave: async (name, filters) => {
-      const path = chosenPath(await io.showSave(name, filters))
+      const path = chosenPath(await across(NO_DIALOG, () => io.showSave(name, filters)))
       return path === null ? null : handle(path, 'write', io)
     },
   }

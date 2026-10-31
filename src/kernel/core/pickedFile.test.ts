@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createFilePicker, fileNameOf, NO_FILE_PICKER, type FilePickerIo } from './pickedFile'
+import { createFilePicker, fileNameOf, NO_FILE_PICKER, type FilePicker, type FilePickerIo } from './pickedFile'
 
 const SECRET_DIR = '/made/up/reader/private-folder'
 const PICKED = `${SECRET_DIR}/notes.json`
@@ -81,6 +81,91 @@ describe('the direction the reader agreed to', () => {
     await expect(file?.size()).rejects.toThrow('A file picked to write cannot be measured: the reader was asked to save')
     expect(io.readText).not.toHaveBeenCalled()
     expect(io.size).not.toHaveBeenCalled()
+  })
+})
+
+/*
+ * THE PLATFORM NAMES THE PATH WHEN IT FAILS. The real trigger needs no malice: a
+ * file deleted between the pick and the read rejects with the whole path in the
+ * sentence, and a capability's own catch is then holding what the closure kept.
+ * Tauri's plugins reject with a bare string as often as an Error, so both shapes.
+ */
+describe('a platform failure, as a capability sees it', () => {
+  const SENTENCE = `failed to read file as text at path: ${PICKED}`
+  const everythingOn = (error: Error): string =>
+    Object.getOwnPropertyNames(error)
+      .map((key) => String((error as unknown as Record<string, unknown>)[key]))
+      .join('\n')
+
+  async function caught(act: () => Promise<unknown>): Promise<Error> {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await act()
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error)
+      /* The original is the kernel's to keep: logged once, whole, on this side of the line. */
+      expect(logged).toHaveBeenCalledTimes(1)
+      const [label, original] = logged.mock.calls[0] ?? []
+      expect(label).toBe(`Paper: ${(error as Error).message}`)
+      expect(String(original)).toContain(SECRET_DIR)
+      return error as Error
+    } finally {
+      logged.mockRestore()
+    }
+    throw new Error('the platform failure was swallowed')
+  }
+
+  const REJECTIONS = [
+    ['an Error', () => new Error(SENTENCE)],
+    ['a bare string', () => SENTENCE],
+  ] as const
+
+  describe.each(REJECTIONS)('rejecting with %s', (_shape, rejection) => {
+    it.each([
+      ['size', 'open', 'The picked file could not be measured'],
+      ['readText', 'open', 'The picked file could not be read'],
+      ['writeText', 'save', 'The picked file could not be written'],
+    ] as const)('%s says a fixed sentence and carries no path', async (method, dialog, sentence) => {
+      const io = ioAnswering(PICKED)
+      io[method].mockRejectedValue(rejection())
+      const picker = createFilePicker(io)
+      const file = dialog === 'open' ? await picker.pickOpen(FILTERS) : await picker.pickSave('offered.json', FILTERS)
+      const error = await caught(() => (method === 'writeText' ? file!.writeText('x') : file![method]()))
+      expect(error.message).toBe(sentence)
+      expect(error.cause).toBeUndefined()
+      expect(everythingOn(error)).not.toContain(SECRET_DIR)
+      expect(everythingOn(error)).not.toContain('notes.json')
+    })
+
+    it.each([
+      ['showOpen', (picker: FilePicker) => picker.pickOpen(FILTERS)],
+      ['showSave', (picker: FilePicker) => picker.pickSave('offered.json', FILTERS)],
+    ] as const)('%s says a fixed sentence and carries no path', async (method, pick) => {
+      const io = ioAnswering(PICKED)
+      io[method].mockRejectedValue(rejection())
+      const error = await caught(() => pick(createFilePicker(io)))
+      expect(error.message).toBe('The file dialog could not be shown')
+      expect(error.cause).toBeUndefined()
+      expect(everythingOn(error)).not.toContain(SECRET_DIR)
+    })
+  })
+
+  it('catches a platform call that throws rather than rejects', async () => {
+    const io = ioAnswering(PICKED)
+    io.readText.mockImplementation(() => {
+      throw new Error(SENTENCE)
+    })
+    const file = await createFilePicker(io).pickOpen(FILTERS)
+    const error = await caught(() => file!.readText())
+    expect(error.message).toBe('The picked file could not be read')
+  })
+
+  it('leaves the direction refusals saying what they said, and logs nothing for them', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const file = await createFilePicker(ioAnswering(PICKED)).pickOpen(FILTERS)
+    await expect(file?.writeText('x')).rejects.toThrow('A file picked to read cannot be written')
+    expect(logged).not.toHaveBeenCalled()
+    logged.mockRestore()
   })
 })
 
