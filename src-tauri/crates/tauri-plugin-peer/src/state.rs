@@ -82,8 +82,9 @@ pub struct PeerState {
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SwitchAnswer {
-    /// This run refuses transport work from now on, and its close is under way.
-    /// The close may outlast the answer: see `SWITCH_CLOSE_DEADLINE`.
+    /// This run refuses transport work and no endpoint of it serves: connections
+    /// are closed and new ones refused. Finishing the close, which flushes the
+    /// goodbyes and the store, may outlast the answer: see `SWITCH_CLOSE_DEADLINE`.
     pub closed: bool,
     /// Why the choice was not recorded, or `None` when it is durable.
     pub record_error: Option<crate::error::Error>,
@@ -160,17 +161,68 @@ impl PeerState {
     /// says, including a data folder that would not resolve. So the two facts go
     /// back apart: see [`SwitchAnswer`].
     pub async fn apply_switch(&self, root: Result<PathBuf>, on: bool) -> SwitchAnswer {
-        let recorded = match root {
-            Ok(root) => crate::commands::off_thread(move || crate::p2p::set(&root, on)).await,
-            Err(unresolved) => Err(unresolved),
+        self.switch_recording(on, async move {
+            match root {
+                Ok(root) => crate::commands::off_thread(move || crate::p2p::set(&root, on)).await,
+                Err(unresolved) => Err(unresolved),
+            }
+        })
+        .await
+    }
+
+    /// [`apply_switch`](Self::apply_switch), apart from how the choice is recorded.
+    ///
+    /// ⚠️ **THE CLOSE STARTS BEFORE THE RECORD AND NEITHER WAITS FOR THE OTHER.**
+    /// The record is a write and an fsync, and it used to come first, so storage
+    /// that stalled left every endpoint serving with the deadline not yet started.
+    /// A stalled record now holds the answer and the control, and nothing else.
+    async fn switch_recording(
+        &self,
+        on: bool,
+        record: impl Future<Output = Result<()>>,
+    ) -> SwitchAnswer {
+        let closing = (!on).then(|| self.begin_close());
+        let close = async {
+            if let Some(closing) = closing {
+                if !closed_within(SWITCH_CLOSE_DEADLINE, closing).await {
+                    log::warn!("peer: closing after the switch went off passed its deadline");
+                }
+            }
         };
-        if !on && !closed_within(SWITCH_CLOSE_DEADLINE, self.begin_close()).await {
-            log::warn!("peer: closing after the switch went off passed its deadline");
-        }
+        let ((), recorded) = tokio::join!(biased; close, record);
         SwitchAnswer {
-            closed: self.closing.load(std::sync::atomic::Ordering::SeqCst),
+            closed: self.transport_closed().await,
             record_error: recorded.err(),
         }
+    }
+
+    /// Whether this run refuses transport work and every endpoint it started has
+    /// stopped serving.
+    ///
+    /// ⚠️ **ASKED OF THE ENDPOINTS, NOT OF THE FLAG.** The flag says a close was
+    /// asked for, and a close can pass its deadline. `Endpoint::closed` resolves
+    /// once the endpoint's close has begun, which in iroh is the moment it closes
+    /// every connection and refuses new ones, whatever that close then waits for.
+    /// A zero timeout still polls it once, which makes this a reading, not a wait.
+    async fn transport_closed(&self) -> bool {
+        if self.refuse_if_closed().is_ok() {
+            return false;
+        }
+        let started = self
+            .node
+            .get()
+            .map(|node| node.endpoint())
+            .into_iter()
+            .chain(self.share.get().map(|share| share.endpoint()));
+        for endpoint in started {
+            if tokio::time::timeout(Duration::ZERO, endpoint.closed())
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Start the share endpoint if this device still has something offered.
@@ -744,6 +796,70 @@ mod tests {
             })
             .await
             .expect("the second close stalled");
+        }
+
+        /// A write stalled on the disk, its fsync say, is no reason to keep serving.
+        #[tokio::test]
+        async fn turning_off_stops_serving_before_a_stalled_record_finishes() {
+            let running = TestNode::start("state-switch-off-stalled-record", Role::Shelf).await;
+            let state = Arc::new(PeerState::default());
+            state.node.set(running.node.clone()).ok().unwrap();
+            let (release, stall) = tokio::sync::oneshot::channel::<()>();
+            let switching = {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    state
+                        .switch_recording(false, async move {
+                            let _ = stall.await;
+                            Ok(())
+                        })
+                        .await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(5), running.node.endpoint().closed())
+                .await
+                .expect("the stalled record held the endpoint open");
+            assert!(!switching.is_finished(), "the record has not finished");
+            release.send(()).unwrap();
+            let answer = switching.await.unwrap();
+            assert!(answer.closed);
+            assert!(answer.record_error.is_none());
+        }
+
+        /// Closure begun in this state, and an endpoint that has not heard: only
+        /// the endpoint can say.
+        #[tokio::test]
+        async fn a_flag_without_a_closed_endpoint_is_not_called_closed() {
+            let running = TestNode::start("state-switch-flag-node", Role::Shelf).await;
+            let state = PeerState::default();
+            state.node.set(running.node.clone()).ok().unwrap();
+            state
+                .closing
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(!state.transport_closed().await);
+            running.node.endpoint().close().await;
+            assert!(state.transport_closed().await);
+        }
+
+        #[tokio::test]
+        async fn a_share_endpoint_still_serving_is_not_called_closed() {
+            let share = crate::share::testkit::TestShare::start("state-switch-flag-share").await;
+            let state = PeerState::default();
+            state.share.set(share.node.clone()).ok().unwrap();
+            state
+                .closing
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(!state.transport_closed().await);
+            share.node.close().await;
+            assert!(state.transport_closed().await);
+        }
+
+        #[tokio::test]
+        async fn an_answer_with_nothing_started_says_closed_only_after_off() {
+            let state = PeerState::default();
+            assert!(!state.transport_closed().await);
+            state.close().await;
+            assert!(state.transport_closed().await);
         }
 
         #[tokio::test]

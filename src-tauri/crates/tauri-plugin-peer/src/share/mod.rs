@@ -965,6 +965,11 @@ impl ShareNode {
             return None;
         }
         let mut held = self.announcer.lock().await;
+        /* Under the mutex: `close` announces itself before it takes this, so a
+        caller here between the two would find the slot still empty, and join. */
+        if *self.closed.borrow() {
+            return None;
+        }
         match &*held {
             DhtSlot::Closed => None,
             DhtSlot::Joined(node) => Some(node.clone()),
@@ -1004,29 +1009,35 @@ impl ShareNode {
         if let Some(renewal) = self.renewal.lock().expect("renewal lock").take() {
             renewal.abort();
         }
-        /* ⚠️ **THE DHT GOES TOO, AND IT USED TO SURVIVE THE CLOSE.** The
-         * announcer holds a `mainline::Dht`, which is a background thread and a
-         * UDP socket; `close` took the gate and the renewal down and left that
-         * running for as long as anything held the closed node. The node's own
-         * `Drop` is not the answer either, because `Arc<ShareNode>` is handed
-         * out — a test that closes and asserts, or a plugin teardown that
-         * outlives one clone, kept a DHT participant alive on a machine that
-         * had stopped sharing. Dropping the handle here is what actually ends
-         * it, and a later `dht()` answers none rather than rejoining. */
-        drop(std::mem::replace(
-            &mut *self.announcer.lock().await,
-            DhtSlot::Closed,
-        ));
-        /* ⚠️ **EVERY STEP RUNS, AND EVERY FAILURE IS SAID.** `.ok()` discarded
-         * both of these: a router that would not shut down and a store that
-         * could not flush are exactly the states worth knowing about at close,
-         * and they left no trace at all. Still best effort in the sense that
-         * one failure does not skip the others — a half-closed node must not
-         * become a node that never closes. */
-        if let Err(err) = self.router.shutdown().await {
-            log::warn!("peer: the share router did not shut down cleanly: {err}");
-        }
-        self.endpoint.close().await;
+        /* ⚠️ **THE ENDPOINT FIRST, AND NOTHING AHEAD OF IT THAT CAN WAIT.** Its first
+         * poll closes every connection and refuses new ones, before any await of
+         * its own. It used to come last, behind a mutex and the router, so a close
+         * stalled on either left notes and blobs serving strangers with the switch
+         * off. The two still run together: what follows is tidying up. */
+        tokio::join!(biased; self.endpoint.close(), async {
+            /* ⚠️ **THE DHT GOES TOO, AND IT USED TO SURVIVE THE CLOSE.** The
+             * announcer holds a `mainline::Dht`, which is a background thread and a
+             * UDP socket; `close` took the gate and the renewal down and left that
+             * running for as long as anything held the closed node. The node's own
+             * `Drop` is not the answer either, because `Arc<ShareNode>` is handed
+             * out — a test that closes and asserts, or a plugin teardown that
+             * outlives one clone, kept a DHT participant alive on a machine that
+             * had stopped sharing. Dropping the handle here is what actually ends
+             * it, and a later `dht()` answers none rather than rejoining. */
+            drop(std::mem::replace(
+                &mut *self.announcer.lock().await,
+                DhtSlot::Closed,
+            ));
+            /* ⚠️ **EVERY STEP RUNS, AND EVERY FAILURE IS SAID.** `.ok()` discarded
+             * both of these: a router that would not shut down and a store that
+             * could not flush are exactly the states worth knowing about at close,
+             * and they left no trace at all. Still best effort in the sense that
+             * one failure does not skip the others — a half-closed node must not
+             * become a node that never closes. */
+            if let Err(err) = self.router.shutdown().await {
+                log::warn!("peer: the share router did not shut down cleanly: {err}");
+            }
+        });
         if let Err(err) = self.store.shutdown().await {
             log::warn!("peer: the public blob store did not shut down cleanly: {err}");
         }
@@ -1463,6 +1474,62 @@ mod dht_after_close {
             .await;
         assert!(dht.is_none());
         assert!(!node.has_dht().await);
+    }
+
+    /// `close` has announced itself and not yet emptied the slot: a caller that
+    /// took the mutex in between used to find it empty, and join.
+    #[tokio::test]
+    async fn a_closing_node_never_joins_the_dht_before_the_slot_says_closed() {
+        let (node, _dir) = discovering("share-dht-closing").await;
+        node.closed.send_replace(true);
+        assert!(matches!(*node.announcer.lock().await, DhtSlot::NotJoined));
+        let dht = node
+            .dht_joining_with(|| panic!("joined the DHT during a close"))
+            .await;
+        assert!(dht.is_none());
+        node.close().await;
+    }
+
+    /// The close stalled before it reached the router, on the mutex here: strangers
+    /// must already be gone, both the one connected and the one arriving.
+    #[tokio::test]
+    async fn a_stalled_close_serves_nobody_while_it_waits() {
+        let share = super::testkit::TestShare::start("share-close-stalled").await;
+        let stranger = super::testkit::TestShare::start("share-close-stalled-stranger").await;
+        let node = share.node.clone();
+        let addr = node.endpoint().addr();
+        let connected = stranger
+            .node
+            .endpoint()
+            .connect(addr.clone(), NOTES_ALPN)
+            .await
+            .expect("a running node answers");
+
+        let held = node.announcer.lock().await;
+        let closing = {
+            let node = node.clone();
+            tokio::spawn(async move { node.close().await })
+        };
+        let patience = std::time::Duration::from_secs(5);
+        tokio::time::timeout(patience, connected.closed())
+            .await
+            .expect("the stalled close left a connection open");
+        let arriving = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            stranger.node.endpoint().connect(addr, NOTES_ALPN),
+        )
+        .await;
+        assert!(
+            !matches!(arriving, Ok(Ok(_))),
+            "a stalled close accepted a connection"
+        );
+        assert!(!closing.is_finished(), "the close was meant to be stalled");
+        drop(held);
+        tokio::time::timeout(patience, closing)
+            .await
+            .expect("the close never finished")
+            .unwrap();
+        stranger.node.close().await;
     }
 
     #[tokio::test]
