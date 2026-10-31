@@ -191,18 +191,25 @@ describe('every mark, for something that is about to write a file', () => {
         const fs = shelf()
         let open = () => {}
         const held = new Promise<void>((resolve) => (open = resolve))
+        let listings = 0
         const gated = {
           ...fs,
           readDir: async (path: string) => {
+            listings += 1
             await held
             return fs.readDir(path)
           },
         }
-        return { fs, gated, open }
+        /* The export waits for pending writes first, so its scan starts a little
+           after the call. The test is about a scan that starts after that one. */
+        const scanStarted = async () => {
+          while (listings === 0) await Promise.resolve()
+        }
+        return { fs, gated, open, scanStarted }
       }
 
       it('answers with its own rows when the panel scan loses a book', async () => {
-        const { fs, gated, open } = overlapping()
+        const { fs, gated, open, scanStarted } = overlapping()
         fs.store.set(recordPath(OTHER), new TextEncoder().encode('{}'))
         const writer = createMarkStore({ fs, queue: writeQueue() })
         await writer.open(BOOK)
@@ -220,10 +227,56 @@ describe('every mark, for something that is about to write a file', () => {
         })
 
         const answer = store.loadAllNow()
+        await scanStarted()
         const panel = store.loadAll()
         open()
         await expect(answer).resolves.toHaveLength(1)
         await panel
+      })
+    })
+
+    /* A mark is on the screen the moment it is made and on the disk some time
+       later, and the scan reads the disk: without the wait, the export left out
+       the mark the reader had just made, and called the backup done. */
+    describe('and a mark is still being written', () => {
+      const writing = () => {
+        const fs = shelf()
+        let open: (failure?: Error) => void = () => {}
+        const held = new Promise<void>((resolve, reject) => {
+          open = (failure) => (failure ? reject(failure) : resolve())
+        })
+        const store = createMarkStore({
+          fs: {
+            ...fs,
+            writeFile: async (path: string, bytes: Uint8Array) => {
+              await held
+              return fs.writeFile(path, bytes)
+            },
+          },
+          queue: writeQueue(),
+        })
+        return { store, open }
+      }
+
+      it('waits for the write, and answers with the mark', async () => {
+        const { store, open } = writing()
+        await store.open(BOOK)
+        const saving = store.add(createMark(highlight()))
+        const answer = store.loadAllNow()
+        open()
+        await saving
+        await expect(answer).resolves.toHaveLength(1)
+      })
+
+      it('answers with the disk when the write fails, which the store has said', async () => {
+        const { store, open } = writing()
+        await store.open(BOOK)
+        const saving = store.add(createMark(highlight()))
+        const answer = store.loadAllNow()
+        open(new Error('disk full'))
+        await expect(saving).rejects.toThrow('disk full')
+        await expect(answer).resolves.toEqual([])
+        expect(store.getSnapshot().persistent).toBe(false)
       })
     })
 

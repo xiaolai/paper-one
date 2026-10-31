@@ -880,6 +880,12 @@ export function createMarkStore({
   }
 
   const loadAllNow: MarkStore['loadAllNow'] = async () => {
+    /* ⚠️ THE WRITES FIRST. The scan reads the disk, and a mark queued before it
+     * is on the screen and not on the disk. Its count moved before the scan took
+     * its starting point, so `writeGen` cannot see this one: a backup left out
+     * the mark just made. A write queued after this point is newer than the
+     * export, and `writeGen` keeps that book's rows from memory. */
+    await queue.idle()
     const { rows, complete } = await scan()
     /* ⚠️ A FAILED SCAN STILL RESOLVES, so this is the only thing that tells it
      * from an empty library — see `MarksScanFailed`. `loadAll` catches the
