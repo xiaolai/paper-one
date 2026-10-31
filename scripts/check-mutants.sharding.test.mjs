@@ -2013,7 +2013,7 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
       first: { exitedCleanly: true, durationMs: 40, report },
       settle: settle === null ? null : { exitedCleanly: true, durationMs: 50, report: settle },
     })
-    const OWED = (root) => [{ file: 'src/a.ts', at: PLACE, identity: A_SURVIVOR.identity, why: NOT_THERE, class: 'added' }]
+    const OWED = () => [{ file: 'src/a.ts', at: PLACE, identity: A_SURVIVOR.identity, why: NOT_THERE, class: 'added' }]
     const resultFile = (root) => path.join(root, 'results/shard-1/a.result.json')
     const reconcileWide = (root, at, wide, fields = {}) =>
       reconcile(root, planOf(), (digest) => ({
@@ -2053,7 +2053,7 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
           const at = path.join(root, 'src/a.ts')
           const wide = wideRun(reportOf(at, first), settle === null ? null : reportOf(at, settle))
 
-          const { stderr, code } = await reconcileWide(root, at, wide, discharged ? {} : { added: OWED(root) })
+          const { stderr, code } = await reconcileWide(root, at, wide, discharged ? {} : { added: OWED() })
 
           expect(code, what).toBe(discharged ? 0 : 1)
           expect(stderr, what).not.toContain('mismatched')
@@ -2135,7 +2135,8 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
       return async () => {
         const report = reports[at]
         at += 1
-        writeFileSync(path.join(root, REPORT), JSON.stringify(report))
+        /* A run with no report to write is a run that left none, for `null`. */
+        if (report !== null) writeFileSync(path.join(root, REPORT), JSON.stringify(report))
         return true
       }
     }
@@ -2232,6 +2233,31 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
         expect(aggregate.code).toBe(0)
       }))
 
+    /* A settle pass that wrote no report is a wide run that could not measure, so
+       nothing was widened: the charge stands, and the aggregate derives narrow. */
+    it('keeps the charge where the wide settle run reported nothing', () =>
+      inScratch('mutants-shard-', async (root) => {
+        const files = threeKinds(root)
+        const a = files['src/a.ts']
+        const subjects = ['src/a.ts']
+        const { manifest } = await planOver(root, { subjects, origins: itsOwn })
+        const atBase = { exitedCleanly: true, durationMs: 900, report: reportOf(a, [{ status: 'Killed' }]) }
+
+        await shardOf(root, manifest, '1/1', {
+          subjects,
+          stryker: inTurn(root, [reportOf(a, [{ status: 'Survived' }]), reportOf(a, [{ status: 'Timeout' }]), null]),
+          measure: () => ({ install: 'linked', outcome: 'killed', durationMs: 900, sha256: A_SHA, source: A_SOURCE, first: atBase, settle: null }),
+        })
+        const written = await readJson(resultIn(path.join(root, 'results'), 1, 'src/a.ts'))
+        const aggregate = await aggregateOf(root, manifest)
+
+        expect(written.base.wide).toBeUndefined()
+        expect(written.base.added.map(({ at }) => at)).toEqual([PLACE])
+        expect(aggregate.stderr).not.toContain('mismatched')
+        expect(aggregate.stderr).toContain(`added: src/a.ts:${PLACE}`)
+        expect(aggregate.code).toBe(1)
+      }))
+
     it('leaves no wide run on a result that was not widened', () =>
       inScratch('mutants-shard-', async (root) => {
         const files = threeKinds(root)
@@ -2268,6 +2294,349 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
         })
       }
     })
+  })
+
+  /* ─── a repeated timeout, in the records the aggregate reads ───────────────── */
+  describe('a repeated wall-clock timeout, reconciled by an aggregate', () => {
+    const TIMEOUT = [{ status: 'Timeout' }]
+    const hungRuns = (at, durationMs = 900) => ({
+      first: { exitedCleanly: true, durationMs, report: reportOf(at, TIMEOUT) },
+      settle: { exitedCleanly: true, durationMs, report: reportOf(at, TIMEOUT) },
+    })
+    /** A file whose one mutant hung, twice, here. */
+    const hungHere = (at) => {
+      const { first, settle } = hungRuns(at, 90)
+      return { outcome: 'timed-out', exitedCleanly: true, report: first.report, settle }
+    }
+    /** A merge base that hung on that mutant too: `killed` is what a real one records — see PR run 41201387001's `circlePort.ts`. */
+    const hungAtBase = (at, fields = {}) => owedAtBase(at, { outcome: 'killed', ...hungRuns(at), authorised: 0, hangsAuthorised: 1, ...fields })
+    /** A merge base whose tests killed it. */
+    const billedAtBase = (at) => killedAtBase(at, { hangsAdded: [PLACE] })
+    const TRACED = { path: 'src/a.ts', how: 'copied', sha256: A_SHA }
+    const COPIES = ['src/one.ts', 'src/two.ts']
+    const copiesPlan = () => planOf(COPIES.map((named) => subjectOf({ path: named, origin: TRACED })))
+    /** Two copies of one base file, each hung here, each with the evidence `measured` gives it. */
+    const reconcileCopies = (root, measured) =>
+      reconcile(root, copiesPlan(), (digest) => ({
+        ...Object.fromEntries(
+          COPIES.map((named) => [
+            `shard-1/${path.basename(named)}.json`,
+            resultOf(digest, { subject: named, ...hungHere(path.join(root, named)), base: { ...measured[named](path.join(root, 'src/a.ts')), origin: TRACED } }),
+          ]),
+        ),
+        'shard-1/receipt.json': receiptOf(digest, { subjects: COPIES }),
+      }))
+    const repeatedAt = (root, named, place = PLACE) => `  repeated: ${path.join(root, named)}:${place}\n`
+
+    /* The real case: `circlePort.ts`, PR run 41201387001, five wall-clock hangs at
+       head and five at base, refused because a base beside \`timed-out` was refused. */
+    it('passes a hang the merge base hung on too, carried on a file that has nothing else', () =>
+      inScratch('mutants-aggregate-', async (root) => {
+        const at = path.join(root, 'src/a.ts')
+
+        const { stderr, code } = await reconcile(root, planOf(), (digest) => ({
+          'shard-1/a.result.json': resultOf(digest, { ...hungHere(at), base: hungAtBase(at) }),
+          'shard-1/receipt.json': receiptOf(digest),
+        }))
+
+        expect(stderr).toBe('')
+        expect(code).toBe(0)
+      }))
+
+    /* ⚠️ **THE FAIL-OPEN.** The aggregate's pairing carried no hangs, so the sweep's
+       own pass wrote an empty `hangsAdded` over the shard's and a hang the merge base
+       had KILLED went nowhere. Allowing `timed-out` a base without deriving the hangs
+       turns that refusal into a pass, which is why this case is the first. */
+    it('fails a hang the merge base killed', () =>
+      inScratch('mutants-aggregate-', async (root) => {
+        const at = path.join(root, 'src/a.ts')
+
+        const { stderr, code } = await reconcile(root, planOf(), (digest) => ({
+          'shard-1/a.result.json': resultOf(digest, { ...hungHere(at), base: billedAtBase(at) }),
+          'shard-1/receipt.json': receiptOf(digest),
+        }))
+
+        expect(code).toBe(1)
+        expect(stderr).toContain(repeatedAt(root, 'src/a.ts'))
+        expect(stderr).not.toContain('mismatched')
+      }))
+
+    it('fails a hang with no evidence, and one whose base could not be measured', async () => {
+      for (const [what, base] of [
+        ['no evidence', null],
+        ['a refusal', refusedAtBase({ reason: 'expired', message: 'it took too long' })],
+      ]) {
+        await inScratch('mutants-aggregate-', async (root) => {
+          const at = path.join(root, 'src/a.ts')
+
+          const { stderr, code } = await reconcile(root, planOf(), (digest) => ({
+            'shard-1/a.result.json': resultOf(digest, { ...hungHere(at), base }),
+            'shard-1/receipt.json': receiptOf(digest),
+          }))
+
+          expect(code, what).toBe(1)
+          expect(stderr, what).toContain(repeatedAt(root, 'src/a.ts'))
+        })
+      }
+    })
+
+    /* ⚠️ **ONE HISTORICAL HANG WAS SPENT ONCE PER COPY** (a second opinion, executed,
+       2026-10-31): the hang pool concatenated each measurement of one origin, where
+       the survivors' reconciles them, so one hang there answered for both copies. */
+    it('does not let copied origins authorise one hang twice', () =>
+      inScratch('mutants-aggregate-', async (root) => {
+        const { stderr, code } = await reconcileCopies(root, { 'src/one.ts': hungAtBase, 'src/two.ts': hungAtBase })
+
+        expect(code).toBe(1)
+        expect(stderr).not.toContain(repeatedAt(root, 'src/one.ts'))
+        expect(stderr).toContain(repeatedAt(root, 'src/two.ts'))
+        expect(stderr).not.toContain('mismatched')
+      }))
+
+    it('authorises nothing on measurements that disagree, and says they did', () =>
+      inScratch('mutants-aggregate-', async (root) => {
+        const { stdout, stderr, code } = await reconcileCopies(root, { 'src/one.ts': hungAtBase, 'src/two.ts': billedAtBase })
+
+        expect(code).toBe(1)
+        expect(stderr).toContain(repeatedAt(root, 'src/one.ts'))
+        expect(stderr).toContain(repeatedAt(root, 'src/two.ts'))
+        expect(stderr).not.toContain('mismatched')
+        expect(stdout).toContain('check-mutants: 1 mutant(s) were contested between measurements of the same merge-base file')
+        expect(stdout).toContain('  src/a.ts — measured 2 time(s), 1 identity(ies) contested\n')
+      }))
+
+    describe('beside a survivor, in a file of two mutants', () => {
+      const BOTH = "export const a = 'a'\nexport const b = 'b'\n"
+      const BOTH_SHA = digestOf(BOTH)
+      const IS_B = { ...IDENTITY, location: { start: { line: 2, column: 18 }, end: { line: 2, column: 21 } } }
+      const reportBoth = (at, statuses) => ({
+        files: { [at]: { source: BOTH, mutants: [IDENTITY, IS_B].map((identity, id) => ({ id: String(id), static: false, ...identity, status: statuses[id] })) } },
+      })
+      const SUBJECT = { sha256: BOTH_SHA, mutants: 2, identities: [IDENTITY, IS_B] }
+      const THE_FILE = { path: 'src/a.ts', how: 'itself', sha256: BOTH_SHA }
+      const here = (at) => ({
+        sha256: BOTH_SHA,
+        mutants: 2,
+        outcome: 'survived',
+        exitedCleanly: false,
+        report: reportBoth(at, ['Survived', 'Timeout']),
+        settle: { exitedCleanly: false, durationMs: 90, report: reportBoth(at, ['Survived', 'Timeout']) },
+      })
+      const measured = (at, statuses, fields) =>
+        owedAtBase(at, {
+          origin: THE_FILE,
+          sha256: BOTH_SHA,
+          source: BOTH,
+          first: { exitedCleanly: true, durationMs: 900, report: reportBoth(at, statuses) },
+          settle: { exitedCleanly: true, durationMs: 900, report: reportBoth(at, statuses) },
+          ...fields,
+        })
+
+      /* The other shape of the fail-open: `survived` always reached the aggregate's
+         derivation, and its pairing carried no hangs either. */
+      it('fails the hang the merge base killed, though the survivor beside it was there too', () =>
+        inScratch('mutants-aggregate-', async (root) => {
+          const at = path.join(root, 'src/a.ts')
+
+          const { stderr, code } = await reconcile(root, planOf([subjectOf({ ...SUBJECT, origin: THE_FILE })]), (digest) => ({
+            'shard-1/a.result.json': resultOf(digest, { ...here(at), base: measured(at, ['Survived', 'Killed'], { hangsAdded: ['2:18'] }) }),
+            'shard-1/receipt.json': receiptOf(digest),
+          }))
+
+          expect(stderr).not.toContain('mismatched')
+          expect(stderr).toContain(repeatedAt(root, 'src/a.ts', '2:18'))
+          expect(stderr).not.toContain('a mutant survived')
+          expect(code).toBe(1)
+        }))
+
+      it('passes the two together when the merge base answers for both', () =>
+        inScratch('mutants-aggregate-', async (root) => {
+          const at = path.join(root, 'src/a.ts')
+
+          const { stderr, code } = await reconcile(root, planOf([subjectOf({ ...SUBJECT, origin: THE_FILE })]), (digest) => ({
+            'shard-1/a.result.json': resultOf(digest, { ...here(at), base: measured(at, ['Survived', 'Timeout'], { hangsAuthorised: 1 }) }),
+            'shard-1/receipt.json': receiptOf(digest),
+          }))
+
+          expect(stderr).toBe('')
+          expect(code).toBe(0)
+        }))
+
+      /* A kill in the wide run discharges a SURVIVOR. A hang is its own pool, whose
+         answer is the merge base's and nothing else's. */
+      it('never lets a wide run discharge a hang', () =>
+        inScratch('mutants-aggregate-', async (root) => {
+          const at = path.join(root, 'src/a.ts')
+          const wide = { first: { exitedCleanly: true, durationMs: 40, report: reportBoth(at, ['Killed', 'Killed']) }, settle: null }
+
+          const { stderr, code } = await reconcile(root, planOf([subjectOf({ ...SUBJECT, origin: THE_FILE })]), (digest) => ({
+            'shard-1/a.result.json': resultOf(digest, { ...here(at), base: measured(at, ['Killed', 'Killed'], { outcome: 'killed', authorised: 0, hangsAdded: ['2:18'], wide }) }),
+            'shard-1/receipt.json': receiptOf(digest),
+          }))
+
+          expect(stderr).not.toContain('mismatched')
+          expect(stderr).toContain(repeatedAt(root, 'src/a.ts', '2:18'))
+          expect(code).toBe(1)
+        }))
+
+      /* The agreeing half of the reconciliation: a pool that is one pool per base
+         file is still a pool of everything every measurement found. */
+      it('authorises two copies’ different hangs from the one base file that hung on both', () =>
+        inScratch('mutants-aggregate-', async (root) => {
+          const traced = { path: 'src/a.ts', how: 'copied', sha256: BOTH_SHA }
+          const statuses = { 'src/one.ts': ['Timeout', 'Killed'], 'src/two.ts': ['Killed', 'Timeout'] }
+
+          const { stderr, code } = await reconcile(root, planOf(COPIES.map((named) => subjectOf({ path: named, ...SUBJECT, origin: traced }))), (digest) => ({
+            ...Object.fromEntries(
+              COPIES.map((named) => {
+                const copy = path.join(root, named)
+                const run = { exitedCleanly: true, durationMs: 90, report: reportBoth(copy, statuses[named]) }
+                return [
+                  `shard-1/${path.basename(named)}.json`,
+                  resultOf(digest, {
+                    subject: named,
+                    sha256: BOTH_SHA,
+                    mutants: 2,
+                    outcome: 'timed-out',
+                    exitedCleanly: true,
+                    report: run.report,
+                    settle: run,
+                    base: measured(path.join(root, 'src/a.ts'), ['Timeout', 'Timeout'], { origin: traced, authorised: 0, outcome: 'killed', hangsAuthorised: 1 }),
+                  }),
+                ]
+              }),
+            ),
+            'shard-1/receipt.json': receiptOf(digest, { subjects: COPIES }),
+          }))
+
+          expect(stderr).toBe('')
+          expect(code).toBe(0)
+        }))
+    })
+
+    /* What a result records of its hangs is held to its own reports, as what it
+       records of its survivors is: its word is not what decides, and a record
+       whose word differs is not one this gate wrote. */
+    it('refuses a result whose hang arithmetic its own evidence does not support', async () => {
+      for (const [what, base, why] of [
+        ['too few', (at) => hungAtBase(at, { hangsAuthorised: 0 }), 'it says the merge base hung on 0 of the timeouts that repeated, and its own evidence hung on 1'],
+        ['too many', (at) => killedAtBase(at, { hangsAuthorised: 1, hangsAdded: [PLACE] }), 'it says the merge base hung on 1 of the timeouts that repeated, and its own evidence hung on 0'],
+        ['none added', (at) => killedAtBase(at), `it says this change added the repeated timeouts at [], and its own evidence says ["${PLACE}"]`],
+        ['one added', (at) => hungAtBase(at, { hangsAdded: [PLACE] }), `it says this change added the repeated timeouts at ["${PLACE}"], and its own evidence says []`],
+      ]) {
+        await inScratch('mutants-aggregate-', async (root) => {
+          const at = path.join(root, 'src/a.ts')
+
+          const { stderr, code } = await reconcile(root, planOf(), (digest) => ({
+            'shard-1/a.result.json': resultOf(digest, { ...hungHere(at), base: base(at) }),
+            'shard-1/receipt.json': receiptOf(digest),
+          }))
+
+          expect(stderr, what).toContain(`mismatched: ${path.join(root, 'results/shard-1/a.result.json')} — the merge base's evidence does not support it: ${why}\n`)
+          expect(code, what).toBe(1)
+        })
+      }
+    })
+
+    it('refuses hang arithmetic that is not hang arithmetic, by name', async () => {
+      const omit = (at) => {
+        const { hangsAuthorised, ...rest } = hungAtBase(at)
+        return rest
+      }
+      for (const [base, why] of [
+        [(at) => hungAtBase(at, { hangsAuthorised: 'one' }), 'its base.hangsAuthorised is "one", which is not a count'],
+        [omit, 'its base.hangsAuthorised is missing, which is not a count'],
+        [(at) => hungAtBase(at, { hangsAdded: PLACE }), `its base.hangsAdded is "${PLACE}", which is not a list of places`],
+        [(at) => hungAtBase(at, { hangsAdded: [''] }), 'its base.hangsAdded is a list, which is not a list of places'],
+      ]) {
+        await inScratch('mutants-aggregate-', async (root) => {
+          const at = path.join(root, 'src/a.ts')
+
+          const { stderr, code } = await reconcile(root, planOf(), (digest) => ({
+            'shard-1/a.result.json': resultOf(digest, { ...hungHere(at), base: base(at) }),
+            'shard-1/receipt.json': receiptOf(digest),
+          }))
+
+          expect(stderr, why).toContain(`unreadable: ${path.join(root, 'results/shard-1/a.result.json')} — ${why}\n`)
+          expect(code, why).toBe(1)
+        })
+      }
+    })
+
+    /* A base file with nothing to mutate holds no hang at all, and is a measurement
+       rather than an absence: it answers for none, and a hang here is this change's. */
+    it('bills a hang here against a merge base that had nothing to mutate', () =>
+      inScratch('mutants-aggregate-', async (root) => {
+        const at = path.join(root, 'src/a.ts')
+        const BARE = 'export const z = 1\n'
+        const traced = { path: 'src/z.ts', how: 'renamed', sha256: digestOf(BARE) }
+
+        const { stderr, code } = await reconcile(root, planOf([subjectOf({ origin: traced })]), (digest) => ({
+          'shard-1/a.result.json': resultOf(digest, {
+            ...hungHere(at),
+            base: owedAtBase(at, { origin: traced, outcome: 'no-mutants', sha256: traced.sha256, source: BARE, first: null, authorised: 0, hangsAdded: [PLACE] }),
+          }),
+          'shard-1/receipt.json': receiptOf(digest),
+        }))
+
+        expect(stderr).not.toContain('mismatched')
+        expect(stderr).toContain(repeatedAt(root, 'src/a.ts'))
+        expect(code).toBe(1)
+      }))
+
+    it('passes a shard’s own hang evidence through the aggregate', () =>
+      inScratch('mutants-shard-', async (root) => {
+        const files = threeKinds(root)
+        const a = files['src/a.ts']
+        const subjects = ['src/a.ts']
+        const { manifest } = await planOver(root, { subjects, origins: itsOwn })
+        const { stryker } = strykerSaying(root, { reports: { [a]: reportOf(a, TIMEOUT) }, settled: { [a]: reportOf(a, TIMEOUT) } })
+
+        const shard = await shardOf(root, manifest, '1/1', {
+          subjects,
+          stryker,
+          measure: () => ({ install: 'linked', outcome: 'killed', durationMs: 900, sha256: A_SHA, source: A_SOURCE, ...hungRuns(a) }),
+        })
+        const written = await readJson(resultIn(path.join(root, 'results'), 1, 'src/a.ts'))
+        const aggregate = await aggregateOf(root, manifest)
+
+        expect(written.outcome).toBe('timed-out')
+        expect(written.base.hangsAuthorised).toBe(1)
+        expect(shard.code).toBe(0)
+        expect(aggregate.stderr).toBe('')
+        expect(aggregate.code).toBe(0)
+      }))
+
+    /* The same hole in the sweep that needs no aggregate: `strykerEach` judges one
+       subject at a time, on an optimistic pool, and what it billed for hangs was
+       never asked again of the one pool a plain sweep's end has. */
+    it('does not let copied origins authorise one hang twice in a plain sweep either', () =>
+      inScratch('mutants-shard-', async (root) => {
+        const files = checkout(root, { 'src/one.ts': A_SOURCE, 'src/two.ts': A_SOURCE, 'src/a.test.mjs': "import './one'\nimport './two'\n" })
+        const atBase = path.join(root, 'src/moved.ts')
+        const { stryker } = strykerSaying(root, {
+          reports: Object.fromEntries(COPIES.map((named) => [files[named], reportOf(files[named], TIMEOUT)])),
+          settled: Object.fromEntries(COPIES.map((named) => [files[named], reportOf(files[named], TIMEOUT)])),
+        })
+        const asked = []
+
+        const { stderr, code } = await sweep(root, {
+          subjects: COPIES,
+          tree: [...COPIES, 'src/a.test.mjs'],
+          stryker,
+          mergeBase: () => BASE,
+          origins: (names) => new Map(names.map((name) => [name, { path: 'src/moved.ts', how: 'copied', sha256: A_SHA }])),
+          measure: (named) => {
+            asked.push(named)
+            return { install: 'linked', outcome: 'killed', durationMs: 900, sha256: A_SHA, source: A_SOURCE, ...hungRuns(atBase) }
+          },
+        })
+
+        expect(asked).toEqual(['src/moved.ts'])
+        expect(code).toBe(1)
+        expect(stderr).not.toContain(repeatedAt(root, 'src/one.ts'))
+        expect(stderr).toContain(repeatedAt(root, 'src/two.ts'))
+      }))
   })
 })
 
