@@ -144,6 +144,21 @@ const WORKS_IN_SETUP = new Set(['tauri-plugin-peer', 'tauri-plugin-webhost'])
 
 const CRATES = path.join(ROOT, 'src-tauri/crates')
 
+/** The crates this checkout's manifest says a capability owns: its own, under `verify:without`. */
+const claimedCrates = (manifest: { readonly capabilities: readonly { readonly crate?: string }[] }): ReadonlySet<string> =>
+  new Set(manifest.capabilities.flatMap((capability) => (capability.crate === undefined ? [] : [capability.crate])))
+
+/**
+ * The exempt crates that ought to be on disk and are not. A crate may be absent
+ * only when no capability claims it, which is what removing its capability leaves.
+ *
+ * A renamed crate stays caught: the manifest then claims a name that is missing
+ * here if the set was not updated, and the new name is not exempt, so its setup
+ * work fails the per-crate test below.
+ */
+const missingExemptCrates = (exempt: ReadonlySet<string>, claimed: ReadonlySet<string>, onDisk: ReadonlySet<string>): readonly string[] =>
+  [...exempt].filter((name) => claimed.has(name) && !onDisk.has(name))
+
 function rustSourcesUnder(dir: string): readonly string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = path.join(dir, entry.name)
@@ -189,7 +204,22 @@ describe('a crate does no work in Rust setup', () => {
   const crates = readdirSync(CRATES).filter((name) => existsSync(path.join(CRATES, name, 'src')))
 
   it('finds the crates', () => {
-    expect(crates).toEqual(expect.arrayContaining([...WORKS_IN_SETUP]))
+    const claimed = claimedCrates(JSON.parse(readFileSync(path.join(ROOT, 'capabilities.manifest.json'), 'utf8')))
+    /* Fails closed: a manifest read as claiming nothing would excuse every absence. */
+    expect(claimed.size).toBeGreaterThan(0)
+    expect(missingExemptCrates(WORKS_IN_SETUP, claimed, new Set(crates))).toEqual([])
+  })
+
+  it.each([
+    ['a claimed crate that is gone', ['a'], [], ['a']],
+    ['a claimed crate that is there', ['a'], ['a'], []],
+    ['an unclaimed crate that is gone, its capability removed', [], [], []],
+  ])('judges %s', (_case, claimed, onDisk, missing) => {
+    expect(missingExemptCrates(new Set(['a']), new Set(claimed), new Set(onDisk))).toEqual(missing)
+  })
+
+  it('reads a crate from a manifest row, and passes over a row without one', () => {
+    expect([...claimedCrates({ capabilities: [{ crate: 'a' }, {}] })]).toEqual(['a'])
   })
 
   it.each(crates.filter((name) => !WORKS_IN_SETUP.has(name)))('%s', (name) => {
