@@ -179,6 +179,35 @@ describe('the dialog', () => {
     expect(io.showSave).toHaveBeenCalledWith('offered.json', FILTERS)
   })
 
+  /* A suggested name is where the dialog opens, so a path in it would let a capability
+     aim the reader's Save at a place of its choosing, and a tired reader presses Return. */
+  it.each([
+    ['a POSIX path', '/made/up/.zshrc'],
+    ['a relative POSIX folder', 'made-up/notes.json'],
+    ['a Windows path', 'C:\\made\\up\\notes.json'],
+    ['a Windows relative folder', 'made-up\\notes.json'],
+    ['a POSIX climb', '../notes.json'],
+    ['a Windows climb', '..\\notes.json'],
+    ['two dots alone', '..'],
+    ['two dots inside a name', 'notes..json'],
+  ])('refuses a suggested name that is %s, before any dialog opens', async (_shape, name) => {
+    const io = ioAnswering(PICKED)
+    await expect(createFilePicker(io).pickSave(name, FILTERS)).rejects.toThrow(
+      'A name offered to the save dialog must be a bare file name',
+    )
+    expect(io.showSave).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a dated name', 'paper-tags-2026-01-02.json'],
+    ['a name with a space and one dot', 'my notes.json'],
+    ['a hidden name', '.notes'],
+  ])('offers %s as it stands', async (_shape, name) => {
+    const io = ioAnswering(PICKED)
+    await createFilePicker(io).pickSave(name, FILTERS)
+    expect(io.showSave.mock.calls).toEqual([[name, FILTERS]])
+  })
+
   it.each([[null], [undefined], [''], [[PICKED]], [[PICKED, '/made/up/other']], [7]])(
     'treats an answer of %j as no pick, in both directions',
     async (answer) => {

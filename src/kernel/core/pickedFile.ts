@@ -49,7 +49,7 @@ export interface FilePicker {
   readonly available: boolean
   /** Null when the reader dismissed the dialog, which is not a failure. */
   pickOpen(filters: readonly FileFilter[]): Promise<PickedFile | null>
-  /** Null when the reader dismissed the dialog. `name` is the name offered, which the reader may change. */
+  /** Null when the reader dismissed the dialog. `name` is the bare file name offered, which the reader may change; a folder in it is refused. */
   pickSave(name: string, filters: readonly FileFilter[]): Promise<PickedFile | null>
 }
 
@@ -107,6 +107,17 @@ const chosenPath = (answer: unknown): string | null =>
 
 const NO_DIALOG = 'The file dialog could not be shown'
 
+/* ⚠️ **THE DIALOG OPENS WHERE THE SUGGESTED NAME SAYS**, so a path here would let a
+   capability choose the location and leave the reader only to press Return: the
+   door is the reader pointing, and this would be the capability pointing for them.
+   Both separators on every platform, because the check should not depend on where
+   the test ran, and `..` anywhere, because no name a capability offers needs it. */
+function refuseAFolder(name: string): void {
+  if (/[\\/]/u.test(name) || name.includes('..')) {
+    throw new Error('A name offered to the save dialog must be a bare file name, with no folder in it')
+  }
+}
+
 export function createFilePicker(io: FilePickerIo): FilePicker {
   return {
     available: true,
@@ -115,6 +126,7 @@ export function createFilePicker(io: FilePickerIo): FilePicker {
       return path === null ? null : handle(path, 'read', io)
     },
     pickSave: async (name, filters) => {
+      refuseAFolder(name)
       const path = chosenPath(await across(NO_DIALOG, () => io.showSave(name, filters)))
       return path === null ? null : handle(path, 'write', io)
     },
