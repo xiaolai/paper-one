@@ -50,6 +50,7 @@ describe('the steps', () => {
          `test:coverage` everywhere. */
       'ledger:check',
       'boundaries',
+      'residue:check',
       'test:projects',
       'test:ledger',
       'typecheck',

@@ -208,6 +208,7 @@ describe('copyTree', () => {
       ['boundaries', 'pnpm', ['boundaries']],
       ['architecture:check', 'pnpm', ['architecture:check']],
       ['compositions:check', 'pnpm', ['compositions:check']],
+      ['residue:check', 'pnpm', ['residue:check']],
       ['test', 'pnpm', ['test']],
       ['build', 'pnpm', ['build']],
       ['build:ios', 'pnpm', ['build:ios']],

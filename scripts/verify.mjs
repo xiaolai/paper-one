@@ -63,6 +63,11 @@ export const STEPS = Object.freeze([
    */
   { name: 'ledger:check', cmd: 'pnpm', args: ['ledger:check'] },
   { name: 'boundaries', cmd: 'pnpm', args: ['boundaries'] },
+  /* `boundaries` SEES IMPORTS; THIS SEES NAMES. A capability can be removed while
+   * the kernel still holds its path or its service slot, and no import says so.
+   * See scripts/check-residue.mjs. Its planted cases run under `test:coverage`,
+   * for the reason given just below for `boundaries:selftest`. */
+  { name: 'residue:check', cmd: 'pnpm', args: ['residue:check'] },
   /* `boundaries:selftest` IS NOT A STEP, AND THE CASES DID NOT STOP RUNNING.
    *
    * It ran the same `CASES` that `check-boundaries.test.mjs` runs under

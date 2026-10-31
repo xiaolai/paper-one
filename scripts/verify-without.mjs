@@ -25,7 +25,8 @@ import { REPO_ROOT, runSteps, spawnStep } from './verify.mjs'
  * What runs in the copy, in order: `capability:remove <id>`; a check that
  * no file under `src/kernel/` changed (the exit criterion's "without
  * touching a kernel file", measured, not assumed); then `typecheck`,
- * `boundaries`, `architecture:check`, `compositions:check`, `test`, `build`
+ * `boundaries`, `architecture:check`, `compositions:check`, `residue:check`,
+ * `test`, `build`
  * (desktop; asserts its bundle), `build:ios` and `build:android` (each
  * asserts its own bundle, now with one capability fewer). Coverage and the
  * Cargo steps are NOT run in the copy, deliberately: coverage floors were
@@ -93,6 +94,7 @@ export const COPY_STEPS = Object.freeze([
   { name: 'boundaries', cmd: 'pnpm', args: ['boundaries'] },
   { name: 'architecture:check', cmd: 'pnpm', args: ['architecture:check'] },
   { name: 'compositions:check', cmd: 'pnpm', args: ['compositions:check'] },
+  { name: 'residue:check', cmd: 'pnpm', args: ['residue:check'] },
   { name: 'test', cmd: 'pnpm', args: ['test'] },
   { name: 'build', cmd: 'pnpm', args: ['build'] },
   { name: 'build:ios', cmd: 'pnpm', args: ['build:ios'] },

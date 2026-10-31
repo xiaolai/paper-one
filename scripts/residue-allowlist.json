@@ -1,0 +1,369 @@
+{
+  "note": "Every place the kernel names a capability, and why. See scripts/check-residue.mjs. A row leaves when its reason does; the gate fails on a stale one.",
+  "rows": [
+    {
+      "id": "circle",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "./circle/log",
+      "count": 1,
+      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "/circle",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves circle's on-disk path inside a book folder; on-disk paths may not change"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "/circle/",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves circle's on-disk path inside a book folder; on-disk paths may not change"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "/public.jsonl",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves public's on-disk path inside a book folder; on-disk paths may not change"
+    },
+    {
+      "id": "voices",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "/voices.json",
+      "count": 1,
+      "reason": "public's stored voice decisions, a file named voices and not the voices capability; the path helper moves to its caller in Phase 2"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/capability.ts",
+      "match": "./circle/overlay",
+      "count": 2,
+      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/circle/foreign.ts",
+      "match": "circle: an annotation with no publication cannot be keyed",
+      "count": 1,
+      "reason": "An error message of circle's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/libraryStore.ts",
+      "match": "./circle/log",
+      "count": 1,
+      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+    },
+    {
+      "id": "sync",
+      "file": "src/kernel/core/presence.ts",
+      "match": "sync:presence",
+      "count": 1,
+      "reason": "Removal writes this register before the trash rename, and behind a port a missed write could resurrect a deleted book; stays in the kernel (plan, What stays)"
+    },
+    {
+      "id": "sync",
+      "file": "src/kernel/core/presence.ts",
+      "match": "sync/removed.json",
+      "count": 1,
+      "reason": "Removal writes this register before the trash rename, and behind a port a missed write could resurrect a deleted book; stays in the kernel (plan, What stays)"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/public/bounds.ts",
+      "match": "public: ",
+      "count": 1,
+      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/public/bounds.ts",
+      "match": "public: not a batch size: ",
+      "count": 1,
+      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/public/bounds.ts",
+      "match": "public: not a byte count: ",
+      "count": 1,
+      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/public/bounds.ts",
+      "match": "public: not a count: ",
+      "count": 2,
+      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/public/envelope.ts",
+      "match": "public: a lifetime is 1..=",
+      "count": 1,
+      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/public/envelope.ts",
+      "match": "public: not a sequence: ",
+      "count": 1,
+      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/public/envelope.ts",
+      "match": "public: not a time: ",
+      "count": 1,
+      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/public/envelope.ts",
+      "match": "public: that envelope is ",
+      "count": 1,
+      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/public/envelope.ts",
+      "match": "public: that is not a publishable envelope",
+      "count": 1,
+      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/public/envelope.ts",
+      "match": "public: that lifetime puts the expiry past a safe integer: ",
+      "count": 1,
+      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/public/presentation.ts",
+      "match": "public: a contributor names neither a voice nor a person",
+      "count": 1,
+      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/registry.ts",
+      "match": "circle:",
+      "count": 1,
+      "reason": "Confinement: the rule for circle's writable paths is the kernel's so a capability cannot widen its own confinement (plan, What stays: REVIEWED_WRITES)"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/registry.ts",
+      "match": "public:",
+      "count": 1,
+      "reason": "Confinement: the rule for public's writable paths is the kernel's so a capability cannot widen its own confinement (plan, What stays: REVIEWED_WRITES)"
+    },
+    {
+      "id": "passages",
+      "file": "src/kernel/core/services.ts",
+      "match": "passages:",
+      "count": 1,
+      "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/services.ts",
+      "match": "./public/envelope",
+      "count": 1,
+      "reason": "Imports a module under core/public/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/services/book.ts",
+      "match": "../circle/log",
+      "count": 1,
+      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+    },
+    {
+      "id": "passages",
+      "file": "src/kernel/core/services/passage.ts",
+      "match": "services.passages",
+      "count": 1,
+      "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/services/rows.ts",
+      "match": "../circle/log",
+      "count": 1,
+      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/serviceTable.ts",
+      "match": "./circle/log",
+      "count": 1,
+      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/index.ts",
+      "match": "./core/circle/bound",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/index.ts",
+      "match": "./core/circle/foreign",
+      "count": 3,
+      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/index.ts",
+      "match": "./core/circle/identity",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/index.ts",
+      "match": "./core/circle/list",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/index.ts",
+      "match": "./core/circle/log",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/index.ts",
+      "match": "./core/circle/overlay",
+      "count": 1,
+      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/index.ts",
+      "match": "./core/circle/page",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/index.ts",
+      "match": "./core/circle/relationships",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/index.ts",
+      "match": "./core/circle/workClaim",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/index.ts",
+      "match": "./core/public/binding",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/index.ts",
+      "match": "./core/public/bounds",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/index.ts",
+      "match": "./core/public/envelope",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/index.ts",
+      "match": "./core/public/order",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/index.ts",
+      "match": "./core/public/presentation",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/index.ts",
+      "match": "./core/public/publish",
+      "count": 2,
+      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
+    },
+    {
+      "id": "passages",
+      "file": "src/kernel/ui/App.tsx",
+      "match": "passages:",
+      "count": 1,
+      "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
+    },
+    {
+      "id": "passages",
+      "file": "src/kernel/ui/App.tsx",
+      "match": "services.passages",
+      "count": 1,
+      "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
+    },
+    {
+      "id": "voices",
+      "file": "src/kernel/ui/App.tsx",
+      "match": "voices:",
+      "count": 1,
+      "reason": "A field naming reader voices in the reading settings, which belong to read-aloud in the kernel until Phase 5"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/ui/hooks/useOverlays.ts",
+      "match": "../../core/circle/foreign",
+      "count": 1,
+      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/ui/hooks/useOverlays.ts",
+      "match": "../../core/circle/overlay",
+      "count": 1,
+      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/ui/reader/markPaint.ts",
+      "match": "../../core/circle/foreign",
+      "count": 1,
+      "reason": "Imports a module under core/circle/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/ui/reader/reanchorPass.ts",
+      "match": "../../core/public/bounds",
+      "count": 1,
+      "reason": "Imports a module under core/public/ that the kernel itself uses; Phase 2 moves what is shared out of that directory"
+    },
+    {
+      "id": "voices",
+      "file": "src/kernel/ui/reader/voiceChoice.ts",
+      "match": "voices:",
+      "count": 1,
+      "reason": "A field naming a tier's system voices in read-aloud code, ordinary vocabulary and not the voices capability; moves in Phase 5"
+    }
+  ]
+}
