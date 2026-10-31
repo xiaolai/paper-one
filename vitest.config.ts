@@ -343,6 +343,13 @@ const COVERAGE_EXCLUDE = [
  * is honest about where the suite actually stands; it is NOT evidence that the
  * reader's UI is well covered. Raising it back is real test-writing work on
  * `src/kernel/ui`, and it is the obvious next piece of it.
+ *
+ * **`src/capabilities/**` GOT ITS FLOOR ON 2026-10-31, BEFORE CODE STARTED MOVING
+ * THERE.** Moving tested code out of the kernel takes it away from the kernel's
+ * floors, and with no floor on the capabilities it would then be guarded by
+ * nothing but the global number. Set to the measurement, truncated to two
+ * decimals, at 12 798 tests: 94.508 lines, 92.884 statements, 88.013 functions,
+ * 90.378 branches.
  */
 const COVERAGE_THRESHOLDS = {
   lines: 83.28,
@@ -351,6 +358,7 @@ const COVERAGE_THRESHOLDS = {
   branches: 78.46,
   'src/kernel/core/**': { lines: 95.12, statements: 93.04, functions: 92.99, branches: 89.79 },
   'src/kernel/ui/**': { lines: 76.71, statements: 74.04, functions: 68.87, branches: 67.17 },
+  'src/capabilities/**': { lines: 94.5, statements: 92.88, functions: 88.01, branches: 90.37 },
   'scripts/lib/**': { lines: 99.24, statements: 98.21, functions: 100, branches: 95.55 },
 }
 
