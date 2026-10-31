@@ -392,6 +392,17 @@ const controlsLabelled = (label: string) =>
 
 const row = (bookId: string, title: string): TrashedBook => ({ folder: bookId.replace(':', '_'), bookId, title, author: 'Someone', removedAt: 1_000, expiresAt: 2_000 })
 
+describe('a capability saying what happened', () => {
+  it('reaches the notice line, and gives the line back when the window goes', async () => {
+    const { services } = await mount(null)
+    act(() => services.notify('Exported 3 marks from 1 book.'))
+    expect(screen.getByText('Exported 3 marks from 1 book.')).toBeTruthy()
+    cleanup()
+    /* A slot still held would refuse this with "already bound". */
+    expect(() => services.bindNotifier(() => {})).not.toThrow()
+  })
+})
+
 describe('what a contributed screen is handed', () => {
   it('gets no `openBook` without a filesystem — a control that could open nothing is not offered', async () => {
     /* `openStored` returns at once with no filesystem, and a contribution

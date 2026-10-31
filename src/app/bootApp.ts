@@ -81,6 +81,7 @@ import {
   summariseMigration,
   timed,
   watchFs,
+  tauriFilePicker,
   tauriSizePort,
 } from '../kernel/ui/boot'
 import type { OpenRequests } from '../kernel/ui/boot'
@@ -239,6 +240,7 @@ export async function bootApp(): Promise<BootedApp> {
      * from a library with none. `shelf.status` reported `books: 0` to a peer
      * asking whether this device was healthy. */
     shelfRead: !shelfUnread,
+    ...(inTauri() ? { files: tauriFilePicker() } : {}),
     /* `record` TEES THE SAME REDACTED FIELDS the console line gets — redaction
        happens once, above both, so the file cannot come to carry something the
        console would not. `enabled` still decides everything: turned off, this

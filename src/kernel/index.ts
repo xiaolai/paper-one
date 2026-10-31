@@ -67,6 +67,9 @@
 /* The services, and the factory a composition root calls once. */
 export { createKernelServices } from './core/services'
 export type { KernelServices, KernelServicesOptions } from './core/services'
+/* The door to a file the reader chose. Types only: a capability receives one from
+   `services.files` and has no business building its own. */
+export type { FileFilter, FilePicker, PickedFile } from './core/pickedFile'
 export { createLibrary } from './core/libraryStore'
 export type { BookPatch, Library, LibraryOptions, RekeyOutcome, RemoteRow } from './core/libraryStore'
 /* The one reader of a rejection's text. In the kernel because a capability

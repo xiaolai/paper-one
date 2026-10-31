@@ -790,6 +790,12 @@ export function App({
     // Stryker disable next-line ArrayDeclaration: `useOccasion`'s `raise` is built from an empty list, so this one and an empty one rebuild the callback equally often — never.
     [raiseNotice],
   )
+  /* A capability's sentence reaches the same line the kernel's own do. An effect
+     with its disposer, so a window that goes away hands the slot back. */
+  useEffect(() => {
+    const bound = services.bindNotifier(setImportNotice)
+    return () => bound.dispose()
+  }, [services, setImportNotice])
   /* The audiobook export, reachable from the command palette and nowhere else —
      see `useAudiobook` for why that is the whole surface for now. */
   const audiobookSource = useMemo(

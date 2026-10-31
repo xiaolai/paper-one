@@ -312,6 +312,7 @@ const FS_ADAPTERS = [
   '^src/kernel/ui/appStorage\\.ts$',
   '^src/kernel/ui/tagFiles\\.ts$',
   '^src/kernel/ui/marksFiles\\.ts$',
+  '^src/kernel/ui/pickedFilesTauri\\.ts$',
 ]
 
 /** The PLUGIN WIRES — the only capability files allowed to import
