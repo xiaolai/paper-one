@@ -2241,8 +2241,18 @@ function sweptTogether(swept, stdout = null) {
   const named = new Map(swept.paired.map(({ at, named: name }) => [at, name]))
   const base = swept.base.map(([subject, evidence]) => [subject, { ...evidence, ...(byFile.get(named.get(subject)) ?? {}) }])
   const stands = base.filter(([, evidence]) => survivorsStand(evidence)).map(([subject]) => subject)
+  /* And the hangs, on the same terms: the sweep's pool holds no more than any one
+     subject's did, so this only ever adds to what `strykerEach` billed — a file it
+     let through on its own pool is one this one could not pay for. */
+  const verdicts = new Map(swept.paired.map(({ at, verdict }) => [at, verdict]))
+  const timedOut = new Map(swept.timedOut)
+  for (const [subject, evidence] of base) {
+    const hangs = verdicts.has(subject) ? hangsUnanswered(verdicts.get(subject), evidence) : []
+    if (hangs.length > 0) timedOut.set(subject, hangs)
+  }
   return {
     base,
+    timedOut: [...timedOut],
     /* Named once: a file already among them for another reason — a run that
        scored nothing cannot reach here, but a file both timed out and survived
        can — is not named twice for this one. */
@@ -2587,7 +2597,7 @@ async function strykerEach(
         const asking = verdict.outcome === 'survived' || verdict.repeated.length > 0
         const judged = asking ? await base(subject, [first.report, settle === null ? null : settle.report], spent) : null
         evidence = judged === null ? null : judged.evidence
-        if (judged !== null && judged.paired !== null) swept.paired.push(judged.paired)
+        if (judged !== null && judged.paired !== null) swept.paired.push({ ...judged.paired, verdict })
         /* A repeat is named whatever else the file also is: a survivor outranks
            it as the file's OUTCOME — a survivor is the finding, a repeat the
            absence of one — and does not replace it as a thing to fix. So a file
@@ -3452,23 +3462,19 @@ async function sweptWide(named, world) {
  * `coveredBy` and `killedBy`, which say WHICH test where this question is only
  * WHETHER one. A reason is kept only on a `Timeout`, the one status
  * `definitelyKilled` reads one for, because a kill's reason is a whole assertion
- * message.
+ * message. Both runs reach here as reports of this one file: `sweptWide` checks the
+ * first, and `measuredHere` refuses a settle run that reported on nothing.
  */
 function slimmedRun({ exitedCleanly, durationMs, report }) {
-  const files = Object.entries(report?.files ?? {}).map(([name, { source, mutants }]) => [
-    name,
-    {
-      source,
-      mutants: mutants.filter(isRecord).map(({ mutatorName, replacement, location, status, statusReason }) => ({
-        mutatorName,
-        replacement,
-        location,
-        status,
-        ...(status === 'Timeout' && statusReason !== undefined ? { statusReason } : {}),
-      })),
-    },
-  ])
-  return { exitedCleanly, durationMs, report: { files: Object.fromEntries(files) } }
+  const [[name, entry]] = Object.entries(report.files)
+  const mutants = entry.mutants.map(({ mutatorName, replacement, location, status, statusReason }) => ({
+    mutatorName,
+    replacement,
+    location,
+    status,
+    statusReason: status === 'Timeout' ? statusReason : undefined,
+  }))
+  return { exitedCleanly, durationMs, report: { files: { [name]: { source: entry.source, mutants } } } }
 }
 
 /**
@@ -4075,29 +4081,10 @@ function differenceAtBase(atBase, undecided, here) {
  * gets.
  */
 export function matchedAcross(entries) {
-  const measured = new Map()
-  for (const { origin, atBase } of entries) {
-    measured.set(origin.path, [...(measured.get(origin.path) ?? []), atBase])
-  }
-  const pooled = []
-  const contested = []
-  for (const [named, runs] of measured) {
-    const found = new Map()
-    for (const [which, run] of runs.entries()) {
-      for (const survivor of run) {
-        const at = found.get(survivorKey(survivor)) ?? { survivor, seen: new Set() }
-        at.seen.add(which)
-        found.set(survivorKey(survivor), at)
-      }
-    }
-    for (const { survivor, seen } of found.values()) {
-      if (seen.size === runs.length) pooled.push(survivor)
-      else contested.push({ ...survivor, why: `${seen.size} of the ${runs.length} measurements of ${named} found it alive and the rest did not` })
-    }
-  }
+  const { measured, pooled, contested } = reconciledAcross(entries, ({ atBase }) => atBase)
   const { authorised, added } = matchedSurvivors(pooled, entries.flatMap(({ here }) => here), [
     ...entries.flatMap(({ undecided }) => undecided),
-    ...contested,
+    ...contested.map((one) => ({ ...one, why: `${one.found} of the ${one.runs} measurements of ${one.file} found it alive and the rest did not` })),
   ])
   const byFile = new Map(entries.map(({ named }) => [named, { authorised: 0, added: [], hangsAuthorised: 0, hangsAdded: [] }]))
   for (const { here } of authorised) byFile.get(here.file).authorised += 1
@@ -4109,11 +4096,18 @@ export function matchedAcross(entries) {
      aggregate derives every difference again rather than taking a shard's word
      for "authorised" — so this pairing is re-run here exactly as the survivors'
      is, one pool per base file. Its own pool: a base hang may answer for a hang
-     here and for nothing else. */
-  const hung = matchedSurvivors(
-    entries.flatMap(({ baseHangs = [] }) => baseHangs),
-    entries.flatMap(({ hereHangs = [] }) => hereHangs),
-  )
+     here and for nothing else.
+
+     ⚠️ **AND IT WAS NOT ON THE SAME TERMS: IT CONCATENATED** (a second opinion,
+     executed, 2026-10-31). Each measurement's hangs went into one list, so a copy's
+     measurement bought a second authorisation out of one historical hang, and a
+     measurement that killed the mutant counted for nothing beside one that hung.
+     The reconciliation is the survivors' own now, and a hang only some measurements
+     met authorises nothing. The defaults that used to sit on these two arrays are
+     gone too: an entry that omitted them was read as a sweep with no hangs, which is
+     how the aggregate billed none — see `baseDisagreement`. */
+  const hangsAtBase = reconciledAcross(entries, ({ baseHangs }) => baseHangs)
+  const hung = matchedSurvivors(hangsAtBase.pooled, entries.flatMap(({ hereHangs }) => hereHangs))
   for (const { here } of hung.authorised) byFile.get(here.file).hangsAuthorised += 1
   for (const { here } of hung.added) byFile.get(here.file).hangsAdded.push(here.at)
   /* ⚠️ **AND THE DISAGREEMENTS THEMSELVES ARE REPORTED, NOT ONLY ACTED ON** (a
@@ -4124,7 +4118,37 @@ export function matchedAcross(entries) {
      the cheapest early sign of a base whose runs are not reproducible — which is
      the thing this whole comparison rests on. The pass is unchanged; the reader
      is told. */
-  return { byFile, contested, measurements: [...measured].map(([named, runs]) => [named, runs.length]) }
+  return { byFile, contested: [...contested, ...hangsAtBase.contested], measurements: [...measured].map(([named, runs]) => [named, runs.length]) }
+}
+
+/**
+ * What every measurement of each base file agrees it held, per mutant — see
+ * `matchedAcross`: `pooled`, which may answer for something here, and `contested`,
+ * which only some of them found and which authorises nothing. `read` is which of an
+ * entry's lists.
+ */
+function reconciledAcross(entries, read) {
+  const measured = new Map()
+  for (const entry of entries) {
+    measured.set(entry.origin.path, [...(measured.get(entry.origin.path) ?? []), read(entry)])
+  }
+  const pooled = []
+  const contested = []
+  for (const runs of measured.values()) {
+    const found = new Map()
+    for (const [which, run] of runs.entries()) {
+      for (const survivor of run) {
+        const at = found.get(survivorKey(survivor)) ?? { survivor, seen: new Set() }
+        at.seen.add(which)
+        found.set(survivorKey(survivor), at)
+      }
+    }
+    for (const { survivor, seen } of found.values()) {
+      if (seen.size === runs.length) pooled.push(survivor)
+      else contested.push({ ...survivor, found: seen.size, runs: runs.length })
+    }
+  }
+  return { measured, pooled, contested }
 }
 
 /** One survivor of one base file as two measurements of it name the same one: where it sits, and what it is. */
@@ -5883,7 +5907,13 @@ async function baseDisagreement(result, subject, root) {
   if (subject.origin === null) {
     return result.base === null ? null : { why: "it carries the merge base's evidence for a file the plan traced to no file at the merge base" }
   }
-  if (result.outcome !== 'survived') return null
+  /* ⚠️ **`timed-out` OWES THE SAME DERIVATION, AND NEVER RECEIVED IT** (PR run
+     41201387001). A shard has asked the merge base about a repeat since 2026-09-20,
+     so a file whose only finding was one that the base hung on too carried evidence
+     this refused outright: `circlePort.ts`, five hangs on each side. A `timed-out`
+     with no evidence fails without being refused: `hangsUnanswered` bills every
+     hang when no base was asked, which is the answer it has earned. */
+  if (result.outcome !== 'survived' && (result.outcome !== 'timed-out' || result.base === null)) return null
   if (result.base === null) {
     return { why: `it leaves the mutants that survived in it with no evidence at all, and the plan traced it to ${subject.origin.path}` }
   }
@@ -5901,8 +5931,9 @@ async function baseDisagreement(result, subject, root) {
   const widened = result.base.wide === undefined ? null : wideUnlike(result.base.wide, subject, at)
   if (widened !== null) return { why: widened }
   const discharged = result.base.wide === undefined ? new Set() : decidedWhenWidened(at, result.base.wide)
-  const here = survivorsFound(at, subject.path, subject.origin.path, [result.report, result.settle === null ? null : result.settle.report], discharged)
-  const { survivors, undecided, problem } = await survivorsAtBase(result.base, {
+  const reports = [result.report, result.settle === null ? null : result.settle.report]
+  const here = survivorsFound(at, subject.path, subject.origin.path, reports, discharged)
+  const { survivors, undecided, repeats = [], problem } = await survivorsAtBase(result.base, {
     at: path.join(root, subject.origin.path),
     named: subject.origin.path,
     frozen: subject.origin.sha256,
@@ -5918,7 +5949,21 @@ async function baseDisagreement(result, subject, root) {
   }
   const unlike = addedUnlike(result.base.added, derived.added)
   if (unlike !== null) return { why: `it says what this change added, and its own evidence says ${unlike}` }
-  return { paired: { at, named: subject.path, origin: subject.origin, here, atBase: survivors, undecided } }
+  /* ⚠️ **THE PAIRING CARRIED NO HANGS, AND THE SWEEP'S ANSWER REPLACES THE SHARD'S**
+     (PR run 41201387001, read rather than hit, because the refusal above stood in
+     front of it). `matchedAcross` read that as a sweep with no hangs, answered an
+     empty `hangsAdded`, and that was spread over the one the shard recorded: a hang
+     the merge base KILLED, beside a survivor it answered for, passed. Both arrays
+     are derived here from the same reports the shard derived them from. */
+  const hereHangs = repeatsFound(at, subject.path, subject.origin.path, reports)
+  const hangs = repeatsJudged(matchedSurvivors(repeats, hereHangs))
+  if (hangs.hangsAuthorised !== result.base.hangsAuthorised) {
+    return { why: `it says the merge base hung on ${result.base.hangsAuthorised} of the timeouts that repeated, and its own evidence hung on ${hangs.hangsAuthorised}` }
+  }
+  if (JSON.stringify(hangs.hangsAdded) !== JSON.stringify(result.base.hangsAdded)) {
+    return { why: `it says this change added the repeated timeouts at ${JSON.stringify(result.base.hangsAdded)}, and its own evidence says ${JSON.stringify(hangs.hangsAdded)}` }
+  }
+  return { paired: { at, named: subject.path, origin: subject.origin, here, atBase: survivors, undecided, hereHangs, baseHangs: repeats } }
 }
 
 /**
@@ -6182,7 +6227,7 @@ function resultProblem(result) {
   if (!swept && result.settle !== null) return `its settle is an object, and ${result.outcome} is no run to settle`
   const base = baseProblem(result.base)
   if (base !== null) return base
-  if (result.outcome !== 'survived' && result.base !== null) {
+  if (result.outcome !== 'survived' && result.outcome !== 'timed-out' && result.base !== null) {
     return `its base is an object, and ${result.outcome} is no survivor for the merge base to answer for`
   }
   if (result.stopped !== undefined && (typeof result.stopped !== 'string' || result.stopped === '')) {
@@ -6279,6 +6324,8 @@ function baseProblem(base) {
       return `its base.added ${at + 1} is ${shown(one)}, which is not a survivor the merge base failed to answer for`
     }
   }
+  if (!isWhole(base.hangsAuthorised)) return `its base.hangsAuthorised is ${shown(base.hangsAuthorised)}, which is not a count`
+  if (!isPaths(base.hangsAdded)) return `its base.hangsAdded is ${shown(base.hangsAdded)}, which is not a list of places`
   return wideProblem(base.wide)
 }
 
