@@ -110,8 +110,8 @@ describe('the P2P switch', () => {
         model={fakeModel({
           role: 'shelf',
           peersLoaded: true,
-          peers: [{ id: 'a', name: 'Phone', platform: 'ios', role: 'satchel', grants: [], pairedAt: 1, lastSeenAt: 1 }],
-          pending: { name: 'Tablet', platform: 'ios', sas: '1234' },
+          peers: [{ id: 'a', name: 'Phone', platform: 'ios', role: 'satchel', grants: [], pairedAt: 1, lastSeenAt: 1, lastAddrs: [] }],
+          pending: { id: 'b', name: 'Tablet', platform: 'ios', sas: '1234', attemptId: 'attempt', kind: 'device' },
         })}
         syncNow={null}
         p2p={p2p}
