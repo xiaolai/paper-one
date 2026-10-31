@@ -1,5 +1,15 @@
-import { VOICE_DECISIONS_PATH, atomicWrite, isMissingFile, notifyAll, type IndexFs, type WriteQueue } from '../../../kernel'
+import { PUBLIC_DIR, atomicWrite, isMissingFile, notifyAll, type IndexFs, type WriteQueue } from '../../../kernel'
 import { NO_DECISIONS, bind, blockPerson, blockVoice, isWellFormed, personOf, standingOf, unbind, unblockPerson, unblockVoice, voicesOf, type BindingRefusal, type VoiceBinding, type VoiceDecisions, type VoiceStanding } from './binding'
+
+/**
+ * The reader's own decisions about voices — which belong to people they know,
+ * and which they have stopped hearing. WI-26.5.
+ *
+ * ⚠️ **LOCAL, AND NEVER PUBLISHED.** A binding says *"this pseudonym is my
+ * friend"*, which is the one fact the whole phase exists to keep off the wire.
+ * It is written here, read here, and has no publisher.
+ */
+export const VOICE_DECISIONS_PATH = `${PUBLIC_DIR}/voices.json`
 
 /**
  * What this reader has decided about other people's voices — WI-26.5, given a

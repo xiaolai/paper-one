@@ -467,17 +467,6 @@ export const CIRCLE_DIR = 'circle'
  * reader's decisions about voices. */
 export const PUBLIC_DIR = 'public'
 
-/**
- * The reader's own decisions about voices — which belong to people they know,
- * and which they have stopped hearing. WI-26.5.
- *
- * ⚠️ **LOCAL, AND NEVER PUBLISHED.** A binding says *"this pseudonym is my
- * friend"*, which is the one fact the whole phase exists to keep off the wire.
- * It is written here, read here, and has no publisher.
- */
-export const VOICE_DECISIONS_PATH = `${PUBLIC_DIR}/voices.json`
-/** The reader's OWN shelf as published — the publisher's store for the shelf log. */
-export const OWN_SHELF_PATH = `${CIRCLE_DIR}/shelf.json`
 /** Everything held about one person that is not about a book. */
 export const personFolderIn = (personId: string): string => `${CIRCLE_DIR}/${safeId(personId)}`
 /** A friend's shelf, as this device holds it. */

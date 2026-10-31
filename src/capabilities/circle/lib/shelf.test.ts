@@ -3,7 +3,7 @@ import { getPublicKey, hashes, sign } from '@noble/ed25519'
 import { sha512 } from '@noble/hashes/sha2.js'
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
 import { describe, expect, it } from 'vitest'
-import { OWN_SHELF_PATH, canonicalJson, makeHlc, type Hlc, type VaultFs } from '../../../kernel'
+import { canonicalJson, makeHlc, type Hlc, type VaultFs } from '../../../kernel'
 import { SHELF_WORK } from './workClaim'
 import { fakeFs } from '../../../kernel/testkit'
 import { pageCrypto } from './crypto'
@@ -23,6 +23,7 @@ import {
   workOf,
   type ShelfFile,
   type ShelvedBook,
+  OWN_SHELF_PATH,
 } from './shelf'
 import { NOTHING_SHARED } from './store'
 
@@ -46,6 +47,12 @@ const mint = () => `shelf${++minted}`
 
 const moby: ShelvedBook = { bookId: 'book:moby', title: 'Moby-Dick', author: 'Herman Melville', identifier: 'isbn:1', languages: ['en-GB'] }
 const dune: ShelvedBook = { bookId: 'book:dune', title: 'Dune', author: 'Frank Herbert', languages: ['en'] }
+
+describe('where the published shelf lives', () => {
+  it('keeps it at circle/shelf.json, because a library on disk already has it there', () => {
+    expect(OWN_SHELF_PATH).toBe('circle/shelf.json')
+  })
+})
 
 describe('the work a book publishes as', () => {
   it('is the claim’s inputs in clear, with the primary language subtag', () => {

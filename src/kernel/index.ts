@@ -409,7 +409,6 @@ export type { WriteQueue } from './core/writeQueue'
    `circlePathIn`. The paths are the kernel's because the folder layout is. */
 export {
   CIRCLE_DIR,
-  OWN_SHELF_PATH,
   circleFolderIn,
   circlePathIn,
   personFolderIn,
@@ -422,7 +421,6 @@ export {
   publicPathIn,
   sharedPathIn,
   PUBLIC_DIR,
-  VOICE_DECISIONS_PATH,
 } from './core/bookFolder'
 export type { PublicPassage } from './core/ports'
 export type { ForeignAnnotation, ForeignOpinion, OverlayAudience } from './core/foreignAnnotation'

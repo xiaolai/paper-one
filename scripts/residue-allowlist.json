@@ -23,13 +23,6 @@
       "reason": "The folder layout is the kernel's, and it reserves public's on-disk path inside a book folder; on-disk paths may not change"
     },
     {
-      "id": "voices",
-      "file": "src/kernel/core/bookFolder.ts",
-      "match": "/voices.json",
-      "count": 1,
-      "reason": "public's stored voice decisions, a file named voices and not the voices capability; the path helper moves to its caller in Phase 2"
-    },
-    {
       "id": "circle",
       "file": "src/kernel/core/foreignAnnotation.ts",
       "match": "circle: an annotation with no publication cannot be keyed",

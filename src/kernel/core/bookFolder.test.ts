@@ -30,7 +30,6 @@ import {
 import {
   CIRCLE_DIR,
   OWN_LISTS_DIR,
-  OWN_SHELF_PATH,
   ownListPathIn,
   personFolderIn,
   personListPathIn,
@@ -1267,7 +1266,6 @@ describe('where the circle’s files live — WI-23.C3 and E1', () => {
   it('names each path under the circle folder, one segment per id, and never a book folder', () => {
     const person = 'ab'.repeat(32)
     expect(CIRCLE_DIR).toBe('circle')
-    expect(OWN_SHELF_PATH).toBe('circle/shelf.json')
     expect(personFolderIn(person)).toBe(`circle/${person}`)
     expect(personShelfPathIn(person)).toBe(`circle/${person}/shelf.json`)
     expect(relationshipPathIn(person)).toBe(`circle/${person}/relationship.json`)
