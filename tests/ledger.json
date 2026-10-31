@@ -11523,8 +11523,6 @@
     "src/kernel/ui/reader/useSpeech.test.tsx > the transport pressed when there is nothing to press it on > answers false for every seek before a reading has begun",
     "src/kernel/ui/reader/useSpeech.test.tsx > the transport pressed when there is nothing to press it on > clears a refusal when the reader presses Listen again",
     "src/kernel/ui/reader/useSpeech.test.tsx > the transport pressed when there is nothing to press it on > stops the position tick when the reading ends, rather than leaving it running",
-    "src/kernel/ui/reader/useSpeech.test.tsx > the value that means “nothing is known yet” > is what the app’s own first render passes, before anything has resolved",
-    "src/kernel/ui/reader/useSpeech.test.tsx > the value that means “nothing is known yet” > names no book and no section",
     "src/kernel/ui/reader/useSpeech.test.tsx > what a reader is told when the reading stops > names the two reasons that are worth a sentence",
     "src/kernel/ui/reader/useSpeech.test.tsx > what a reader is told when the reading stops > says nothing for every reason that is not a failure",
     "src/kernel/ui/reader/useSpeech.test.tsx > what a reader is told when the reading stops > tells the two sentences apart, which is the whole of its job",
