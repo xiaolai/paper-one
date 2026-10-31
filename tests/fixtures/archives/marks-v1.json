@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "books": [
+    {
+      "bookId": "book-one",
+      "title": "The Invented Harbour",
+      "author": "A. Nobody",
+      "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "marks": [
+        {
+          "text": "The tide came in sideways.",
+          "prefix": "At dawn ",
+          "suffix": " Nobody minded.",
+          "note": "Is this the narrator lying?",
+          "kind": "highlight",
+          "tint": "yellow",
+          "style": "fill",
+          "chapter": "Chapter 1",
+          "createdAt": "2026-01-02T03:04:05.000Z",
+          "localAnchor": {
+            "cfi": "epubcfi(/6/4!/4/2/1:0)",
+            "sectionIndex": 1
+          }
+        },
+        {
+          "text": "Second passage",
+          "prefix": "At dawn ",
+          "suffix": " Nobody minded.",
+          "note": "",
+          "kind": "highlight",
+          "tint": "green",
+          "style": "fill",
+          "chapter": "Chapter 1",
+          "createdAt": "2026-01-02T03:04:05.000Z",
+          "localAnchor": {
+            "cfi": "epubcfi(/6/6!/4/2/1:0)",
+            "sectionIndex": 2
+          }
+        },
+        {
+          "text": "",
+          "prefix": "",
+          "suffix": "",
+          "note": "",
+          "kind": "bookmark",
+          "tint": "yellow",
+          "style": "fill",
+          "chapter": "Chapter 1",
+          "createdAt": "2026-01-02T03:04:05.000Z",
+          "localAnchor": {
+            "cfi": "epubcfi(/6/8!/4/2)",
+            "sectionIndex": 3
+          }
+        },
+        {
+          "text": "A passage from another edition",
+          "prefix": "At dawn ",
+          "suffix": " Nobody minded.",
+          "note": "Is this the narrator lying?",
+          "kind": "highlight",
+          "tint": "yellow",
+          "style": "fill",
+          "chapter": "Chapter 1",
+          "createdAt": "2026-01-02T03:04:05.000Z",
+          "localAnchor": {
+            "cfi": "",
+            "sectionIndex": 0
+          },
+          "unplaced": {
+            "reason": "foreign-build",
+            "fromBook": "book-old"
+          }
+        }
+      ],
+      "cards": [
+        {
+          "kind": "Recall",
+          "body": "Who keeps the harbour?",
+          "answer": "Nobody",
+          "source": "Chapter 1",
+          "createdAt": "2026-01-02T03:04:05.000Z",
+          "localAnchor": {
+            "cfi": "epubcfi(/6/4!/4/2/1:0)"
+          }
+        },
+        {
+          "kind": "Idea",
+          "body": "Tides as memory",
+          "answer": "",
+          "source": "Chapter 1",
+          "createdAt": "2026-01-02T03:04:05.000Z",
+          "localAnchor": null
+        }
+      ]
+    },
+    {
+      "bookId": "book-two",
+      "title": "虚构之书",
+      "author": "",
+      "marks": [
+        {
+          "text": "潮水从侧面涌来。",
+          "prefix": "At dawn ",
+          "suffix": " Nobody minded.",
+          "note": "# 不是标题",
+          "kind": "highlight",
+          "tint": "yellow",
+          "style": "fill",
+          "chapter": "Chapter 1",
+          "createdAt": "2026-01-02T03:04:05.000Z",
+          "localAnchor": {
+            "cfi": "epubcfi(/6/2!/4/2/1:3)",
+            "sectionIndex": 0
+          }
+        }
+      ],
+      "cards": []
+    }
+  ]
+}

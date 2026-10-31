@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "books": [
+    {
+      "bookId": "book-one",
+      "title": "The Invented Harbour",
+      "author": "A. Nobody",
+      "tags": [
+        "Sea",
+        "To reread"
+      ]
+    },
+    {
+      "bookId": "book-two",
+      "title": "虚构之书",
+      "author": "",
+      "tags": [
+        "小说"
+      ]
+    }
+  ]
+}
