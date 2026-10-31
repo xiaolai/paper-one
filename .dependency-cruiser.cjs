@@ -267,19 +267,7 @@ const KERNEL_MOBILE_ENTRY = '^src/kernel/ui/mobile\\.ts$'
 
 /** The kernel's storage adapters: the only modules that touch the fs plugin.
  *
- *  `tagFiles` is one of them, and is on this list for the same reason the
- *  others are: it is the half of the tag archive that TOUCHES A FILE, split
- *  from `core/tagArchive.ts` — which decides what an archive contains and
- *  needs no filesystem to be tested. Both paths go through a dialog, so the
- *  file is one the reader pointed at; no path is constructed there.
- *
- *  `marksFiles` is the same shape and here for the same reason: the I/O half
- *  of `core/marksArchive.ts`, dialogs only, no path constructed. That two of
- *  these now exist is the pattern, not an exception to it — an archive is a
- *  pure document module plus a thin file half, and the file half is what goes
- *  on this list.
- *
- *  `bookSizes` is the third of that shape: `sizePortOver` decides what a size
+ *  `bookSizes` splits the same way: `sizePortOver` decides what a size
  *  MEANS — the extension preference order, and the rule that a walk which did
  *  not finish has no total — and needs no filesystem to be tested, while the
  *  binding under it is two calls to the plugin. It constructs paths, unlike
@@ -310,8 +298,6 @@ const FS_ADAPTERS = [
    * does: own a directory under `$APPDATA` and remove its own files from it. */
   '^src/kernel/ui/reader/audiobookTauri\\.ts$',
   '^src/kernel/ui/appStorage\\.ts$',
-  '^src/kernel/ui/tagFiles\\.ts$',
-  '^src/kernel/ui/marksFiles\\.ts$',
   '^src/kernel/ui/pickedFilesTauri\\.ts$',
 ]
 

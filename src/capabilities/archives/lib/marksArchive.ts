@@ -1,22 +1,26 @@
-import type { IndexedBook } from './bookIndex'
-import type { Card, CardKind } from './cards'
-import { CARD_KINDS, MAX_CARD_TEXT, liveCards } from './cards'
-import { fold } from './library'
-import { cfiOverlaps } from './markMatch'
-import { ARCHIVE_MAX_BYTES, ARCHIVE_MAX_ROWS } from './importLimits'
 import {
+  ARCHIVE_MAX_BYTES,
+  ARCHIVE_MAX_ROWS,
+  CARD_KINDS,
   MARK_KINDS,
   MARK_STYLES,
   MARK_TINTS,
+  MAX_CARD_TEXT,
   MAX_MARK_NOTE,
   MAX_MARK_TEXT,
+  cfiOverlaps,
+  foldForMatching as fold,
+  isBookmarkKind,
+  liveCards,
   liveMarks,
+  type Card,
+  type CardKind,
+  type IndexedBook,
   type Mark,
   type MarkKind,
   type MarkStyle,
   type MarkTint,
-  isBookmarkKind,
-} from './marks'
+} from '../../../kernel'
 
 /**
  * The reader's marginalia, as a file they can keep.
@@ -32,7 +36,7 @@ import {
  * stated rule about what is deliberately NOT exported because it regenerates
  * itself.
  *
- * PURE. Reading and writing the file belongs to `ui/marksFiles.ts`; everything
+ * PURE. Reading and writing the file belongs to `lib/marksFiles.ts`; everything
  * about what the document contains, and how a book in it is matched to a book
  * on the shelf, is decided here where it can be tested without a filesystem.
  */

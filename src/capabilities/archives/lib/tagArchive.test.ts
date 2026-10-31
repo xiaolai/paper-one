@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { IndexedBook } from './bookIndex'
+import type { IndexedBook } from '../../../kernel'
 import { archiveName, exportTags, parseArchive, planImport, type TagArchive } from './tagArchive'
 
 function book(over: Partial<IndexedBook> = {}): IndexedBook {

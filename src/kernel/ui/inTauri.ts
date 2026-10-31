@@ -4,8 +4,8 @@
  * ## Why two lines get their own module
  *
  * This lived in `appStorage.ts`, whose first statement imports six symbols from
- * `@tauri-apps/plugin-fs`. Four modules — `lookUp`, `marksFiles`, `tagFiles`
- * and `openExternal` — import **only this function** from it, and every one of
+ * `@tauri-apps/plugin-fs`. Modules — `lookUp` and `openExternal` among them —
+ * import **only this function** from it, and every one of
  * them dragged the filesystem plugin in behind a `window` check that needs no
  * filesystem at all.
  *

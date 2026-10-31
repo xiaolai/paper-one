@@ -160,7 +160,7 @@ describe('tagMany', () => {
        under test do not need the size: a lost update across the eight workers
        shows at any width-8 fan-out (the first draft's `changed += await`
        answered 201 of 2 000), and the fan-out bound is about width, not count.
-       `useArchives.test.ts` carries the two-thousand-row import over a fake
+       `archiveActions.test.ts` carries the two-thousand-row import over a fake
        store, where it is cheap. */
     const ids = Array.from({ length: 200 }, (_, i) => `book_${i}`)
     const fs = fakeFs(seeded(ids))

@@ -1,9 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import type { IndexedBook } from './bookIndex'
-import type { Card } from './cards'
-import type { Mark } from './marks'
+import type { Card, IndexedBook, Mark } from '../../../kernel'
 import { exportMarks, parseArchive, toMarkdown } from './marksArchive'
 import { exportTags, parseArchive as parseTagArchive } from './tagArchive'
 
@@ -22,7 +20,7 @@ import { exportTags, parseArchive as parseTagArchive } from './tagArchive'
  */
 
 const fixture = (name: string): string =>
-  readFileSync(fileURLToPath(new URL(`../../../tests/fixtures/archives/${name}`, import.meta.url)), 'utf8')
+  readFileSync(fileURLToPath(new URL(`../../../../tests/fixtures/archives/${name}`, import.meta.url)), 'utf8')
 
 const AT = Date.UTC(2026, 0, 2, 3, 4, 5)
 

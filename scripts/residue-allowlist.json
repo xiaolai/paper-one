@@ -108,20 +108,6 @@
     },
     {
       "id": "cards",
-      "file": "src/kernel/core/marksArchive.ts",
-      "match": "./cards",
-      "count": 2,
-      "reason": "The archive format holds cards and stays compatible (D2); this row leaves when the module moves to archives"
-    },
-    {
-      "id": "cards",
-      "file": "src/kernel/core/marksArchive.ts",
-      "match": "cards:",
-      "count": 6,
-      "reason": "The archive format holds cards and stays compatible (D2); this row leaves when the module moves to archives"
-    },
-    {
-      "id": "cards",
       "file": "src/kernel/core/serviceTable.ts",
       "match": "./cards",
       "count": 1,
@@ -166,29 +152,8 @@
       "id": "cards",
       "file": "src/kernel/ui/App.tsx",
       "match": "services.cards",
-      "count": 1,
+      "count": 2,
       "reason": "Rekeying a book's cards when its id changes stays the kernel's, with the store (D2)"
-    },
-    {
-      "id": "cards",
-      "file": "src/kernel/ui/hooks/useCards.ts",
-      "match": "../../core/cards",
-      "count": 1,
-      "reason": "Holds the archive actions' view of the store; this row leaves when those move to archives"
-    },
-    {
-      "id": "cards",
-      "file": "src/kernel/ui/marksFiles.ts",
-      "match": "../core/cards",
-      "count": 1,
-      "reason": "The archive format holds cards (D2); this row leaves when the module moves to archives"
-    },
-    {
-      "id": "cards",
-      "file": "src/kernel/ui/marksFiles.ts",
-      "match": "cards:",
-      "count": 1,
-      "reason": "The archive format holds cards (D2); this row leaves when the module moves to archives"
     }
   ]
 }

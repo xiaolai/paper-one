@@ -17,7 +17,6 @@ import type { DiagnosticLog } from '../core/diagnosticsLog'
 import { createOpenRollback } from './openRollback'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
 import { useImportRun } from './hooks/useImportRun'
-import { useArchives } from './hooks/useArchives'
 import { requestWindowClose, useWindowClose } from './hooks/useWindowClose'
 import { takeOpened, type OpenRequests } from './openedFiles'
 import { closePrepare } from './closeWindow'
@@ -33,7 +32,6 @@ import { useEnrichment } from './hooks/useEnrichment'
 import { flushBeforeClose, onBeforeClose, onBeforeDrain, settleBeforeDrain } from '../core/beforeClose'
 import { useFileDrop, type DropHaul } from './hooks/useFileDrop'
 import { useLibrary } from './hooks/useLibrary'
-import { useCards } from './hooks/useCards'
 import { useMarks } from './hooks/useMarks'
 import { useMarking } from './hooks/useMarking'
 import { useBookmarking } from './hooks/useBookmarking'
@@ -260,7 +258,6 @@ export function App({
    * folder goes through the ONE queue the services share — see
    * `createKernelServices` — which is what gives the close something to hold for. */
   const marks = useMarks(services.marks, book.bookId)
-  const cards = useCards(services.cards)
   const marking = useMarking(book, marks)
   /* Beside marking, not inside it. Marking acts on a selection and
    * bookmarking acts on a place — see `useBookmarking`. */
@@ -896,7 +893,10 @@ export function App({
   const { bookId, meta, source, cover } = book
 
   const { rekey: rekeyMarks } = marks
-  const { rekey: rekeyCards } = cards
+  const rekeyCards = useCallback(
+    (from: string, to: string) => void services.cards.rekey(from, to).catch(() => {}),
+    [services.cards],
+  )
 
   /* Taking a book in — the bytes, the identity migration and the record, in one
    * ordered sequence. It was four pieces of this component: two refs, a layout
@@ -1307,12 +1307,6 @@ export function App({
     const timer = setTimeout(() => setNotice(null), NOTICE_MS)
     return () => clearTimeout(timer)
   }, [notice])
-
-  /* THE READER'S FILING AND THEIR MARGINALIA, out to a file and back — see
-   * `useArchives`. Four handlers and a hundred and seventy lines of the same
-   * errand (pick, plan, write, say what happened), none of which touches the
-   * position, the screen or the keyboard map this component coordinates. */
-  const archives = useArchives({ library, marks, cards, notice: setImportNotice })
 
   const addFolder = useCallback(
     () => {
@@ -2180,10 +2174,6 @@ export function App({
         editTags: readingBook ? openTags : null,
         jumpBack: jumps.canBack ? jumps.back : null,
         jumpForward: jumps.canForward ? jumps.forward : null,
-        /* NULL WHERE THE BUILD CANNOT DO IT — the palette omits the row
-           rather than offering one that would refuse. `useArchives` decides,
-           because it is what knows. */
-        exportMarks: archives.exportMarks,
         /* Handed over whole, with no rule spelled here: `reachable` is the rule
            and `buildCommands` is what reads it, because a rule spelled in `App` is
            a rule nothing measures — no test renders this file and reads the
@@ -2194,9 +2184,6 @@ export function App({
            that would be refused. */
         ...(audiobook ? { exportAudiobook: audiobook } : {}),
         onDuplicate: onDuplicateCommand,
-        importMarks: archives.importMarks,
-        exportTags: archives.exportTags,
-        importTags: archives.importTags,
         /* The same faces the settings panel offers — see `offeredFaces`. */
         faces: offeredHere,
         state,
@@ -2241,11 +2228,9 @@ export function App({
        on every relocation — a dependency that held by accident and would have
        stopped holding the moment the hook's inputs changed. */
     /* AND THE SAME OMISSION AGAIN, twice over. `jumps` supplies both jump
-       commands and their availability; the four archive callbacks close over
-       `library.books`, `marks` and `cards`. None was listed, so the palette
-       could offer a jump the stack no longer has, or export a library snapshot
-       taken several imports ago — a stale command is worse than a missing one
-       because it looks like it worked. */
+       commands and their availability. It was not listed, so the palette could
+       offer a jump the stack no longer has — a stale command is worse than a
+       missing one because it looks like it worked. */
     [
       state,
       dispatch,
@@ -2260,7 +2245,6 @@ export function App({
       openTags,
       composition,
       jumps,
-      archives,
       markSelection,
       closeBook,
       /* ⚠️ **READ AT LINE 1934 AND OMITTED HERE.** `running` and `run` both change

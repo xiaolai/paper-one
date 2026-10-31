@@ -1,5 +1,4 @@
-import type { IndexedBook } from './bookIndex'
-import { TAG_MAX, fold, normalizeTag, tagKey } from './library'
+import { TAG_MAX, foldForMatching as fold, normalizeTag, tagKey, type IndexedBook } from '../../../kernel'
 
 /**
  * The reader's filing, as a file they can keep.

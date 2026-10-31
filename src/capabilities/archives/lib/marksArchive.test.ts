@@ -10,11 +10,7 @@ import {
   toMarkdown,
   type MarksArchive,
 } from './marksArchive'
-import type { IndexedBook } from './bookIndex'
-import type { Card } from './cards'
-import type { Mark } from './marks'
-import { ARCHIVE_MAX_BYTES, ARCHIVE_MAX_ROWS } from './importLimits'
-import { hlcOf } from './hlc'
+import { ARCHIVE_MAX_BYTES, ARCHIVE_MAX_ROWS, hlcOf, type Card, type IndexedBook, type Mark } from '../../../kernel'
 
 /**
  * The door: everything the reader wrote, out to a file and back.

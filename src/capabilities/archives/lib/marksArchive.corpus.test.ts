@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { IndexedBook } from './bookIndex'
-import type { Mark } from './marks'
-import { BUILD_IDS, CORPUS_BUILDS, CORPUS_PASSAGES, type BuildId } from './markCorpus.testkit'
+import type { IndexedBook, Mark } from '../../../kernel'
+import { BUILD_IDS, CORPUS_BUILDS, CORPUS_PASSAGES, type BuildId } from '../../../kernel/testkit'
 import { exportMarks, planImport } from './marksArchive'
 
 /**

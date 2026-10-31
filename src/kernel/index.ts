@@ -113,7 +113,8 @@ export { bodyOf, canonicalTextOf, extractSections, MAX_SECTION_CHARS } from './u
  * path"* is that assertion, and it exists because WI-21.P1 paid for it. */
 export { refuseBookScripts } from './ui/reader/bookScripts'
 export type { ExtractDeps, ExtractedSection, Extraction } from './ui/reader/passageText'
-export { createMarkStore } from './core/markStore'
+export { cfiOverlaps } from './core/markMatch'
+export { MarksScanFailed, createMarkStore } from './core/markStore'
 export type { MarkSnapshot, MarkStore, MarkStoreOptions } from './core/markStore'
 export type { UnplacedMark } from './core/marks'
 
@@ -443,7 +444,8 @@ export type {
 export { foreignWeight, overlayKey, overlayKeyOf, readersAmong } from './core/foreignAnnotation'
 export { READING_STATES, STARS } from './core/readingState'
 export type { ReadingState, Stars } from './core/readingState'
-export { tagKey } from './core/tags'
+/* `fold` UNDER ANOTHER NAME, because the entry's `fold` is circle's. */
+export { TAG_MAX, fold as foldForMatching, normalizeTag, tagKey } from './core/tags'
 
 /* The ledger's primitives: the stamp, the presence register, the formats. */
 export {
@@ -502,9 +504,12 @@ export {
   MARK_KINDS,
   MARK_STYLES,
   MARK_TINTS,
+  MAX_MARK_NOTE,
+  MAX_MARK_TEXT,
   createMark,
   isAnnotation,
   isBookmark,
+  isBookmarkKind,
   liveMarks,
   markStamp,
   mergeMarks,
@@ -529,7 +534,7 @@ export type {
  * which is where it is declared — it used to be re-exported through the reader,
  * whose module imports foliate's CFI parser. */
 export type { ResolvedCfi } from './core/resolvedCfi'
-export { CARD_KINDS, CARDS_STORAGE_KEY, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
+export { CARD_KINDS, CARDS_STORAGE_KEY, MAX_CARD_TEXT, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
 export { createCard } from './core/cardStore'
 export { rowHue } from './core/bookAccent'
 export type { Card, CardKind, NewCard } from './core/cards'

@@ -1,27 +1,43 @@
-// @vitest-environment jsdom
-import { act, cleanup, renderHook } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { IndexedBook } from '../../core/bookIndex'
-import { importTagsFromFile } from '../tagFiles'
-import { ArchiveOverLimit } from '../../core/marksArchive'
-import { exportMarksToFile, importMarksFromFile } from '../marksFiles'
-import { useArchives } from './useArchives'
-import type { CardsView } from './useCards'
-import type { LibraryView } from './useLibrary'
-import { MarksScanFailed, type MarksView } from './useMarks'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  MarksScanFailed,
+  createMarkStore,
+  recordPath,
+  writeQueue,
+  type FilePicker,
+  type IndexedBook,
+  type KernelServices,
+  type Library,
+  type MarkStore,
+  type NewMark,
+} from '../../../kernel'
+import { fakeFs } from '../../../kernel/testkit'
+import { addDrafts, createArchives, type ArchiveServices, type Archives } from './archiveActions'
+import { ArchiveOverLimit } from './marksArchive'
+import { exportMarksToFile, importMarksFromFile } from './marksFiles'
+import { importTagsFromFile } from './tagFiles'
 
 /* The file layer is the dialog and the disk; neither exists under jsdom, and
-   what is under test is what the hook does with the archive it is handed. */
-vi.mock('../tagFiles', () => ({
-  canArchiveTags: () => true,
+   what is under test is what this does with the archive it is handed. */
+vi.mock('./tagFiles', () => ({
   exportTagsToFile: vi.fn(),
   importTagsFromFile: vi.fn(),
 }))
-vi.mock('../marksFiles', () => ({
-  canArchiveMarks: () => true,
+vi.mock('./marksFiles', () => ({
   exportMarksToFile: vi.fn(),
   importMarksFromFile: vi.fn(),
 }))
+
+type Cards = KernelServices['cards']
+
+/** The file layer is mocked above, so nothing here ever asks for the picker. */
+const wired = ({
+  library,
+  marks,
+  cards,
+  notice,
+}: Pick<ArchiveServices, 'library' | 'marks' | 'cards'> & { notice: ArchiveServices['notify'] }): Archives =>
+  createArchives({ library, marks, cards, notify: notice, files: {} as FilePicker })
 
 /**
  * A tag import is AWAITED, and reports what the store answered (WI-20.36).
@@ -33,34 +49,27 @@ vi.mock('../marksFiles', () => ({
  * rewritten to await one write per book; this is the same repair.
  */
 describe('importing tags', () => {
-  afterEach(cleanup)
-
   const shelf = (count: number): IndexedBook[] =>
     Array.from({ length: count }, (_, i) => ({ bookId: `book_${i}`, title: `Title ${i}`, author: '' }))
 
   function mount(books: readonly IndexedBook[], outcome: { changed: number; failed: number }) {
     const tagMany = vi.fn(async (_entries: readonly { bookId: string; tags: readonly string[] }[]) => outcome)
     const tagBooks = vi.fn()
-    const library = { books, tagMany, tagBooks } as unknown as LibraryView
+    const library = { getSnapshot: () => books, tagMany, tagBooks } as unknown as Library
     const notice = vi.fn()
-    const hook = renderHook(() =>
-      useArchives({ library, marks: {} as MarksView, cards: {} as CardsView, notice }),
-    )
-    return { tagMany, tagBooks, notice, hook }
+    const archives = wired({ library, marks: {} as MarkStore, cards: {} as Cards, notice })
+    return { tagMany, tagBooks, notice, archives }
   }
 
   it('hands two thousand rows to the store in one batched call and reports its count', async () => {
     const books = shelf(2000)
     vi.mocked(importTagsFromFile).mockResolvedValue({
-      path: 'tags.json',
       archive: { version: 1, books: books.map((one) => ({ ...one, tags: ['Sea'] })) },
     })
-    const { tagMany, tagBooks, notice, hook } = mount(books, { changed: 1999, failed: 1 })
+    const { tagMany, tagBooks, notice, archives } = mount(books, { changed: 1999, failed: 1 })
 
-    await act(async () => {
-      hook.result.current.importTags?.()
-      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
-    })
+    archives.importTags()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
 
     expect(tagBooks).not.toHaveBeenCalled()
     expect(tagMany).toHaveBeenCalledTimes(1)
@@ -79,14 +88,11 @@ describe('importing tags', () => {
   it('counts the tags when every write landed', async () => {
     const books = shelf(3)
     vi.mocked(importTagsFromFile).mockResolvedValue({
-      path: 'tags.json',
       archive: { version: 1, books: books.map((one) => ({ ...one, tags: ['Sea'] })) },
     })
-    const { notice, hook } = mount(books, { changed: 3, failed: 0 })
-    await act(async () => {
-      hook.result.current.importTags?.()
-      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
-    })
+    const { notice, archives } = mount(books, { changed: 3, failed: 0 })
+    archives.importTags()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
     expect(notice).toHaveBeenCalledWith('Added 3 tags across 3 books.')
   })
 
@@ -100,28 +106,22 @@ describe('importing tags', () => {
   it('says nothing was added when every write was refused', async () => {
     const books = shelf(2)
     vi.mocked(importTagsFromFile).mockResolvedValue({
-      path: 'tags.json',
       archive: { version: 1, books: books.map((one) => ({ ...one, tags: ['Sea'] })) },
     })
-    const { notice, hook } = mount(books, { changed: 0, failed: 2 })
-    await act(async () => {
-      hook.result.current.importTags?.()
-      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
-    })
+    const { notice, archives } = mount(books, { changed: 0, failed: 2 })
+    archives.importTags()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
     expect(notice).toHaveBeenCalledWith('Nothing was added. 2 books could not be saved.')
   })
 
   it('says when nothing on the shelf changed', async () => {
     const books = shelf(2)
     vi.mocked(importTagsFromFile).mockResolvedValue({
-      path: 'tags.json',
       archive: { version: 1, books: [{ ...books[0]!, tags: ['Sea'] }] },
     })
-    const { notice, hook } = mount(books, { changed: 0, failed: 0 })
-    await act(async () => {
-      hook.result.current.importTags?.()
-      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
-    })
+    const { notice, archives } = mount(books, { changed: 0, failed: 0 })
+    archives.importTags()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
     expect(notice).toHaveBeenCalledWith('Nothing to add — those tags are already here.')
   })
 })
@@ -137,8 +137,6 @@ describe('importing tags', () => {
  * did not. Same defect the tag import had, one file down.
  */
 describe('importing marginalia, and what actually landed', () => {
-  afterEach(cleanup)
-
   const archivedMark = (text: string) => ({
     text,
     prefix: '',
@@ -163,12 +161,11 @@ describe('importing marginalia, and what actually landed', () => {
     const makeMany = vi.fn(async () => {
       if (refuse.cards) throw new Error('disk full')
     })
-    const marks = { loadAllNow: vi.fn(async () => []), addMany } as unknown as MarksView
-    const cards = { all: [], makeMany } as unknown as CardsView
-    const library = { books } as unknown as LibraryView
+    const marks = { loadAllNow: vi.fn(async () => []), addMany } as unknown as MarkStore
+    const cards = { getSnapshot: () => ({ all: [] }), addMany: makeMany } as unknown as Cards
+    const library = { getSnapshot: () => books } as unknown as Library
     const notice = vi.fn()
     vi.mocked(importMarksFromFile).mockResolvedValue({
-      path: 'marks.json',
       archive: {
         version: 1,
         books: [
@@ -189,27 +186,25 @@ describe('importing marginalia, and what actually landed', () => {
         ],
       },
     } as unknown as Awaited<ReturnType<typeof importMarksFromFile>>)
-    const hook = renderHook(() => useArchives({ library, marks, cards, notice }))
-    return { notice, hook }
+    const archives = wired({ library, marks, cards, notice })
+    return { notice, archives }
   }
 
-  const run = async (hook: ReturnType<typeof renderHook>, notice: ReturnType<typeof vi.fn>) => {
-    await act(async () => {
-      ;(hook.result.current as { importMarks?: () => void }).importMarks?.()
-      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
-    })
+  const run = async (archives: Archives, notice: ReturnType<typeof vi.fn>) => {
+    archives.importMarks()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
   }
 
   it('counts what the plan held when every write landed', async () => {
-    const { notice, hook } = mount()
-    await run(hook, notice)
+    const { notice, archives } = mount()
+    await run(archives, notice)
     expect(notice).toHaveBeenCalledWith('Added 3 marks and 0 cards across 2 books.')
   })
 
   it('says nothing was saved when every write was refused', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { notice, hook } = mount({ books: true })
-    await run(hook, notice)
+    const { notice, archives } = mount({ books: true })
+    await run(archives, notice)
     expect(notice).toHaveBeenCalledWith('Nothing was saved. 2 books could not be saved.')
     logged.mockRestore()
   })
@@ -232,28 +227,24 @@ describe('importing marginalia, and what actually landed', () => {
  * notice beside a written archive is the same lost backup with an apology.
  */
 describe('marginalia after a failed scan', () => {
-  afterEach(cleanup)
-
   function mount() {
     const loadAllNow = vi.fn(() => Promise.reject(new MarksScanFailed()))
     const addMany = vi.fn(async () => {})
     const makeMany = vi.fn(async () => {})
-    const marks = { loadAllNow, addMany } as unknown as MarksView
-    const cards = { all: [], makeMany } as unknown as CardsView
-    const library = { books: [] } as unknown as LibraryView
+    const marks = { loadAllNow, addMany } as unknown as MarkStore
+    const cards = { getSnapshot: () => ({ all: [] }), addMany: makeMany } as unknown as Cards
+    const library = { getSnapshot: () => [] } as unknown as Library
     const notice = vi.fn()
-    const hook = renderHook(() => useArchives({ library, marks, cards, notice }))
-    return { addMany, makeMany, notice, hook }
+    const archives = wired({ library, marks, cards, notice })
+    return { addMany, makeMany, notice, archives }
   }
 
   it('exports nothing, and does not blame the file it was about to write', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { notice, hook } = mount()
+    const { notice, archives } = mount()
 
-    await act(async () => {
-      hook.result.current.exportMarks?.()
-      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
-    })
+    archives.exportMarks()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
 
     expect(vi.mocked(exportMarksToFile), 'an empty archive was written anyway').not.toHaveBeenCalled()
     /* WHICH END FAILED decides the sentence: "could not be written" would send
@@ -266,15 +257,12 @@ describe('marginalia after a failed scan', () => {
   it('imports nothing, rather than merging against a baseline it does not have', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.mocked(importMarksFromFile).mockResolvedValue({
-      path: 'marks.json',
       archive: { version: 1, books: [] },
     } as unknown as Awaited<ReturnType<typeof importMarksFromFile>>)
-    const { addMany, makeMany, notice, hook } = mount()
+    const { addMany, makeMany, notice, archives } = mount()
 
-    await act(async () => {
-      hook.result.current.importMarks?.()
-      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
-    })
+    archives.importMarks()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
 
     /* Importing against an unknown baseline re-adds every mark in the archive:
        the plan's duplicate check is against what the scan found. */
@@ -299,8 +287,6 @@ describe('marginalia after a failed scan', () => {
  * across two builds, so the ONE thing that must not fail is saying so.
  */
 describe('a book found by name, and marks that cannot be placed', () => {
-  afterEach(cleanup)
-
   const archivedMark = () => ({
     text: 'Call me Ishmael',
     prefix: '',
@@ -320,12 +306,11 @@ describe('a book found by name, and marks that cannot be placed', () => {
     const books = [{ bookId: 'local-copy', title: 'Moby-Dick', author: 'Herman Melville' }] as unknown as IndexedBook[]
     const addMany = vi.fn(async (_bookId: string, _rows: unknown[]) => {})
     const makeMany = vi.fn(async () => {})
-    const marks = { loadAllNow: vi.fn(async () => []), addMany } as unknown as MarksView
-    const cards = { all: [], makeMany } as unknown as CardsView
-    const library = { books } as unknown as LibraryView
+    const marks = { loadAllNow: vi.fn(async () => []), addMany } as unknown as MarkStore
+    const cards = { getSnapshot: () => ({ all: [] }), addMany: makeMany } as unknown as Cards
+    const library = { getSnapshot: () => books } as unknown as Library
     const notice = vi.fn()
     vi.mocked(importMarksFromFile).mockResolvedValue({
-      path: 'marks.json',
       archive: {
         version: 1,
         books: [
@@ -339,15 +324,13 @@ describe('a book found by name, and marks that cannot be placed', () => {
         ],
       },
     } as unknown as Awaited<ReturnType<typeof importMarksFromFile>>)
-    const hook = renderHook(() => useArchives({ library, marks, cards, notice }))
-    return { notice, hook, addMany, makeMany }
+    const archives = wired({ library, marks, cards, notice })
+    return { notice, archives, addMany, makeMany }
   }
 
-  const run = async (hook: ReturnType<typeof renderHook>, notice: ReturnType<typeof vi.fn>) => {
-    await act(async () => {
-      ;(hook.result.current as { importMarks?: () => void }).importMarks?.()
-      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
-    })
+  const run = async (archives: Archives, notice: ReturnType<typeof vi.fn>) => {
+    archives.importMarks()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
   }
 
   it('never hands a foreign anchor to the store', async () => {
@@ -359,8 +342,8 @@ describe('a book found by name, and marks that cannot be placed', () => {
      * whole of Stage 1, is that no CFI from the other build goes with them. So
      * the check moved from "was it called" to "what did it carry", which is the
      * stronger question and the one that survives the capability coming back. */
-    const { notice, hook, addMany } = mount()
-    await run(hook, notice)
+    const { notice, archives, addMany } = mount()
+    await run(archives, notice)
     expect(addMany).toHaveBeenCalled()
     const written = addMany.mock.calls.flatMap((call) => call[1] as { cfi: string; unplaced?: unknown }[])
     expect(written).toHaveLength(1)
@@ -373,8 +356,8 @@ describe('a book found by name, and marks that cannot be placed', () => {
   it('keeps the quote, the note and the colour, which is what the reader made', async () => {
     /* The point of keeping the mark at all. The anchor is the ONE field that
        cannot cross; everything the reader actually wrote does. */
-    const { notice, hook, addMany } = mount()
-    await run(hook, notice)
+    const { notice, archives, addMany } = mount()
+    await run(archives, notice)
     const row = (addMany.mock.calls.flatMap((call) => call[1] as Record<string, unknown>[]))[0]!
     expect(row['text']).toBe('Call me Ishmael')
     expect(row['chapter']).toBe('Loomings')
@@ -385,8 +368,8 @@ describe('a book found by name, and marks that cannot be placed', () => {
   it('names the book, and does not call it missing', async () => {
     /* "Not on this shelf" would send the reader looking for a book that is
        right there. The two lists exist so the two sentences can differ. */
-    const { notice, hook } = mount()
-    await run(hook, notice)
+    const { notice, archives } = mount()
+    await run(archives, notice)
     const said = notice.mock.calls.at(-1)?.[0] as string
     /* THE SENTENCE CHANGED WITH THE BEHAVIOUR. It said "Not placed", which was
        the honest word for throwing the marks away; they are kept now, so it
@@ -409,8 +392,8 @@ describe('a book found by name, and marks that cannot be placed', () => {
    * count that decides this sentence has to include it.
    */
   it('does not open by denying the marks it just kept', async () => {
-    const { notice, hook } = mount()
-    await run(hook, notice)
+    const { notice, archives } = mount()
+    await run(archives, notice)
     const said = notice.mock.calls.at(-1)?.[0] as string
     expect(said).not.toContain('Nothing was saved')
     expect(said).not.toContain('Nothing to add')
@@ -421,10 +404,10 @@ describe('a book found by name, and marks that cannot be placed', () => {
   it('reports what LANDED, not what was planned, when the unplaced write fails', async () => {
     /* The rule `marksAdded` already follows, applied to the third class: a
        refused write must not promise the reader their marks were kept. */
-    const { notice, hook, addMany } = mount()
+    const { notice, archives, addMany } = mount()
     addMany.mockRejectedValue(new Error('disk full'))
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await run(hook, notice)
+    await run(archives, notice)
     const said = notice.mock.calls.at(-1)?.[0] as string
     expect(said).toContain('Nothing was saved.')
     expect(said, 'a refused write still claimed the marks were kept').not.toContain('kept without a place')
@@ -438,25 +421,24 @@ describe('a book found by name, and marks that cannot be placed', () => {
        read — is the first UNPLACED write, not the cards. With the unplaced
        write fulfilled and the cards write refused, the old arithmetic reported
        the cards as fine and never looked at their result at all. */
-    const { notice, hook, makeMany } = mount()
+    const { notice, archives, makeMany } = mount()
     makeMany.mockRejectedValue(new Error('cards refused'))
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await run(hook, notice)
+    await run(archives, notice)
     const said = notice.mock.calls.at(-1)?.[0] as string
     expect(said, 'a failed card write was reported as a success').toContain('the cards could not be saved.')
     logged.mockRestore()
   })
 })
 
-describe('useArchives — importing cards with no book on this shelf', () => {
+describe('archives — importing cards with no book on this shelf', () => {
   it('writes each under the book id it left with, anchor kept, and counts it in the sentence', async () => {
     const makeMany = vi.fn(async () => {})
-    const marks = { loadAllNow: vi.fn(async () => []), addMany: vi.fn(async () => {}) } as unknown as MarksView
-    const cards = { all: [], makeMany } as unknown as CardsView
-    const library = { books: [] } as unknown as LibraryView
+    const marks = { loadAllNow: vi.fn(async () => []), addMany: vi.fn(async () => {}) } as unknown as MarkStore
+    const cards = { getSnapshot: () => ({ all: [] }), addMany: makeMany } as unknown as Cards
+    const library = { getSnapshot: () => [] } as unknown as Library
     const notice = vi.fn()
     vi.mocked(importMarksFromFile).mockResolvedValue({
-      path: 'marks.json',
       archive: {
         version: 1,
         books: [],
@@ -473,32 +455,71 @@ describe('useArchives — importing cards with no book on this shelf', () => {
         ],
       },
     })
-    const hook = renderHook(() => useArchives({ library, marks, cards, notice }))
-    await act(async () => {
-      hook.result.current.importMarks?.()
-      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
-    })
+    const archives = wired({ library, marks, cards, notice })
+    archives.importMarks()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
     expect(makeMany).toHaveBeenCalledWith([
-      { bookId: 'returned', kind: 'Idea', body: 'Still worth keeping', answer: '', source: 'Loomings', cfi: 'epubcfi(/6/2!/4/2)' },
+      expect.objectContaining({ bookId: 'returned', kind: 'Idea', body: 'Still worth keeping', answer: '', source: 'Loomings', cfi: 'epubcfi(/6/2!/4/2)' }),
     ])
     expect(notice).toHaveBeenCalledWith('Added 0 marks and 1 card across 0 books.')
   })
 })
 
-describe('useArchives — an export too big to read back', () => {
+describe('archives — an export too big to read back', () => {
   it('says so, and does not blame the disk', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.mocked(exportMarksToFile).mockRejectedValue(new ArchiveOverLimit('200001 rows, past 200000'))
-    const marks = { loadAllNow: vi.fn(async () => []) } as unknown as MarksView
-    const cards = { all: [] } as unknown as CardsView
-    const library = { books: [] } as unknown as LibraryView
+    const marks = { loadAllNow: vi.fn(async () => []) } as unknown as MarkStore
+    const cards = { getSnapshot: () => ({ all: [] }) } as unknown as Cards
+    const library = { getSnapshot: () => [] } as unknown as Library
     const notice = vi.fn()
-    const hook = renderHook(() => useArchives({ library, marks, cards, notice }))
-    await act(async () => {
-      hook.result.current.exportMarks?.()
-      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
-    })
+    const archives = wired({ library, marks, cards, notice })
+    archives.exportMarks()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
     expect(notice.mock.calls).toEqual([['You have more marks and cards than one file can hold and be read back — nothing was exported.']])
     logged.mockRestore()
+  })
+})
+
+describe('a batch of marks for one book', () => {
+  const BOOK = 'book:abc'
+  const shelf = () => fakeFs({ [recordPath(BOOK)]: JSON.stringify({ bookId: BOOK, title: 'Moby-Dick', author: 'Melville' }) })
+  const draft = (over: Partial<NewMark>): NewMark =>
+    ({
+      bookId: BOOK,
+      cfi: 'epubcfi(/6/4!/4/2,/1:5,/1:12)',
+      sectionIndex: 0,
+      text: 'Ishmael',
+      prefix: '',
+      suffix: '',
+      note: '',
+      kind: 'highlight',
+      tint: 'yellow',
+      style: 'fill',
+      chapter: 'Ch. 1',
+      ...over,
+    }) as NewMark
+
+  it('is written whole, each draft minted into a mark', async () => {
+    const store = createMarkStore({ fs: shelf(), queue: writeQueue() })
+    await addDrafts(store, BOOK, [
+      draft({}),
+      draft({ cfi: 'epubcfi(/6/4!/4/4,/1:0,/1:5)', text: 'Queequeg' }),
+    ])
+
+    const written = await store.forBook(BOOK)
+    expect(written.map((mark) => mark.text).sort()).toEqual(['Ishmael', 'Queequeg'])
+    expect(written.every((mark) => typeof mark.id === 'string' && mark.id !== '')).toBe(true)
+  })
+
+  it('is refused whole when it holds a draft of another book', async () => {
+    /* The store writes the batch under the book it is NAMED for, so a draft
+       carrying another id would land in this book's file owned by that one. */
+    const store = createMarkStore({ fs: shelf(), queue: writeQueue() })
+
+    await expect(addDrafts(store, BOOK, [draft({}), draft({ bookId: 'book:elsewhere' })])).rejects.toThrow(
+      'addMany for book:abc was handed a draft belonging to book:elsewhere',
+    )
+    expect(await store.forBook(BOOK), 'part of a refused batch was written').toEqual([])
   })
 })

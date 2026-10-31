@@ -24,12 +24,8 @@ function context(over: Partial<AppState> = {}, ctxOver: Record<string, unknown> 
     closeBook: () => {},
     openSwitcher: () => {},
     editTags: null,
-    exportTags: null,
-    importTags: null,
     jumpBack: null,
     jumpForward: null,
-    exportMarks: null,
-    importMarks: null,
     /* Null is the ordinary state: no pace derived, or a reading speaking. */
     autoAdvance: null,
     ...ctxOver,
@@ -275,10 +271,6 @@ describe('every row the palette prints', () => {
         editTags: handler('editTags'),
         jumpBack: handler('jumpBack'),
         jumpForward: handler('jumpForward'),
-        exportMarks: handler('exportMarks'),
-        importMarks: handler('importMarks'),
-        exportTags: handler('exportTags'),
-        importTags: handler('importTags'),
         openBookPicker: handler('openBookPicker'),
         importFolder: handler('importFolder'),
         openSwitcher: handler('openSwitcher'),
@@ -350,10 +342,6 @@ describe('every row the palette prints', () => {
          The palette draws a heading whenever the group changes, so that order
          put "Book" on screen twice; `contiguous` joins a split group now, and
          the table says the order the reader sees. */
-      { id: 'marks:export', label: 'Export your marks and cards…', group: 'Library', keywords: 'mark note card highlight annotation backup save export file json markdown archive', ran: ['exportMarks'] },
-      { id: 'marks:import', label: 'Import marks from a file… (merge)', group: 'Library', keywords: 'mark note card highlight annotation restore load import merge file json archive backup', ran: ['importMarks'] },
-      { id: 'tags:export', label: 'Export your tags…', group: 'Library', keywords: 'tag backup save export file json archive', ran: ['exportTags'] },
-      { id: 'tags:import', label: 'Import tags from a file… (merge)', group: 'Library', keywords: 'tag restore load import merge file json archive backup', ran: ['importTags'] },
     ])
   })
 
@@ -422,10 +410,6 @@ describe('every row the palette prints', () => {
       ['book:tags', { editTags: () => {} }],
       ['jump:back', { jumpBack: () => {} }],
       ['jump:forward', { jumpForward: () => {} }],
-      ['marks:export', { exportMarks: () => {} }],
-      ['marks:import', { importMarks: () => {} }],
-      ['tags:export', { exportTags: () => {} }],
-      ['tags:import', { importTags: () => {} }],
     ] as const
     for (const [id, handler] of GATED) {
       const added = buildCommands({ ...bare, ...handler })
@@ -594,12 +578,8 @@ describe('advertised combos are bound', () => {
       lookUp: () => {},
       toggleBookmark: () => {},
       editTags: () => {},
-      exportTags: () => {},
-      importTags: () => {},
       jumpBack: () => {},
       jumpForward: () => {},
-      exportMarks: () => {},
-      importMarks: () => {},
     }
     const digits = new Set(PANE_SHORTCUTS.map((entry) => entry.combo))
     const advertised = new Set(
@@ -1229,40 +1209,6 @@ describe('filterCommands', () => {
       row('prefix', 'Whale song', 'Book'),
     ]
     expect(filterCommands(commands, 'whale').map((command) => command.id)).toEqual(['prefix', 'inside', 'keyword', 'group'])
-  })
-})
-
-describe('the tag archive commands', () => {
-  /** The shared context with the archive hooks swapped in. */
-  const withArchive = (over: { exportTags?: (() => void) | null; importTags?: (() => void) | null }) => ({
-    ...context().ctx,
-    ...over,
-  })
-
-  /* Offered only where there is a filesystem to write to — `canArchiveTags` is
-     false in a plain browser tab, and a row that opens a dialog which cannot
-     exist is the app describing a feature it does not have. */
-  it('offers export and import when the archive is available', () => {
-    const ids = buildCommands(withArchive({ exportTags: () => {}, importTags: () => {} })).map((c) => c.id)
-    expect(ids).toContain('tags:export')
-    expect(ids).toContain('tags:import')
-  })
-
-  it('offers neither when it is not', () => {
-    const ids = buildCommands(withArchive({ exportTags: null, importTags: null })).map((c) => c.id)
-    expect(ids).not.toContain('tags:export')
-    expect(ids).not.toContain('tags:import')
-  })
-
-  it('says merge in the import label, because that is what it does', () => {
-    /* The word is the reassurance: an import never removes a tag, so restoring
-       an old file cannot silently undo a month of filing. */
-    const row = buildCommands(withArchive({ importTags: () => {} })).find((c) => c.id === 'tags:import')
-    /* THE LABEL, which this title always named and which this case never read:
-       it asserted the keywords, and the label had no "merge" in it from the
-       day the row was written (2026-09-13 audit). */
-    expect(row?.label).toBe('Import tags from a file… (merge)')
-    expect(row?.keywords).toContain('merge')
   })
 })
 

@@ -3,7 +3,7 @@ import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { marksPathIn, recordPath } from '../../core/bookFolder'
 import { fakeFs } from '../../core/indexFsFake.testkit'
-import { createMarkStore, type MarkSnapshot, type MarkStore } from '../../core/markStore'
+import { MarksScanFailed, createMarkStore, type MarkSnapshot, type MarkStore } from '../../core/markStore'
 import {
   bookmarkFrom,
   createMark,
@@ -14,7 +14,7 @@ import {
 } from '../../core/marks'
 import { resolvedCfiForTesting } from '../../core/resolvedCfi.testkit'
 import { writeQueue } from '../../core/writeQueue'
-import { MarksScanFailed, useMarks } from './useMarks'
+import { useMarks } from './useMarks'
 
 /**
  * ⚠️ THE ASSERTION THAT STOPS AN EMPTY BACKUP COMING BACK — the second half.
@@ -105,7 +105,7 @@ describe('every mark, for something that is about to write a file', () => {
     await act(async () => {
       /* THE ONE OUTCOME WORTH REFUSING is this resolving with `[]`: an empty
          answer becoming a file on disk, over the backup it was replacing. */
-      await expect(result.current.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+      await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
     })
     /* And the store still says so, for the panel that draws rather than
        writes — the two readings of one scan must not disagree. */
@@ -125,7 +125,7 @@ describe('every mark, for something that is about to write a file', () => {
 
     let everyMark: readonly { kind: string }[] = []
     await act(async () => {
-      everyMark = await result.current.loadAllNow()
+      everyMark = await store.loadAllNow()
     })
     /* BOTH CLASSES. They share a file and are split at the snapshot, and an
        archive of one half is a backup that silently drops the other. */
@@ -214,7 +214,7 @@ describe('every mark, for something that is about to write a file', () => {
 
     let everyMark: readonly unknown[] = ['not asked']
     await act(async () => {
-      everyMark = await result.current.loadAllNow()
+      everyMark = await store.loadAllNow()
     })
     expect(everyMark).toEqual([])
     expect(result.current.scanFailed).toBe(false)
@@ -222,11 +222,10 @@ describe('every mark, for something that is about to write a file', () => {
 
   it('names a failed scan as the failure it is, for the catch that branches on it', async () => {
     const store = createMarkStore({ fs: unlistableShelf(), queue: writeQueue() })
-    const { result } = renderHook(() => useMarks(store, BOOK))
 
     let cause: unknown = null
     await act(async () => {
-      cause = await result.current.loadAllNow().then(
+      cause = await store.loadAllNow().then(
         () => null,
         (thrown: unknown) => thrown,
       )
@@ -265,8 +264,8 @@ describe('every mark, for something that is about to write a file', () => {
 
 const SAVE_FAILED = "Paper: could not save that book's marks"
 
-/* ⚠️ A WRITE LET GO IS STILL A WRITE SOMEBODY MUST HEAR ABOUT. Every verb but
-   `addMany` hands its promise on or drops it, so the log is the one trace a
+/* ⚠️ A WRITE LET GO IS STILL A WRITE SOMEBODY MUST HEAR ABOUT. Every verb hands
+   its promise on or drops it, so the log is the one trace a
    refused remove, place or note leaves beside `persistent`. */
 describe('a refused write', () => {
   it('is logged with what refused it, for a verb whose promise is let go', async () => {
@@ -377,45 +376,6 @@ describe('the open book’s marks', () => {
     await settled()
     expect(result.current.current.map((mark) => mark.text)).toEqual(['Six months at sea'])
     expect(result.current.ready).toBe(true)
-  })
-})
-
-describe('a batch of marks for one book', () => {
-  it('is written whole, each draft minted into a mark', async () => {
-    const store = createMarkStore({ fs: shelf(), queue: writeQueue() })
-    const { result } = renderHook(() => useMarks(store, BOOK))
-
-    await act(async () => {
-      await result.current.addMany(BOOK, [highlight(), place()])
-    })
-
-    const written = await store.forBook(BOOK)
-    expect(written.map((mark) => [mark.kind, mark.text]).sort()).toEqual([
-      ['bookmark', 'Call me Ishmael'],
-      ['highlight', 'Ishmael'],
-    ])
-    expect(written.every((mark) => typeof mark.id === 'string' && mark.id !== '')).toBe(true)
-  })
-
-  it('is refused whole when it holds a draft of another book', async () => {
-    /* The store writes the batch under the book it is NAMED for, so a draft
-       carrying another id would land in this book's file owned by that one. */
-    const store = createMarkStore({ fs: shelf(), queue: writeQueue() })
-    const { result } = renderHook(() => useMarks(store, BOOK))
-
-    let refused: unknown = null
-    await act(async () => {
-      refused = await result.current
-        .addMany(BOOK, [highlight(), { ...highlight(), bookId: 'book:elsewhere' }])
-        .then(
-          () => null,
-          (cause: unknown) => cause,
-        )
-    })
-
-    expect(refused).toBeInstanceOf(Error)
-    expect((refused as Error).message).toBe('addMany for book:abc was handed a draft belonging to book:elsewhere')
-    expect(await store.forBook(BOOK), 'part of a refused batch was written').toEqual([])
   })
 })
 

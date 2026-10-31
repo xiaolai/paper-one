@@ -398,7 +398,7 @@ describe('the mark store splits bookmarks from annotations', () => {
  * and written a valid archive containing nothing — and reported success. The
  * reader does not find out until the day they need it.
  *
- * `useMarks.loadAllNow` is the fix: it scans and hands the rows straight back,
+ * `loadAllNow` is the fix: it scans and hands the rows straight back,
  * with no render in the path. This is the assertion beside it, because a fix
  * removes today's failure and only an assertion stops it returning while still
  * looking green.

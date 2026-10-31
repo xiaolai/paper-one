@@ -85,6 +85,14 @@
       ]
     },
     {
+      "id": "archives",
+      "requires": [],
+      "ts": "archives",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "webhost",
       "requires": [],
       "ts": "webhost",

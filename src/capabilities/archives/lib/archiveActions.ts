@@ -1,11 +1,15 @@
-import { useCallback } from 'react'
-import { canArchiveMarks, exportMarksToFile, importMarksFromFile } from '../marksFiles'
-import { canArchiveTags, exportTagsToFile, importTagsFromFile } from '../tagFiles'
-import { planImport } from '../../core/tagArchive'
-import { ArchiveOverLimit, planImport as planMarksImport } from '../../core/marksArchive'
-import type { CardsView } from './useCards'
-import type { LibraryView } from './useLibrary'
-import { MarksScanFailed, type MarksView } from './useMarks'
+import {
+  MarksScanFailed,
+  createCard,
+  createMark,
+  type KernelServices,
+  type MarkStore,
+  type NewMark,
+} from '../../../kernel'
+import { ArchiveOverLimit, planImport as planMarksImport } from './marksArchive'
+import { exportMarksToFile, importMarksFromFile } from './marksFiles'
+import { planImport } from './tagArchive'
+import { exportTagsToFile, importTagsFromFile } from './tagFiles'
 
 /**
  * The reader's filing and their marginalia, out to a file and back.
@@ -31,35 +35,48 @@ import { MarksScanFailed, type MarksView } from './useMarks'
  */
 
 export interface Archives {
-  /** Null where this build cannot write a file — the palette then omits it. */
-  readonly exportTags: (() => void) | null
-  readonly importTags: (() => void) | null
-  readonly exportMarks: (() => void) | null
-  readonly importMarks: (() => void) | null
+  readonly exportTags: () => void
+  readonly importTags: () => void
+  readonly exportMarks: () => void
+  readonly importMarks: () => void
 }
 
-export interface ArchivesOptions {
-  /* THE HOOK VIEWS, not the stores: these read `library.books` and
-     `cards.all`, which are the rendered snapshots, and write through the same
-     handles every other surface does. */
-  readonly library: LibraryView
-  readonly marks: MarksView
-  readonly cards: CardsView
-  /** Where every one of these says what happened. */
-  readonly notice: (text: string) => void
+/* THE STORES, not a hook's views, and they are read when a row is pressed: this
+   is no longer a component, so there is no render for a snapshot to be stale
+   behind, and the palette holds nothing that needs rebuilding when one changes. */
+export type ArchiveServices = Pick<KernelServices, 'library' | 'marks' | 'cards' | 'files' | 'notify'>
+
+/**
+ * Mint and write several marks for ONE book, in one store write.
+ *
+ * FAIL FAST on a draft naming another book. The store writes the batch under the
+ * FIRST argument's file, so a mismatched draft would land in one book's file
+ * while carrying another book's id — ownership corrupted quietly, surfacing only
+ * when a later mutation routes by the id inside the row. The import below builds
+ * both from the same plan entry; this guard is for the change that will not.
+ */
+export function addDrafts(marks: MarkStore, bookId: string, drafts: readonly NewMark[]): Promise<void> {
+  const foreign = drafts.find((draft) => draft.bookId !== bookId)
+  if (foreign) {
+    return Promise.reject(
+      new Error(`addMany for ${bookId} was handed a draft belonging to ${foreign.bookId}`),
+    )
+  }
+  return marks.addMany(bookId, drafts.map((draft) => createMark(draft)))
 }
 
-export function useArchives({ library, marks, cards, notice }: ArchivesOptions): Archives {
-/* The reader's filing, out to a file and back — reporting through `notice`,
+export function createArchives({ library, marks, cards, files, notify }: ArchiveServices): Archives {
+/* The reader's filing, out to a file and back — reporting through `notify`,
  * per the module header. A dismissed dialog says nothing at all, deliberately:
  * the reader closed it, they know, and a message about it is the app
  * narrating their own action. */
-const exportTagsNow = useCallback(() => {
-  void exportTagsToFile(library.books, new Date())
-    .then((path) => {
-      if (!path) return
-      const filed = library.books.filter((book) => (book.tags ?? []).length > 0).length
-      notice(
+const exportTagsNow = (): void => {
+  const books = library.getSnapshot()
+  void exportTagsToFile(files, books, new Date())
+    .then((written) => {
+      if (!written) return
+      const filed = books.filter((book) => (book.tags ?? []).length > 0).length
+      notify(
         filed === 0
           ? 'No tags to export yet — nothing on the shelf is filed.'
           : `Exported the tags on ${filed} ${filed === 1 ? 'book' : 'books'}.`,
@@ -67,31 +84,31 @@ const exportTagsNow = useCallback(() => {
     })
     .catch((cause: unknown) => {
       console.error('Paper: could not export your tags', cause)
-      notice('Those tags could not be written.')
+      notify('Those tags could not be written.')
     })
-}, [library.books, notice])
+}
 
-const importTagsNow = useCallback(() => {
+const importTagsNow = (): void => {
   /* WHICH STAGE FAILED decides the sentence. One catch used to answer every
    * rejection with "That file could not be read" — including a rejected
    * store write, for which that message is factually wrong and sends the
    * reader chasing the wrong problem (their file, not their disk). */
   let reading = true
   void (async () => {
-    const picked = await importTagsFromFile()
+    const picked = await importTagsFromFile(files)
     if (!picked) return
     if (!picked.archive) {
-      notice('That file is not a Paper tag export.')
+      notify('That file is not a Paper tag export.')
       return
     }
-    const plan = planImport(picked.archive, library.books)
+    const plan = planImport(picked.archive, library.getSnapshot())
     reading = false
     /* THE NUMBER THAT DID NOTHING IS WORTH SAYING TOO. An archive from
        another library matches nothing here, and an import that reports only
        its successes leaves the reader believing it worked. */
     const missed = plan.unmatched > 0 ? ` ${plan.unmatched} not on this shelf.` : ''
     if (plan.additions.length === 0) {
-      notice(`Nothing to add — those tags are already here.${missed}`)
+      notify(`Nothing to add — those tags are already here.${missed}`)
       return
     }
     /* ONE BATCHED CALL, AWAITED, exactly as the marks import below. This
@@ -114,7 +131,7 @@ const importTagsNow = useCallback(() => {
      *
      * So the number is spent only on a whole import; a partial one counts the
      * books it actually changed, which is the thing that was measured. */
-    notice(
+    notify(
       changed === 0 && failed === 0
         ? `Nothing to add — those tags are already here.${missed}`
         : changed === 0
@@ -125,14 +142,14 @@ const importTagsNow = useCallback(() => {
     )
   })().catch((cause: unknown) => {
     console.error('Paper: could not import those tags', cause)
-    notice(reading ? 'That file could not be read.' : 'The file was read, but those tags could not be saved.')
+    notify(reading ? 'That file could not be read.' : 'The file was read, but those tags could not be saved.')
   })
-}, [library, notice])
+}
 /**
  * The reader's marginalia, out to a file and back.
  *
  * THE EMPTY-FILE TRAP, and it is why this awaits rather than reads.
- * `MarksView.all` and `.allBookmarks` are empty until `loadAll()` has run, and
+ * `MarkSnapshot.all` and `.allBookmarks` are empty until `loadAll()` has run, and
  * the only caller of `loadAll` IN A RUNNING APP is the Marginalia panel
  * mounting. (`app/mobile/localMarks.ts` calls it twice more, and `MobileApp`
  * says in its own words that `localContent`/`localMarks`/`localPositions` are
@@ -148,7 +165,7 @@ const importTagsNow = useCallback(() => {
  * until the day the reader needs it.
  *
  * `loadAllNow()` resolves with the rows rather than setting state and hoping
- * a re-render arrives first — see `MarksView.loadAllNow`.
+ * a re-render arrives first — see `MarkStore.loadAllNow`.
  *
  * AND A FAILED SCAN IS THE SAME TRAP WEARING A DIFFERENT CAUSE. A scan that
  * could not read the shelf leaves the same empty list behind as a shelf with
@@ -158,16 +175,16 @@ const importTagsNow = useCallback(() => {
  * and both handlers below refuse rather than write. The dialog is never even
  * opened, because the scan is awaited first.
  */
-const exportMarksNow = useCallback(() => {
+const exportMarksNow = (): void => {
   void (async () => {
     /* CARDS ARE NOT LAZY — `CardStore` holds every row from the start,
        because a card is explicitly cross-book and no surface ever asked for
        one book's. Only the marks need the scan. */
     const everyMark = await marks.loadAllNow()
-    const written = await exportMarksToFile(library.books, everyMark, cards.all, new Date())
+    const written = await exportMarksToFile(files, library.getSnapshot(), everyMark, cards.getSnapshot().all, new Date())
     if (!written) return
     if (written.marks === 0 && written.cards === 0) {
-      notice('Nothing to export yet — no marks and no cards.')
+      notify('Nothing to export yet — no marks and no cards.')
       return
     }
     const parts = [
@@ -178,7 +195,7 @@ const exportMarksNow = useCallback(() => {
        imported back — and a reader told only "exported" could keep one as
        their only backup. */
     const note = written.format === 'md' ? ' as Markdown, which cannot be imported back' : ''
-    notice(`Exported ${parts.join(' and ')} from ${written.books} ${written.books === 1 ? 'book' : 'books'}${note}.`)
+    notify(`Exported ${parts.join(' and ')} from ${written.books} ${written.books === 1 ? 'book' : 'books'}${note}.`)
   })().catch((cause: unknown) => {
     /* WHICH END FAILED decides the sentence, exactly as the tag import above.
        "could not be written" over a scan failure sends the reader to look at
@@ -187,31 +204,31 @@ const exportMarksNow = useCallback(() => {
        which is the fact they most need. */
     if (cause instanceof MarksScanFailed) {
       console.error('Paper: could not read your marginalia to export it', cause)
-      notice('Your marks could not be read — nothing was exported.')
+      notify('Your marks could not be read — nothing was exported.')
       return
     }
     /* NOT THE DISK'S FAULT, and retrying will not help. Said so the reader knows
        the backup they already have is still the one they have. */
     if (cause instanceof ArchiveOverLimit) {
       console.error('Paper: your marginalia is past what one archive can hold', cause)
-      notice('You have more marks and cards than one file can hold and be read back — nothing was exported.')
+      notify('You have more marks and cards than one file can hold and be read back — nothing was exported.')
       return
     }
     console.error('Paper: could not export your marginalia', cause)
-    notice('Those marks could not be written.')
+    notify('Those marks could not be written.')
   })
-}, [marks, cards, library.books, notice])
+}
 
-const importMarksNow = useCallback(() => {
+const importMarksNow = (): void => {
   void (async () => {
-    const picked = await importMarksFromFile()
+    const picked = await importMarksFromFile(files)
     if (!picked) return
     if (!picked.archive) {
-      notice('That file is not a Paper marginalia export.')
+      notify('That file is not a Paper marginalia export.')
       return
     }
     const everyMark = await marks.loadAllNow()
-    const plan = planMarksImport(picked.archive, library.books, everyMark, cards.all)
+    const plan = planMarksImport(picked.archive, library.getSnapshot(), everyMark, cards.getSnapshot().all)
     /* ONE WRITE PER BOOK, AND ONE FOR THE CARDS — and every one of them
      * AWAITED before the notice below claims anything.
      *
@@ -246,7 +263,8 @@ const importMarksNow = useCallback(() => {
     const unplacedWrites = plan.additions.filter((one) => one.unplaced.length > 0)
     const settled = await Promise.allSettled([
       ...plan.additions.map((one) =>
-        marks.addMany(
+        addDrafts(
+          marks,
           one.bookId,
           one.marks.map((mark) => ({
             bookId: one.bookId,
@@ -274,7 +292,8 @@ const importMarksNow = useCallback(() => {
        * is a placeholder and means nothing; the class the store puts these in
        * is what keeps them away from the painter, not the number. */
       ...unplacedWrites.map((one) =>
-        marks.addMany(
+        addDrafts(
+          marks,
           one.bookId,
           one.unplaced.map(({ mark, fromBook }) => ({
             bookId: one.bookId,
@@ -292,7 +311,7 @@ const importMarksNow = useCallback(() => {
           })),
         ),
       ),
-      cards.makeMany(
+      cards.addMany(
         [
           ...plan.additions.flatMap((one) => one.cards.map((card) => ({ ...card, bookId: one.bookId }))),
           ...plan.looseCards,
@@ -303,7 +322,7 @@ const importMarksNow = useCallback(() => {
           answer: card.answer,
           source: card.source,
           cfi: card.localAnchor?.cfi ?? null,
-        })),
+        })).map((draft) => createCard(draft)),
       ),
     ])
     for (const outcome of settled) {
@@ -396,7 +415,7 @@ const importMarksNow = useCallback(() => {
     /* SAID, NOT SWALLOWED: two archived marks that overlapped each other were
        kept as one, and the reader who exported both deserves to hear it. */
     const folded = plan.folded > 0 ? ` ${plan.folded} overlapping ${plan.folded === 1 ? 'mark' : 'marks'} kept as one.` : ''
-    notice(
+    notify(
       plan.marksAdded === 0 && plan.cardsAdded === 0 && plan.unplacedAdded === 0
         ? `Nothing to add.${already}${folded}${missed}${unplaced}`
         : marksAdded === 0 && cardsAdded === 0 && kept === 0
@@ -432,21 +451,18 @@ const importMarksNow = useCallback(() => {
      * sends them to replace an archive that is perfectly good. */
     if (cause instanceof MarksScanFailed) {
       console.error('Paper: could not read your marginalia to import against it', cause)
-      notice('Your marks could not be read — nothing was imported.')
+      notify('Your marks could not be read — nothing was imported.')
       return
     }
     console.error('Paper: could not import that marginalia', cause)
-    notice('That file could not be read.')
+    notify('That file could not be read.')
   })
-}, [marks, cards, library.books, notice])
+}
 
-  /* NULL WHERE THE BUILD CANNOT DO IT, so the palette omits the row rather
-     than offering one that would refuse — the same rule every other
-     conditional command follows. The checks are the file layer's own. */
   return {
-    exportTags: canArchiveTags() ? exportTagsNow : null,
-    importTags: canArchiveTags() ? importTagsNow : null,
-    exportMarks: canArchiveMarks() ? exportMarksNow : null,
-    importMarks: canArchiveMarks() ? importMarksNow : null,
+    exportTags: exportTagsNow,
+    importTags: importTagsNow,
+    exportMarks: exportMarksNow,
+    importMarks: importMarksNow,
   }
 }

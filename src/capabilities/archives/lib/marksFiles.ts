@@ -1,10 +1,11 @@
-import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
-import { readTextFile, stat, writeTextFile } from '@tauri-apps/plugin-fs'
-import { ARCHIVE_MAX_BYTES, tooLarge } from '../core/importLimits'
-import { inTauri } from './inTauri'
-import type { IndexedBook } from '../core/bookIndex'
-import type { Card } from '../core/cards'
-import type { Mark } from '../core/marks'
+import {
+  ARCHIVE_MAX_BYTES,
+  tooLarge,
+  type Card,
+  type FilePicker,
+  type IndexedBook,
+  type Mark,
+} from '../../../kernel'
 import {
   archiveName,
   archiveText,
@@ -12,7 +13,7 @@ import {
   parseArchive,
   toMarkdown,
   type MarksArchive,
-} from '../core/marksArchive'
+} from './marksArchive'
 
 /**
  * The archive's two ends: a file the reader chooses, and the document
@@ -23,16 +24,10 @@ import {
  * of them need a filesystem. This half needs one and has no decisions in it
  * worth testing.
  *
- * NO PATH IS CONSTRUCTED HERE. Both operations go through a dialog, so the file
- * is one the reader pointed at: that is what extends Tauri's filesystem scope
- * to it, and it is also the only honest way to write outside the app's own data
- * directory. A path assembled in code would be denied, and denied at run time.
+ * NO PATH EXISTS HERE. Both operations go through `services.files`, so the file
+ * is one the reader pointed at, and what comes back is a handle with its name
+ * and the verb the reader asked for: there is no path to construct or to keep.
  */
-
-/** Whether the archive can be written at all — false in a plain browser tab. */
-export function canArchiveMarks(): boolean {
-  return inTauri()
-}
 
 /**
  * What a completed export did, so the caller can say it in a sentence.
@@ -43,7 +38,6 @@ export function canArchiveMarks(): boolean {
  * Markdown file as their only backup.
  */
 export interface MarksExport {
-  readonly path: string
   readonly format: 'json' | 'md'
   readonly books: number
   readonly marks: number
@@ -60,24 +54,21 @@ export interface MarksExport {
  * rendered from the same document `.json` is written from — see `toMarkdown`.
  */
 export async function exportMarksToFile(
+  files: FilePicker,
   books: readonly IndexedBook[],
   marks: readonly Mark[],
   cards: readonly Card[],
   now: Date,
 ): Promise<MarksExport | null> {
-  const path = await saveDialog({
-    defaultPath: archiveName(now),
-    filters: [
-      { name: 'Paper marginalia', extensions: ['json'] },
-      { name: 'Markdown (a reading copy)', extensions: ['md'] },
-    ],
-  })
-  if (!path) return null
+  const file = await files.pickSave(archiveName(now), [
+    { name: 'Paper marginalia', extensions: ['json'] },
+    { name: 'Markdown (a reading copy)', extensions: ['md'] },
+  ])
+  if (!file) return null
   const archive = exportMarks(books, marks, cards)
-  const format: 'json' | 'md' = /\.md$/i.test(path) ? 'md' : 'json'
-  await writeTextFile(path, format === 'md' ? toMarkdown(archive) : archiveText(archive))
+  const format: 'json' | 'md' = /\.md$/i.test(file.name) ? 'md' : 'json'
+  await file.writeText(format === 'md' ? toMarkdown(archive) : archiveText(archive))
   return {
-    path,
     format,
     books: archive.books.length,
     marks: archive.books.reduce((sum, book) => sum + book.marks.length, 0),
@@ -98,23 +89,18 @@ export async function exportMarksToFile(
  * anchors and no colours, so parsing it back would produce marks that look like
  * the reader's and are not.
  */
-export async function importMarksFromFile(): Promise<
-  { path: string; archive: MarksArchive | null } | null
-> {
-  const chosen = await openDialog({
-    multiple: false,
-    directory: false,
-    filters: [{ name: 'Paper marginalia', extensions: ['json'] }],
-  })
-  const path = typeof chosen === 'string' ? chosen : null
-  if (!path) return null
+export async function importMarksFromFile(
+  files: FilePicker,
+): Promise<{ archive: MarksArchive | null } | null> {
+  const file = await files.pickOpen([{ name: 'Paper marginalia', extensions: ['json'] }])
+  if (!file) return null
   /* ⚠️ **THE SIZE IS ASKED BEFORE THE FILE IS READ**, and it used to be asked
-   * never. `readTextFile` takes the whole thing into memory and `parseArchive`
+   * never. `readText` takes the whole thing into memory and `parseArchive`
    * validates afterwards — so a crafted archive, or an ordinary huge one picked
    * by mistake, exhausted memory or froze the interface before a single field
    * had been looked at. A bound that runs after the read has not bounded
    * anything. */
-  const { size } = await stat(path)
+  const size = await file.size()
   if (size > ARCHIVE_MAX_BYTES) throw tooLarge('That marginalia file', size, ARCHIVE_MAX_BYTES)
-  return { path, archive: parseArchive(await readTextFile(path)) }
+  return { archive: parseArchive(await file.readText()) }
 }

@@ -1,4 +1,5 @@
 import type { Capability } from '../kernel'
+import { archives } from '../capabilities/archives'
 import { cards } from '../capabilities/cards'
 import { circle } from '../capabilities/circle'
 import { peer } from '../capabilities/peer'
@@ -78,4 +79,4 @@ import { webhost } from '../capabilities/webhost'
  *
  * DESKTOP ONLY: a phone is a satchel, never a shelf, and has nothing to
  * serve. */
-export const capabilities: readonly Capability[] = [peer, sync, circle, publicSharing, voices, passages, cards, webhost]
+export const capabilities: readonly Capability[] = [peer, sync, circle, publicSharing, voices, passages, cards, archives, webhost]
