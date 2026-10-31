@@ -89,7 +89,7 @@
       "id": "voices",
       "file": "src/kernel/ui/App.tsx",
       "match": "voices:",
-      "count": 1,
+      "count": 2,
       "reason": "A field naming reader voices in the reading settings, which belong to read-aloud in the kernel until Phase 5"
     },
     {
@@ -154,6 +154,20 @@
       "match": "services.cards",
       "count": 2,
       "reason": "Rekeying a book's cards when its id changes stays the kernel's, with the store (D2)"
+    },
+    {
+      "id": "peer",
+      "file": "src/kernel/core/envelope.ts",
+      "match": "peer:",
+      "count": 2,
+      "reason": "The envelope's word for the device at the other end of a frame, carried in a service's context; it is protocol vocabulary and does not reach the capability"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/services.ts",
+      "match": "cards:",
+      "count": 1,
+      "reason": "The card store, which stays in the kernel when the Cards panel moves out (D2)"
     }
   ]
 }

@@ -22,9 +22,12 @@ import { isProcessEntry } from './lib/entry.mjs'
  *   - a literal holding it as a path segment: `./circle/log`, `/circle`, `sync/x`;
  *   - a literal with `<id>:` or `<id>.` at its start or after a slash:
  *     `sync:presence`, `/public.jsonl`;
- *   - `services.<id>`, however it is reached;
- *   - `<id>` as a key of an object VALUE: `circle: { … }`. A member of a type is
- *     not one, since a type holds no behaviour for a cut capability to orphan.
+ *   - `services.<id>`, however it is reached: `ctx['services']['circle']`,
+ *     `(env.services!).circle`, `const { circle } = env.services`;
+ *   - `<id>` as a key of an object VALUE, however it is written: `circle: { … }`,
+ *     `{ circle }`, `{ ['circle']: … }`, `circle() {}`, `get circle() {}`. A member
+ *     of a type is not one, since a type holds no behaviour for a cut capability
+ *     to orphan.
  *
  * A literal equal to the id and nothing more (`'circle'`) is not matched: the
  * shapes above are the ones the plan fixed, and `core/capability.ts` shows why a
@@ -72,10 +75,38 @@ function literalText(node) {
     : null
 }
 
-/** `services`, `env.services`, `ctx?.services`: an expression ending in that name. */
-const endsInServices = (node) =>
-  (ts.isIdentifier(node) && node.text === 'services') ||
-  (ts.isPropertyAccessExpression(node) && node.name.text === 'services')
+/** `x`, `x!`, `(x)`, `x as T`, `x satisfies T`: the expression under its wrappers. */
+function unwrapped(node) {
+  let inner = node
+  while (ts.isParenthesizedExpression(inner) || ts.isNonNullExpression(inner) || ts.isAsExpression(inner) || ts.isSatisfiesExpression(inner)) {
+    inner = inner.expression
+  }
+  return inner
+}
+
+/** `services`, `env.services`, `ctx?.services`, `ctx['services']`: an expression ending in that name. */
+function endsInServices(node) {
+  const inner = unwrapped(node)
+  return (
+    (ts.isIdentifier(inner) && inner.text === 'services') ||
+    (ts.isPropertyAccessExpression(inner) && inner.name.text === 'services') ||
+    (ts.isElementAccessExpression(inner) && ts.isStringLiteralLike(inner.argumentExpression) && inner.argumentExpression.text === 'services')
+  )
+}
+
+/** The text of a key that says it: `a`, `'a'`, `['a']`. Null for `[a]`, which could be anything. */
+function keyText(name) {
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text
+  return ts.isComputedPropertyName(name) && ts.isStringLiteralLike(name.expression) ? name.expression.text : null
+}
+
+const isObjectMember = (node) =>
+  (ts.isPropertyAssignment(node) ||
+    ts.isShorthandPropertyAssignment(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node)) &&
+  ts.isObjectLiteralExpression(node.parent)
 
 /**
  * Every naming of an id in one file's text: `{ id, match }`, one per occurrence.
@@ -104,8 +135,14 @@ export function namingsIn(text, fileName, ids) {
       const id = node.argumentExpression.text
       if (known.has(id)) found.push({ id, match: `services.${id}` })
     }
-    if ((ts.isPropertyAssignment(node) || ts.isMethodDeclaration(node)) && ts.isObjectLiteralExpression(node.parent)) {
-      const key = ts.isIdentifier(node.name) || ts.isStringLiteralLike(node.name) ? node.name.text : null
+    if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer && endsInServices(node.initializer)) {
+      for (const element of node.name.elements) {
+        const id = keyText(element.propertyName ?? element.name)
+        if (id !== null && known.has(id)) found.push({ id, match: `services.${id}` })
+      }
+    }
+    if (isObjectMember(node)) {
+      const key = keyText(node.name)
       if (key !== null && known.has(key)) found.push({ id: key, match: `${key}:` })
     }
     ts.forEachChild(node, visit)
