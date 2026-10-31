@@ -330,6 +330,18 @@ describe('which binding a read goes through', () => {
     expect(missing(root)).toEqual([])
   })
 
+  it('names its limit on a namespace import read through default, loudly', () => {
+    const root = over("import * as css from './A.module.css'\nexport const f = () => css.default.live")
+    expect(missing(root)).toEqual(['default'])
+    expect(names(root)).toEqual(['live'])
+  })
+
+  it('takes nothing from a default that is not a stylesheet', () => {
+    const root = over(`${IMPORT}export const f = (o: any) => { const { s = {} } = o; let t: any; ({ t = {} } = o); return [s.gone, t.gone, styles.live] }`)
+    expect(missing(root)).toEqual([])
+    expect(names(root)).toEqual([])
+  })
+
   it('still reads the import outside the scope that shadows it', () => {
     const root = over(`${IMPORT}export const f = (styles: any) => styles.other\nexport const g = () => styles.gone`)
     expect(missing(root)).toEqual(['gone'])
@@ -354,6 +366,11 @@ describe('which binding a read goes through', () => {
     ['a rest binding', `${IMPORT}const { live, ...rest } = styles\nexport const f = () => [live, rest.gone]`],
     ['a destructuring parameter default', `${IMPORT}export const f = ({ gone } = styles) => gone`],
     ['a destructuring assignment', `${IMPORT}let g: any\n;({ gone: g } = styles)\nexport const f = () => g`],
+    ['a default inside a pattern', `${IMPORT}export const f = (o: any) => { const { s = styles } = o; return s.gone }`],
+    ['a renamed default inside a pattern', `${IMPORT}export const f = (o: any) => { const { x: s = styles } = o; return s.gone }`],
+    ['a nested default inside a pattern', `${IMPORT}export const f = (o: any) => { const { a: { s = styles } } = o; return s.gone }`],
+    ['a default in a destructuring assignment', `${IMPORT}export const f = (o: any) => { let s: any; ({ s = styles } = o); return s.gone }`],
+    ['a renamed default in a destructuring assignment', `${IMPORT}export const f = (o: any) => { let s: any; ({ x: s = styles } = o); return s.gone }`],
   ])('reports a missing class through %s', (_what, source) => {
     expect(missing(over(source))).toEqual(['gone'])
   })
@@ -366,6 +383,12 @@ describe('which binding a read goes through', () => {
     ['a nested destructuring of what was handed in', 'export const f = ({ styles: { target } }: any) => target'],
     ['a renamed handing-in', 'export const f = ({ styles: s }: any) => s.target'],
     ['a member of what was handed in', 'export const f = (props: any) => props.styles.target'],
+    ['a default inside a pattern', "import styles from './A.module.css'\nexport const f = (o: any) => { const { s = styles } = o; return s.target }"],
+    ['a default in a destructuring assignment', "import styles from './A.module.css'\nexport const f = (o: any) => { let s: any; ({ s = styles } = o); return s.target }"],
+    ['a renamed handing-in with a default', 'export const f = (p: any) => { const { styles: s = {} } = p; return s.target }'],
+    ['a handing-in by assignment', 'export const f = (p: any) => { let s: any; ({ styles: s } = p); return s.target }'],
+    ['a handing-in by assignment with a default', 'export const f = (p: any) => { let s: any; ({ styles: s = {} } = p); return s.target }'],
+    ['a nested handing-in by assignment with a default', 'export const f = (p: any) => { let t: any; ({ styles: { target: t } = {} as any } = p); return t }'],
     ['a shadowing parameter, which is what handing in looks like', "import styles from './B.module.css'\nexport const f = (styles: any) => styles.target"],
   ])('keeps a class alive through %s', (_what, source) => {
     const root = fixture({

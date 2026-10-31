@@ -9,6 +9,10 @@ import { isProcessEntry } from './lib/entry.mjs'
  * `pnpm css:check` — every class in a CSS module has a consumer, and every class
  * a source names from a CSS module exists.
  *
+ * A STATIC HEURISTIC WITH NAMED LIMITS, not a proof: it reads syntax and one file's
+ * scopes, with no types resolved. WHAT IT CANNOT SEE lists what a clean run does not
+ * cover.
+ *
  * A RULE OUTLIVES THE COMPONENT THAT ORPHANED IT, silently. A panel loses its
  * empty state, a popover becomes a full-width sheet, a status line is replaced
  * — the JSX changes and the CSS is left behind, still valid, still parsed,
@@ -31,7 +35,8 @@ import { isProcessEntry } from './lib/entry.mjs'
  * a second stylesheet is read against the first.
  * A class read only that way is reported dead, which is loud, and a missing class
  * read that way is not reported. `<X styles={styles}>` is seen where it is read
- * as `styles`.
+ * as `styles`. A namespace import read as `css.default.x` reports `default` as
+ * undefined and reads no `x`, which is loud too; read `css.x` or a default import.
  *
  * WHAT IT DELIBERATELY DOES NOT DO. It does not check whether the RULE has any
  * effect, or whether the element it lands on is rendered, or whether a
@@ -88,6 +93,21 @@ function keyOf(name) {
   return ts.isComputedPropertyName(name) && ts.isStringLiteralLike(name.expression) ? name.expression.text : null
 }
 
+/** What a pattern's value assigns to: `s` in `{ a: s }` and in `{ a: s = {} }`. */
+function assignedTarget(node) {
+  const inner = unwrapped(node)
+  return ts.isBinaryExpression(inner) && inner.operatorToken.kind === ts.SyntaxKind.EqualsToken ? assignedTarget(inner.left) : inner
+}
+
+/** Whether an object literal is the left of an assignment, so its keys read rather than write. */
+function isDestructuringTarget(literal) {
+  let node = literal
+  while (ts.isParenthesizedExpression(node.parent)) node = node.parent
+  const parent = node.parent
+  if (ts.isBinaryExpression(parent)) return parent.left === node && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+  return ts.isPropertyAssignment(parent) && parent.initializer === node && isDestructuringTarget(parent.parent)
+}
+
 const isModuleImport = (specifier) => ts.isStringLiteralLike(specifier) && specifier.text.endsWith('.module.css')
 
 /** Handed in by whoever called: no stylesheet is known, so a read proves only that a class is used. */
@@ -103,9 +123,9 @@ const HANDED_IN = Object.freeze({ modulePath: null })
  * anything called `styles` still counts as one, and that keeps its classes alive
  * without saying which module they must be in.
  *
- * A binding is filled from an import, a declaration, a defaulted parameter or an
- * assignment, directly or through a pattern; a pattern's keys are reads and its
- * rest is another holder. Run until nothing changes, because an alias can be
+ * A binding is filled from an import, a declaration, a default or an assignment,
+ * directly or through a pattern; a pattern's keys are reads and its rest is another
+ * holder. Run until nothing changes, because an alias can be
  * written above the one it copies.
  */
 function readsIn(file, source, checker) {
@@ -124,7 +144,8 @@ function readsIn(file, source, checker) {
 
   let changed = false
   const hold = (identifier, origin) => {
-    const symbol = checker.getSymbolAtLocation(identifier)
+    /* In `({ s = x } = o)` the name's own symbol is the key; the variable is the holder. */
+    const symbol = ts.isShorthandPropertyAssignment(identifier.parent) ? checker.getShorthandAssignmentValueSymbol(identifier.parent) : checker.getSymbolAtLocation(identifier)
     /* THE FIRST STYLESHEET A BINDING TAKES IS THE ONE IT HOLDS, so this only ever
        moves one way and the loop below ends, whatever a reassignment does. Knowing
        the module outranks knowing only that one was handed in. */
@@ -153,12 +174,18 @@ function readsIn(file, source, checker) {
   const handedIn = []
   const members = []
   const visit = (node) => {
-    if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+    if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) {
       if (node.initializer) flows.push([node.name, node.initializer])
-    } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
-      flows.push([unwrapped(node.left), node.right])
-    } else if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent) && !node.dotDotDotToken && keyOf(node.propertyName ?? node.name) === 'styles') {
+    }
+    if (ts.isShorthandPropertyAssignment(node) && node.objectAssignmentInitializer) flows.push([node.name, node.objectAssignmentInitializer])
+    if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent) && !node.dotDotDotToken && keyOf(node.propertyName ?? node.name) === 'styles') {
       handedIn.push(node.name)
+    }
+    if (ts.isPropertyAssignment(node) && ts.isObjectLiteralExpression(node.parent) && isDestructuringTarget(node.parent) && keyOf(node.name) === 'styles') {
+      handedIn.push(assignedTarget(node.initializer))
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      flows.push([unwrapped(node.left), node.right])
     } else if (ts.isPropertyAccessExpression(node)) {
       members.push([node.expression, [node.name.text]])
     } else if (ts.isElementAccessExpression(node)) {
