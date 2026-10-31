@@ -1175,6 +1175,18 @@ describe('an export at the limits of what can be read back', () => {
     expect(() => archiveText(carrying('漢'.repeat(Math.ceil(fits / 3) + 1)))).toThrow(ArchiveOverLimit)
   })
 
+  /* The parser keeps the first part of a very long title, and the shelf still has it
+     all: compared whole, the same work on another machine matched nothing. */
+  it('still finds a book by a name longer than the parser keeps', () => {
+    const long = { title: 'T'.repeat(1040), author: 'A'.repeat(1040) }
+    const doc = exportMarks([BOOK({ bookId: 'elsewhere', ...long })], [MARK({ bookId: 'elsewhere' })], [])
+    const back = parseArchive(archiveText(doc))
+    expect(back?.books[0]?.title).toHaveLength(1000)
+    const plan = planImport(back!, [BOOK({ bookId: 'here', ...long })], [], [])
+    expect(plan.unmatched).toEqual([])
+    expect(plan.unplacedAdded).toBe(1)
+  })
+
   it('writes what it has always written, pretty-printed, when the archive fits', () => {
     const doc = exportMarks([BOOK()], [MARK()], [])
     expect(archiveText(doc)).toBe(JSON.stringify(doc, null, 2))

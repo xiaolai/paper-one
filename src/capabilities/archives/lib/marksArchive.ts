@@ -383,10 +383,15 @@ export interface UnplacedBook {
  * scans only TRACKED files, so it stayed silent for as long as this file was
  * untracked. Green before the first commit meant less than it looked.
  */
+/* CUT AS THE PARSER CUTS, because an archive's name has been through `parseArchive`
+ * and the shelf's has not: compared whole, a book with a very long title could never
+ * find itself on another machine. */
+const NAME_KEPT = 1000
+
 /* A structured tuple, not a joined string: NUL is a valid character in a
  * JavaScript string and in escaped JSON, so a separator could be forged by a
  * crafted title. `JSON.stringify` of the pair cannot be. */
-const nameKey = (title: string, author: string): string => JSON.stringify([fold(title), fold(author)])
+const nameKey = (title: string, author: string): string => JSON.stringify([fold(title.slice(0, NAME_KEPT)), fold(author.slice(0, NAME_KEPT))])
 
 const iso = (at: number): string => new Date(at).toISOString()
 
@@ -692,7 +697,7 @@ export function parseArchive(raw: string): MarksArchive | null {
     const cards = cardRows.map(parseCard).filter((card): card is ArchivedCard => card !== null)
     if (marks.length === 0 && cards.length === 0) continue
     const bookId = str(row['bookId'], 200)
-    const title = str(row['title'], 1000)
+    const title = str(row['title'], NAME_KEPT)
     // Unnameable by either route is not a row, it is noise.
     if (!bookId && !title) continue
     /* VALIDATED TO THE SHAPE, not merely read as a string. A digest is compared
@@ -704,7 +709,7 @@ export function parseArchive(raw: string): MarksArchive | null {
     books.push({
       bookId,
       title,
-      author: str(row['author'], 1000),
+      author: str(row['author'], NAME_KEPT),
       ...(CONTENT_HASH.test(contentHash) ? { contentHash } : {}),
       marks,
       cards,
