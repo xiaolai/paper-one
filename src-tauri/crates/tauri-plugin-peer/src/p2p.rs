@@ -16,7 +16,7 @@ use crate::identity::PEER_DIR;
 use crate::peers::PeerStore;
 use crate::person::{device_role_path, person_path};
 use crate::share::policy::{SharePolicy, ShareService};
-use crate::store::write_atomic;
+use crate::store::{write_atomic, write_new_atomic};
 
 const SWITCH_FILE: &str = "p2p-switch";
 
@@ -42,15 +42,38 @@ fn in_use(root: &Path) -> Result<bool> {
 ///
 /// ⚠️ **DECIDED ONCE AND WRITTEN DOWN.** Re-deriving it every launch would turn
 /// the switch back on for a reader who turned it off while still paired.
+///
+/// ⚠️ **THE FIRST ANSWER NEVER REPLACES ANYTHING.** Plugin setup and the webview
+/// both ask at launch. An asker that found no file and was then slow reading the
+/// evidence used to write its inference over whatever had landed meanwhile,
+/// which could be the reader's own off. It installs only into an empty place,
+/// then answers from the file, so every asker agrees with whoever won.
 pub fn is_on(root: &Path) -> Result<bool> {
-    match std::fs::read_to_string(switch_path(root)) {
-        Ok(text) => Ok(text.trim() == "on"),
+    decided(root, in_use)
+}
+
+/// [`is_on`], apart from where the evidence comes from.
+fn decided(root: &Path, evidence: impl FnOnce(&Path) -> Result<bool>) -> Result<bool> {
+    let path = switch_path(root);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(says_on(&text)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let on = in_use(root)?;
-            set(root, on)?;
-            Ok(on)
+            write_new_atomic(&path, word(evidence(root)?))?;
+            Ok(says_on(&std::fs::read_to_string(&path)?))
         }
         Err(err) => Err(err.into()),
+    }
+}
+
+fn says_on(text: &str) -> bool {
+    text.trim() == "on"
+}
+
+fn word(on: bool) -> &'static [u8] {
+    if on {
+        b"on"
+    } else {
+        b"off"
     }
 }
 
@@ -60,7 +83,7 @@ pub fn set(root: &Path, on: bool) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    write_atomic(&path, if on { b"on" } else { b"off" })
+    write_atomic(&path, word(on))
 }
 
 /// `Ok` when P2P is on; the refusal an endpoint start returns when it is not.
@@ -144,6 +167,68 @@ mod tests {
         set(scratch.path(), true).unwrap();
         assert!(is_on(scratch.path()).unwrap());
         assert!(require_on(scratch.path()).is_ok());
+    }
+
+    /// The reader turned it off while a slow first asker was still reading the
+    /// evidence. That asker's inference must not bring it back on next launch.
+    #[test]
+    fn a_choice_landing_during_the_first_answer_outranks_it() {
+        let scratch = ScratchDir::new("p2p-late-off");
+        let answer = decided(scratch.path(), |root| {
+            set(root, false)?;
+            Ok(true)
+        })
+        .unwrap();
+        assert!(!answer);
+        assert_eq!(
+            std::fs::read_to_string(switch_path(scratch.path())).unwrap(),
+            "off"
+        );
+    }
+
+    #[test]
+    fn an_on_landing_during_the_first_answer_outranks_it_too() {
+        let scratch = ScratchDir::new("p2p-late-on");
+        let answer = decided(scratch.path(), |root| {
+            set(root, true)?;
+            Ok(false)
+        })
+        .unwrap();
+        assert!(answer);
+        assert!(is_on(scratch.path()).unwrap());
+    }
+
+    /// Whichever first asker installs its answer, the other reports that answer
+    /// rather than its own inference.
+    #[test]
+    fn the_loser_of_the_first_answer_reports_the_winner() {
+        let scratch = ScratchDir::new("p2p-loser");
+        let answer = decided(scratch.path(), |root| {
+            assert!(decided(root, |_| Ok(true)).unwrap());
+            Ok(false)
+        })
+        .unwrap();
+        assert!(answer);
+    }
+
+    #[test]
+    fn askers_at_once_agree_and_leave_one_clean_file() {
+        let scratch = ScratchDir::new("p2p-racers");
+        write_peer_file(scratch.path(), "circle-person", "someone");
+        let root = scratch.path();
+        let answers: Vec<bool> = std::thread::scope(|threads| {
+            let askers: Vec<_> = (0..16)
+                .map(|_| threads.spawn(|| is_on(root).unwrap()))
+                .collect();
+            askers.into_iter().map(|one| one.join().unwrap()).collect()
+        });
+        assert!(answers.into_iter().all(|on| on));
+        let mut left: Vec<_> = std::fs::read_dir(root.join(PEER_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["circle-person", SWITCH_FILE]);
     }
 
     #[test]

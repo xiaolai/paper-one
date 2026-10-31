@@ -13,7 +13,8 @@
 //! The install is `rename`, which replaces atomically — unlike `identity.rs`,
 //! which uses `hard_link` because it must NOT clobber a key already in use.
 //! Here replacing is exactly the intent: this is the newest state, and the
-//! writer holds whatever lock the caller holds.
+//! writer holds whatever lock the caller holds. [`write_new_atomic`] is the one
+//! exception, for a first answer that must not replace one already given.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -134,6 +135,50 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Write `bytes` to `path` only if nothing is there, so a first answer cannot
+/// replace one that landed before it. True if this call installed them.
+///
+/// `hard_link`, as `keyfile::install_new` installs a key: atomic and exclusive
+/// on POSIX and NTFS, so a reader sees a complete file or none, and a loser
+/// discovers it lost instead of overwriting the winner.
+pub fn write_new_atomic(path: &Path, bytes: &[u8]) -> Result<bool> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Identity(format!("{} has no parent", path.display())))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Error::Identity(format!("could not make {}: {e}", dir.display())))?;
+
+    let tmp = temp_beside(path);
+    if let Err(e) = stage(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::Identity(format!(
+            "could not stage {}: {e}",
+            path.display()
+        )));
+    }
+    let installed = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match installed {
+        Ok(()) => {
+            /* The same accommodation and the same refusal as `write_atomic`. */
+            if let Ok(handle) = std::fs::File::open(dir) {
+                handle.sync_all().map_err(|e| {
+                    Error::Identity(format!(
+                        "could not persist the directory entry for {}: {e}",
+                        path.display()
+                    ))
+                })?;
+            }
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(Error::Identity(format!(
+            "could not install {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +190,21 @@ mod tests {
         write_atomic(&path, b"{\"a\":1}").unwrap();
         write_atomic(&path, b"{\"a\":2}").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":2}");
+    }
+
+    #[test]
+    fn a_first_write_installs_into_an_empty_place_and_replaces_nothing() {
+        let dir = crate::testutil::scratch("atomic-new");
+        let path = dir.join("deep").join("thing");
+        assert!(write_new_atomic(&path, b"first").unwrap());
+        assert!(!write_new_atomic(&path, b"second").unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        let left: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
     }
 
     #[test]
