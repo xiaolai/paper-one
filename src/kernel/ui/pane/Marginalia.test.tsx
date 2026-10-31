@@ -1275,11 +1275,17 @@ describe('the cross-book scan, beside what is already listed', () => {
     expect(screen.queryByText(/^No marginalia/u)).toBeNull()
   })
 
-  it('says it is still reading beside the marks it has, and calls no filter empty until it is done', () => {
+  /* NO LINE ABOVE THE LIST, because a row that comes and goes above the rows
+     moves every one of them twice in a scan. The pane's title says it instead:
+     `SidePane.behaviour.test.tsx` holds that half. */
+  it('puts no line above the marks it has while reading, and calls no filter empty until it is done', () => {
     panel({ all: [ANNOTATION()], scanning: true })
-    expect(screen.getByText('Reading your marks…')).not.toBeNull()
+    expect(screen.queryByText('Reading your marks…')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Notes' }))
     expect(screen.queryByText(/^No notes/u)).toBeNull()
+    /* Nothing listed under this filter, so there is nothing to push down, and a
+       blank panel would read as the marks having been lost. */
+    expect(screen.getByText('Reading your marks…')).not.toBeNull()
   })
 
   it('says neither once the scan has landed', () => {

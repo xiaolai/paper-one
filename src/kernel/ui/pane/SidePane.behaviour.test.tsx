@@ -487,3 +487,30 @@ describe('a contributed pane', () => {
     expect(screen.getByText(FAILED)).not.toBeNull()
   })
 })
+
+/**
+ * ⚠️ **THE SCAN IS SAID IN THE TITLE ROW, WHICH DOES NOT MOVE.** It used to be a
+ * row above the list, so the list dropped when a scan began and rose when it
+ * ended: the pane visibly shook once each time it opened.
+ */
+describe('the cross-book scan, beside the pane title', () => {
+  const scanning = { scanning: true } as Partial<MarksView>
+  const marksWith = (over: Partial<MarksView>) => ({ ...propsOf().marks, ...over }) as MarksView
+
+  it('marks the running scan in the title row, by name for whoever cannot see the icon', () => {
+    draw({ state: stateOf({ pane: 'marginalia' }), marks: marksWith(scanning) })
+    const status = screen.getByRole('status', { name: 'Reading your marks…' })
+    expect(status.parentElement?.textContent).toBe('Marginalia')
+  })
+
+  it('takes the mark away once the scan has landed', () => {
+    const { redraw } = draw({ state: stateOf({ pane: 'marginalia' }), marks: marksWith(scanning) })
+    redraw({ marks: marksWith({ scanning: false }) })
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('says nothing about marks over another panel, whatever the scan is doing', () => {
+    draw({ state: stateOf({ pane: 'toc' }), marks: marksWith(scanning) })
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+})

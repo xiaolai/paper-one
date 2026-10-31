@@ -74,8 +74,12 @@ const UNREADABLE_MARKS =
 export const SCAN_FAILED_MARKS = 'Your marks could not be read'
 /** What to do about a failed scan, wherever it is said. */
 const SCAN_FAILED_NEXT = 'Nothing on disk has been changed. Close and reopen the panel to try again.'
-/** The cross-book scan is still running — over an empty panel or above a partial list (#130). */
-const SCANNING_MARKS = 'Reading your marks…'
+/**
+ * The cross-book scan is still running — in words where nothing is listed, and
+ * as the name of the mark beside the pane's title, which stands over a partial
+ * list too (#130).
+ */
+export const SCANNING_MARKS = 'Reading your marks…'
 import type { MarksView } from '../hooks/useMarks'
 import { comboFor } from '../panes'
 import { FilterChips } from './FilterChips'
@@ -1088,15 +1092,12 @@ export function Marginalia({
         </div>
       )}
 
-      {/* THE SCAN, SAID ABOVE WHAT IS LISTED AS WELL AS OVER NOTHING (#129,
-          #130). Kept to the nothing-at-all branch, a running scan let a partial
-          list pass for the whole of it. Running wins over failed, as it does in
-          that branch: a scan under way is the newer answer. */}
-      {marks.scanning && (
-        <div className={styles.panelMeta}>
-          <span>{SCANNING_MARKS}</span>
-        </div>
-      )}
+      {/* A FAILED SCAN, SAID ABOVE WHAT IS LISTED AS WELL AS OVER NOTHING (#129).
+          A running one is not said here (#130): a row for it pushed the list
+          down and pulled it back each time the panel opened. `SidePane` marks it
+          beside the title, which does not move.
+          Running wins over failed, as it does in the nothing-at-all branch: a
+          scan under way is the newer answer. */}
       {marks.scanFailed && !marks.scanning && (
         <div className={styles.panelMeta}>
           <span>
@@ -1145,9 +1146,16 @@ export function Marginalia({
         )}
       </div>
 
-      {/* NOT WHILE THE LIST IS UNFINISHED OR UNREAD — the line above says which,
-          and "No notes yet." under it would claim an answer nobody has yet
-          (#129, #130). */}
+      {/* NOT WHILE THE LIST IS UNFINISHED OR UNREAD — "No notes yet." would claim
+          an answer nobody has yet (#129, #130). Said in words here, because
+          nothing below can be moved by it, and the title's mark alone over an
+          empty filter reads as the marks having been lost. A failed scan is
+          said by the line above. */}
+      {shown.length === 0 && marks.scanning && (
+        <div className={styles.empty}>
+          <div className={styles.emptyBody}>{SCANNING_MARKS}</div>
+        </div>
+      )}
       {shown.length === 0 && !marks.scanning && !marks.scanFailed && (
         <div className={styles.empty}>
           <div className={styles.emptyBody}>

@@ -58,6 +58,33 @@
   color: var(--ink);
 }
 
+/* WORK UNDER WAY, in the one row that does not move when it starts or stops.
+   It fades in late so that a scan that lands at once shows nothing at all. Under
+   reduced motion the global rule stops the turning after its one quick cycle,
+   and what is left is the same mark, still. */
+.paneBusy {
+  display: inline-flex;
+  margin-inline-start: var(--space-6);
+  color: var(--muted);
+  animation: paneBusyIn var(--motion-popover) 200ms both;
+}
+
+.paneBusy svg {
+  animation: paneBusyTurn 1s linear infinite;
+}
+
+@keyframes paneBusyIn {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes paneBusyTurn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /*
  * THE PANE SCROLLS WITHOUT RESERVING A LANE FOR SAYING SO.
  *

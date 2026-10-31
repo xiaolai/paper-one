@@ -4,6 +4,7 @@ import {
   Layers,
   LibraryBig,
   List,
+  LoaderCircle,
   Search,
   Settings as SettingsIcon,
   Wrench,
@@ -26,7 +27,7 @@ import type { Bookmarking } from '../hooks/useBookmarking'
 import { Contents } from './Contents'
 import { LibraryPanel, type LibraryPanelProps } from './LibraryPanel'
 import { Cards } from './Cards'
-import { Marginalia } from './Marginalia'
+import { Marginalia, SCANNING_MARKS } from './Marginalia'
 import { SearchPanel } from './SearchPanel'
 import { DevPane } from './DevPane'
 import type { DiagnosticLog } from '../../core/diagnosticsLog'
@@ -346,7 +347,14 @@ export function SidePane({
   if (isContributedScreenId(state.screen)) return null
   return (
     <>
-      <div className={styles.paneTitle}>{shown.title}</div>
+      <div className={styles.paneTitle}>
+        {shown.title}
+        {pane === 'marginalia' && marks.scanning && (
+          <span className={styles.paneBusy} role="status" aria-label={SCANNING_MARKS} title={SCANNING_MARKS}>
+            <LoaderCircle size={ICON.inline} strokeWidth={ICON.stroke} aria-hidden />
+          </span>
+        )}
+      </div>
 
       <div className={styles.body}>
         {pane === 'toc' && (
