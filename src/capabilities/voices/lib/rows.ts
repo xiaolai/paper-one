@@ -10,7 +10,7 @@
  * auditable in one place).
  */
 
-import type { InstallProgress, SpokenAudio, VoicePack } from '../../../kernel'
+import type { InstallProgress, RenderedFile, SpokenAudio, VoicePack } from '../../../kernel'
 
 /**
  * A download's progress, as the plugin emits it.
@@ -365,6 +365,20 @@ function isTiming(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false
   const row = value as Record<string, unknown>
   return counted(row.start) && counted(row.length) && counted(row.startMs) && counted(row.endMs)
+}
+
+export function renderedFileOf(row: unknown): RenderedFile {
+  const raw = (row ?? {}) as Record<string, unknown>
+  if (!counted(raw.sampleRate) || raw.sampleRate === 0) {
+    throw new Error('the file was rendered at a sample rate that is not one')
+  }
+  /* ⚠️ **ABSENT IS REFUSED, NOT READ AS NOTHING SKIPPED.** A chapter missing a
+     sentence reported as whole is the failure the skip list exists to end, and
+     the plugin always sends the list. */
+  if (!Array.isArray(raw.skipped) || !raw.skipped.every(isSkip)) {
+    throw new Error('the file was rendered with a skip list that is not one')
+  }
+  return { sampleRate: raw.sampleRate, skipped: raw.skipped as RenderedFile['skipped'] }
 }
 
 function isSkip(value: unknown): boolean {

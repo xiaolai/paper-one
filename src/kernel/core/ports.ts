@@ -336,6 +336,24 @@ export interface SpokenSkip {
   readonly why: string
 }
 
+/** What to read into a file, and where. See `SpeechEnginePort.renderFile`. */
+export interface SpeechFileRequest {
+  readonly packId: string
+  readonly voiceId: string
+  readonly text: string
+  /** A multiplier on the engine's own speed; 1 is its default. */
+  readonly rate?: number
+  /** An absolute path. A failed write leaves nothing there. */
+  readonly path: string
+}
+
+/** What a file written by `renderFile` holds, apart from the samples. */
+export interface RenderedFile {
+  readonly sampleRate: number
+  /** What the engine refused to say: a chapter with less in it than its text. */
+  readonly skipped: readonly SpokenSkip[]
+}
+
 export interface SpokenAudio {
   /** 16-bit mono PCM, little-endian, at `sampleRate`. */
   readonly pcm: Uint8Array
@@ -457,6 +475,23 @@ export interface SpeechEnginePort {
    * something needs it rather than a parameter to leave lying here.
    */
   render(request: SpeechRequest): Promise<SpokenAudio>
+  /**
+   * Read some text aloud into a file at a path the caller names.
+   *
+   * ⚠️ **NOT `render` WITH A DESTINATION: NOTHING IS KEPT.** The clip store holds
+   * what a reader has HEARD, and a ten-hour book is 6.2 GB against a 5 GB budget,
+   * so an export that rendered into it would evict its own earlier chapters
+   * before the muxer read them. This writes to the caller's scratch file and
+   * touches no clip.
+   *
+   * ⚠️ **OPTIONAL, AND ONLY UNTIL IT HAS A CALLER.** The export still reaches the
+   * same command directly (`audiobookTauri.ts`) until the narration capability
+   * takes it over, and nothing reads this before then. Required, it would change
+   * every fake of this port in the tests, including the reading proof's, on the
+   * step whose proof is that test bodies did not change. Its first caller makes
+   * it required.
+   */
+  renderFile?(request: SpeechFileRequest): Promise<RenderedFile>
   /**
    * The rendered section already on disk, or `null` the first time.
    *

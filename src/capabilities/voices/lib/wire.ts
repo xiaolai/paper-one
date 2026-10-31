@@ -37,6 +37,15 @@ export interface ClipQuery {
   readonly spokenDigest: string
 }
 
+/** What to render into a file, and where. */
+export interface RenderFileQuery {
+  readonly pack: string
+  readonly voice: string
+  readonly text: string
+  readonly rate: number | null
+  readonly path: string
+}
+
 /** Every command, and nothing else. */
 export interface VoicesWire {
   catalogue(): Promise<unknown[]>
@@ -47,6 +56,8 @@ export interface VoicesWire {
   clipFind(query: ClipQuery): Promise<unknown>
   /** Render a section and keep it. Minutes, on a blocking thread. */
   clipRender(query: ClipQuery, text: string): Promise<unknown>
+  /** Render into a file the caller names, keeping nothing. */
+  renderFile(file: RenderFileQuery): Promise<unknown>
   /**
    * Hold clips open while something reads them, or let them go.
    *
@@ -88,6 +99,9 @@ export function voicesWire(): VoicesWire {
        refuses and is right to — the shape is a VALUE on both sides. */
     clipFind: (ask) => invoke<unknown>('plugin:voices|voices_clip_find', { ask }),
     clipRender: (ask, text) => invoke<unknown>('plugin:voices|voices_clip_render', { ask, text }),
+    /* Flat, as the command declares its arguments: `voices_render_file` has five
+       and no `ask`, because it names no clip. */
+    renderFile: (file) => invoke<unknown>('plugin:voices|voices_render_file', { ...file }),
     clipHold: (stems, hold) => invoke<unknown>('plugin:voices|voices_clip_hold', { stems, hold }),
     clipUsage: () => invoke<unknown>('plugin:voices|voices_clip_usage'),
     clipForget: (book) => invoke<unknown>('plugin:voices|voices_clip_forget', { book }),
