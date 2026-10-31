@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ARCHIVE_MAX_BYTES, type IndexedBook } from '../../../kernel'
+import { ARCHIVE_MAX_BYTES, TAG_MAX, type IndexedBook } from '../../../kernel'
 import { ArchiveOverLimit } from './marksArchive'
 import { archiveName, archiveText, exportTags, parseArchive, planImport, type TagArchive } from './tagArchive'
 
@@ -137,8 +137,9 @@ describe('planning an import', () => {
 
 /*
  * WHAT IS EXPORTED MUST COME BACK. The reader refuses a tags file over
- * `ARCHIVE_MAX_BYTES`, and nothing on the way out knew it. There is no row limit
- * here to spend: this parser reads every row of a file it agrees to open.
+ * `ARCHIVE_MAX_BYTES`, and the parser cuts a title or an author at its own cap, and
+ * nothing on the way out knew either. There is no row limit here to spend: this
+ * parser reads every row of a file it agrees to open.
  */
 describe('an export at the limits of what can be read back', () => {
   const carrying = (title: string): TagArchive => archiveOf([{ bookId: 'b1', title, author: '', tags: ['sea'] }])
@@ -161,6 +162,17 @@ describe('an export at the limits of what can be read back', () => {
   it('writes what it has always written, pretty-printed, when the archive fits', () => {
     const doc = exportTags([book({ tags: ['sea'] })])
     expect(archiveText(doc)).toBe(JSON.stringify(doc, null, 2))
+  })
+
+  /* The parser keeps the first part of a very long title, and the shelf still has it
+     all: compared whole, the same work on another machine matched nothing. */
+  it('still finds a book by a name longer than the parser keeps', () => {
+    const long = { title: 'T'.repeat(TAG_MAX * 8 + 40), author: 'A'.repeat(TAG_MAX * 8 + 40) }
+    const back = parseArchive(archiveText(exportTags([book({ bookId: 'elsewhere', tags: ['sea'], ...long })])))
+    expect(back?.books[0]?.title).toHaveLength(TAG_MAX * 8)
+    const plan = planImport(back!, [book({ bookId: 'here', ...long })])
+    expect(plan.additions).toEqual([{ bookId: 'here', tags: ['sea'] }])
+    expect(plan.unmatched).toBe(0)
   })
 })
 

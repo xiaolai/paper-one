@@ -61,8 +61,14 @@ export interface ImportPlan {
   readonly tagsAdded: number
 }
 
-/** How a book is looked up by name when its id is not on this shelf. */
-const nameKey = (title: string, author: string): string => `${fold(title)}\u0000${fold(author)}`
+/**
+ * How a book is looked up by name when its id is not on this shelf.
+ *
+ * CUT AS THE PARSER CUTS, because an archive's name has been through `parseArchive`
+ * and the shelf's has not: compared whole, a book with a very long title could never
+ * find itself on another machine.
+ */
+const nameKey = (title: string, author: string): string => `${fold(str(title))}\u0000${fold(str(author))}`
 
 /**
  * Everything the reader has filed, as a document.
