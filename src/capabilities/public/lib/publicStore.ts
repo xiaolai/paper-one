@@ -1,34 +1,7 @@
-import {
-  DEFAULT_PUBLIC_BOUNDS,
-  EMPTY_PUBLIC_FILE,
-  MAX_HELD_BYTES_PER_BOOK,
-  MAX_HELD_PER_BOOK,
-  VERIFY_PER_TASK,
-  atomicWrite,
-  breathe,
-  canonicalJson,
-  MAX_TASK_MS,
-  isMissingFile,
-  foldPublic,
-  hasRoom,
-  keepWithin,
-  publicPathIn,
-  publicationKey,
-  readPublicEnvelope,
-  sequenceKey,
-  sizeOf,
-  sliceFor,
-  type Delivered,
-  type IndexFs,
-  type KeptEnvelope,
-  type PublicCrypto,
-  type PublicFile,
-  type PublicRefusal,
-  type PublicWithdrawal,
-  type VaultFs,
-  type Weighed,
-  type WriteQueue,
-} from '../../../kernel'
+import { atomicWrite, breathe, canonicalJson, isMissingFile, publicPathIn, type IndexFs, type VaultFs, type WriteQueue } from '../../../kernel'
+import { DEFAULT_PUBLIC_BOUNDS, MAX_HELD_BYTES_PER_BOOK, MAX_HELD_PER_BOOK, VERIFY_PER_TASK, MAX_TASK_MS, hasRoom, keepWithin, sizeOf, sliceFor, type Weighed } from './bounds'
+import { EMPTY_PUBLIC_FILE, foldPublic, publicationKey, sequenceKey, type Delivered, type KeptEnvelope, type PublicFile, type PublicWithdrawal } from './order'
+import { readPublicEnvelope, type PublicCrypto, type PublicRefusal } from './envelope'
 
 /**
  * Where a stranger's annotations live on this device, and what it costs to

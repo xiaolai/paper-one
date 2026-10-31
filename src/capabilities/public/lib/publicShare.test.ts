@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isContentHash } from './bookFolder'
+import { isContentHash } from '../../../kernel'
 import {
   adopts,
   folderForFetch,

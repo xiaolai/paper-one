@@ -1,15 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import {
-  DEFAULT_LIFETIME_MS,
-  PUBLIC_VERSION,
-  canonicalJson,
-  publicPathIn,
-  publicSignedBytes,
-  writeQueue,
-  type CapabilityContext,
-  type IndexedBook,
-  type PublicEnvelope,
-} from '../../kernel'
+import { canonicalJson, publicPathIn, writeQueue, type CapabilityContext, type IndexedBook } from '../../kernel'
+import { DEFAULT_LIFETIME_MS, PUBLIC_VERSION, publicSignedBytes, type PublicEnvelope } from './lib/envelope'
 import { fakeFs } from '../../kernel/testkit'
 
 /**

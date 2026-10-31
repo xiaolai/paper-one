@@ -1,4 +1,4 @@
-import { isContentHash } from './bookFolder'
+import { isContentHash } from '../../../kernel'
 
 /**
  * What a book may be offered publicly as, and what a fetched file may become —
@@ -28,7 +28,7 @@ import { isContentHash } from './bookFolder'
  * at all, and a book added a minute ago may not have one yet. A surface that
  * simply hid the control would look broken; {@link offerAbsentBecause} is the
  * sentence that has to accompany its absence, the same shape and for the same
- * reason as `shareAbsentBecause` in `circle/foreign.ts`.
+ * reason as `shareAbsentBecause` in the circle's `foreign.ts`.
  */
 
 /* ⚠️ **`isContentHash` IS IMPORTED, NOT WRITTEN AGAIN.** `bookFolder.ts` calls

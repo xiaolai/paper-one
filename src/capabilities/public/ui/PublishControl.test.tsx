@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PUBLIC_LINKS_DISCLOSURE, disclosureFor, linksVoiceToPerson, type PublicPassage } from '../../../kernel'
+import { type PublicPassage } from '../../../kernel'
+import { PUBLIC_LINKS_DISCLOSURE, disclosureFor, linksVoiceToPerson } from '../lib/publish'
 import type { PublishPublicPort } from '../lib/publishPort'
 import { PublishControl } from './PublishControl'
 

@@ -1,18 +1,6 @@
 import { createElement } from 'react'
-import {
-  isContentHash,
-  messageOf,
-  notifyAll,
-  standingOf,
-  type Capability,
-  type CapabilityContext,
-  type Disposable,
-  type ForeignAnnotation,
-  type IndexFs,
-  type Library,
-  type OverlayRequest,
-  type PublicPassage,
-} from '../../kernel'
+import { isContentHash, messageOf, notifyAll, type Capability, type CapabilityContext, type Disposable, type ForeignAnnotation, type IndexFs, type Library, type OverlayRequest, type PublicPassage } from '../../kernel'
+import { standingOf } from './lib/binding'
 import { p2pAvailable, sharePort, voicePort } from '../peer'
 import { publicAnnotationsFor } from './lib/overlay'
 import { publicPortOver, type PublicPort } from './lib/publicPort'
@@ -29,7 +17,7 @@ import { PublishControl } from './ui/PublishControl'
  * Phase 25. The Rust half is the share endpoint in `tauri-plugin-peer`
  * (`src/share/`): a second keypair on a second port, content-addressed, with
  * two independent services — the book's bytes and public annotations about it.
- * This half is the composition: the kernel's pure rules (`publicShare.ts`), the
+ * This half is the composition: the pure rules (`lib/publicShare.ts`), the
  * library snapshot, the peer plugin's share commands, and one pane.
  *
  * ## Why it is not part of `circle`

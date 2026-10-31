@@ -193,10 +193,9 @@ function inUnits(bytes: number): string {
 /**
  * A pack's SIZE, where a value that is not one is refused rather than drawn.
  *
- * ⚠️ **NOT `sizeOf`** — the kernel already exports one of those, from
- * `core/public/bounds.ts`, and it reads a Content-Length STRING into a number.
- * Two exports of that name is a compile error, and two FUNCTIONS of that name
- * answering different questions would have been worse than one.
+ * ⚠️ **NOT `sizeOf`** — the public capability's `lib/bounds.ts` has one of
+ * those, and it reads a Content-Length STRING into a number. Two FUNCTIONS of
+ * that name answering different questions would have been worse than one.
  *
  * A row with no size would otherwise be offered as `NaN MB`, which is the
  * failure this exists for — a download of an unknown amount, described

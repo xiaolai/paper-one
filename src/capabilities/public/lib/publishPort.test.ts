@@ -1,14 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import {
-  PUBLIC_DISCLOSURE,
-  PUBLIC_LINKS_DISCLOSURE,
-  isPublicEnvelopeShape,
-  publicSignedBytes,
-  type IndexedBook,
-  type Library,
-  type PublicEnvelope,
-  type PublicPassage,
-} from '../../../kernel'
+import { type IndexedBook, type Library, type PublicPassage } from '../../../kernel'
+import { PUBLIC_DISCLOSURE, PUBLIC_LINKS_DISCLOSURE } from './publish'
+import { isPublicEnvelopeShape, publicSignedBytes, type PublicEnvelope } from './envelope'
 import type { SharePort, ShareService, SharedBook, VoicePort, VoiceStatus } from '../../peer'
 import { publishPortOver } from './publishPort'
 

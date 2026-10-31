@@ -1,4 +1,4 @@
-import type { PublicPassage } from '../ports'
+import type { PublicPassage } from '../../../kernel'
 
 /**
  * Publishing to the circle and publishing to strangers are two acts — WI-26.4.

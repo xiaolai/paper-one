@@ -1,15 +1,7 @@
-import {
-  overlayKeyOf,
-  reconcile,
-  standingOf,
-  type AnchorWeight,
-  type ForeignAnnotation,
-  type ForeignOpinion,
-  type OverlayRequest,
-  type PublicFile,
-  type ResolvedPassage,
-  type VoiceDecisions,
-} from '../../../kernel'
+import { overlayKeyOf, type ForeignAnnotation, type ForeignOpinion, type OverlayRequest, type ResolvedPassage } from '../../../kernel'
+import { reconcile, type AnchorWeight } from './presentation'
+import { standingOf, type VoiceDecisions } from './binding'
+import { type PublicFile } from './order'
 
 /**
  * Turning held public annotations into something the painter can draw —

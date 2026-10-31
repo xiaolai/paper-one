@@ -1,18 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import {
-  DEFAULT_LIFETIME_MS,
-  EMPTY_PUBLIC_FILE,
-  MAX_APPENDED_SHARED,
-  MAX_HELD_PER_BOOK,
-  PUBLIC_VERSION,
-  canonicalJson,
-  publicPathIn,
-  publicSignedBytes,
-  writeQueue,
-  type IndexFs,
-  type PublicCrypto,
-  type PublicEnvelope,
-} from '../../../kernel'
+import { MAX_APPENDED_SHARED, canonicalJson, publicPathIn, writeQueue, type IndexFs } from '../../../kernel'
+import { DEFAULT_LIFETIME_MS, PUBLIC_VERSION, publicSignedBytes, type PublicCrypto, type PublicEnvelope } from './envelope'
+import { EMPTY_PUBLIC_FILE } from './order'
+import { MAX_HELD_PER_BOOK } from './bounds'
 import { readPublic, takePublic, writePublic } from './publicStore'
 
 /**

@@ -1,19 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import {
-  DEFAULT_LIFETIME_MS,
-  EMPTY_PUBLIC_FILE,
-  NO_DECISIONS,
-  PUBLIC_VERSION,
-  bind,
-  blockVoice,
-  canonicalJson,
-  overlayKeyOf,
-  type PublicEnvelope,
-  type PublicFile,
-  type ResolveResult,
-  type VoiceBinding,
-  type VoiceDecisions,
-} from '../../../kernel'
+import { canonicalJson, overlayKeyOf, type ResolveResult } from '../../../kernel'
+import { DEFAULT_LIFETIME_MS, PUBLIC_VERSION, type PublicEnvelope } from './envelope'
+import { EMPTY_PUBLIC_FILE, type PublicFile } from './order'
+import { NO_DECISIONS, bind, blockVoice, type VoiceBinding, type VoiceDecisions } from './binding'
 /* ⚠️ **THE MINT, NOT A CAST.** `reanchor.test.ts` walks `src/` for
    `as ResolvedCfi` and holds the set to exactly two files — the resolver and
    this testkit — because *"if a second minting site exists, the type is

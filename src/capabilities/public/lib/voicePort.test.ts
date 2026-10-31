@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { VOICE_DECISIONS_PATH, writeQueue, type IndexFs, type VoiceBinding } from '../../../kernel'
+import { VOICE_DECISIONS_PATH, writeQueue, type IndexFs } from '../../../kernel'
+import { type VoiceBinding } from './binding'
 import { MAX_DECISIONS, decisionsFrom, voiceDecisionsPortOver, type VoiceDecisionsPort } from './voicePort'
 
 const VOICE = 'ab'.repeat(32)

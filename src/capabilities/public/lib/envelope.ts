@@ -1,5 +1,5 @@
-import { canonicalJson } from '../canonicalJson'
-import type { PublicPassage } from '../ports'
+import { canonicalJson } from '../../../kernel'
+import type { PublicPassage } from '../../../kernel'
 
 /**
  * What a stranger's annotation IS on the wire — WI-26.2.

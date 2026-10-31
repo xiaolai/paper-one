@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canonicalJson } from '../canonicalJson'
+import { canonicalJson } from '../../../kernel'
 import {
   DEFAULT_LIFETIME_MS,
   MAX_CHAPTER,

@@ -1,26 +1,5 @@
-import {
-  NO_DECISIONS,
-  VOICE_DECISIONS_PATH,
-  atomicWrite,
-  bind,
-  blockPerson,
-  blockVoice,
-  isMissingFile,
-  isWellFormed,
-  notifyAll,
-  personOf,
-  standingOf,
-  unbind,
-  unblockPerson,
-  unblockVoice,
-  voicesOf,
-  type BindingRefusal,
-  type IndexFs,
-  type VoiceBinding,
-  type VoiceDecisions,
-  type VoiceStanding,
-  type WriteQueue,
-} from '../../../kernel'
+import { VOICE_DECISIONS_PATH, atomicWrite, isMissingFile, notifyAll, type IndexFs, type WriteQueue } from '../../../kernel'
+import { NO_DECISIONS, bind, blockPerson, blockVoice, isWellFormed, personOf, standingOf, unbind, unblockPerson, unblockVoice, voicesOf, type BindingRefusal, type VoiceBinding, type VoiceDecisions, type VoiceStanding } from './binding'
 
 /**
  * What this reader has decided about other people's voices — WI-26.5, given a

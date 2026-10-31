@@ -51,83 +51,6 @@
       "reason": "Removal writes this register before the trash rename, and behind a port a missed write could resurrect a deleted book; stays in the kernel (plan, What stays)"
     },
     {
-      "id": "public",
-      "file": "src/kernel/core/public/bounds.ts",
-      "match": "public: ",
-      "count": 1,
-      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/core/public/bounds.ts",
-      "match": "public: not a batch size: ",
-      "count": 1,
-      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/core/public/bounds.ts",
-      "match": "public: not a byte count: ",
-      "count": 1,
-      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/core/public/bounds.ts",
-      "match": "public: not a count: ",
-      "count": 2,
-      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/core/public/envelope.ts",
-      "match": "public: a lifetime is 1..=",
-      "count": 1,
-      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/core/public/envelope.ts",
-      "match": "public: not a sequence: ",
-      "count": 1,
-      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/core/public/envelope.ts",
-      "match": "public: not a time: ",
-      "count": 1,
-      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/core/public/envelope.ts",
-      "match": "public: that envelope is ",
-      "count": 1,
-      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/core/public/envelope.ts",
-      "match": "public: that is not a publishable envelope",
-      "count": 1,
-      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/core/public/envelope.ts",
-      "match": "public: that lifetime puts the expiry past a safe integer: ",
-      "count": 1,
-      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/core/public/presentation.ts",
-      "match": "public: a contributor names neither a voice nor a person",
-      "count": 1,
-      "reason": "An error message of public's own pure code, prefixed with its name; the module moves out in Phase 2"
-    },
-    {
       "id": "circle",
       "file": "src/kernel/core/registry.ts",
       "match": "circle:",
@@ -210,48 +133,6 @@
       "match": "./core/circle/workClaim",
       "count": 2,
       "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/index.ts",
-      "match": "./core/public/binding",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/index.ts",
-      "match": "./core/public/bounds",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/index.ts",
-      "match": "./core/public/envelope",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/index.ts",
-      "match": "./core/public/order",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/index.ts",
-      "match": "./core/public/presentation",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
-    },
-    {
-      "id": "public",
-      "file": "src/kernel/index.ts",
-      "match": "./core/public/publish",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for public; the module moves out in Phase 2"
     },
     {
       "id": "passages",
