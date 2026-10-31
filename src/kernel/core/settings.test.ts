@@ -315,6 +315,24 @@ describe('reading a file nobody can vouch for', () => {
     ])
   })
 
+  /* THE CARDS PANEL MOVED HOUSE AND TOOK A NEW NAME. A reader who hid it under
+     the old one must not find it back; no version bump, because a list that
+     already says the new name reads the same. */
+  it("reads a hidden 'cards' as the panel's present name", () => {
+    expect(readingBack(envelope({ 'kernel.hiddenPanes': ['cards'] })).hiddenPanes).toEqual(['cards:deck'])
+    expect(readingBack(envelope({ 'kernel.hiddenPanes': ['search', 'cards', 'library'] })).hiddenPanes).toEqual([
+      'search',
+      'cards:deck',
+      'library',
+    ])
+  })
+
+  it('names the panel once when the list holds both of its names, and leaves a new list alone', () => {
+    expect(readingBack(envelope({ 'kernel.hiddenPanes': ['cards', 'cards:deck'] })).hiddenPanes).toEqual(['cards:deck'])
+    expect(readingBack(envelope({ 'kernel.hiddenPanes': ['cards:deck', 'cards'] })).hiddenPanes).toEqual(['cards:deck'])
+    expect(readingBack(envelope({ 'kernel.hiddenPanes': ['cards:deck'] })).hiddenPanes).toEqual(['cards:deck'])
+  })
+
   it('refuses a switch that is not a boolean', () => {
     const got = readingBack(envelope({ 'kernel.rulerOn': 'yes', 'kernel.themeFollowsOs': 0 }))
     expect(got.rulerOn).toBe(DEFAULTS.rulerOn)

@@ -102,7 +102,7 @@ export interface AppState {
    * from inside the reducer would make it impure.
    */
   readonly developer: boolean
-  /** Unfinished panels hidden while developer options are on — see `paneOffered`. */
+  /** Unfinished panels hidden while developer options are on — see `contributionOffered`. */
   readonly hiddenPanes: readonly string[]
   readonly theme: Theme
   /** §05: the system follows the OS by default, with an override in Settings. */
@@ -873,10 +873,7 @@ export function paneFits(screen: Screen, pane: PaneId, audience: PaneAudience = 
    * own fallback), and §11's pane ids drifted across exactly three copies
    * before `panes.ts` existed. A sixth caller gets the whole rule or none of
    * it. */
-  /* `hiddenPanes` WITH NO FALLBACK OF ITS OWN: `paneOffered` defaults an absent
-     list to none, and a second `?? []` here was a default nothing could tell
-     from its mutant — the list is consulted only for an unfinished id. */
-  if (!paneOffered(pane, audience.developer ?? false, audience.hiddenPanes)) return false
+  if (!paneOffered(pane, audience.developer ?? false)) return false
   return screen === 'reader' ? !SHELF_ONLY.includes(pane) : !BOOK_ONLY.includes(pane)
 }
 
@@ -898,8 +895,8 @@ export function defaultPaneFor(screen: Screen): PaneId {
      gone: it returned what falling through returns, and no behaviour could
      tell it was there (2026-09-15 mutation sweep). */
   /* ⚠️ **CONTENTS, AND IT USED TO BE COMPANION.** The reader's fallback panel
-   * cannot be one that most readers are not shown: `companion` is in
-   * `UNFINISHED_PANE_IDS`, so with developer options off it fits nowhere, and a
+   * cannot be one that most readers are not shown: `companion` was unfinished,
+   * so with developer options off it fit nowhere, and a
    * default that fits nowhere is how every path through the reducer lands on a
    * panel that does not exist.
    *
@@ -958,7 +955,7 @@ function stillOffered(pane: PaneId, state: AppState, contributed: ContributedPan
   const entry = isContributedPaneId(pane) ? contributed.find((one) => one.id === pane) : undefined
   return entry !== undefined
     ? contributionOffered(entry, state.developer, state.hiddenPanes)
-    : paneOffered(pane, state.developer, state.hiddenPanes)
+    : paneOffered(pane, state.developer)
 }
 
 /** The audience a state describes, so the reducer's four calls cannot differ. */

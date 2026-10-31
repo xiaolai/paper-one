@@ -55,11 +55,8 @@ describe('buildCommands', () => {
      * version named four of the five panels that carry a digit and had already
      * drifted — it did not include Bookmarks, and nothing compared it with
      * `PANES`. A second copy of a registry is a second opinion about it. */
-    /* DEVELOPER OPTIONS ON, because one of the five digits is Cards and Cards
-       is unfinished — see `UNFINISHED_PANE_IDS`. The claim being made here is
-       that a panel the palette OFFERS carries the digit the keyboard BINDS, and
-       a panel nobody is offered has neither. The other half of that pairing —
-       the digit going dead with the panel — is the case below. */
+    /* The claim being made here is that a panel the palette OFFERS carries the
+       digit the keyboard BINDS, and a panel nobody is offered has neither. */
     const commands = buildCommands(context({ screen: 'reader', developer: true }).ctx)
     for (const { combo, pane } of PANE_SHORTCUTS) {
       expect(find(commands, `pane:${pane}`)?.combo, `pane:${pane}`).toBe(combo)
@@ -67,33 +64,14 @@ describe('buildCommands', () => {
     expect(find(commands, 'pane:toggle')?.combo).toBe('⌘\\')
   })
 
-  /**
-   * ⚠️ **AN UNFINISHED PANEL IS NOT IN THE PALETTE EITHER.**
-   *
-   * The rail, the palette and the digits all read `paneFits`, which is the
-   * point of folding `paneOffered` into it: a reader who has not turned
-   * developer options on cannot reach Cards by any of the three, and there is
-   * no fourth route that was forgotten.
-   */
-  it('does not offer the unfinished panel until developer options are on', () => {
+  /* ⚠️ **DEVELOPER IS NOT IN THE PALETTE WITHOUT THE CHORD.** A contributed panel
+     that calls itself unfinished is asked the same; see 'unfinished' below. */
+  it('does not offer the Developer panel until developer options are on', () => {
     const plain = buildCommands(context({ screen: 'reader' }).ctx)
-    expect(find(plain, 'pane:cards')).toBeUndefined()
     expect(find(plain, 'pane:dev')).toBeUndefined()
 
     const developer = buildCommands(context({ screen: 'reader', developer: true }).ctx)
-    expect(find(developer, 'pane:cards')).toBeDefined()
     expect(find(developer, 'pane:dev')).toBeDefined()
-  })
-
-  /* HIDING ONE LEAVES THE REST. Developer is not unfinished and is not hidden
-     by `hiddenPanes`, so it is what says the switch is per-panel rather than a
-     second master. */
-  it('drops one that developer options hid', () => {
-    const commands = buildCommands(
-      context({ screen: 'reader', developer: true, hiddenPanes: ['cards'] }).ctx,
-    )
-    expect(find(commands, 'pane:cards')).toBeUndefined()
-    expect(find(commands, 'pane:dev')).toBeDefined()
   })
 
   /**
@@ -113,10 +91,6 @@ describe('buildCommands', () => {
     // The cross-book ones stay: they are why the library has a pane at all.
     expect(find(library, 'pane:marginalia')).toBeDefined()
     expect(find(library, 'pane:settings')).toBeDefined()
-    /* Cards is cross-book too, and unfinished — so on the shelf it is a
-       question of the SCREEN once the reader has asked to see it at all. */
-    const shown = buildCommands(context({ screen: 'library', developer: true }).ctx)
-    expect(find(shown, 'pane:cards')).toBeDefined()
   })
 
   it('offers all of them in a book', () => {
@@ -476,7 +450,7 @@ describe('every row the palette prints', () => {
  * other" — and which nothing enforced until the size shortcuts were added.
  *
  * Read from App's SOURCE rather than by dispatching a synthetic KeyboardEvent,
- * for the reason the ⌘1…5 test above gives: the two things that must agree live
+ * for the reason the ⌘1…3 test above gives: the two things that must agree live
  * in different files, and a test that asks the registry about itself can only
  * ever agree with itself. A combo advertised in the palette and bound nowhere
  * is a row that prints a keystroke which does nothing.
@@ -568,7 +542,7 @@ describe('advertised combos are bound', () => {
    * to bind BOTH — ⌘+ on a US layout is ⌘⇧= and reports '+', while ⌘= reports
    * '=' — or the shortcut works only for readers who happened to hold shift.
    *
-   * Panel digits are absent on purpose: ⌘1…5 is bound from PANE_SHORTCUTS, and
+   * Panel digits are absent on purpose: ⌘1…3 is bound from PANE_SHORTCUTS, and
    * the test above already checks that table against the renderer.
    */
   /* A key, or — for a chord that stacks Control on the accelerator — the whole
@@ -664,10 +638,7 @@ describe('advertised combos are bound', () => {
      everywhere was the hole: deleting the digit branch entirely left the suite
      green, because the only other test of it asserted that the PANELS render. */
   it('binds every panel digit the rail advertises, and toggles the open one', () => {
-    /* DEVELOPER OPTIONS ON, because ⌘4 is Cards and Cards is unfinished. What
-       is being checked here is that an OFFERED panel's digit works; that a
-       panel nobody is offered has a dead digit is the case below, and the two
-       together are the whole rule. */
+    /* What is being checked here is that an OFFERED panel's digit works. */
     const offered = { ...anything, developer: true }
     for (const { digit, pane } of PANE_SHORTCUTS) {
       expect(resolveAccel({ key: digit, repeat: false }, offered), `⌘${digit}`).toEqual({
@@ -682,25 +653,10 @@ describe('advertised combos are bound', () => {
     }
   })
 
-  /**
-   * ⚠️ **A DIGIT FOR A PANEL NOBODY IS OFFERED IS DEAD**, the same way a digit
-   * for a panel this screen has not got is dead. A key that opens something the
-   * rail does not draw is the mirror of a rail button that opens nothing.
-   */
-  it('leaves an unfinished panel’s digit unbound until developer options are on', () => {
-    const cards = PANE_SHORTCUTS.find(({ pane }) => pane === 'cards')
-    expect(cards, 'Cards no longer carries a digit — this check needs rewriting').toBeDefined()
-    expect(resolveAccel({ key: cards!.digit, repeat: false }, anything)).toBeNull()
-    expect(
-      resolveAccel({ key: cards!.digit, repeat: false }, { ...anything, developer: true }),
-    ).toEqual({ kind: 'openPane', pane: 'cards' })
-    /* And hidden inside developer options, it goes dead again. */
-    expect(
-      resolveAccel(
-        { key: cards!.digit, repeat: false },
-        { ...anything, developer: true, hiddenPanes: ['cards'] },
-      ),
-    ).toBeNull()
+  /* ⌘4 LEFT WITH THE PANEL: the seam offers a capability no accelerator. */
+  it('gives Cards no digit: the panel is a capability\'s, and a contributed pane gets none', () => {
+    expect(PANE_SHORTCUTS.map(({ pane }) => pane)).not.toContain('cards')
+    expect(resolveAccel({ key: '4', repeat: false }, { ...anything, developer: true })).toBeNull()
   })
 
   /**
@@ -1050,7 +1006,7 @@ describe('advertised combos are bound', () => {
 })
 
 describe('PANE_SHORTCUTS', () => {
-  it('binds §11\'s ⌘1…4 to contents, marginalia, search and cards', () => {
+  it('binds §11\'s ⌘1…3 to contents, marginalia and search', () => {
     /* FOUR, AND THE NAME SAYS FOUR — THE SECOND TIME THIS NAME OUTLIVED A PANEL.
      *
      * It said six once, naming a Bookmarks panel left behind when bookmarks
@@ -1078,7 +1034,6 @@ describe('PANE_SHORTCUTS', () => {
       ['1', 'toc'],
       ['2', 'marginalia'],
       ['3', 'search'],
-      ['4', 'cards'],
     ])
 
     /* THE TITLE, HELD TO THE ROWS.

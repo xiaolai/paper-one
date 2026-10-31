@@ -103,7 +103,6 @@ export async function collectSurfaces() {
     readingSteps: metrics.READING_STEPS.map((s) => s.size),
     spacingAxes: Object.keys(metrics.SPACING),
     panes: [...uiTypes.KERNEL_PANE_IDS],
-    unfinishedPanes: [...uiTypes.UNFINISHED_PANE_IDS],
     aligns: [...uiTypes.ALIGNS],
     services: table.SERVICE_TABLE.map((s) => s.name),
     markTints: [...marks.MARK_TINTS],

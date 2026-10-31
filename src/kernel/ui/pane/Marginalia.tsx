@@ -6,13 +6,11 @@ import {
   Bookmark as BookmarkIcon,
   BookOpen,
   Highlighter,
-  Layers,
   LibraryBig,
   PenLine,
   Trash2,
 } from 'lucide-react'
 import { rowHue } from '../../core/bookAccent'
-import { cardFromMark } from '../../core/cards'
 import {
   compareMarks,
   isPlaced,
@@ -38,7 +36,6 @@ import { ICON, type Platform } from '../../core/metrics'
 const UNPLACED_TITLE = 'From another edition of this book — Paper has not found this passage here yet.'
 import { onBeforeClose } from '../../core/beforeClose'
 import { relativeTime } from '../../core/relativeTime'
-import type { CardsView } from '../hooks/useCards'
 import type { MarkControl, MarkControlTools } from '../../core/capability'
 
 /* The context a mark control's contribution is drawn under: the open book, which the control's own render never reads — it is handed the mark. */
@@ -73,12 +70,6 @@ const hasNote = (mark: { readonly note: string }): boolean => mark.note.trim() !
 
 /** §11: say what happened and what to do. A store that has quietly stopped saving looks exactly like one that works. */
 const NOT_SAVING = "Marginalia is not being saved — this device's storage is unavailable."
-
-/**
- * The same sentence for the cards this panel makes — their own store and their
- * own flag (`CardsView.persistent`), which the panel could not see (#132).
- */
-const NOT_SAVING_CARDS = "Cards you make are not being saved — this device's storage is unavailable."
 
 /** The one sentence for a marks file that would not read, wherever it stands. */
 const UNREADABLE_MARKS =
@@ -703,22 +694,6 @@ export interface MarginaliaProps {
      * book is a single call, so a browser host's `loadAll` is cheap. */
     readonly loadAll: MarksView['loadAll']
   }
-  /**
-   * Where a mark becomes a made thing — §15's line between note and card.
-   *
-   * OPTIONAL, AND ABSENT MEANS THE CONTROL IS NOT DRAWN. `make` is synchronous
-   * and hands a `Card` straight back; a host whose cards live behind a channel
-   * cannot answer that shape, and a stub returning a fabricated card would put
-   * a made thing on screen that the shelf never received.
-   */
-  /* `make`, and whether what it writes is kept — the whole `CardsView` coupled
-   * it to card state and verbs it never reads.
-   *
-   * ⚠️ `persistent` WAS NARROWED AWAY WITH THEM, and it is not state this panel
-   * never reads: `make` lets its write go and reports a refusal only through
-   * that flag, and the Cards panel that draws it is not offered to a reader. So
-   * a card made here that was never saved was said nowhere (#132). */
-  cards?: Pick<CardsView, 'make' | 'persistent'> | undefined
   /** The open book, so its marks can be shown first. Null when none is open. */
   bookId: string | null
   /**
@@ -797,7 +772,6 @@ export interface MarginaliaProps {
 
 export function Marginalia({
   marks,
-  cards,
   bookId,
   onDelete,
   onDeleteBookmark,
@@ -1123,14 +1097,6 @@ export function Marginalia({
         </div>
       )}
 
-      {/* HERE, because this is where cards are made, above the rows that make
-          them (#122, #132). */}
-      {cards !== undefined && !cards.persistent && (
-        <div className={styles.panelMeta}>
-          <span>{NOT_SAVING_CARDS}</span>
-        </div>
-      )}
-
       {/* ABOVE THE ROWS THAT DRAW THE CONTROL, and not over a panel with none:
           there is nothing there for it to be about. The class is the one the
           two lines above draw in. */}
@@ -1295,21 +1261,6 @@ export function Marginalia({
           <div className={styles.noteSource}>
             <span>{mark.chapter || 'Unknown chapter'}</span>
             <span className={styles.rowActions}>
-              {/* Notes stay raw; cards are made. This is the only place the
-                  one becomes the other, which is what keeps the distinction
-                  §15 draws visible rather than nominal. */}
-              {cards !== undefined && (
-                <button
-                  type="button"
-                  className={styles.noteDelete}
-                  aria-label="Make a card"
-                  title="Make a card"
-                  /* THE NOTE AS WRITTEN HERE, not as the row last heard it — see `written` (#128). */
-                  onClick={() => cards.make(cardFromMark(noteAsWritten(mark)))}
-                >
-                  <Layers size={ICON.inline} strokeWidth={ICON.stroke} />
-                </button>
-              )}
               {/* A CAPABILITY'S ICON AMONG THE ROW'S OWN, ahead of the bin, so
                   the destructive one stays where the hand expects it. */}
               {markControls?.filter((control) => control.place === 'actions').map((control) => (

@@ -18,6 +18,11 @@ import { contributionOffered, paneOffered } from '../core/uiTypes'
 const step = (state: AppState, idx: number): AppState =>
   reducer(state, { type: 'setStepIdx', idx })
 
+/** The unfinished panel the rules below are asked about, as its capability contributes it. */
+const deck = { id: 'cards:deck', screens: ['reader', 'library'], unfinished: true } as const
+const contributed = [deck]
+const withDeck = (state: AppState, action: Action) => reducer(state, action, contributed)
+
 describe('setStepIdx', () => {
   it('stores a step in range', () => {
     expect(step(initialState, 0).stepIdx).toBe(0)
@@ -165,7 +170,7 @@ describe('the pane follows the screen', () => {
       expect(paneFits('library', pane, dev)).toBe(false)
     }
     // Cross-book by design, and the reason the library has a pane at all.
-    for (const pane of ['marginalia', 'cards', 'library', 'settings'] as const) {
+    for (const pane of ['marginalia', 'library', 'settings'] as const) {
       expect(paneFits('library', pane, dev)).toBe(true)
     }
   })
@@ -204,27 +209,25 @@ describe('the pane follows the screen', () => {
     for (const pane of ['marginalia', 'settings'] as const) {
       expect(paneFits('reader', pane)).toBe(true)
     }
-    // Unfinished, so it needs developer options as well as the right screen.
-    expect(paneFits('reader', 'cards', { developer: true })).toBe(true)
   })
 
   /**
    * ⚠️ **THE UNFINISHED PANELS ARE NOT OFFERED, AND THEY USED TO BE.**
    *
-   * `companion` and `cards` draw a panel that does not answer what it promises,
-   * so they are shown only to a reader who asked for them with ⌘⌃⌥D. The rule
-   * is `paneOffered` and it is folded into `paneFits` — see there for why one
+   * An unfinished panel does not answer what it promises, so it is shown only
+   * to a reader who asked for it with ⌘⌃⌥D. The rule is `contributionOffered`
+   * and it is folded into `paneFits` — see there for why one
    * function rather than a second check every caller must remember.
    */
   describe('the unfinished panels', () => {
     it('fit nowhere until developer options are on', () => {
-      expect(paneFits('reader', 'cards')).toBe(false)
-      expect(paneFits('library', 'cards')).toBe(false)
+      expect(paneFits('reader', 'cards:deck', { contributed })).toBe(false)
+      expect(paneFits('library', 'cards:deck', { contributed })).toBe(false)
     })
 
     it('fit their own screens once they are', () => {
-      expect(paneFits('reader', 'cards', { developer: true })).toBe(true)
-      expect(paneFits('library', 'cards', { developer: true })).toBe(true)
+      expect(paneFits('reader', 'cards:deck', { contributed, developer: true })).toBe(true)
+      expect(paneFits('library', 'cards:deck', { contributed, developer: true })).toBe(true)
     })
 
     /* THE SCREEN RULE STILL APPLIES. Developer options reveal a panel; they do
@@ -239,8 +242,8 @@ describe('the pane follows the screen', () => {
     /* Hiding one is only meaningful under developer options, and turning the
        master switch off gives the plain app back whatever was ticked. */
     it('can be hidden individually while developer options are on', () => {
-      expect(paneFits('reader', 'cards', { developer: true, hiddenPanes: ['cards'] })).toBe(false)
-      expect(paneFits('reader', 'cards', { developer: true, hiddenPanes: ['dev'] })).toBe(true)
+      expect(paneFits('reader', 'cards:deck', { contributed, developer: true, hiddenPanes: ['cards:deck'] })).toBe(false)
+      expect(paneFits('reader', 'cards:deck', { contributed, developer: true, hiddenPanes: ['dev'] })).toBe(true)
     })
 
     /* The Developer panel is the mirror image: it exists only under the switch,
@@ -263,12 +266,12 @@ describe('the pane follows the screen', () => {
    */
   describe('developer options', () => {
     it('reveal the unfinished panels and take them back', () => {
-      const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
+      const on = withDeck(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
       expect(on.developer).toBe(true)
-      const opened = reducer(on, { type: 'openPane', pane: 'cards' })
-      expect(opened.pane).toBe('cards')
+      const opened = withDeck(on, { type: 'openPane', pane: 'cards:deck' })
+      expect(opened.pane).toBe('cards:deck')
 
-      const off = reducer(opened, { type: 'toggleDeveloper' })
+      const off = withDeck(opened, { type: 'toggleDeveloper' })
       expect(off.developer).toBe(false)
       expect(off.pane).toBe('toc')
     })
@@ -276,15 +279,15 @@ describe('the pane follows the screen', () => {
     /* A CLOSED PANE STAYS CLOSED — the rule `paneFor` keeps everywhere else. */
     it('do not open a pane the reader had closed', () => {
       const closed = at({ screen: 'reader', pane: null })
-      expect(reducer(closed, { type: 'toggleDeveloper' }).pane).toBeNull()
+      expect(withDeck(closed, { type: 'toggleDeveloper' }).pane).toBeNull()
     })
 
     /* The remembered panel is re-resolved too, or the next ⌘\\ reopens
        something the reader is no longer offered. */
     it('do not leave an unreachable panel remembered', () => {
-      const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
-      const opened = reducer(on, { type: 'openPane', pane: 'cards' })
-      const off = reducer(opened, { type: 'toggleDeveloper' })
+      const on = withDeck(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
+      const opened = withDeck(on, { type: 'openPane', pane: 'cards:deck' })
+      const off = withDeck(opened, { type: 'toggleDeveloper' })
       expect(off.lastPane).toBe('toc')
     })
 
@@ -306,42 +309,42 @@ describe('the pane follows the screen', () => {
     it('an unofferable request leaves the remembered panel alone rather than overwriting it', () => {
       const reading = at({ screen: 'reader', pane: 'marginalia', lastPane: 'marginalia' })
       /* The click the titlebar used to offer every reader. */
-      const asked = reducer(reading, { type: 'openPane', pane: 'cards' })
+      const asked = withDeck(reading, { type: 'openPane', pane: 'cards:deck' })
       expect(asked.pane).toBe('toc') // the request cannot be honoured...
       expect(asked.lastPane).toBe('marginalia') // ...and must not cost the memory
 
-      const shut = reducer(asked, { type: 'closePane' })
-      expect(reducer(shut, { type: 'togglePane' }).pane).toBe('marginalia')
+      const shut = withDeck(asked, { type: 'closePane' })
+      expect(withDeck(shut, { type: 'togglePane' }).pane).toBe('marginalia')
     })
 
     /* The same action with a panel the reader IS offered still records it —
        the guard is about offered-ness, not about refusing to remember. */
     it('an offerable request is remembered as before', () => {
       const reading = at({ screen: 'reader', pane: 'toc', lastPane: 'toc' })
-      expect(reducer(reading, { type: 'openPane', pane: 'marginalia' }).lastPane).toBe('marginalia')
+      expect(withDeck(reading, { type: 'openPane', pane: 'marginalia' }).lastPane).toBe('marginalia')
       /* And under the chord, so is an unfinished one — it is offered then. */
-      const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
-      expect(reducer(on, { type: 'openPane', pane: 'cards' }).lastPane).toBe('cards')
+      const on = withDeck(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
+      expect(withDeck(on, { type: 'openPane', pane: 'cards:deck' }).lastPane).toBe('cards:deck')
     })
 
     it('hide and show one panel at a time', () => {
-      const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
-      const hidden = reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: true })
-      expect(hidden.hiddenPanes).toEqual(['cards'])
-      expect(paneFits('reader', 'cards', hidden)).toBe(false)
+      const on = withDeck(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
+      const hidden = withDeck(on, { type: 'setPaneHidden', pane: 'cards:deck', hidden: true })
+      expect(hidden.hiddenPanes).toEqual(['cards:deck'])
+      expect(paneFits('reader', 'cards:deck', { ...hidden, contributed })).toBe(false)
       /* AND ONLY THE ONE NAMED. Developer is not unfinished, so hiding Cards
          must leave it exactly where it was. */
       expect(paneFits('reader', 'dev', hidden)).toBe(true)
 
-      const shown = reducer(hidden, { type: 'setPaneHidden', pane: 'cards', hidden: false })
+      const shown = withDeck(hidden, { type: 'setPaneHidden', pane: 'cards:deck', hidden: false })
       expect(shown.hiddenPanes).toEqual([])
     })
 
     /* Hiding the panel you are looking at moves you off it. */
     it('move off a panel they hide', () => {
-      const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
-      const opened = reducer(on, { type: 'openPane', pane: 'cards' })
-      const hidden = reducer(opened, { type: 'setPaneHidden', pane: 'cards', hidden: true })
+      const on = withDeck(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
+      const opened = withDeck(on, { type: 'openPane', pane: 'cards:deck' })
+      const hidden = withDeck(opened, { type: 'setPaneHidden', pane: 'cards:deck', hidden: true })
       expect(hidden.pane).toBe('toc')
     })
 
@@ -353,10 +356,10 @@ describe('the pane follows the screen', () => {
        may touch it; `goScreen` never rewrites it for the same reason. */
     it('leave a pane remembered for the other screen alone', () => {
       const reading = at({ screen: 'reader', pane: 'toc', lastPane: 'library' })
-      expect(reducer(reading, { type: 'toggleDeveloper' }).lastPane).toBe('library')
-      const hidden = reducer(
+      expect(withDeck(reading, { type: 'toggleDeveloper' }).lastPane).toBe('library')
+      const hidden = withDeck(
         { ...reading, developer: true },
-        { type: 'setPaneHidden', pane: 'cards', hidden: true },
+        { type: 'setPaneHidden', pane: 'cards:deck', hidden: true },
       )
       expect(hidden.lastPane).toBe('library')
     })
@@ -364,26 +367,26 @@ describe('the pane follows the screen', () => {
     /* But a remembered pane that is no longer OFFERED does go, or the next
        ⌘\\ reopens something the reader cannot be shown. */
     it('replace a remembered pane the reader is no longer offered', () => {
-      const on = at({ screen: 'reader', pane: 'toc', lastPane: 'cards', developer: true })
-      expect(reducer(on, { type: 'toggleDeveloper' }).lastPane).toBe('toc')
+      const on = at({ screen: 'reader', pane: 'toc', lastPane: 'cards:deck', developer: true })
+      expect(withDeck(on, { type: 'toggleDeveloper' }).lastPane).toBe('toc')
     })
 
     /* Ticking twice is not two entries — the list is a set. */
     it('do not record the same panel twice', () => {
-      const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
-      const once = reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: true })
-      const twice = reducer(once, { type: 'setPaneHidden', pane: 'cards', hidden: true })
-      expect(twice.hiddenPanes).toEqual(['cards'])
+      const on = withDeck(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
+      const once = withDeck(on, { type: 'setPaneHidden', pane: 'cards:deck', hidden: true })
+      const twice = withDeck(once, { type: 'setPaneHidden', pane: 'cards:deck', hidden: true })
+      expect(twice.hiddenPanes).toEqual(['cards:deck'])
     })
 
     /* THE SAME STATE, not an equal one. The write effect depends on
        `hiddenPanes` by identity, so a repeat that rebuilt the array re-ran the
        whole preference write (2026-09-13 audit). */
     it('return the same state when the list already says so', () => {
-      const on = reducer(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
-      const once = reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: true })
-      expect(reducer(once, { type: 'setPaneHidden', pane: 'cards', hidden: true })).toBe(once)
-      expect(reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: false })).toBe(on)
+      const on = withDeck(at({ screen: 'reader' }), { type: 'toggleDeveloper' })
+      const once = withDeck(on, { type: 'setPaneHidden', pane: 'cards:deck', hidden: true })
+      expect(withDeck(once, { type: 'setPaneHidden', pane: 'cards:deck', hidden: true })).toBe(once)
+      expect(withDeck(on, { type: 'setPaneHidden', pane: 'cards:deck', hidden: false })).toBe(on)
     })
   })
 
@@ -413,9 +416,10 @@ describe('the pane follows the screen', () => {
   })
 
   /* NON-VACUITY: the check must be able to fail. An unfinished panel is exactly
-     what it is guarding against, so it has to answer false for one. */
+     what it is guarding against, so it has to answer false for one: Developer,
+     the one kernel panel a reader may not be offered. */
   it('would notice a default that is not offered', () => {
-    expect(paneOffered('cards', false)).toBe(false)
+    expect(paneOffered('dev', false)).toBe(false)
   })
 
   it('does not carry the Library panel into the first book opened from the shelf', () => {
@@ -620,7 +624,7 @@ describe('bootState with remembered preferences', () => {
          along the round trip would put a reader back into the plain app on the
          next launch with no way to tell why. */
       developer: true,
-      hiddenPanes: ['cards'],
+      hiddenPanes: ['cards:deck'],
       theme: 'sage' as const,
       themeFollowsOs: false,
       typeface: 'literata',
@@ -1037,9 +1041,6 @@ describe('the voice a reader chooses, and the speeds beside it', () => {
  * it to every reader, and the kernel rule it was under is about kernel ids.
  */
 describe('a contributed panel that calls itself unfinished', () => {
-  const deck = { id: 'cards:deck', screens: ['reader', 'library'], unfinished: true } as const
-  const contributed = [deck]
-
   it('is offered only under developer options, and not once hidden there', () => {
     expect(contributionOffered(deck, false)).toBe(false)
     expect(contributionOffered(deck, true)).toBe(true)

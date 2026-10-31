@@ -77,6 +77,14 @@
       ]
     },
     {
+      "id": "cards",
+      "requires": [],
+      "ts": "cards",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "webhost",
       "requires": [],
       "ts": "webhost",

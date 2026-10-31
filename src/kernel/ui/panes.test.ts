@@ -16,13 +16,13 @@ const contributed: PaneContribution[] = [
 
 describe('shownPane', () => {
   it('names a kernel pane by the registry title, a contributed one by its label', () => {
-    expect(shownPane('marginalia', contributed, 'cards')).toEqual({ id: 'marginalia', title: 'Marginalia', contribution: null })
-    expect(shownPane('example:pane', contributed, 'cards')).toEqual({ id: 'example:pane', title: 'Example', contribution: contributed[0] })
+    expect(shownPane('marginalia', contributed, 'toc')).toEqual({ id: 'marginalia', title: 'Marginalia', contribution: null })
+    expect(shownPane('example:pane', contributed, 'toc')).toEqual({ id: 'example:pane', title: 'Example', contribution: contributed[0] })
   })
 
   it('shows the fallback for a contributed id nobody composed — a remembered pane from a capability that is gone', () => {
     expect(shownPane('gone:pane', contributed, 'library')).toEqual({ id: 'library', title: 'Library', contribution: null })
-    expect(shownPane('example:pane', [], 'cards').id).toBe('cards')
+    expect(shownPane('example:pane', [], 'toc').id).toBe('toc')
   })
 
   /* A FALLBACK IS RESOLVED AGAINST THE COMPOSITION TOO. Handed a contributed id
@@ -179,7 +179,6 @@ describe('the kernel registry keeps its shortcuts', () => {
       'toc',
       'marginalia',
       'search',
-      'cards',
     ])
     /* AGAINST THE ID REGISTRY, not against `PANE_TITLES` — that map is built
        BY `Object.fromEntries(PANES.map(…))`, so asking whether every pane is a
@@ -195,13 +194,12 @@ describe('the kernel registry keeps its shortcuts', () => {
   })
 
   /* EACH DIGIT IS THE LAST CHARACTER OF ITS COMBO, and only a pane with a combo
-     has one — the four in publication order, which is not the rail's. */
+     has one — the three in publication order, which is not the rail's. */
   it('pairs each combo with its digit and its panel, and gives the rest none', () => {
     expect(PANE_SHORTCUTS).toEqual([
       { combo: '⌘1', digit: '1', pane: 'toc' },
       { combo: '⌘2', digit: '2', pane: 'marginalia' },
       { combo: '⌘3', digit: '3', pane: 'search' },
-      { combo: '⌘4', digit: '4', pane: 'cards' },
     ])
   })
 
@@ -213,7 +211,6 @@ describe('the kernel registry keeps its shortcuts', () => {
       toc: 'Contents',
       marginalia: 'Marginalia',
       search: 'Search',
-      cards: 'Cards',
       library: 'Library',
       settings: 'Settings',
       dev: 'Developer',
@@ -223,9 +220,8 @@ describe('the kernel registry keeps its shortcuts', () => {
 
 /**
  * WHICH PANELS A SCREEN OFFERS, in registry order — `state`'s rule applied to
- * the registry. Cards is unfinished (`UNFINISHED_PANE_IDS`) and Developer is
- * developer-only, so neither is offered to a reader who has not pressed the
- * chord.
+ * the registry. Developer is developer-only, so it is not offered to a reader who
+ * has not pressed the chord.
  */
 describe('panesFor', () => {
   const ids = (panes: readonly { id: string }[]) => panes.map((pane) => pane.id)
@@ -235,22 +231,10 @@ describe('panesFor', () => {
     expect(ids(panesFor('library'))).toEqual(['marginalia', 'library', 'settings'])
   })
 
-  it('offers the unfinished panel and Developer under developer options, less any hidden', () => {
-    expect(ids(panesFor('reader', { developer: true }))).toEqual([
-      'toc',
-      'marginalia',
-      'search',
-      'cards',
-      'settings',
-      'dev',
-    ])
-    expect(ids(panesFor('reader', { developer: true, hiddenPanes: ['cards'] }))).toEqual([
-      'toc',
-      'marginalia',
-      'search',
-      'settings',
-      'dev',
-    ])
+  it('offers Developer under developer options, and hiding a panel it does not know changes nothing', () => {
+    const all = ['toc', 'marginalia', 'search', 'settings', 'dev']
+    expect(ids(panesFor('reader', { developer: true }))).toEqual(all)
+    expect(ids(panesFor('reader', { developer: true, hiddenPanes: ['cards:deck'] }))).toEqual(all)
   })
 })
 

@@ -2574,8 +2574,8 @@ export function App({
     /* ⚠️ THE DIGITS READ THESE, AND THEY WERE MISSING — the same defect the
        tint note below records, on the day developer options landed. The handler
        went on closing over the visibility rules as they were when the effect
-       last ran, so ⌘4 stayed dead for a whole render after Cards was revealed,
-       and stayed live after it was hidden. */
+       last ran, so a digit stayed dead for a whole render after its panel was
+       revealed, and stayed live after it was hidden. */
     state.developer,
     state.hiddenPanes,
     /* ⌘D MARKS IN THE COLOUR THE BAR IS SHOWING, and `state.markTint` and
@@ -2727,7 +2727,6 @@ export function App({
             marks={marks}
             bookmarking={bookmarking}
             platform={platform}
-            cards={cards}
             onGoTo={jumpTo}
             onDeleteMark={marking.unmark}
             markFocus={marking.focus}

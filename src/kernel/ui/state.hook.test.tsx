@@ -104,7 +104,7 @@ describe('the hook on a change', () => {
 describe('every preference a reader changes is saved', () => {
   const CHANGE: Readonly<Record<KernelSettingName, Action>> = {
     developer: { type: 'toggleDeveloper' },
-    hiddenPanes: { type: 'setPaneHidden', pane: 'cards', hidden: true },
+    hiddenPanes: { type: 'setPaneHidden', pane: 'cards:deck', hidden: true },
     theme: { type: 'setTheme', theme: 'night', fromOs: true },
     themeFollowsOs: { type: 'setThemeFollowsOs', follows: false },
     typeface: { type: 'setTypeface', typeface: 'plex' },

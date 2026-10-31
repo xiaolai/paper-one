@@ -208,7 +208,6 @@ const EXCLUDED = Object.freeze({
   paneShortcuts: 'carries a ⌘ glyph and a pane id already covered by `panes`',
   readerStyles: 'a subset of `markStyles`',
   allFaces: 'a superset of `bundledFaces` whose extra members are probed at runtime and may legitimately never be described',
-  unfinishedPanes: 'a subset of `panes`',
   capabilities: 'walked separately below, seam by seam',
 })
 

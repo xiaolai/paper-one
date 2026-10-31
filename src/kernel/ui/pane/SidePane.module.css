@@ -482,14 +482,6 @@
   background: var(--wash);
 }
 
-.noteKind {
-  font-size: var(--text-caption);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--track-caps);
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
 /* --- bookmarks -------------------------------------------------------- */
 
 /* A bookmark row is the note row's shape, and it borrows the whole of it —

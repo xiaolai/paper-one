@@ -3,13 +3,8 @@ import { ICON } from '../../core/metrics'
 import styles from './SidePane.module.css'
 
 /**
- * The row of filter chips above a list — Marginalia's and Cards' both.
- *
- * They were the same eleven lines of JSX twice, differing only in the type of
- * the label. Which is fine right up to the first change that has to be made in
- * both: §07 asks for selected state to be ANNOUNCED as well as drawn, and
- * neither copy did it. One component means one place to fix that, and it is
- * fixed here.
+ * The row of filter chips above a list. §07 asks for selected state to be
+ * ANNOUNCED as well as drawn, so it is said here for whoever draws one.
  *
  * TWO SHAPES, ONE COMPONENT, for the same reason. Marginalia filters on two
  * axes and got to seven chips, which wrapped to three lines of chrome above the

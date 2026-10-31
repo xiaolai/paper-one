@@ -102,8 +102,8 @@ export interface AccelContext {
    * Whether developer options are on, and which panels are hidden inside them.
    *
    * HERE BECAUSE THE DIGITS READ `paneFits`, and an unfinished panel does not
-   * fit for a reader who has not asked for it — so ⌘4 must be dead while Cards
-   * is hidden, exactly as it is dead on a screen the panel does not belong to.
+   * fit for a reader who has not asked for it — so its digit must be dead while
+   * it is hidden, exactly as it is dead on a screen the panel does not belong to.
    * A key that opens a panel the rail does not draw is the same defect as a
    * rail button that opens nothing.
    */

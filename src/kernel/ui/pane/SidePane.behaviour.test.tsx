@@ -1,15 +1,13 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import type { PaneContext } from '../../core/capability'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SidePane, type SidePaneProps } from './SidePane'
 import { initialState, type AppState } from '../state'
-import type { IndexedBook } from '../../core/bookIndex'
-import type { Card } from '../../core/cards'
 import { createDiagnosticLog } from '../../core/diagnosticsLog'
 import { offeredFaces } from '../../core/typefaces'
 import type { Book, SearchHit } from '../hooks/useBook'
 import type { MarksView } from '../hooks/useMarks'
-import type { CardsView } from '../hooks/useCards'
 import type { Bookmarking } from '../hooks/useBookmarking'
 import type { TagPrefsStore } from '../hooks/useTagPrefs'
 
@@ -78,19 +76,6 @@ const openBook = (over: Record<string, unknown> = {}): Book =>
     ...over,
   }) as unknown as Book
 
-const shelved = (bookId: string, title: string): IndexedBook => ({ bookId, title, author: '' }) as unknown as IndexedBook
-
-const card = (over: Partial<Card>): Card => ({
-  id: 'card-1',
-  bookId: 'open-book',
-  kind: 'Idea',
-  body: 'A card',
-  answer: '',
-  source: 'Loomings',
-  cfi: 'epubcfi(/6/4!/4/2)',
-  createdAt: 1,
-  ...over,
-})
 
 const tagPrefs = (): TagPrefsStore => ({
   prefs: { pinned: [], colours: {}, hiddenSubjects: [], views: [] },
@@ -120,7 +105,6 @@ function propsOf(over: Partial<SidePaneProps> = {}): SidePaneProps {
     marks: { all: [], current: [], bookmarks: [], allBookmarks: [], allUnplaced: [], persistent: true, ready: true, loadAll: vi.fn() } as unknown as MarksView,
     bookmarking: { remove: vi.fn() } as unknown as Bookmarking,
     platform: 'macos',
-    cards: { all: [], persistent: true } as unknown as CardsView,
     onGoTo: vi.fn(),
     onDeleteMark: vi.fn(),
     markFocus: null,
@@ -162,7 +146,6 @@ const railNames = (container: HTMLElement): (string | null)[] => railOf(containe
 const MARKERS = {
   toc: () => screen.queryByRole('button', { name: 'Loomings' }),
   marginalia: () => screen.queryByText('Nothing kept yet'),
-  cards: () => screen.queryByText('No cards yet'),
   search: () => screen.queryByLabelText('Search this book'),
   dev: () => screen.queryByText('Diagnostics are not being recorded'),
   settings: () => screen.queryByRole('switch', { name: 'Follow system appearance' }),
@@ -181,7 +164,6 @@ describe('the panel a state shows', () => {
   it.each([
     ['toc', 'reader', 'Contents'],
     ['marginalia', 'reader', 'Marginalia'],
-    ['cards', 'reader', 'Cards'],
     ['search', 'reader', 'Search'],
     ['dev', 'reader', 'Developer'],
     ['settings', 'reader', 'Settings'],
@@ -205,7 +187,7 @@ describe('the panel a state shows', () => {
   })
 
   it('draws the screen’s own default for a panel this reader is not offered', () => {
-    draw({ state: stateOf({ pane: 'cards', lastPane: 'cards', developer: false }) })
+    draw({ state: stateOf({ pane: 'dev', lastPane: 'dev', developer: false }) })
     expectOnlyPanel('toc')
   })
 
@@ -225,13 +207,8 @@ describe('the rail', () => {
     expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Search', 'Settings'])
   })
 
-  it('adds the unfinished panel and Developer under developer options, in rail order', () => {
+  it('adds Developer under developer options, in rail order', () => {
     const { container } = draw({ state: stateOf({ developer: true }) })
-    expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Cards', 'Search', 'Settings', 'Developer'])
-  })
-
-  it('leaves out an unfinished panel the developer hid', () => {
-    const { container } = draw({ state: stateOf({ developer: true, hiddenPanes: ['cards'] }) })
     expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Search', 'Settings', 'Developer'])
   })
 
@@ -281,42 +258,36 @@ describe('the rail', () => {
     const { container, redraw } = draw()
     expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Search', 'Settings'])
     redraw({ state: stateOf({ developer: true }) })
-    expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Cards', 'Search', 'Settings', 'Developer'])
-    redraw({ state: stateOf({ developer: true, hiddenPanes: ['cards'] }) })
     expect(railNames(container)).toEqual(['Contents', 'Marginalia', 'Search', 'Settings', 'Developer'])
-    redraw({ state: stateOf({ developer: true, hiddenPanes: ['cards'], screen: 'library', pane: 'library', lastPane: 'library' }) })
+    redraw({ state: stateOf({ developer: true, screen: 'library', pane: 'library', lastPane: 'library' }) })
     expect(railNames(container)).toEqual(['Marginalia', 'Library', 'Settings', 'Developer'])
-    redraw({ state: stateOf({ developer: true, hiddenPanes: ['cards'], screen: 'library', pane: 'library', lastPane: 'library' }), contributed: [friends] })
+    redraw({ state: stateOf({ developer: true, screen: 'library', pane: 'library', lastPane: 'library' }), contributed: [friends] })
     expect(railNames(container)).toEqual(['Marginalia', 'Library', 'Settings', 'Developer', 'Friends'])
   })
 })
 
-describe('the cards panel', () => {
-  const cardsState = stateOf({ pane: 'cards', lastPane: 'cards', developer: true })
-  const cardsOf = (...all: Card[]) => ({ all, persistent: true }) as unknown as CardsView
-
-  it('follows a card through the host’s jump, naming its book', () => {
-    const { onGoTo } = draw({ state: cardsState, cards: cardsOf(card({ body: 'What is a gam?', cfi: 'epubcfi(/6/8!/4/2)' })) })
-    fireEvent.click(screen.getByRole('button', { name: 'What is a gam?' }))
-    expect(onGoTo.mock.calls).toEqual([[{ bookId: 'open-book', cfi: 'epubcfi(/6/8!/4/2)' }]])
+describe('a contributed panel', () => {
+  it('is handed the jump every kernel panel makes, and the book the screen shows', () => {
+    let seen: PaneContext | undefined
+    const pane = { id: 'deck:panel', label: 'Deck', icon: 'globe', screens: ['reader'], render: (context: PaneContext) => {
+      seen = context
+      return <p>the deck</p>
+    } } as const
+    const { onGoTo } = draw({ state: stateOf({ pane: 'deck:panel', lastPane: 'deck:panel' }), contributed: [pane] })
+    expect(seen?.bookId).toBe('open-book')
+    seen?.goTo?.({ bookId: 'typee', cfi: 'epubcfi(/6/8!/4/2)' })
+    expect(onGoTo.mock.calls).toEqual([[{ bookId: 'typee', cfi: 'epubcfi(/6/8!/4/2)' }]])
   })
 
-  it('lets a card from another book on the shelf be followed, and not one from a book that has left it', () => {
-    draw({
-      state: cardsState,
-      books: [shelved('typee', 'Typee'), shelved('open-book', 'Moby-Dick')],
-      cards: cardsOf(card({ id: 'a', bookId: 'typee', body: 'On the shelf' }), card({ id: 'b', bookId: 'omoo', body: 'Gone from the shelf' })),
-    })
-    expect((screen.getByRole('button', { name: 'On the shelf' }) as HTMLButtonElement).disabled).toBe(false)
-    expect((screen.getByRole('button', { name: 'Gone from the shelf' }) as HTMLButtonElement).disabled).toBe(true)
-  })
-
-  it('asks the shelf the host has now', () => {
-    const cards = cardsOf(card({ id: 'a', bookId: 'typee', body: 'Arrives on the shelf' }))
-    const { redraw } = draw({ state: cardsState, books: [], cards })
-    expect((screen.getByRole('button', { name: 'Arrives on the shelf' }) as HTMLButtonElement).disabled).toBe(true)
-    redraw({ books: [shelved('typee', 'Typee')] })
-    expect((screen.getByRole('button', { name: 'Arrives on the shelf' }) as HTMLButtonElement).disabled).toBe(false)
+  it('is given no jump by a host that has none', () => {
+    let seen: PaneContext | undefined
+    const pane = { id: 'deck:panel', label: 'Deck', icon: 'globe', screens: ['reader'], render: (context: PaneContext) => {
+      seen = context
+      return <p>the deck</p>
+    } } as const
+    const { onGoTo: _none, ...props } = propsOf({ state: stateOf({ pane: 'deck:panel', lastPane: 'deck:panel' }), contributed: [pane] })
+    render(<SidePane {...props} />)
+    expect(seen).toEqual({ bookId: 'open-book' })
   })
 })
 
@@ -410,14 +381,15 @@ describe('the settings panel', () => {
   })
 
   it('hides and shows an unfinished panel from the developer band', () => {
-    const { dispatch, redraw } = draw({ state: settingsState({ developer: true }) })
+    const contributed = [{ id: 'deck:panel', label: 'Deck', icon: 'globe', screens: ['reader'], unfinished: true, render: () => null }] as const
+    const { dispatch, redraw } = draw({ state: settingsState({ developer: true }), contributed })
     openGroup('Unfinished panels')
-    fireEvent.click(screen.getByRole('switch', { name: 'Cards' }))
-    redraw({ state: settingsState({ developer: true, hiddenPanes: ['cards'] }) })
-    fireEvent.click(screen.getByRole('switch', { name: 'Cards' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Deck' }))
+    redraw({ state: settingsState({ developer: true, hiddenPanes: ['deck:panel'] }), contributed })
+    fireEvent.click(screen.getByRole('switch', { name: 'Deck' }))
     expect(dispatch.mock.calls).toEqual([
-      [{ type: 'setPaneHidden', pane: 'cards', hidden: true }],
-      [{ type: 'setPaneHidden', pane: 'cards', hidden: false }],
+      [{ type: 'setPaneHidden', pane: 'deck:panel', hidden: true }],
+      [{ type: 'setPaneHidden', pane: 'deck:panel', hidden: false }],
     ])
   })
 

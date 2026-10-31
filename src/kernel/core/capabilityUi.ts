@@ -47,6 +47,37 @@ export const CAPABILITY_UI = Object.freeze({
    * reader's root key. See the stylesheet.
    */
   phrase: 'paper-cap-phrase',
+  /** The root of a pane that lists things: the kernel's own panel margins. */
+  panel: 'paper-cap-panel',
+  /** A quiet line at the top of a panel: a count, a warning. */
+  panelMeta: 'paper-cap-panel-meta',
+  /** A panel with nothing in it yet, saying so. */
+  empty: 'paper-cap-empty',
+  /** `empty`'s heading. */
+  emptyTitle: 'paper-cap-empty-title',
+  /** `empty`'s explanation, or the one line of a filter that found nothing. */
+  emptyBody: 'paper-cap-empty-body',
+  /** A wrapping row of filter chips. */
+  filters: 'paper-cap-filters',
+  /** One filter chip. `data-on` says it is the chosen one. */
+  filter: 'paper-cap-filter',
+  /**
+   * A made thing in a list, with a coloured bar down its edge. Set `--card-hue`
+   * on it: without one the bar draws nothing and says nothing about it.
+   */
+  card: 'paper-cap-card',
+  /** A card's small capitals: what kind it is. */
+  cardKind: 'paper-cap-card-kind',
+  /** A card's text as the button that goes to where it came from. */
+  cardJump: 'paper-cap-card-jump',
+  /** The words inside `cardJump`, muted when the button is disabled. */
+  cardBody: 'paper-cap-card-body',
+  /** A card's second line. */
+  cardAnswer: 'paper-cap-card-answer',
+  /** A card's foot: its source on one side, its action on the other. */
+  cardFoot: 'paper-cap-card-foot',
+  /** A small button holding only an icon. Give it an `aria-label`. */
+  iconButton: 'paper-cap-icon-button',
   /** A row of buttons offered together. */
   actions: 'paper-cap-actions',
   /**

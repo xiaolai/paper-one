@@ -953,6 +953,28 @@ describe('carried findings — crash durability and load hardening', () => {
     }
   })
 
+  /* The panel left the kernel; the journal kind did not (D2). A file written
+     before the move, and one written after it, is the same file. */
+  it('opens a journal holding cards lines with no quarantine, and keeps every one of them', async () => {
+    const fs = overFile({
+      [JOURNAL_PATH]:
+        JSON.stringify({ seq: 1, kind: 'begin', epoch: 'e1', book: '', what: 'cards', at, origin: 'local' }) +
+        '\n' +
+        JSON.stringify({ seq: 2, kind: 'commit', epoch: 'e1', book: '', what: 'cards', at, rev: 1, origin: 'local' }) +
+        '\n' +
+        JSON.stringify({ seq: 3, kind: 'commit', epoch: 'e1', book: '', what: 'cards', at, rev: 2, origin: 'local' }) +
+        '\n',
+      [JOURNAL_META_PATH]: JSON.stringify({ epoch: 'e1', nextSeq: 4, journalFormat: 1, state: 'ready' }),
+    })
+    const quarantined: string[] = []
+    const journal = journalOver(fs, { onQuarantine: (info) => quarantined.push(info.reason) })
+    await journal.open()
+    expect(quarantined).toEqual([])
+    expect(journal.entries().filter((e) => e.kind === 'commit' && e.what === 'cards').map((e) => e.rev)).toEqual([1, 2])
+    expect(journal.entries().every((e) => e.epoch === 'e1')).toBe(true)
+    await journal.close()
+  })
+
   it('#31 migrates colliding legacy cards revs at load instead of refusing to open', async () => {
     // Two legacy per-book cards streams, each at rev 1, that canonicalise onto
     // the one `cards ''` stream — their revs now collide.

@@ -530,13 +530,14 @@ export type {
  * whose module imports foliate's CFI parser. */
 export type { ResolvedCfi } from './core/resolvedCfi'
 export { CARD_KINDS, CARDS_STORAGE_KEY, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
+export { createCard } from './core/cardStore'
+export { rowHue } from './core/bookAccent'
 export type { Card, CardKind, NewCard } from './core/cards'
-/* `paneOffered` and its list are the rule for whether a reader may see a panel
+/* `paneOffered` is the rule for whether a reader may see a panel
    at all — `composition.contract.test.ts` holds `KERNEL_DEFAULT_PANE` to it, so
    the kernel's fallback cannot drift back onto a panel nobody is shown. */
 export {
   KERNEL_PANE_IDS,
-  UNFINISHED_PANE_IDS,
   isContributedPaneId,
   isKernelPaneId,
   paneOffered,

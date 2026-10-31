@@ -1,7 +1,6 @@
 import { useMemo } from 'react'
 import {
   Highlighter,
-  Layers,
   LibraryBig,
   List,
   LoaderCircle,
@@ -21,12 +20,10 @@ import { contributionFits, defaultPaneFor, paneFits, setReadingStyle, type AppDi
 import type { Book } from '../hooks/useBook'
 import type { Annotation } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
-import type { CardsView } from '../hooks/useCards'
 import type { MarksView } from '../hooks/useMarks'
 import type { Bookmarking } from '../hooks/useBookmarking'
 import { Contents } from './Contents'
 import { LibraryPanel, type LibraryPanelProps } from './LibraryPanel'
-import { Cards } from './Cards'
 import { Marginalia, SCANNING_MARKS } from './Marginalia'
 import { SearchPanel } from './SearchPanel'
 import { DevPane } from './DevPane'
@@ -70,7 +67,6 @@ import type { VoiceFacts } from '../reader/voiceChoice'
 const RAIL_ENTRIES = [
   { id: 'toc', Icon: List },
   { id: 'marginalia', Icon: Highlighter },
-  { id: 'cards', Icon: Layers },
   { id: 'search', Icon: Search },
   { id: 'library', Icon: LibraryBig },
   { id: 'settings', Icon: SettingsIcon },
@@ -115,7 +111,6 @@ export interface SidePaneProps {
   bookmarking: Bookmarking
   /** Which keyboard this reader has — the Marginalia panel teaches ⌘B/Ctrl+B. */
   platform: Platform
-  cards: CardsView
   /**
    * What the developer surfaces need, when they are drawn.
    *
@@ -244,7 +239,6 @@ export function SidePane({
   marks,
   bookmarking,
   platform,
-  cards,
   onGoTo,
   onDeleteMark,
   markFocus,
@@ -295,7 +289,7 @@ export function SidePane({
   const shown = shownPane(wanted, contributed, fallback)
   const pane = shown.id
 
-  /* THE SHELF, INDEXED ONCE. Marginalia and Cards ask "what is this book
+  /* THE SHELF, INDEXED ONCE. Marginalia asks "what is this book
    * called" and "is it here" per row, and each answer was a linear `find` or
    * `some` over the whole shelf through a callback minted fresh every render
    * — so a panel of a few hundred rows rescanned a two-thousand-book shelf
@@ -364,7 +358,6 @@ export function SidePane({
         {pane === 'marginalia' && (
           <Marginalia
             marks={marks}
-            cards={cards}
             bookId={book.bookId}
             onDelete={onDeleteMark}
             onDeleteBookmark={bookmarking.remove}
@@ -382,17 +375,6 @@ export function SidePane({
             focus={markFocus}
             onFocusDone={onMarkFocusDone}
             markControls={markControls}
-            {...goToProps}
-          />
-        )}
-
-        {pane === 'cards' && (
-          <Cards
-            cards={cards}
-            bookId={book.bookId}
-            /* THE SAME `books` LIST, THE SAME QUESTION as Marginalia asks two
-               panels up. One source, so the two cannot answer differently. */
-            onShelf={onShelf}
             {...goToProps}
           />
         )}
@@ -523,7 +505,7 @@ export function SidePane({
             <ContributionBody
               id={shown.contribution.id}
               render={shown.contribution.render}
-              context={{ bookId: contributionBookId }}
+              context={{ bookId: contributionBookId, ...(onGoTo ? { goTo: onGoTo } : {}) }}
             />
           </ContributionBoundary>
         )}

@@ -602,7 +602,7 @@ describe('the two bands', () => {
 
   /**
    * ⚠️ **THE PANEL SHOWED SETTINGS FOR A PANEL THE READER COULD NOT OPEN.**
-   * `UNFINISHED_PANE_IDS` hid the deleted companion's pane and never touched
+   * The unfinished-panel rule hid the deleted companion's pane and never touched
    * its settings section, which sat in The app band from the day the
    * capability contributed it. A section configuring a surface that is not
    * offered is worse than either half alone: it is evidence the feature is
@@ -614,23 +614,6 @@ describe('the two bands', () => {
    * one shares its engine would take a working control away. `peer:devices` is
    * in the same assertion for that.
    */
-  it('hides an unfinished capability’s settings, and only that capability’s', () => {
-    const both = [section('cards:study', 'Study'), section('peer:devices', 'Devices')]
-    const { props } = full({ sections: both })
-    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
-    expect(bandOf('Devices', container)).toBe('The app')
-    expect(bandOf('Study', container)).toBeNull()
-
-    /* One chord later it is there, which is what makes the line above about
-       the gate rather than about the section having been dropped. */
-    const { props: dev } = full({
-      sections: both,
-      developer: { hidden: [], onSetHidden: () => {}, recording: false },
-    })
-    const revealed = render(<Settings {...(dev as ComponentProps<typeof Settings>)} />)
-    expect(bandOf('Study', revealed.container)).toBe('The app')
-  })
-
   it('hides the settings of a capability whose own panel calls itself unfinished, until that panel is offered', () => {
     const both = [section('deck:study', 'Study'), section('peer:devices', 'Devices')]
     const unfinishedPanes = [{ id: 'deck:panel', label: 'Deck' }]
@@ -946,7 +929,7 @@ describe('the Page group holds exactly the rows its host can act on', () => {
  * ⚠️ **DEVELOPER OPTIONS, and the band that exists only while they are on.**
  * ⌘⌃⌥D is the only way in, so nothing here offers it; what IS here is which
  * unfinished panels are drawn, and whether diagnostics are being recorded.
- * `UNFINISHED_PANE_IDS` names the rows, so these are Companion and Cards.
+ * The composition's own unfinished panels name the rows.
  */
 describe('developer options', () => {
   const developer = (over: Record<string, unknown> = {}) => ({ hidden: [], onSetHidden: vi.fn(), recording: false, ...over })
@@ -960,14 +943,10 @@ describe('developer options', () => {
     expect(screen.queryByRole('button', { name: 'Unfinished panels' })).toBeNull()
   })
 
-  /* ⚠️ **TWO PANELS WERE LISTED HERE**, so the row for one and the row for the
-     other each said a different thing and the pair pinned both. `companion` is
-     deleted, so `UNFINISHED_PANE_IDS` holds one id and the band draws one row;
-     both STATES are still asserted, by rendering the row hidden and then
-     shown. */
   it('list each unfinished panel as shown or hidden, and a press asks for the other', () => {
     const onSetHidden = vi.fn()
-    const { props } = full({ developer: developer({ hidden: ['cards'], onSetHidden }) })
+    const unfinishedPanes = [{ id: 'cards:deck', label: 'Cards' }]
+    const { props } = full({ unfinishedPanes, developer: developer({ hidden: ['cards:deck'], onSetHidden }) })
     const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
     expect(captions(container)).toEqual(['Reading', 'Developer'])
     open('Unfinished panels')
@@ -982,7 +961,7 @@ describe('developer options', () => {
     fireEvent.click(hidden)
     cleanup()
 
-    const { props: shownProps } = full({ developer: developer({ hidden: [], onSetHidden }) })
+    const { props: shownProps } = full({ unfinishedPanes, developer: developer({ hidden: [], onSetHidden }) })
     render(<Settings {...(shownProps as ComponentProps<typeof Settings>)} />)
     open('Unfinished panels')
     const shown = screen.getByRole('switch', { name: 'Cards' })
@@ -990,9 +969,19 @@ describe('developer options', () => {
     fireEvent.click(shown)
 
     expect(onSetHidden.mock.calls).toEqual([
-      ['cards', false],
-      ['cards', true],
+      ['cards:deck', false],
+      ['cards:deck', true],
     ])
+  })
+
+  /* A BUILD WITHOUT THE PANEL HAS NO ROW TO PUT THERE, and a heading over nothing
+     is a band that says the feature exists. */
+  it('draw no group of unfinished panels when the composition has none', () => {
+    const { props } = full({ developer: developer() })
+    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    expect(captions(container)).toEqual(['Reading', 'Developer'])
+    expect(screen.queryByRole('button', { name: 'Unfinished panels' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Diagnostics' })).not.toBeNull()
   })
 
   it('list a capability’s unfinished panel by its label, and a press names its id', () => {
@@ -1035,7 +1024,8 @@ describe('developer options', () => {
       { id: 'cards:study', title: 'Study', render: () => null },
       { id: 'peer:devices', title: 'Devices', render: () => null },
     ]
-    const { props } = full({ sections, developer: developer({ hidden: ['cards'] }) })
+    const unfinishedPanes = [{ id: 'cards:deck', label: 'Cards' }]
+    const { props } = full({ sections, unfinishedPanes, developer: developer({ hidden: ['cards:deck'] }) })
     render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
     expect(screen.queryByRole('button', { name: 'Study' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Devices' })).not.toBeNull()
@@ -1090,7 +1080,10 @@ describe('a container with nothing in it', () => {
   /* NOR FOR SECTIONS THIS READER IS NOT OFFERED — an unfinished panel's, with
      developer options off, is filtered before the band is decided. */
   it('draws none when every section is one this reader is not offered', () => {
-    const { props } = full({ sections: [{ id: 'cards:study', title: 'Study', render: () => null }] })
+    const { props } = full({
+      sections: [{ id: 'cards:study', title: 'Study', render: () => null }],
+      unfinishedPanes: [{ id: 'cards:deck', label: 'Cards' }],
+    })
     const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
     expect(captions(container)).toEqual(['Reading'])
   })

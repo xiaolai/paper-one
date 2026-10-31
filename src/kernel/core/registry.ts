@@ -18,7 +18,7 @@ import type {
 } from './capability'
 import type { SettingsStore } from './ports'
 import type { KernelServices } from './services'
-import { isKernelPaneId, type ContributedPaneId, type PaneId } from './uiTypes'
+import { isKernelPaneId, presentPaneName, type ContributedPaneId, type PaneId } from './uiTypes'
 
 /**
  * The registry: a set of capabilities becomes ONE composition.
@@ -440,8 +440,7 @@ export function scopeStorage(storage: KernelServices['storage'], capId: string):
  * and was moved off Companion the day Companion became unfinished; this one was
  * not, so `resolvePaneId` still resolved an unknown stored id to a panel most
  * readers are not shown. Two defaults for one decision is how half a change
- * lands — see `UNFINISHED_PANE_IDS`, which is the list that made Companion
- * unfinished, and `defaultPaneFor`, which carries the reasoning for Contents.
+ * lands — see `defaultPaneFor`, which carries the reasoning for Contents.
  *
  * It stays HERE rather than importing that function: `registry.ts` is core and
  * React-free, `defaultPaneFor` takes a screen this resolver does not have, and
@@ -460,8 +459,9 @@ export const KERNEL_DEFAULT_PANE: PaneId = 'toc'
  */
 export function resolvePaneId(id: unknown, known: Iterable<string>, fallback: PaneId = KERNEL_DEFAULT_PANE): PaneId {
   if (isKernelPaneId(id)) return id
-  if (typeof id === 'string' && id.includes(':')) {
-    for (const candidate of known) if (candidate === id) return id as ContributedPaneId
+  const present = presentPaneName(id)
+  if (typeof present === 'string' && present.includes(':')) {
+    for (const candidate of known) if (candidate === present) return present as ContributedPaneId
   }
   return fallback
 }
@@ -991,7 +991,15 @@ export async function composeCapabilities(
        * after the check. */
       markControls: Object.freeze(
         (cap.markControls ?? []).map((control) =>
-          Object.freeze({ id: control.id, render: control.render.bind(control) }),
+          /* NAMED FIELD BY NAMED FIELD, so a field added to the seam and left out
+             here is lost in the app and in nothing below this line: `place` and
+             `notice` were, until the capability that uses them went through it. */
+          Object.freeze({
+            id: control.id,
+            render: control.render.bind(control),
+            ...(control.place === undefined ? {} : { place: control.place }),
+            ...(control.notice === undefined ? {} : { notice: control.notice.bind(control) }),
+          }),
         ),
       ),
       clients: Object.freeze((cap.clients ?? []).map((client) => Object.freeze({ ...client }))),

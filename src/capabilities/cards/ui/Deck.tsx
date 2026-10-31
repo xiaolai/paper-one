@@ -1,12 +1,6 @@
-import { useMemo, useState, type CSSProperties } from 'react'
+import { useMemo, useState, useSyncExternalStore, type CSSProperties } from 'react'
 import { Trash2 } from 'lucide-react'
-import { rowHue } from '../../core/bookAccent'
-import { CARD_KINDS, type CardKind } from '../../core/cards'
-import { ICON } from '../../core/metrics'
-import type { CardsView } from '../hooks/useCards'
-import type { JumpTarget } from '../hooks/useJumps'
-import { FilterChips } from './FilterChips'
-import styles from './SidePane.module.css'
+import { CAPABILITY_UI as ui, CARD_KINDS, ICON, rowHue, type Card, type CardKind, type KernelServices } from '../../../kernel'
 
 /**
  * Cards — the made things, in the pane.
@@ -21,38 +15,14 @@ import styles from './SidePane.module.css'
 type Filter = 'All' | CardKind
 const FILTERS: readonly Filter[] = ['All', ...CARD_KINDS]
 
+/** A jump: the same shape the panel's host hands every contributed pane. */
+type GoTo = (target: { bookId: string; cfi: string }) => void
+
 export interface CardsProps {
-  /**
-   * The three members this pane reads — not all seven of `CardsView`.
-   *
-   * NARROWED the way `SearchPanel`'s `book` and `Marginalia`'s `marks` were:
-   * indexed access into the original, so the two cannot drift and every
-   * existing caller still passes a whole `CardsView`. A host with a channel and
-   * `card.list` can satisfy three; it cannot satisfy `make`, which is
-   * synchronous and hands a `Card` straight back.
-   *
-   * ⚠️ **`discard` IS OPTIONAL, because one host cannot supply it truthfully.**
-   *
-   * The narrowing above stops one member short. A host with a channel and
-   * `card.list` satisfies `all` and `persistent` — and `discard` calls
-   * `card.remove`, which is `card:write`. The browser client holds exactly one
-   * grant and it is a READ one — the host that serves a browser composes the
-   * kernel's own read/write split, and says at length why widening it is a
-   * decision. So every `card.remove` it sends is refused, always, by design.
-   *
-   * Requiring it did not make the browser able to discard; it made the browser
-   * pass a function that could not work. The card vanished optimistically, the
-   * refusal came back, and it reappeared — a delete button that undoes itself,
-   * which reads as a bug in the shelf rather than as a permission.
-   *
-   * Absent, the control is not drawn. That is the honest rendering of "this
-   * session may read cards and not change them", and it is the same shape
-   * `onGoTo` and `onShelf` already use here.
-   */
   cards: {
-    readonly all: CardsView['all']
-    readonly persistent: CardsView['persistent']
-    readonly discard?: CardsView['discard'] | undefined
+    readonly all: readonly Card[]
+    readonly persistent: boolean
+    readonly discard: (id: string) => void
   }
   bookId: string | null
   /**
@@ -69,10 +39,10 @@ export interface CardsProps {
    * this panel did before there was anywhere to come back to.
    */
   onShelf?: ((bookId: string) => boolean) | undefined
-  onGoTo?: (target: JumpTarget) => void
+  onGoTo?: GoTo | undefined
 }
 
-export function Cards({ cards, bookId, onShelf, onGoTo }: CardsProps) {
+export function Deck({ cards, bookId, onShelf, onGoTo }: CardsProps) {
   const [filter, setFilter] = useState<Filter>('All')
 
   const shown = useMemo(
@@ -82,9 +52,9 @@ export function Cards({ cards, bookId, onShelf, onGoTo }: CardsProps) {
 
   if (cards.all.length === 0) {
     return (
-      <div className={styles.empty}>
-        <div className={styles.emptyTitle}>No cards yet</div>
-        <div className={styles.emptyBody}>
+      <div className={ui.empty}>
+        <div className={ui.emptyTitle}>No cards yet</div>
+        <div className={ui.emptyBody}>
           Notes stay raw; cards are made. Mark a passage, then make a card from
           it in Notes.
         </div>
@@ -92,7 +62,7 @@ export function Cards({ cards, bookId, onShelf, onGoTo }: CardsProps) {
             case that needs it most: a store that cannot write, whose last card
             was discarded, looks identical to a reader who has never made one. */}
         {!cards.persistent && (
-          <div className={styles.emptyBody}>
+          <div className={ui.emptyBody}>
             Cards are not being saved — this device&apos;s storage is unavailable.
           </div>
         )}
@@ -101,9 +71,9 @@ export function Cards({ cards, bookId, onShelf, onGoTo }: CardsProps) {
   }
 
   return (
-    <div className={styles.panel}>
-      <div className={styles.panelMeta}>
-        <span style={{ flex: 1 }}>
+    <div className={ui.panel}>
+      <div className={ui.panelMeta}>
+        <span className={ui.grow}>
           {cards.all.length} {cards.all.length === 1 ? 'card' : 'cards'}
         </span>
       </div>
@@ -111,16 +81,29 @@ export function Cards({ cards, bookId, onShelf, onGoTo }: CardsProps) {
       {/* §11: say what happened and what to do. Cards that are not being saved
           look exactly like cards that are, until the next launch. */}
       {!cards.persistent && (
-        <div className={styles.panelMeta}>
+        <div className={ui.panelMeta}>
           <span>Cards are not being saved — this device&apos;s storage is unavailable.</span>
         </div>
       )}
 
-      <FilterChips options={FILTERS} active={filter} onSelect={setFilter} label="Filter cards" />
+      <div className={ui.filters} role="group" aria-label="Filter cards">
+        {FILTERS.map((option) => (
+          <button
+            key={option}
+            type="button"
+            className={ui.filter}
+            data-on={filter === option}
+            aria-pressed={filter === option}
+            onClick={() => setFilter(option)}
+          >
+            {option}
+          </button>
+        ))}
+      </div>
 
       {shown.length === 0 && (
-        <div className={styles.empty}>
-          <div className={styles.emptyBody}>
+        <div className={ui.empty}>
+          <div className={ui.emptyBody}>
             {/* Named, for the same reason as Notes: a blank list under a
                 selected chip looks like the cards are gone. */}
             No {filter === 'All' ? 'cards' : `${filter.toLowerCase()} cards`} yet.
@@ -129,14 +112,14 @@ export function Cards({ cards, bookId, onShelf, onGoTo }: CardsProps) {
       )}
 
       {shown.map((card) => (
-        <div key={card.id} className={styles.note} style={{ '--note-hue': rowHue(card.id) } as CSSProperties}>
-          <div className={styles.noteKind} data-kind={card.kind}>
+        <div key={card.id} className={ui.card} style={{ '--card-hue': rowHue(card.id) } as CSSProperties}>
+          <div className={ui.cardKind} data-kind={card.kind}>
             {card.kind}
           </div>
 
           <button
             type="button"
-            className={styles.noteJump}
+            className={ui.cardJump}
             /* TWO REASONS A CARD CANNOT BE FOLLOWED, and only one of them
                narrowed. A card made from nothing has no anchor and never will
                — §15's line between a card and a mark is precisely that a card
@@ -147,30 +130,59 @@ export function Cards({ cards, bookId, onShelf, onGoTo }: CardsProps) {
             disabled={!card.cfi || !onGoTo || !(card.bookId === bookId || (onShelf?.(card.bookId) ?? false))}
             onClick={() => card.cfi && onGoTo?.({ bookId: card.bookId, cfi: card.cfi })}
           >
-            <span className={styles.noteBody}>{card.body}</span>
+            <span className={ui.cardBody}>{card.body}</span>
           </button>
 
-          {card.answer && <div className={styles.noteComment}>{card.answer}</div>}
+          {card.answer && <div className={ui.cardAnswer}>{card.answer}</div>}
 
-          <div className={styles.noteSource}>
+          <div className={ui.cardFoot}>
             <span>{card.source || 'No source'}</span>
-            {/* NOT DRAWN WITHOUT `discard`. A disabled button would still say
-                "you could discard this, but not now", which is false — the
-                browser client can never discard a card. Absence is the accurate
-                statement. */}
-            {cards.discard && (
-              <button
-                type="button"
-                className={styles.noteDelete}
-                aria-label="Discard card"
-                onClick={() => cards.discard?.(card.id)}
-              >
-                <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
-              </button>
-            )}
+          <button
+            type="button"
+            className={ui.iconButton}
+            aria-label="Discard card"
+            onClick={() => cards.discard(card.id)}
+          >
+            <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
+          </button>
           </div>
         </div>
       ))}
     </div>
   )
+}
+
+/**
+ * The deck, reading the kernel's stores: cards from the card store and "is it on
+ * the shelf" from the library. The panel itself takes plain values, so it can be
+ * drawn in a test without either.
+ */
+export function DeckPane({
+  services,
+  bookId,
+  goTo,
+}: {
+  services: Pick<KernelServices, 'cards' | 'library'>
+  bookId: string | null
+  goTo?: GoTo | undefined
+}) {
+  const { cards, library } = services
+  const snapshot = useSyncExternalStore(cards.subscribe, cards.getSnapshot, cards.getSnapshot)
+  const books = useSyncExternalStore(library.subscribe, library.getSnapshot, library.getSnapshot)
+  /* One set per change of the shelf: a panel of a few hundred rows asks per row. */
+  const onShelf = useMemo(() => {
+    const ids = new Set(books.map((one) => one.bookId))
+    return (id: string) => ids.has(id)
+  }, [books])
+  const view = useMemo(
+    () => ({
+      all: snapshot.all,
+      persistent: snapshot.persistent,
+      /* A rejection is a store that could not take the write, and `persistent`
+         is what says so. What must not happen is an unhandled rejection. */
+      discard: (id: string) => void cards.remove(id).catch(() => {}),
+    }),
+    [snapshot.all, snapshot.persistent, cards],
+  )
+  return <Deck cards={view} bookId={bookId} onShelf={onShelf} onGoTo={goTo} />
 }

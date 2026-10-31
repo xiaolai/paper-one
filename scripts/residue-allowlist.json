@@ -98,6 +98,97 @@
       "match": "voices:",
       "count": 1,
       "reason": "A field naming a tier's system voices in read-aloud code, ordinary vocabulary and not the voices capability; moves in Phase 5"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/cardStore.ts",
+      "match": "./cards",
+      "count": 1,
+      "reason": "The card store stays the kernel's (D2): cards still sync, journal and read from an archive with the panel gone"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/marksArchive.ts",
+      "match": "./cards",
+      "count": 2,
+      "reason": "The archive format holds cards and stays compatible (D2); this row leaves when the module moves to archives"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/marksArchive.ts",
+      "match": "cards:",
+      "count": 6,
+      "reason": "The archive format holds cards and stays compatible (D2); this row leaves when the module moves to archives"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/serviceTable.ts",
+      "match": "./cards",
+      "count": 1,
+      "reason": "The card.* services and card:* grants stay the kernel's (D2)"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/services/card.ts",
+      "match": "../cards",
+      "count": 1,
+      "reason": "The card.* services and card:* grants stay the kernel's (D2)"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/services/card.ts",
+      "match": "services.cards",
+      "count": 4,
+      "reason": "The card.* services and card:* grants stay the kernel's (D2)"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/services/rows.ts",
+      "match": "../cards",
+      "count": 1,
+      "reason": "The card.* services and card:* grants stay the kernel's (D2)"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/uiTypes.ts",
+      "match": "cards:deck",
+      "count": 1,
+      "reason": "A stored 'cards' panel name is read as the panel's present name, or a panel the reader hid reappears; harmless with no such panel composed"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/index.ts",
+      "match": "./core/cards",
+      "count": 2,
+      "reason": "The entry hands capabilities the card store's vocabulary, which stays the kernel's (D2)"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/ui/App.tsx",
+      "match": "services.cards",
+      "count": 1,
+      "reason": "Rekeying a book's cards when its id changes stays the kernel's, with the store (D2)"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/ui/hooks/useCards.ts",
+      "match": "../../core/cards",
+      "count": 1,
+      "reason": "Holds the archive actions' view of the store; this row leaves when those move to archives"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/ui/marksFiles.ts",
+      "match": "../core/cards",
+      "count": 1,
+      "reason": "The archive format holds cards (D2); this row leaves when the module moves to archives"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/ui/marksFiles.ts",
+      "match": "cards:",
+      "count": 1,
+      "reason": "The archive format holds cards (D2); this row leaves when the module moves to archives"
     }
   ]
 }

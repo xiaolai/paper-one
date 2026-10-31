@@ -47,9 +47,9 @@ describe('developer options survive a relaunch', () => {
     const { result } = renderHook(() => useAppState(settings))
 
     act(() => result.current[1]({ type: 'toggleDeveloper' }))
-    act(() => result.current[1]({ type: 'setPaneHidden', pane: 'cards', hidden: true }))
+    act(() => result.current[1]({ type: 'setPaneHidden', pane: 'cards:deck', hidden: true }))
 
-    expect(settings.get(KERNEL_SETTINGS.hiddenPanes)).toEqual(['cards'])
+    expect(settings.get(KERNEL_SETTINGS.hiddenPanes)).toEqual(['cards:deck'])
   })
 
   /* THE WHOLE POINT: a second launch over the same store comes up with them. */

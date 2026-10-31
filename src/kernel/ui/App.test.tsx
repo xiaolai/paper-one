@@ -17,7 +17,6 @@ import { bookIdFor } from '../core/marks'
 import { fakeFs } from '../core/indexFsFake.testkit'
 import { composeCapabilities, kernelApi } from '../core/registry'
 import { createKernelServices } from '../core/services'
-import { UNFINISHED_PANE_IDS } from '../core/uiTypes'
 import { PANE_TITLES } from './panes'
 import readerStyles from './screens/Reader.module.css'
 
@@ -584,8 +583,7 @@ describe('the palette’s own commands', () => {
   /**
    * ⚠️ **THE RULE HAD FOUR READERS AND SIX SURFACES.**
    *
-   * `UNFINISHED_PANE_IDS` says removing an id from it is "the only edit
-   * required" to ship a panel, and `paneFits` says it has five callers. Two
+   * `paneFits` says it has five callers. Two
    * surfaces in this window never asked either: the titlebar drew the deleted
    * companion's button for every reader (whose click `paneFor` sent to
    * Contents, and whose `aria-pressed` could therefore never be true), and the
@@ -597,11 +595,9 @@ describe('the palette’s own commands', () => {
    * an unmatched query now says so and Enter is inert, on every screen and
    * whatever the chord. The titlebar's half is still a live filter.
    *
-   * Written over the LIST rather than over those two controls, so it is a rule
-   * and not a pair of pins: a third unfinished panel, or a seventh surface that
-   * draws one, fails here. It asserts on the shared titles from `panes.ts`,
-   * which is where every surface takes its label from, so a surface drawing an
-   * unfinished panel under the right name cannot pass.
+   * Written over a contributed panel that calls itself unfinished, rather than
+   * over those two controls, so it is a rule and not a pair of pins: a seventh
+   * surface that draws one fails here.
    */
   it('offers no unfinished panel anywhere in the window until the chord reveals them', async () => {
     /* ⚠️ **A REAL BOOK, BECAUSE THE TITLEBAR'S BUTTONS ARE BEHIND `isReader`.**
@@ -611,17 +607,19 @@ describe('the palette’s own commands', () => {
        that could not have failed it. The whole point is the titlebar, so the
        test has to be in the reader. */
     const { fs, moby } = await shelfWithMoby()
-    await mount(fs, { books: [moby] })
+    await mount(fs, {
+      books: [moby],
+      capability: {
+        id: 'deck',
+        requires: [],
+        panes: [{ id: 'deck:panel', label: 'Unfinished deck', icon: 'layers', screens: ['reader'], unfinished: true, render: () => null }],
+      },
+    })
     fireEvent.click(screen.getByTitle('Open Moby-Dick'))
     await settle()
     expect(await screen.findByText(WILL_NOT_PARSE)).toBeTruthy()
 
-    /* NON-VACUOUS: this proves nothing if the list is empty, and the list is
-       the whole subject. */
-    expect(UNFINISHED_PANE_IDS.length).toBeGreaterThan(0)
-    for (const id of UNFINISHED_PANE_IDS) {
-      expect(controlsLabelled(PANE_TITLES[id])).toEqual([])
-    }
+    expect(controlsLabelled('Unfinished deck')).toEqual([])
     /* The finished panel beside it IS drawn, in both the titlebar group and
        the rail — the proof that this window renders the surfaces under test,
        so the emptiness above is the filter's doing and not the harness's. */
@@ -649,9 +647,7 @@ describe('the palette’s own commands', () => {
     await settle()
     developerChord()
     await settle()
-    for (const id of UNFINISHED_PANE_IDS) {
-      expect(controlsLabelled(PANE_TITLES[id]).length).toBeGreaterThan(0)
-    }
+    expect(controlsLabelled('Unfinished deck').length).toBeGreaterThan(0)
   })
 })
 

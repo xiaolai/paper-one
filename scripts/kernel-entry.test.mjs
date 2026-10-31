@@ -40,6 +40,7 @@ const MANIFEST = 'capabilities.manifest.json'
  * stays. Anything else orphaned by a cut is a finding, cut or no cut.
  */
 const ORPHANED_BY_A_CUT = Object.freeze({
+  cards: ['./core/bookAccent', './core/cardStore'],
   circle: ['./core/coverFacts'],
   passages: ['./ui/reader/bookScripts', './ui/reader/passageText'],
   voices: ['./ui/reader/clipKey'],

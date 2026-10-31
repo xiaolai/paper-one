@@ -15,7 +15,7 @@ import {
   stepAt,
   stepIndexOf,
 } from '../../core/metrics'
-import { PANE_TITLES, THEMES } from '../panes'
+import { THEMES } from '../panes'
 
 /* A settings section is about no book — no section reads the context, so what
    it holds cannot be seen.
@@ -54,7 +54,6 @@ import {
   SEPARATIONS,
   SIDES,
   TABLE_FITS,
-  UNFINISHED_PANE_IDS,
   settingsSectionOffered,
 } from '../../core/uiTypes'
 import { PaneBand } from './PaneBand'
@@ -806,10 +805,6 @@ export function Settings({
   const offeredSections = sections.filter((section) =>
     settingsSectionOffered(section, developer !== undefined, developer?.hidden, unfinishedPanes),
   )
-  const unfinishedRows = [
-    ...UNFINISHED_PANE_IDS.map((id) => ({ id: id as string, label: PANE_TITLES[id] as string })),
-    ...unfinishedPanes,
-  ]
   const optionalRowsDrawn = optionalFeatures !== undefined && optionalFeatures.standing.some(hasRow)
   const appBandDrawn = offeredSections.length > 0 || (missing ?? []).length > 0 || optionalRowsDrawn
   const [faceMenuOpen, setFaceMenuOpen] = useState(false)
@@ -1365,7 +1360,7 @@ export function Settings({
       {/* Only with something to hold — see `appBandDrawn`. */}
       {appBandDrawn && (
       <PaneBand title="The app">
-      {/* ⚠️ **FILTERED, AND IT NEVER WAS.** `UNFINISHED_PANE_IDS` hid the
+      {/* ⚠️ **FILTERED, AND IT NEVER WAS.** The unfinished list hid the
           deleted companion's PANEL and left its settings section in front of
           every reader — settings for a surface they cannot open. The rule is
           derived from that one list rather than restated here; see
@@ -1425,29 +1420,32 @@ export function Settings({
           construction rather than about reading or about a capability. */}
       {developer && (
         <PaneBand title="Developer">
-          <PaneGroup
-            title="Unfinished panels"
-            open={groupOpen(GROUP.developerPanels)}
-            onToggle={() => toggleGroup(GROUP.developerPanels)}
-          >
-            <p className={styles.groupHint}>
-              These panels are drawn but do not yet answer what they promise. They are hidden from
-              every reader who has not turned developer options on.
-            </p>
-            {/* `ToggleRow` WITH THE SHELF'S OWN WORDS — `SHOWN_HIDDEN`, the
-                labels the scrollbar row uses. The question here is the same
-                one ("is this drawn?") and answering it with On/Off would give
-                the reader two vocabularies for one idea. */}
-            {unfinishedRows.map(({ id, label }) => (
-              <ToggleRow
-                key={id}
-                label={label}
-                on={!developer.hidden.includes(id)}
-                onChange={(on) => developer.onSetHidden(id, !on)}
-                labels={SHOWN_HIDDEN}
-              />
-            ))}
-          </PaneGroup>
+          {/* NOTHING TO SWITCH, NO GROUP: a build without the panel has no row to put here. */}
+          {unfinishedPanes.length > 0 && (
+<PaneGroup
+              title="Unfinished panels"
+              open={groupOpen(GROUP.developerPanels)}
+              onToggle={() => toggleGroup(GROUP.developerPanels)}
+            >
+              <p className={styles.groupHint}>
+                These panels are drawn but do not yet answer what they promise. They are hidden from
+                every reader who has not turned developer options on.
+              </p>
+              {/* `ToggleRow` WITH THE SHELF'S OWN WORDS — `SHOWN_HIDDEN`, the
+                  labels the scrollbar row uses. The question here is the same
+                  one ("is this drawn?") and answering it with On/Off would give
+                  the reader two vocabularies for one idea. */}
+              {unfinishedPanes.map(({ id, label }) => (
+                <ToggleRow
+                  key={id}
+                  label={label}
+                  on={!developer.hidden.includes(id)}
+                  onChange={(on) => developer.onSetHidden(id, !on)}
+                  labels={SHOWN_HIDDEN}
+                />
+              ))}
+            </PaneGroup>
+          )}
 
           <PaneGroup
             title="Diagnostics"

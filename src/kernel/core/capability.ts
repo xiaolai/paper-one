@@ -107,6 +107,12 @@ export interface PaneContext {
    * link that opens nothing is the control this repository refuses to draw.
    */
   readonly openBook?: (bookId: string) => void
+  /**
+   * Go to a place in one of the reader's books — the jump every kernel panel
+   * makes, so it enters the stack and raises "← Back to". Offered in the side
+   * pane where the host has a jump stack, absent where it has none.
+   */
+  readonly goTo?: (target: { bookId: string; cfi: string }) => void
 }
 
 /**
@@ -137,6 +143,8 @@ export type ContributionIcon =
   | 'people'
   /** Anybody at all — published, public, the open network. */
   | 'globe'
+  /** A stack of made things: a deck. */
+  | 'layers'
 
 /**
  * A pane in the side pane, contributed by a capability.

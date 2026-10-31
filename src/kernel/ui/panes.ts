@@ -37,10 +37,10 @@ export const PANES: readonly PaneEntry[] = [
   { id: 'toc', label: 'Contents', combo: '⌘1' },
   { id: 'marginalia', label: 'Marginalia', combo: '⌘2' },
   { id: 'search', label: 'Search', combo: '⌘3' },
-  { id: 'cards', label: 'Cards', combo: '⌘4' },
   { id: 'library', label: 'Library' },
   { id: 'settings', label: 'Settings' },
-  /* NO COMBO. ⌘5 is free, and leaving it that way is deliberate: a reader who
+  /* NO COMBO. ⌘4 left with the Cards panel, which a capability now contributes
+     and a contributed pane gets no digit. ⌘5 is free, and leaving it that way is deliberate: a reader who
      has never turned developer options on would find a digit in the middle of
      the ramp that does nothing, and one who has does not need a shortcut to a
      panel they opened on purpose. */
@@ -61,9 +61,9 @@ export function panesFor(screen: Screen, audience: PaneAudience = {}): readonly 
 }
 
 /**
- * §11 bound ⌘1…5 to "Contents, marginalia, search, cards, stats"; it is ⌘1…4
- * now that the Reading pane is gone — kernel panes only, and a contributed
- * pane gets no digit.
+ * §11 bound ⌘1…5 to "Contents, marginalia, search, cards, stats"; it is ⌘1…3
+ * now that the Reading pane is gone and Cards is a capability's — kernel panes
+ * only, and a contributed pane gets no digit.
  *
  * The digits are NOT the rail's order and never were: they are the order the
  * panels were published in, and the rail groups them by what they are for. A

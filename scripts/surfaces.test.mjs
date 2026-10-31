@@ -45,9 +45,8 @@ describe('the registries it evaluates', () => {
     ])
   })
 
-  it('reads the seven kernel panes and the one that is unfinished', () => {
-    expect(surfaces.panes).toEqual(['toc', 'marginalia', 'cards', 'search', 'library', 'settings', 'dev'])
-    expect(surfaces.unfinishedPanes).toEqual(['cards'])
+  it('reads the six kernel panes', () => {
+    expect(surfaces.panes).toEqual(['toc', 'marginalia', 'search', 'library', 'settings', 'dev'])
   })
 
   it('reads three tints, three mark styles, and only two offered to the reader', () => {

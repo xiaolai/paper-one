@@ -518,6 +518,13 @@ const REVIEWED_FOOTPRINT = [
    * that list came from the embedded catalogue. The review of what the call
    * beneath it reaches is on the entry above. */
   'voices/ui/VoicesPane.tsx port.remove(pack.id)',
+
+  /*
+   * cards — a tombstone, through the kernel's `services.cards` and no further.
+   * The scan matches the `remove` shape; no fs is reached and no path is built.
+   * What it can name is the id of a card the reader's own Discard press was on.
+   * Cards storage, its journal and its wire stayed in the kernel (D2). */
+  'cards/ui/Deck.tsx cards.remove(id)',
 ].sort()
 
 /** Path constants the footprint above leans on: each must resolve under the

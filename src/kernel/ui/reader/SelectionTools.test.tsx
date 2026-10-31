@@ -553,8 +553,8 @@ describe('the selection popup, rendered', () => {
     expect(placedAt()).toEqual({ top: '252px', left: '540px' })
   })
 
-  /* WHAT THE BAR OFFERS IS DECIDED HERE, AND ONLY HERE. `UNFINISHED_PANE_IDS`
-     hides a panel on every shell, but it does not reach a button on this bar —
+  /* WHAT THE BAR OFFERS IS DECIDED HERE, AND ONLY HERE. An unfinished
+     panel is hidden on every shell, but that rule does not reach a button on this bar —
      so each face's controls are pinned exactly: which, in what order, and what a
      screen reader hears for each. */
   describe('what it offers', () => {
