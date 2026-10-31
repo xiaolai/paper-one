@@ -3409,8 +3409,9 @@ function affordable(spent, named, stdout) {
 }
 
 /**
- * This subject's survivors HERE, measured against the same wide set of tests the
- * merge base is measured against — or `null` where that could not be done.
+ * This subject's sweep HERE against the same wide set of tests the merge base is
+ * measured against, as the runs a result carries — or `null` where that could not
+ * be done.
  *
  * `measuredHere` is already exactly this sweep: a whole file, discovered with
  * `reachingAtBase`, run with the settle run, reconciled against its own content.
@@ -3423,7 +3424,7 @@ function affordable(spent, named, stdout) {
  * way round in the one place it has to be: this run exists to REMOVE a charge,
  * so failing to make it may leave one standing but can never invent permission.
  */
-async function killedWhenWidened(subject, named, origin, world) {
+async function sweptWide(named, world) {
   let measured
   /* `named`, never `origin.path`: the first is what this file is called HERE and
      the second what it was called at the merge base, and a renamed subject has
@@ -3436,8 +3437,57 @@ async function killedWhenWidened(subject, named, origin, world) {
   }
   if (measured.first === null) return null
   const at = path.join(world.root, named)
-  const entry = reportEntryOf(at, measured.first.report)
-  if (entry === null) return null
+  if (reportEntryOf(at, measured.first.report) === null) return null
+  return { first: slimmedRun(measured.first), settle: measured.settle === null ? null : slimmedRun(measured.settle) }
+}
+
+/**
+ * A wide run as a result carries it: only what `decidedWhenWidened` reads, and the source
+ * and identities that hold it to what the plan froze.
+ *
+ * ⚠️ **THE REPORTS ARE MEGABYTES, AND NEARLY ALL OF IT IS WHAT NOTHING READS.**
+ * Measured on PR run 41201387001's own reports: `registry.ts`, 867 mutants, 1.09
+ * MB slimmed to 0.20; the 21 heaviest-to-widen files, 8.0 MB a pass slimmed to 1.9,
+ * against 175 MB of results in that run. What goes is `testFiles` and each mutant's
+ * `coveredBy` and `killedBy`, which say WHICH test where this question is only
+ * WHETHER one. A reason is kept only on a `Timeout`, the one status
+ * `definitelyKilled` reads one for, because a kill's reason is a whole assertion
+ * message.
+ */
+function slimmedRun({ exitedCleanly, durationMs, report }) {
+  const files = Object.entries(report?.files ?? {}).map(([name, { source, mutants }]) => [
+    name,
+    {
+      source,
+      mutants: mutants.filter(isRecord).map(({ mutatorName, replacement, location, status, statusReason }) => ({
+        mutatorName,
+        replacement,
+        location,
+        status,
+        ...(status === 'Timeout' && statusReason !== undefined ? { statusReason } : {}),
+      })),
+    },
+  ])
+  return { exitedCleanly, durationMs, report: { files: Object.fromEntries(files) } }
+}
+
+/**
+ * Which mutants a wide sweep DECIDED, as their positional `keyOf` — the one thing
+ * that may take a charge away, and the same reading in the shard that swept it
+ * and in the aggregate that derives it again.
+ *
+ * ⚠️ **BY POSITION, BECAUSE AN IDENTITY IS NOT A MUTANT** (a second opinion's
+ * replay, 2026-10-31). A survivor's identity is built to survive a move, so two
+ * identical `return "x"` in one function share one. This was a set of those: a
+ * base whose tests killed both, and a head whose tests kill only the first, had
+ * the kill of the first discharge the second, whose one surviving test is the
+ * regression this gate exists to name. Spending them one to one launders it just
+ * the same, by discharging whichever came first. A wide run sweeps the SAME BYTES
+ * as the narrow one — the aggregate holds it to that — so there is no move to be
+ * tolerant of: the mutant at this place, by this mutator, with this replacement,
+ * is the one mutant both runs are about, and none other may answer for it.
+ */
+function decidedWhenWidened(at, { first, settle }) {
   /* ⚠️ **AND THIS RUN DOES SETTLE ITS TIMEOUTS, THOUGH IT COSTS A SECOND PASS.**
      Dropping the settle was tried and reverted the same day: it saves a
      30-minute sweep, and it pays for that by keeping a charge on any mutant the
@@ -3450,12 +3500,12 @@ async function killedWhenWidened(subject, named, origin, world) {
      A kill in EITHER run is evidence a test decided the mutant, which is all
      that may discharge a charge; the settle run re-runs the whole file, so its
      answer stands for any mutant it names. */
-  const settled = measured.settle === null ? new Map() : answersIn(reportEntryOf(at, measured.settle.report))
-  const parsed = parsedSource(entry.source, named)
-  return entry.mutants
-    .filter(isRecord)
-    .filter((mutant) => definitelyKilled(mutant) || definitelyKilled(settled.get(keyOf(mutant)) ?? mutant))
-    .map((mutant) => survivorOf(mutant, named, origin.path, parsed))
+  const settled = settle === null ? new Map() : answersIn(reportEntryOf(at, settle.report))
+  return new Set(
+    reportEntryOf(at, first.report)
+      .mutants.filter((mutant) => definitelyKilled(mutant) || definitelyKilled(settled.get(keyOf(mutant)) ?? mutant))
+      .map(keyOf),
+  )
 }
 
 /**
@@ -3587,7 +3637,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
   const hangs = matchedSurvivors(repeats ?? [], repeatsHere)
   const narrow = differenceAtBase(survivors, undecided, here)
   if (narrow.added.some((one) => one.class === 'added') && affordable(spent, origin.path, world.stdout)) {
-    const wide = await killedWhenWidened(subject, named, origin, world)
+    const wide = await sweptWide(named, world)
     if (wide !== null) {
       /* ⚠️ **THE SECOND RUN MAY ONLY TAKE A CHARGE AWAY, NEVER ADD ONE.** The
          whole argument for widening is that more tests kill more — and a second
@@ -3604,10 +3654,13 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
          it. Nothing the wide run says can create one, so this needs no
          monotonicity to be sound, and that is why it is a filter over kills
          rather than the recomputation it looks like it should be. */
-      const killed = new Set(wide.map((one) => JSON.stringify(one.identity)))
-      const kept = here.filter((one) => !killed.has(JSON.stringify(one.identity)))
+      const kept = survivorsFound(subject, named, origin.path, reports, decidedWhenWidened(path.join(world.root, named), wide))
       return {
-        evidence: { ...evidence, ...differenceAtBase(survivors, undecided, kept), ...repeatsJudged(hangs), widened: true },
+        /* ⚠️ **AND THE RUNS TRAVEL, BECAUSE THE ANSWER IS NOT TAKEN ON A SHARD'S
+           WORD** (PR run 41201387001). This carried `widened: true` and no report,
+           so the aggregate could only derive the narrow difference again, and
+           refused every widened file with a kill in it as "mismatched": 13 of them. */
+        evidence: { ...evidence, ...differenceAtBase(survivors, undecided, kept), ...repeatsJudged(hangs), wide },
         paired: { at: subject, named, origin, here: kept, atBase: survivors, undecided, hereHangs: repeatsHere, baseHangs: repeats ?? [] },
       }
     }
@@ -5845,7 +5898,10 @@ async function baseDisagreement(result, subject, root) {
      it carries no measurement, and `survivorsStand` fails the file on it. */
   if (result.base.refusal !== null) return null
   const at = path.join(root, subject.path)
-  const here = survivorsFound(at, subject.path, subject.origin.path, [result.report, result.settle === null ? null : result.settle.report])
+  const widened = result.base.wide === undefined ? null : wideUnlike(result.base.wide, subject, at)
+  if (widened !== null) return { why: widened }
+  const discharged = result.base.wide === undefined ? new Set() : decidedWhenWidened(at, result.base.wide)
+  const here = survivorsFound(at, subject.path, subject.origin.path, [result.report, result.settle === null ? null : result.settle.report], discharged)
   const { survivors, undecided, problem } = await survivorsAtBase(result.base, {
     at: path.join(root, subject.origin.path),
     named: subject.origin.path,
@@ -5863,6 +5919,23 @@ async function baseDisagreement(result, subject, root) {
   const unlike = addedUnlike(result.base.added, derived.added)
   if (unlike !== null) return { why: `it says what this change added, and its own evidence says ${unlike}` }
   return { paired: { at, named: subject.path, origin: subject.origin, here, atBase: survivors, undecided } }
+}
+
+/**
+ * Why the wide runs a result carries are not sweeps OF the file the plan froze, or
+ * `null` when they are. A first run of no file is refused rather than read as
+ * nothing to discharge: a shard writes no wide run it could not read, so one here
+ * is a record this gate did not write. A settle run of no file only answers for no
+ * mutant, which `decidedWhenWidened` reads as that.
+ */
+function wideUnlike({ first, settle }, subject, at) {
+  const against = { named: subject.path, sha256: subject.sha256, identities: subject.identities, whose: 'the plan' }
+  const entry = reportEntryOf(at, first.report)
+  if (entry === null) return "the widened run's report is of no file, so nothing it says can take a charge away"
+  const unlike = reportUnlike(entry, against)
+  if (unlike !== null) return `the widened run's report: ${unlike}`
+  const settled = settle === null ? null : reportUnlike(reportEntryOf(at, settle.report), against)
+  return settled === null ? null : `the widened settle run's report: ${settled}`
 }
 
 /** How a recorded list of added survivors differs from the derived one, or `null` where it does not. */
@@ -6206,7 +6279,20 @@ function baseProblem(base) {
       return `its base.added ${at + 1} is ${shown(one)}, which is not a survivor the merge base failed to answer for`
     }
   }
-  return null
+  return wideProblem(base.wide)
+}
+
+/**
+ * What is wrong with the wide runs an evidence carries, or `null`. None at all is
+ * a file that was not widened, and what is derived from that is the narrow bill —
+ * the most a result can owe — so absence is safe to read as absence, unlike every
+ * other field here.
+ */
+function wideProblem(wide) {
+  if (wide === undefined) return null
+  if (!isRecord(wide)) return `its base.wide is ${shown(wide)}, which is not the runs of a widened sweep`
+  if (wide.first === null) return 'its base.wide carries no first run, and a sweep that did not run took no charge away'
+  return runProblem(wide.first, 'its base.wide.', 'first') ?? runProblem(wide.settle, 'its base.wide.', 'settle')
 }
 
 /**

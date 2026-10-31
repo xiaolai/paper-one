@@ -2005,6 +2005,270 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
       }
     })
   })
+
+  /* ─── a widened sweep, in the records the aggregate reads ──────────────────── */
+  describe('a sweep widened to take a charge away', () => {
+    /** The wide evidence a result carries: its first run, and its settle run if it had one. */
+    const wideRun = (report, settle = null) => ({
+      first: { exitedCleanly: true, durationMs: 40, report },
+      settle: settle === null ? null : { exitedCleanly: true, durationMs: 50, report: settle },
+    })
+    const OWED = (root) => [{ file: 'src/a.ts', at: PLACE, identity: A_SURVIVOR.identity, why: NOT_THERE, class: 'added' }]
+    const resultFile = (root) => path.join(root, 'results/shard-1/a.result.json')
+    const reconcileWide = (root, at, wide, fields = {}) =>
+      reconcile(root, planOf(), (digest) => ({
+        'shard-1/a.result.json': survivedWith(digest, at, killedAtBase(at, { wide, ...fields })),
+        'shard-1/receipt.json': receiptOf(digest),
+      }))
+
+    /* ⚠️ **A SHARD REMOVED THE CHARGE AND THE AGGREGATE PUT IT BACK AS A LIE.** A
+       shard read the wide run, dropped the survivors it killed and threw the
+       report away, so the aggregate re-derived the NARROW difference and refused
+       each such file as "mismatched". PR run 41201387001: 13 files. */
+    it('derives the discharge again from the wide report it carries, and passes', () =>
+      inScratch('mutants-aggregate-', async (root) => {
+        const at = path.join(root, 'src/a.ts')
+
+        const { stdout, stderr, code } = await reconcileWide(root, at, wideRun(reportOf(at, [{ status: 'Killed' }])))
+
+        expect(stderr).toBe('')
+        expect(code).toBe(0)
+        expect(stdout).toContain(`  ${at} — 0 of 0 survivor(s) were there too, in itself at the merge base (killed, dependencies linked, 900 ms)\n`)
+      }))
+
+    it('takes a charge away only for an answer that decides the mutant, in either wide run', async () => {
+      const HIT = 'Hit limit reached (12/10)'
+      const cases = [
+        ['a kill', [{ status: 'Killed' }], null, true],
+        ['the hit limit', [{ status: 'Timeout', statusReason: HIT }], null, true],
+        ['a settle run’s kill', [{ status: 'Timeout' }], [{ status: 'Killed' }], true],
+        ['a settle run’s hit limit', [{ status: 'Timeout' }], [{ status: 'Timeout', statusReason: HIT }], true],
+        ['a survivor', [{ status: 'Survived' }], null, false],
+        ['a wall-clock timeout', [{ status: 'Timeout' }], null, false],
+        ['a wall-clock timeout that repeated', [{ status: 'Timeout' }], [{ status: 'Timeout' }], false],
+        ['no coverage', [{ status: 'NoCoverage' }], null, false],
+      ]
+      for (const [what, first, settle, discharged] of cases) {
+        await inScratch('mutants-aggregate-', async (root) => {
+          const at = path.join(root, 'src/a.ts')
+          const wide = wideRun(reportOf(at, first), settle === null ? null : reportOf(at, settle))
+
+          const { stderr, code } = await reconcileWide(root, at, wide, discharged ? {} : { added: OWED(root) })
+
+          expect(code, what).toBe(discharged ? 0 : 1)
+          expect(stderr, what).not.toContain('mismatched')
+          expect(stderr.includes('added: src/a.ts:1:18'), what).toBe(!discharged)
+        })
+      }
+    })
+
+    it('refuses a result that says a charge is gone when its wide report kept it, and one that says it stands when the report took it', async () => {
+      for (const [what, first, added, why] of [
+        ['it stands', [{ status: 'Survived' }], [], 'it says what this change added, and its own evidence says 1 were added, the first differing one being StringLiteral replacing'],
+        ['it is gone', [{ status: 'Killed' }], OWED(), 'it says what this change added, and its own evidence says 0 survivor(s) were added, against the 1 it records'],
+      ]) {
+        await inScratch('mutants-aggregate-', async (root) => {
+          const at = path.join(root, 'src/a.ts')
+
+          const { stderr, code } = await reconcileWide(root, at, wideRun(reportOf(at, first)), { added })
+
+          expect(stderr, what).toContain(`mismatched: ${resultFile(root)} — the merge base's evidence does not support it: ${why}`)
+          expect(code, what).toBe(1)
+        })
+      }
+    })
+
+    /* The report is what the discharge is derived from, so it answers to the same
+       account as head's own: the content the plan froze, and exactly its mutants. */
+    it('holds both wide reports to the head content and the mutants the plan froze', async () => {
+      const OTHER = "export const a = 'b'\n"
+      const elsewhere = { ...IDENTITY, location: { start: { line: 1, column: 18 }, end: { line: 1, column: 20 } } }
+      const cases = [
+        ['first', (at) => wideRun(reportOf(at, [{ status: 'Killed' }], OTHER)), "the widened run's report: its source of src/a.ts is not the content the plan hashed"],
+        ['first', (at) => wideRun(reportOf(at, [])), "the widened run's report: it lacks the mutant"],
+        ['first', (at) => wideRun(reportOf(at, [{ status: 'Killed', ...elsewhere }])), "the widened run's report: it holds the mutant StringLiteral at 1:18-1:20"],
+        ['first', () => wideRun({ files: {} }), "the widened run's report is of no file, so nothing it says can take a charge away"],
+        [
+          'settle',
+          (at) => wideRun(reportOf(at, [{ status: 'Timeout' }]), reportOf(at, [{ status: 'Killed' }], OTHER)),
+          "the widened settle run's report: its source of src/a.ts is not the content the plan hashed",
+        ],
+      ]
+      for (const [what, wide, why] of cases) {
+        await inScratch('mutants-aggregate-', async (root) => {
+          const at = path.join(root, 'src/a.ts')
+
+          const { stderr, code } = await reconcileWide(root, at, wide(at))
+
+          expect(stderr, what).toContain(`mismatched: ${resultFile(root)} — the merge base's evidence does not support it: ${why}`)
+          expect(code, what).toBe(1)
+        })
+      }
+    })
+
+    /** A checkout of a file with two identical statements in one scope, planned by the real planner, whose plan names its real mutants. */
+    const DUPLICATED = "export function f(on) {\n  if (on) return 'x'\n  return 'x'\n}\n"
+    const plannedDuplicate = async (root) => {
+      const files = checkout(root, { 'src/a.ts': DUPLICATED, 'src/a.test.mjs': "import './a'\n" })
+      const subjects = ['src/a.ts']
+      const tree = ['src/a.ts', 'src/a.test.mjs']
+      const origins = (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: digestOf(DUPLICATED) }]))
+      const { manifest } = await planOver(root, { subjects, tree, origins })
+      const { identities } = (await readJson(manifest)).subjects[0]
+      const report = (statusOf) => ({
+        files: {
+          [files['src/a.ts']]: {
+            source: DUPLICATED,
+            mutants: identities.map((identity, id) => ({ id: String(id), static: false, ...identity, coveredBy: ['1'], killedBy: ['1'], statusReason: 'some words', status: statusOf(identity) })),
+          },
+        },
+      })
+      const placeOfIt = ({ location: { start } }) => `${start.line}:${start.column}`
+      const strings = identities.filter((one) => one.mutatorName === 'StringLiteral').map(placeOfIt)
+      /* What this whole case rests on: two mutants of one statement. */
+      expect(strings).toEqual(['2:18', '3:10'])
+      return { files, subjects, tree, manifest, report, placeOfIt }
+    }
+    /** Stands in for Stryker over one subject: each run writes the next report and says its exit. */
+    const inTurn = (root, reports) => {
+      let at = 0
+      return async () => {
+        const report = reports[at]
+        at += 1
+        writeFileSync(path.join(root, REPORT), JSON.stringify(report))
+        return true
+      }
+    }
+
+    /* ⚠️ **ONE IDENTITY IS NOT ONE MUTANT, AND SPENDING KILLS BY IDENTITY LAUNDERS
+       A SURVIVOR** (a second opinion, 2026-10-31, replayed in memory). Two
+       identical `return 'x'`: the merge base's tests kill both; here a test kills
+       only the first. As a set, the kill of the first discharged the second;
+       counted one to one, it discharges whichever was found first, which is no
+       better — the mutant that lives is a mutant a test no longer kills. Only the
+       SAME POSITIONAL MUTANT may answer. */
+    it('leaves charged the one of two identical statements the wide run did not kill, in the shard and in the aggregate', () =>
+      inScratch('mutants-shard-', async (root) => {
+        const { subjects, tree, manifest, report, placeOfIt } = await plannedDuplicate(root)
+        const isString = ({ mutatorName }) => mutatorName === 'StringLiteral'
+        const narrow = report((one) => (isString(one) ? 'Survived' : 'Killed'))
+        const wide = report((one) => (isString(one) && placeOfIt(one) === '3:10' ? 'Survived' : 'Killed'))
+        const atBase = { exitedCleanly: true, durationMs: 900, report: report(() => 'Killed') }
+
+        const shard = await shardOf(root, manifest, '1/1', {
+          subjects,
+          tree,
+          stryker: inTurn(root, [narrow, wide]),
+          measure: () => ({ install: 'linked', outcome: 'killed', durationMs: 900, sha256: digestOf(DUPLICATED), source: DUPLICATED, first: atBase, settle: null }),
+        })
+        const written = await readJson(resultIn(path.join(root, 'results'), 1, 'src/a.ts'))
+        const aggregate = await aggregateOf(root, manifest)
+
+        expect(shard.code).toBe(1)
+        expect(written.base.added.map(({ at }) => at)).toEqual(['3:10'])
+        expect(written.base.authorised).toBe(0)
+        expect(aggregate.stderr).not.toContain('mismatched')
+        expect(aggregate.stderr).toContain("  added: src/a.ts:3:10 — StringLiteral replacing \"'x'\"")
+        expect(aggregate.stderr).not.toContain('src/a.ts:2:18')
+        expect(aggregate.code).toBe(1)
+      }))
+
+    it('passes a shard’s own widened result through the aggregate, carrying only what the aggregate reads of the wide run', () =>
+      inScratch('mutants-shard-', async (root) => {
+        const files = threeKinds(root)
+        const a = files['src/a.ts']
+        const subjects = ['src/a.ts']
+        const { manifest } = await planOver(root, { subjects, origins: itsOwn })
+        const hit = 'Hit limit reached (12/10)'
+        const noisy = { static: false, coveredBy: ['1'], killedBy: ['1'], testsCompleted: 3 }
+        const narrow = reportOf(a, [{ status: 'Survived' }])
+        const wide = { ...reportOf(a, [{ status: 'Timeout', statusReason: hit, ...noisy }]), testFiles: { 'src/a.test.mjs': { tests: [] } }, schemaVersion: '1' }
+        wide.files[a].mutants[0].statusReason = hit
+        const atBase = { exitedCleanly: true, durationMs: 900, report: reportOf(a, [{ status: 'Killed' }]) }
+
+        const shard = await shardOf(root, manifest, '1/1', {
+          subjects,
+          stryker: inTurn(root, [narrow, wide]),
+          measure: () => ({ install: 'linked', outcome: 'killed', durationMs: 900, sha256: A_SHA, source: A_SOURCE, first: atBase, settle: null }),
+        })
+        const written = await readJson(resultIn(path.join(root, 'results'), 1, 'src/a.ts'))
+        const aggregate = await aggregateOf(root, manifest)
+
+        expect(written.base.added).toEqual([])
+        expect(written.base.wide).toEqual({
+          first: {
+            exitedCleanly: true,
+            durationMs: expect.any(Number),
+            report: { files: { [a]: { source: A_SOURCE, mutants: [{ ...IDENTITY, status: 'Timeout', statusReason: hit }] } } },
+          },
+          settle: null,
+        })
+        expect(shard.code).toBe(0)
+        expect(aggregate.stderr).toBe('')
+        expect(aggregate.code).toBe(0)
+      }))
+
+    it('keeps a reason only on the status that is decided by one, and the wide settle run as well as the first', () =>
+      inScratch('mutants-shard-', async (root) => {
+        const files = threeKinds(root)
+        const a = files['src/a.ts']
+        const subjects = ['src/a.ts']
+        const { manifest } = await planOver(root, { subjects, origins: itsOwn })
+        const narrow = reportOf(a, [{ status: 'Survived' }])
+        const wide = reportOf(a, [{ status: 'Timeout' }])
+        const settled = reportOf(a, [{ status: 'Killed', statusReason: 'expected true to be false', killedBy: ['1'] }])
+        const atBase = { exitedCleanly: true, durationMs: 900, report: reportOf(a, [{ status: 'Killed' }]) }
+
+        await shardOf(root, manifest, '1/1', {
+          subjects,
+          stryker: inTurn(root, [narrow, wide, settled]),
+          measure: () => ({ install: 'linked', outcome: 'killed', durationMs: 900, sha256: A_SHA, source: A_SOURCE, first: atBase, settle: null }),
+        })
+        const written = await readJson(resultIn(path.join(root, 'results'), 1, 'src/a.ts'))
+        const aggregate = await aggregateOf(root, manifest)
+
+        expect(written.base.wide.settle.report).toEqual({ files: { [a]: { source: A_SOURCE, mutants: [{ ...IDENTITY, status: 'Killed' }] } } })
+        expect(written.base.added).toEqual([])
+        expect(aggregate.code).toBe(0)
+      }))
+
+    it('leaves no wide run on a result that was not widened', () =>
+      inScratch('mutants-shard-', async (root) => {
+        const files = threeKinds(root)
+        const a = files['src/a.ts']
+        const subjects = ['src/a.ts']
+        const { manifest } = await planOver(root, { subjects, origins: itsOwn })
+        const atBase = { exitedCleanly: false, durationMs: 900, report: reportOf(a, [{ status: 'Survived' }]) }
+
+        await shardOf(root, manifest, '1/1', {
+          subjects,
+          stryker: inTurn(root, [reportOf(a, [{ status: 'Survived' }])]),
+          measure: () => ({ install: 'linked', outcome: 'survived', durationMs: 900, sha256: A_SHA, source: A_SOURCE, first: atBase, settle: null }),
+        })
+
+        expect(Object.keys((await readJson(resultIn(path.join(root, 'results'), 1, 'src/a.ts'))).base)).not.toContain('wide')
+      }))
+
+    it('refuses wide evidence that is not two runs, by name', async () => {
+      const refusals = [
+        ['report', 'its base.wide is "report", which is not the runs of a widened sweep'],
+        [{ settle: null }, 'its base.wide.first is missing, which is neither a first run nor null'],
+        [{ first: null, settle: null }, 'its base.wide carries no first run, and a sweep that did not run took no charge away'],
+        [{ first: 'run', settle: null }, 'its base.wide.first is "run", which is neither a first run nor null'],
+        [{ first: { exitedCleanly: true, durationMs: 1, report: null } }, 'its base.wide.settle is missing, which is neither a settle run nor null'],
+      ]
+      for (const [wide, why] of refusals) {
+        await inScratch('mutants-aggregate-', async (root) => {
+          const at = path.join(root, 'src/a.ts')
+
+          const { stderr, code } = await reconcileWide(root, at, wide)
+
+          expect(stderr, why).toContain(`unreadable: ${resultFile(root)} — ${why}\n`)
+          expect(code, why).toBe(1)
+        })
+      }
+    })
+  })
 })
 
 describe('what an aggregate says of a sweep that failed', () => {
