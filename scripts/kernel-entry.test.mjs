@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DELETED_ENV } from './verify-without.mjs'
@@ -29,6 +29,30 @@ import { DELETED_ENV } from './verify-without.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const ENTRY = 'src/kernel/index.ts'
+const MANIFEST = 'capabilities.manifest.json'
+
+/**
+ * WHAT CUTTING A CAPABILITY LEAVES WITH NO IMPORTER, BY THE ID CUT.
+ *
+ * Each of these is a kernel module the kernel does not need through its entry
+ * and one capability does, so the deletion proof orphans its clause by
+ * construction — and the proof forbids touching a kernel file, so the clause
+ * stays. Anything else orphaned by a cut is a finding, cut or no cut.
+ */
+const ORPHANED_BY_A_CUT = Object.freeze({
+  circle: ['./core/coverFacts'],
+  passages: ['./ui/reader/bookScripts', './ui/reader/passageText'],
+  voices: ['./ui/reader/clipKey'],
+})
+
+/** The clauses that load a module for names `used` does not hold. */
+const orphansIn = (byModule, used) =>
+  [...byModule]
+    .filter(([, held]) => held.value && !held.names.some((one) => used.has(one)))
+    .map(([from]) => from)
+
+/** The orphans a cut of `cut` does not explain; with no cut, all of them. */
+const unexplained = (orphans, cut) => orphans.filter((one) => !(ORPHANED_BY_A_CUT[cut] ?? []).includes(one))
 
 /** Every `export { … } from '…'` clause in the entry, by the module it names. */
 function clausesOf(text) {
@@ -82,7 +106,7 @@ function importedThroughTheEntry(files) {
 }
 
 describe("the kernel's public entry", () => {
-  it('re-exports no module that nothing imports a name from', (context) => {
+  it('re-exports no module that nothing imports a name from', () => {
     const text = readFileSync(join(ROOT, ENTRY), 'utf8')
     const byModule = clausesOf(text)
     /* NON-VACUOUS: a parse that found nothing would pass silently, which is
@@ -96,24 +120,41 @@ describe("the kernel's public entry", () => {
        an empty set cannot make every module look dead. */
     expect(used.size).toBeGreaterThan(100)
 
-    const loadedForNothing = [...byModule]
-      .filter(([, held]) => held.value && !held.names.some((one) => used.has(one)))
-      .map(([from]) => from)
-    /* ⚠️ **THE DELETION PROOF MAKES THIS FIRE BY CONSTRUCTION.** Cutting a
-       capability deletes the only importer of the contract the kernel declares
-       for it — `./core/circle/*` for `circle` — and the proof forbids touching
-       a kernel file, so the clause stays with no importer. Found
-       2026-09-15 running the proof on a clean tree; it failed on `main` too.
-       `PAPER_VERIFY_WITHOUT` is set only by `verify:without`, which names the
-       id it cut, and on the real tree this is a hard assertion — the same rule
-       `check-third-party-notices.test.mjs` follows for the crates of a cut. */
-    const cut = process.env[DELETED_ENV]
-    if (cut !== undefined && loadedForNothing.length > 0) {
-      return context.skip(`${cut} was cut from this copy, and the kernel keeps what it declared for it (${loadedForNothing.join(', ')}), because the proof touches no kernel file`)
-    }
+    /* ⚠️ **THE DELETION PROOF ORPHANS WHAT `ORPHANED_BY_A_CUT` LISTS, AND ONLY
+       THAT IS EXCUSED.** `PAPER_VERIFY_WITHOUT` is set only by `verify:without`,
+       which names the id it cut; on the real tree nothing is excused. */
     expect(
-      loadedForNothing,
+      unexplained(orphansIn(byModule, used), process.env[DELETED_ENV]),
       'the entry loads these for names nothing imports through it — either drop the clause or import from the module directly inside the kernel',
     ).toEqual([])
+  })
+
+  it('lists exactly what cutting each capability would orphan', (context) => {
+    /* The proof runs on a copy and only for the id it is handed, so a new orphan
+       is caught here, on the real tree, for every id. A copy has already lost
+       a capability and the case above holds it to its own row. */
+    const cut = process.env[DELETED_ENV]
+    if (cut !== undefined) return context.skip(`${cut} was cut from this copy`)
+
+    const byModule = clausesOf(readFileSync(join(ROOT, ENTRY), 'utf8'))
+    const files = ['src', 'scripts', 'tests'].flatMap((dir) => sourcesUnder(join(ROOT, dir)))
+    const { capabilities } = JSON.parse(readFileSync(join(ROOT, MANIFEST), 'utf8'))
+    /* An id another entry requires cannot be cut; `capability:remove` refuses. */
+    const cuttable = capabilities.filter(({ id }) => !capabilities.some((one) => one.requires?.includes(id)))
+    expect(cuttable.length).toBeGreaterThan(3)
+
+    for (const { id, ts } of cuttable) {
+      const home = join(ROOT, 'src', 'capabilities', ts) + sep
+      const orphans = orphansIn(byModule, importedThroughTheEntry(files.filter((file) => !file.startsWith(home))))
+      expect(orphans.sort(), `cutting ${id}`).toEqual([...(ORPHANED_BY_A_CUT[id] ?? [])].sort())
+    }
+  })
+
+  it('excuses an orphan only for the capability whose cut it is listed under', () => {
+    expect(Object.keys(ORPHANED_BY_A_CUT).length).toBeGreaterThan(0)
+    expect(unexplained(['./core/coverFacts'], 'circle')).toEqual([])
+    expect(unexplained(['./core/coverFacts'], 'voices')).toEqual(['./core/coverFacts'])
+    expect(unexplained(['./core/coverFacts'], undefined)).toEqual(['./core/coverFacts'])
+    expect(unexplained(['./core/planted'], 'circle')).toEqual(['./core/planted'])
   })
 })
