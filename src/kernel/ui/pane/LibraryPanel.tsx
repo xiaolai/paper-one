@@ -557,7 +557,7 @@ export function LibraryPanel({
             group.children.length === 0 ? (
               group.self && row(group.self)
             ) : (
-              <div key={`g:${tagKey(group.prefix)}`} className={styles.tagGroup}>
+              <div key={`g:${tagKey(group.prefix)}`}>
                 {group.self ? (
                   row(group.self)
                 ) : (

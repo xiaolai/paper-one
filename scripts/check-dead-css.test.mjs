@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { deadClasses } from './check-dead-css.mjs'
+import { deadClasses, undefinedClasses } from './check-dead-css.mjs'
 
 /**
  * `check-dead-css`: what counts as reaching a class, and what does not.
@@ -109,13 +109,80 @@ describe('every way a class is reached', () => {
   })
 })
 
+/*
+ * ⚠️ **THE OTHER DIRECTION, AND THE ONE THAT SHOWS.** A class named in markup that
+ * no stylesheet declares reads as `undefined`, and React draws no attribute: no
+ * error, no warning, a bare browser control in the middle of a designed pane.
+ * The side pane's search field lost its whole rule that way, and this gate
+ * passed through it because it only asked the question from the stylesheet's end.
+ */
+describe('a class the markup names and no stylesheet declares', () => {
+  const missing = (root) => undefinedClasses(root).map((u) => `${u.file}: ${u.name}`)
+
+  it('is reported, against the module that file imported', () => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n',
+      'src/B.module.css': '.gone { color: red; }\n',
+      'src/A.tsx': "import styles from './A.module.css'\nexport const A = () => styles.live + styles.gone\n",
+    })
+    expect(missing(root)).toEqual(['src/A.tsx: gone'])
+  })
+
+  it('is reported under any name the module was imported by', () => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n',
+      'src/A.tsx': "import editorStyles from './A.module.css'\nexport const A = () => editorStyles.gone\n",
+    })
+    expect(missing(root)).toEqual(['src/A.tsx: gone'])
+  })
+
+  it('is reported whichever quotes the import uses', () => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n',
+      'src/A.tsx': 'import styles from "./A.module.css"\nexport const A = () => styles.gone\n',
+    })
+    expect(missing(root)).toEqual(['src/A.tsx: gone'])
+  })
+
+  /* A comment describing the rule is exactly what survives a careless deletion,
+     and it must not count as the rule. */
+  it('is not declared by a comment that mentions it', () => {
+    const root = fixture({
+      'src/A.module.css': '/* wrap it in a .gone first */\n.live { color: red; }\n',
+      'src/A.tsx': "import styles from './A.module.css'\nexport const A = () => styles.gone\n",
+    })
+    expect(missing(root)).toEqual(['src/A.tsx: gone'])
+  })
+
+  it('is not found in the import path, nor in a selector that only qualifies', () => {
+    const root = fixture({
+      'src/controls.module.css': '.a:hover .live { color: red; }\n',
+      'src/A.tsx': "import controls from './controls.module.css'\nexport const A = () => [controls.a, controls.live]\n",
+    })
+    expect(missing(root)).toEqual([])
+  })
+})
+
+describe('a class reached under another import name', () => {
+  /* `.popover` was deleted as unreachable while three files drew it, because
+     they import the module as `editorStyles` and this gate read only `styles.`.
+     The gate had removed a live rule. */
+  it('is not unreachable', () => {
+    const root = fixture({
+      'src/A.module.css': '.popover { color: red; }\n',
+      'src/A.tsx': "import editorStyles from './A.module.css'\nexport const A = () => editorStyles.popover\n",
+    })
+    expect(names(root)).toEqual([])
+  })
+})
+
 describe('the CLI', () => {
   it('exits 0 on this repository, and says what it looked at', () => {
     /* Against the real tree, which is the run that gates every push. The
        counts are printed because a check reporting "0 unreachable" over 0
        modules looks exactly like one that worked. */
     const run = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' })
-    expect(run.stdout).toMatch(/check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable/)
+    expect(run.stdout).toMatch(/check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined/)
     expect(run.status).toBe(0)
   })
 })

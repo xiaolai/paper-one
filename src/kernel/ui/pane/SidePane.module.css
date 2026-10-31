@@ -498,6 +498,18 @@
   color: var(--ink-2);
 }
 
+/* The remembered opening line. It is there to confirm the place, not to be read
+   — the reader has the whole page one click away — so it is clamped rather than
+   allowed to set the height of every row. */
+.placeLine {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  padding-top: var(--space-4);
+}
+
 /* --- search ---------------------------------------------------------- */
 
 .searchField {
@@ -509,6 +521,39 @@
   padding: 0 var(--space-12);
   border-radius: var(--radius-pill);
   background: var(--wash);
+}
+
+/* A bare input inside the pill its parent draws: the pill is the control, and
+   this only carries the text. */
+.searchInput {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--text-ui);
+  color: var(--ink);
+}
+
+.searchInput::placeholder {
+  color: var(--muted);
+}
+
+/* ⚠️ **LIGHT THE PILL, NOT THE BARE INPUT INSIDE IT.** The global ring drew itself
+   around the input's own box, a square-cornered 21px strip inside a 34px pill.
+   A text field matches `:focus-visible` after a click as well as from the
+   keyboard, so a click lights the pill too: the reader is about to type, and the
+   ring says where. The offset is inset, as for
+   `.noteInput`: on a filled pill the global two pixels land outside the fill. */
+.searchField:has(:focus-visible) {
+  outline: var(--focus-ring);
+  outline-offset: -1px;
+}
+
+/* The container shows focus — see above. Dropping the input's own ring is only
+   safe because of that rule, which is why the two sit together. */
+.searchInput:focus {
+  outline: none;
 }
 
 .result {
@@ -1131,6 +1176,14 @@
  * heading means it stays true if either changes. */
 .groupBody {
   padding-inline-start: calc(var(--icon-control) + var(--space-6));
+}
+
+/* A sentence about the group, in the rows' own inset. */
+.groupHint {
+  margin: 0;
+  padding: var(--space-6) var(--space-10);
+  font-size: var(--text-small);
+  color: var(--muted);
 }
 
 .groupToggle {

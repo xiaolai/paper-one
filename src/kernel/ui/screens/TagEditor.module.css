@@ -1,7 +1,7 @@
 /* The tag editor — see `TagEditor.tsx`.
  *
  * The BOX only. Whoever opens it gives it a place: the shelf's card and row
- * place it with `useRowMenu` the way a menu is placed;
+ * wrap it in a `.popover` (below), placed by `useRowMenu` the way a menu is;
  * the reader shows it inside a sheet. Both get the same inside, which is the
  * point of it being one component. */
 
@@ -14,6 +14,15 @@
   padding: var(--space-10) var(--space-12) var(--space-12);
   color: var(--ink);
   font-size: var(--text-ui);
+}
+
+/* Over a card or a row: a menu's surface, fixed and placed from the viewport,
+   because the surfaces that open it clip their overflow. `composes` so it is
+   the same surface a menu is and cannot drift from it. */
+.popover {
+  composes: menu from '../styles/controls.module.css';
+  padding: 0;
+  min-width: 0;
 }
 
 /* In the reader's sheet: the sheet's width is the editor's, and the sheet's

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { extname, join, relative, sep } from 'node:path'
+import { dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessEntry } from './lib/entry.mjs'
 
 /**
- * `pnpm css:check` — every class in a CSS module has a consumer.
+ * `pnpm css:check` — every class in a CSS module has a consumer, and every class
+ * a source names from a CSS module exists.
  *
  * A RULE OUTLIVES THE COMPONENT THAT ORPHANED IT, silently. A panel loses its
  * empty state, a popover becomes a full-width sheet, a status line is replaced
@@ -17,8 +18,9 @@ import { isProcessEntry } from './lib/entry.mjs'
  *
  * NOT A LINTER, and deliberately not: this repo gates with small scripts that
  * answer one question each, and the question here is narrow enough to answer
- * exactly. A class is used when some source names it as `styles.<name>` — the
- * only way a module class is read in this codebase, verified by there being no
+ * exactly. A class is used when some source names it as `styles.<name>`, or
+ * under whatever other name that source imported the module by — the only way
+ * a module class is read in this codebase, verified by there being no
  * `styles[...]` lookup anywhere — or when another module `composes` it.
  *
  * WHAT IT DELIBERATELY DOES NOT DO. It does not check whether the RULE has any
@@ -50,6 +52,51 @@ function walk(dir, out = []) {
   return out
 }
 
+/** The module classes a source reads: `{ alias, modulePath, name }` for each. */
+function moduleReads(file) {
+  const text = readFileSync(file, 'utf8')
+  const reads = []
+  for (const [, alias, path] of text.matchAll(/^import\s+(\w+)\s+from\s+['"]([^'"]+\.module\.css)['"]/gm)) {
+    /* The lookbehind is for the import line itself: `controls.module` in
+       `'../styles/controls.module.css'` is a path, not a read. */
+    const read = new RegExp(`(?<![\\w./'"-])${alias}\\.([A-Za-z_][A-Za-z0-9_]*)`, 'g')
+    for (const m of text.matchAll(read)) {
+      reads.push({ alias, modulePath: resolve(dirname(file), path), name: m[1] })
+    }
+  }
+  return reads
+}
+
+/** Class selectors in a stylesheet, with its comments gone: prose declares nothing. */
+function declaredClasses(file) {
+  const text = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+  return new Set([...text.matchAll(/\.(-?[A-Za-z_][A-Za-z0-9_-]*)/g)].map((m) => m[1]))
+}
+
+/**
+ * Every class a source reads from a CSS module that the module does not declare.
+ *
+ * The direction that shows. `styles.gone` is `undefined`, and `className={undefined}`
+ * draws no attribute and says nothing, so the element falls back to whatever the
+ * browser gives it. `fefc54f` took `.searchInput` and `.placeLine` out with the
+ * rules it meant to remove, and the search field went on looking like that for
+ * six weeks under a gate that was green.
+ */
+export function undefinedClasses(root, roots = ROOTS) {
+  const files = roots.flatMap((dir) => (existsSync(join(root, dir)) ? walk(join(root, dir)) : []))
+  const found = []
+  for (const file of files.filter((f) => ['.ts', '.tsx'].includes(extname(f)))) {
+    for (const { modulePath, name } of moduleReads(file)) {
+      const known = existsSync(modulePath) && declaredClasses(modulePath).has(name)
+      const shown = relative(root, file).split(sep).join('/')
+      if (!known && !found.some((f) => f.file === shown && f.name === name)) {
+        found.push({ file: shown, name })
+      }
+    }
+  }
+  return found
+}
+
 /**
  * Every class a CSS module declares that nothing can reach, under `root`.
  *
@@ -72,6 +119,10 @@ export function deadClasses(root, roots = ROOTS) {
     for (const m of readFileSync(file, 'utf8').matchAll(/\bstyles\.([A-Za-z][A-Za-z0-9_]*)/g)) {
       used.add(m[1])
     }
+    /* UNDER ANY IMPORT NAME. Reading only `styles.` called `.popover` unreachable
+       while three files drew it as `editorStyles.popover`, and it was deleted on
+       this gate's word (`74aa52b`). */
+    for (const { name } of moduleReads(file)) used.add(name)
   }
   for (const file of modules) {
     /* BOTH SPELLINGS OF `composes`. Cross-file is `composes: x from './y.css'`;
@@ -114,18 +165,28 @@ export function deadClasses(root, roots = ROOTS) {
    an importer that only wanted `deadClasses` paid for a full walk of `src`. */
 if (isProcessEntry(import.meta)) {
   const { dead, modules, used } = deadClasses(REPO)
+  const missing = undefinedClasses(REPO)
   for (const { file, name, line } of dead) {
     process.stdout.write(`${file}:${line}  .${name} — no source names \`styles.${name}\`\n`)
   }
   process.stdout.write(
-    `check-dead-css: ${modules} modules, ${used} classes used, ${dead.length} unreachable\n`,
+    `check-dead-css: ${modules} modules, ${used} classes used, ${dead.length} unreachable, ${missing.length} undefined\n`,
   )
+  for (const { file, name } of missing) {
+    process.stdout.write(`${file}  .${name} — named here, declared by no rule in the module it imports\n`)
+  }
+  if (missing.length > 0) {
+    process.stdout.write(
+      '\nA class no stylesheet declares reads as undefined and styles nothing, without\n' +
+        'an error. Restore the rule, or stop naming the class.\n',
+    )
+  }
   if (dead.length > 0) {
     process.stdout.write(
       '\nAn unreachable rule is shipped CSS that can never apply. Delete it, or\n' +
         'rename it with a leading `_` if it is kept deliberately — the exemption\n' +
         'belongs at the rule, where the next reader of this file will see it.\n',
     )
-    process.exit(1)
   }
+  if (dead.length > 0 || missing.length > 0) process.exit(1)
 }
