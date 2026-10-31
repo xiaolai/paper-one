@@ -2614,6 +2614,26 @@ describe('two satchels, one module', () => {
     run.handle.dispose()
   })
 
+  /* A start with no transport asks the plugin why, and a newer runtime can come up
+     and report during that await. The older one's sentence is not the newer's. */
+  it('leaves a newer runtime its status when an older unwired start answers late', async () => {
+    const before = native.p2pOn
+    let answer: (on: boolean) => void = () => {}
+    const asked = vi.fn(() => new Promise<boolean>((resolve) => { answer = resolve }))
+    native.p2pOn = asked
+    const older = start({ noPlugin: true })
+    await until(() => expect(asked).toHaveBeenCalled())
+    native.p2pOn = before
+    const hellos = perDevice(null, Promise.resolve())
+    await satchelWith(book('book:a', 'Alpha', 'bytes'), { serve: hellos.serve })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+
+    answer(false)
+    await older
+
+    expect(syncStatus.getSnapshot().state).toBe('ok')
+  })
+
   /* THE SWITCH'S SENTENCE IS THE RUNNING RUNTIME'S, like the slot it sits beside. */
   it('keeps the newer satchel off when an older one stops', async () => {
     const hellos = perDevice(null, Promise.resolve())

@@ -1252,7 +1252,9 @@ export const sync: Capability = {
       myStorageModel = createStorageModel({ services, coverCache: null, status: syncStatus, removeDownload: null })
       storageModel = myStorageModel
       const detail = await unwiredDetail(Boolean(fs))
-      if (!stopped) syncStatus.set({ state: 'idle', detail })
+      /* Ownership, because stopped says nothing of a newer runtime that came up
+         during that await and is reporting its own sessions. */
+      if (!stopped && storageModel === myStorageModel) syncStatus.set({ state: 'idle', detail })
     }
 
     /* OFF CLOSES THE TRANSPORT FOR THE REST OF THE RUN, so the schedule stops
