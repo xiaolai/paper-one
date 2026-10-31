@@ -31,9 +31,6 @@ If you want a finished EPUB reader today, you want a different repository.
   and PDF through `pdf.js`. The fork is deliberate: upstream's API is
   explicitly unstable, and nothing on npm under that name is the author's.
 - Marks and notes anchored to the text, kept beside the book
-- Optional on-device language model for a "gloss" — a short explanation of a
-  word or phrase in the sentence it appears in, as an alternative to a
-  dictionary lookup
 - Optional sync between the user's own machines, peer to peer. All peer-to-peer
   is off until it is turned on in Settings, under Devices
 
