@@ -5098,8 +5098,8 @@ describe('a survivor measured against the merge base', () => {
   /* ⚠️ **AND A SECOND WIDE PASS IS NOT ALWAYS AFFORDABLE.** It costs a whole
      sweep of the file again: measured on `session.ts`, 31 minutes against a
      12-minute narrow run. On this gate's own heaviest subject — itself, at an
-     estimated 204 minutes for one plain pass — starting a second one unbounded
-     is how a 210-minute CI step ends with no answer at all, which is worse than
+     estimated 179 to 357 minutes for one plain pass — starting a second one unbounded
+     is how a 345-minute CI step ends with no answer at all, which is worse than
      the answer it was trying to correct. The file's own sweep is what a second
      one would cost, so that is what is spent against the budget; refusing leaves
      the NARROW bill standing, which is the safe direction, and says so. */
@@ -5112,7 +5112,7 @@ describe('a survivor measured against the merge base', () => {
         exits: { [mutated]: false },
       })
       let runs = 0
-      /* Every reading is 21 minutes past the last, so the one sweep this file
+      /* Every reading is 61 minutes past the last, so the one sweep this file
          gets is already over the budget a second one would need. */
       let now = 0
       const result = await sweep(root, {
@@ -5122,7 +5122,7 @@ describe('a survivor measured against the merge base', () => {
           runs += 1
           return stryker(config)
         },
-        clock: () => (now += 21 * 60_000),
+        clock: () => (now += 61 * 60_000),
         mergeBase: () => BASE,
         origins: itsOwn,
         measure: (named, _commit, asked) => killedAt(asked.root, named),
@@ -5131,8 +5131,41 @@ describe('a survivor measured against the merge base', () => {
       /* The narrow sweep, and no second one. */
       expect(runs).toBe(1)
       expect(result.code).toBe(1)
-      expect(result.stdout).toContain('past the 20 this gate will spend again')
+      expect(result.stdout).toContain('past the 60 this gate will spend again')
       expect(result.stdout).toContain('can only ever bill MORE than the wider set would')
+    }))
+
+  /* ⚠️ **AND THE BUDGET WAS BILLING WHAT THE WIDER SET KILLS** (PR run 41201387001,
+     2026-10-31). `registry.ts` swept in 44 minutes against a 20-minute budget, so
+     239 mutants its 5 nearest tests miss stayed charged though the 122 tests that
+     reach it kill them at the merge base. A file that costly is the case the second
+     pass exists for, so it gets the pass. */
+  it('sweeps a file as costly as the heaviest one measured a second time, against the wider set', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived') },
+        exits: { [mutated]: false },
+      })
+      let runs = 0
+      let now = 0
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker: (config) => {
+          runs += 1
+          return stryker(config)
+        },
+        clock: () => (now += 60 * 60_000),
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        measure: (named, _commit, asked) => killedAt(asked.root, named),
+      })
+
+      expect(runs).toBe(2)
+      expect(result.stdout).not.toContain('this gate will spend again')
+      expect(result.code).toBe(1)
     }))
 
   it('fails a survivor the merge base did not owe, naming what was mutated and why nothing there answers for it', async () => {
@@ -7702,14 +7735,17 @@ describe('the workflow sweeps in isolated shards of one frozen plan, reconciled 
    * job bounds re-derived from it. Until then a shard that overruns ENDS AT ITS
    * STEP TIMEOUT, which leaves no receipt, which the aggregate refuses — red,
    * never green. */
-  it('bounds a shard by the slowest file measured, scaled to the runner with a margin, and gives the heaviest files shards of their own', () => {
+  it('bounds a shard by the slowest file measured, scaled to the runner, and gives the heaviest files shards of their own', () => {
     const MEASURED_MINUTES = 18 + 5 / 60
     const COUNTED_WHEN_MEASURED = 1174
-    const COUNTED_NOW = 2941
+    const COUNTED_NOW = 5148
     const LOCAL_RUNNERS = 9
     const CI_VCPUS = 4
-    const MARGIN = 2
-    const sized = Math.ceil(((MEASURED_MINUTES * (COUNTED_NOW / COUNTED_WHEN_MEASURED) * LOCAL_RUNNERS) / CI_VCPUS) * MARGIN)
+    /* No margin any more, and that is a finding rather than a repair: doubling this
+       for a slower core gives 357, past the 345 a step can have under GitHub's 360,
+       so no bound can promise it. Half of what the margin stood for is settled, the
+       CI log saying 4 runners; a core's speed is not. See SIZING in the workflow. */
+    const sized = Math.ceil((MEASURED_MINUTES * (COUNTED_NOW / COUNTED_WHEN_MEASURED) * LOCAL_RUNNERS) / CI_VCPUS)
     const shard = job('mutants-shard')
     const [sweep] = running(stepsOf(shard), SWEEPS)
 
@@ -7719,6 +7755,31 @@ describe('the workflow sweeps in isolated shards of one frozen plan, reconciled 
     const [shards, isolate] = [Number(valueAt(env, 6, 'SHARDS')), Number(valueAt(env, 6, 'ISOLATE'))]
     expect(isolate).toBeGreaterThanOrEqual(1)
     expect(shards).toBeGreaterThan(isolate)
+  })
+
+  /* ⚠️ **THE ONE FILE MEASURED ALL THE WAY THROUGH SETS THE STEP** (PR run
+     41201387001, 2026-10-31). `bookFolder.ts`: 21.1 minutes here, a first run at the
+     merge base of 74.15, and a settle run about as long (0.94 to 1.03 of the first,
+     measured on the files that finished one). That base run was killed by its deadline,
+     so what the file costs when it is allowed to finish is projected, and widening it
+     costs what the merge base did. It is the fourth heaviest by mutants, and sharing a
+     shard with it took a shard to 386 minutes on that run's own plan, past anything
+     GitHub allows a hosted job, so it needs a shard of its own — and a fifth, because
+     a branch that also changes this gate pushes it down one. */
+  it('bounds a shard by the heaviest file measured through head, base and widening, inside what a hosted job may run', () => {
+    const [HEAD, BASE_FIRST] = [21.1, 74.15]
+    const measuredThrough = HEAD + BASE_FIRST * 2 + BASE_FIRST * 2
+    const shard = job('mutants-shard')
+    const [sweep] = running(stepsOf(shard), SWEEPS)
+    const step = Number(valueAt(sweep, 8, 'timeout-minutes'))
+    const whole = Number(valueAt(shard, 4, 'timeout-minutes'))
+    const env = blockOf(job('mutants-plan'), 4, 'env')
+
+    expect(Math.ceil(measuredThrough)).toBe(318)
+    expect(step).toBeGreaterThanOrEqual(318)
+    expect(whole).toBeGreaterThan(step)
+    expect(whole).toBeLessThanOrEqual(360)
+    expect(Number(valueAt(env, 6, 'ISOLATE'))).toBeGreaterThanOrEqual(5)
   })
 })
 

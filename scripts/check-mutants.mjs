@@ -3397,8 +3397,8 @@ function isInstalled(specifier, root) {
  * ⚠️ **THE WIDENED SWEEP HAD NO BOUND, AND A CI STEP HAS ONE** (2026-09-17). It
  * costs a whole extra sweep of the file, plus that sweep's settle run: measured
  * on `session.ts`, 31 and 30 minutes against a 12-minute narrow run. On the
- * heaviest subject this gate has — itself, estimated at 204 minutes for ONE
- * plain pass — starting a second one unbounded is how a 210-minute step ends
+ * heaviest subject this gate has — itself, estimated at 179 to 357 minutes for ONE
+ * plain pass — starting a second one unbounded is how a 345-minute step ends
  * with no answer at all, which is worse than the wrong answer it was trying to
  * correct.
  *
@@ -4427,16 +4427,30 @@ function installAt(at, { timeoutMs }) {
 
 /**
  * How long one merge-base measurement may take, and how much of that its install
- * may take — PROVISIONAL, and to be replaced by numbers measured end to end on
- * the runners that pay for them. A measurement records what the whole operation
- * cost for exactly that reason.
+ * may take. A measurement records what the whole operation cost for exactly that
+ * reason.
+ *
+ * ⚠️ **180 BECAUSE 90 KILLED A MEASUREMENT THAT WOULD HAVE FINISHED** (PR run
+ * 41201387001, 2026-10-31). `bookFolder.ts`'s first run at the merge base took 74.15
+ * minutes, and its settle run was killed by the 90-minute deadline 15.7 minutes
+ * in. A settle run measured 0.94 to 1.03 of its first run on the files that
+ * finished one, so that base costs about 148.3; 148.3 x 1.2 = 178, rounded to 180.
+ * An expired measurement bills the file for what it could not measure, so a
+ * deadline this near the work is a bill nothing earned. The install keeps its 10:
+ * nothing measured has approached it.
  */
 const INSTALL_DEADLINE_MS = 10 * 60_000
-const BASE_DEADLINE_MS = 90 * 60_000
+const BASE_DEADLINE_MS = 180 * 60_000
 /* What a file's own sweep may have cost and still be worth sweeping again wide
-   to check a bill — see `affordable`. Half of what one shard's CI step allows
-   for everything it holds, so one file can never spend the whole of it twice. */
-const WIDEN_BUDGET_MS = 20 * 60_000
+   to check a bill — see `affordable`.
+
+   ⚠️ **60 BECAUSE 20 BILLED WHAT THE WIDER SET KILLS** (PR run 41201387001,
+   2026-10-31). `registry.ts`, the largest in that run, spent 44.3 (22.5 + a settle
+   run of 21.8), so 239 mutants its 5 nearest tests miss stayed charged though the 122
+   tests that reach it kill them at the merge base. 44.3 x 1.35 = 60. What a file
+   past this is refused is not time but a removal of charges it may not have earned:
+   the bill stands, and the step keeps its room. */
+const WIDEN_BUDGET_MS = 60 * 60_000
 
 /**
  * How much of `budget` is left, from `started`, by `clock` — whole milliseconds,
@@ -5519,7 +5533,7 @@ async function shardSweep({ manifest, results, index, count }, world) {
        the identity undecided. A shard called `world.measure` per subject and so
        had neither half. The plan puts every subject sharing an origin on one
        shard only by accident, so this is a real cost as well as a real risk:
-       three near-budget base measurements already pass the 210-minute step. */
+       two near-budget base measurements already pass the 345-minute step. */
     const measured = new Map()
     const measureOnce = (origin, mergeBase, asked) => {
       if (!measured.has(origin)) measured.set(origin, world.measure(origin, mergeBase, asked))
