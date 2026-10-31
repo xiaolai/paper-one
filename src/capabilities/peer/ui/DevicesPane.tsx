@@ -112,7 +112,10 @@ export function DevicesPane({ model, syncNow, p2p = null }: DevicesPaneProps) {
   const [settingRole, setSettingRole] = useState(false)
   const [updatingGrants, setUpdatingGrants] = useState<ReadonlySet<string>>(() => new Set())
 
-  if (p2p && !p2p.launchedOn) {
+  /* Once the switch has closed the transport every device command is refused
+     until the next launch, so nothing but the switch is drawn: the same answer
+     as a launch with it off. */
+  if (p2p && (!p2p.launchedOn || needsReopen)) {
     return (
       <div className={ui.section}>
         <P2pSwitchRow p2p={p2p} />
@@ -394,7 +397,7 @@ export function DevicesPane({ model, syncNow, p2p = null }: DevicesPaneProps) {
           how three unrelated things came to sit side by side. Registered only
           on a satchel (`sync/index.ts` — a shelf answers rather than dials),
           so on a shelf it is absent rather than inert. */}
-      {syncNow && !needsReopen && (
+      {syncNow && (
         <div className={ui.actions}>
           <button type="button" className={ui.button} onClick={syncNow}>
             Sync now

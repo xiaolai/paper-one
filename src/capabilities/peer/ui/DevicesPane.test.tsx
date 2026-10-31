@@ -101,6 +101,38 @@ describe('the P2P switch', () => {
     expect(screen.queryByRole('button', { name: 'Sync now' })).toBeNull()
   })
 
+  /* Every one of these goes through `PeerState::node`, which refuses once the
+     transport has closed, and that stays so if the switch goes back on. */
+  it('draws no device controls once the switch has closed the transport, and none when it goes back on', async () => {
+    const p2p = createP2pSwitch(true, async () => {})
+    render(
+      <DevicesPane
+        model={fakeModel({
+          role: 'shelf',
+          peersLoaded: true,
+          peers: [{ id: 'a', name: 'Phone', platform: 'ios', role: 'satchel', grants: [], pairedAt: 1, lastSeenAt: 1 }],
+          pending: { name: 'Tablet', platform: 'ios', sas: '1234' },
+        })}
+        syncNow={null}
+        p2p={p2p}
+      />,
+    )
+    const controls = ['Pair a new device…', 'Revoke', 'Refuse']
+    for (const name of controls) expect(screen.getByRole('button', { name }), name).toBeTruthy()
+    expect(screen.getByRole('checkbox')).toBeTruthy()
+
+    fireEvent.click(toggle())
+    await screen.findByText('Quit and reopen Paper to finish turning this off.')
+    for (const name of controls) expect(screen.queryByRole('button', { name }), name).toBeNull()
+    expect(screen.queryByRole('checkbox')).toBeNull()
+    expect(screen.queryByText('This device')).toBeNull()
+
+    fireEvent.click(toggle())
+    await screen.findByText('Quit and reopen Paper to finish turning this on.')
+    for (const name of controls) expect(screen.queryByRole('button', { name }), name).toBeNull()
+    expect(toggle().getAttribute('aria-checked')).toBe('true')
+  })
+
   it('follows a write that lands after Settings closed and reopened', async () => {
     let land = () => {}
     const p2p = createP2pSwitch(true, () => new Promise<void>((resolve) => (land = resolve)))
