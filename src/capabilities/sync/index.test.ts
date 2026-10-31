@@ -2598,6 +2598,22 @@ describe('two satchels, one module', () => {
     expect(named(newer.events, 'sync.session-failed'), 'the newer satchel lost the runtime it was using').toEqual([])
   })
 
+  /* An Off that closed the transport and could not be saved leaves the switch
+     reading on: the watcher hears on, and the transport is gone all the same. */
+  it('stops the schedule and asks for a relaunch when the transport closes with the switch still on', async () => {
+    const hellos = perDevice(null, Promise.resolve())
+    const { run } = await satchelWith(book('book:a', 'Alpha', 'bytes'), { serve: hellos.serve })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    const asked = hellos.total()
+
+    native.p2pWatcher?.(true)
+
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Quit and reopen Paper to use peer-to-peer' })
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(hellos.total(), 'the schedule kept dialling a closed transport').toBe(asked)
+    run.handle.dispose()
+  })
+
   /* THE SWITCH'S SENTENCE IS THE RUNNING RUNTIME'S, like the slot it sits beside. */
   it('keeps the newer satchel off when an older one stops', async () => {
     const hellos = perDevice(null, Promise.resolve())

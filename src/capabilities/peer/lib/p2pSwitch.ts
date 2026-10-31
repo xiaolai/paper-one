@@ -25,7 +25,7 @@ export interface P2pSwitch {
   readonly set: (on: boolean) => Promise<void>
   /** Whether a write has not finished, which can outlast the pane that asked. */
   readonly writing: () => boolean
-  /** Told when an answer lands, which can be after the pane that asked has gone. A refused write is no answer. */
+  /** Told when an answer lands, which can be after the pane that asked has gone, or when this run's transport closes though the write was refused. */
   readonly subscribe: (listener: () => void) => () => void
   /** Told when `writing` changes, a refused write included. */
   readonly subscribeWriting: (listener: () => void) => () => void
@@ -57,8 +57,14 @@ export function createP2pSwitch(launchedOn: boolean, write: (on: boolean) => Pro
         /* Only what the plugin says it did. A rejection is no answer: it can come
            before the plugin ran, with the endpoints still serving. */
         const answer = await write(on)
-        if (launchedOn && answer.closed) closed = true
-        if (answer.recordError !== null) throw answer.recordError
+        const justClosed = launchedOn && answer.closed && !closed
+        if (justClosed) closed = true
+        if (answer.recordError !== null) {
+          /* The choice did not change, and the transport did: what runs on it
+             has to stop whatever the disk said. */
+          if (justClosed) notifyAll(listeners, 'P2P switch')
+          throw answer.recordError
+        }
         chosen = on
         notifyAll(listeners, 'P2P switch')
       })().finally(() => {

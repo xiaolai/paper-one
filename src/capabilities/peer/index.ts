@@ -693,7 +693,8 @@ export async function p2pAvailable(): Promise<boolean> {
 
 /**
  * Told when the reader changes the switch in this run, for whatever is still
- * running on the transport that change closes.
+ * running on the transport that change closes. Also told, with the switch still
+ * reading on, when an Off closed the transport and could not be saved.
  */
 export function watchP2p(listener: (on: boolean) => void): () => void {
   const held = p2pSwitch

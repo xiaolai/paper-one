@@ -92,8 +92,8 @@ export interface DevicesPaneProps {
 
 export function DevicesPane({ model, syncNow, p2p = null }: DevicesPaneProps) {
   const snapshot = useSyncExternalStore(model.subscribe, model.getSnapshot)
-  /* The writing signal, because an Off that closed the transport without being
-     recorded is no answer: `subscribe` never hears of it. */
+  /* The writing signal, because `needsReopen` is settled when writing ends and
+     `subscribe` hears only of an answer or a close, not of every settling. */
   const needsReopen = useSyncExternalStore(p2p?.subscribeWriting ?? noSwitchToWatch, () => p2p?.needsReopen() ?? false)
   const [code, setCode] = useState('')
   /* Reset by the offer's identity, so a second pairing does not open already

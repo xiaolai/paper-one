@@ -100,6 +100,34 @@ describe('the P2P switch across one run', () => {
       expect(p2p.needsReopen()).toBe(false)
     })
 
+    /* Whatever is still running on that transport has to hear, or it goes on
+       retrying a connection that is gone, with controls drawn that cannot work. */
+    it('tells subscribers once when an Off closes the transport without being recorded', async () => {
+      const p2p = createP2pSwitch(true, async () => ({ closed: true, recordError: new Error('disk full') }))
+      const heard: boolean[] = []
+      p2p.subscribe(() => heard.push(p2p.needsReopen()))
+      await expect(p2p.set(false)).rejects.toThrow('disk full')
+      expect(heard).toEqual([true])
+      await expect(p2p.set(false)).rejects.toThrow('disk full')
+      expect(heard, 'nothing changed the second time').toEqual([true])
+    })
+
+    it('tells nobody when a refused write closed nothing', async () => {
+      const p2p = createP2pSwitch(true, async () => ({ closed: false, recordError: new Error('disk full') }))
+      const heard: boolean[] = []
+      p2p.subscribe(() => heard.push(p2p.needsReopen()))
+      await expect(p2p.set(false)).rejects.toThrow('disk full')
+      expect(heard).toEqual([])
+    })
+
+    it('tells nobody of a close in a run that never had the transport', async () => {
+      const p2p = createP2pSwitch(false, async () => ({ closed: true, recordError: new Error('disk full') }))
+      const heard: boolean[] = []
+      p2p.subscribe(() => heard.push(p2p.needsReopen()))
+      await expect(p2p.set(false)).rejects.toThrow('disk full')
+      expect(heard).toEqual([])
+    })
+
     it('claims no close when the plugin says it did not, whatever the answer asked for', async () => {
       const p2p = createP2pSwitch(true, async () => ({ closed: false, recordError: new Error('disk full') }))
       await expect(p2p.set(false)).rejects.toThrow('disk full')
