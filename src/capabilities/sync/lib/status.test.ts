@@ -3,7 +3,7 @@ import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { ServiceCallError, serviceError } from '../../../kernel'
-import { REFUSAL_KINDS, describeRefusal, describeSession, refusalKind, type RefusalKind } from './status'
+import { REFUSAL_KINDS, describeRefusal, describeSession, isLinkClosure, refusalKind, saysMoreThanClosure, type RefusalKind } from './status'
 
 /**
  * WI-20.25 — the words. Every way a session can be refused used to reach the
@@ -209,5 +209,42 @@ describe('audit-fix round 1 — what the classifier got wrong', () => {
   })
   it('the tuple is the type: every kind in the list has a sentence, and the list is the whole type', () => {
     for (const kind of REFUSAL_KINDS) expect(describeRefusal({ kind, message: '' }, names)).not.toBe('')
+  })
+})
+
+describe('what a closed connection excuses', () => {
+  it('excuses the connection failing, however that arrives', () => {
+    for (const thrown of [
+      { kind: 'p2pOff', message: 'off' },
+      { kind: 'peerClosed', message: 'closed' },
+      { kind: 'streamClosed', message: 'gone' },
+      { kind: 'noSession', message: 'gone' },
+      { kind: 'blobInterrupted', message: 'cut off' },
+      { code: 'disconnected', message: 'gone' },
+    ]) {
+      expect(isLinkClosure(thrown)).toBe(true)
+    }
+  })
+
+  it('does not excuse a local write, or bytes that arrived wrong', () => {
+    for (const thrown of [
+      new Error('no space left on device'),
+      new Error('the journal would not write'),
+      { kind: 'blobHashMismatch', message: 'digest differs' },
+      { code: 'unreadable', message: 'the record will not read' },
+      null,
+    ]) {
+      expect(isLinkClosure(thrown)).toBe(false)
+    }
+  })
+
+  const nothingHeld = { held: 0, dropped: 0, repaired: 0 }
+
+  it('finds more to say in a finished session only beyond the connection', () => {
+    expect(saysMoreThanClosure({ refused: [], quarantine: nothingHeld })).toBe(false)
+    expect(saysMoreThanClosure({ refused: [{ kind: 'unreachable', message: 'x' }], quarantine: nothingHeld })).toBe(false)
+    expect(saysMoreThanClosure({ refused: [{ kind: 'conflict', book: 'b', message: 'x' }], quarantine: nothingHeld })).toBe(true)
+    expect(saysMoreThanClosure({ refused: [], quarantine: { ...nothingHeld, held: 1 } })).toBe(true)
+    expect(saysMoreThanClosure({ refused: [], quarantine: { ...nothingHeld, dropped: 1 } })).toBe(true)
   })
 })

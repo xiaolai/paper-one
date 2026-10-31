@@ -2944,7 +2944,7 @@ describe('whose sentence a failure is', () => {
       serve: (far) =>
         replacing(far.ledger.services(), {
           [SYNC_SERVICES.content.name]: () => {
-            throw { code: 'unreadable', retryable: true, message: 'the record will not read' }
+            throw { code: 'disconnected', retryable: true, message: 'the session closed' }
           },
         }),
     })
@@ -2969,6 +2969,131 @@ describe('whose sentence a failure is', () => {
 
     run.handle.dispose()
     expect(native.p2pWatcher).toBeNull()
+  })
+
+  /* Only the closed connection is excused. These all land after the reader
+     turned the switch off, and their sentence is the only sign of them. */
+  it('says a download’s own local write failed after the switch has gone off', async () => {
+    await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      start: {
+        around: (services) => ({
+          ...services,
+          library: {
+            ...services.library,
+            refreshContent: () => Promise.reject(new Error('no space left on device')),
+          },
+        }),
+      },
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    native.p2pWatcher?.(false)
+
+    await action('sync:download').run('book:a')
+
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'degraded', detail: 'This device is out of space, so nothing more could be saved' })
+  })
+
+  it('says a download was refused for a reason of its own after the switch has gone off, and not when the link closed', async () => {
+    let refusal: unknown = { code: 'disconnected', retryable: true, message: 'the session closed' }
+    await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.content.name]: () => {
+            throw refusal
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    native.p2pWatcher?.(false)
+
+    await action('sync:download').run('book:a')
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+    refusal = { code: 'unreadable', retryable: true, message: 'the record will not read' }
+    await action('sync:download').run('book:a')
+    expect(syncStatus.getSnapshot().state).toBe('degraded')
+  })
+
+  it('says a session failed for a reason of its own after the switch has gone off', async () => {
+    const hello = gate()
+    await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.hello.name]: async () => {
+            await hello.promise
+            throw { code: 'unsupported', retryable: false, message: 'a newer journal' }
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('syncing'))
+    native.p2pWatcher?.(false)
+    hello.open()
+
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('degraded'))
+  })
+
+  it('leaves the switch’s sentence alone when a session fails because the link closed', async () => {
+    const hello = gate()
+    const { run } = await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.hello.name]: async () => {
+            await hello.promise
+            throw { code: 'disconnected', retryable: true, message: 'the session closed' }
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('syncing'))
+    native.p2pWatcher?.(false)
+    hello.open()
+
+    await until(() => expect(named(run.events, 'sync.session-failed')).toHaveLength(1))
+    await settled(100)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+  })
+
+  it('names a book a session could not move when it finishes after the switch has gone off', async () => {
+    const hello = gate()
+    await satchelWith({}, {
+      knows: true,
+      near: { ...book('book:first', 'First', 'first bytes'), ...book('book:mine', 'Mine', 'my bytes') },
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.hello.name]: async (request, context, real) => {
+            await hello.promise
+            return real(request, context)
+          },
+          [SYNC_SERVICES.push.name]: async (request, context, real) => {
+            if ((request as { book?: string }).book === 'book:mine') throw { code: 'conflict', retryable: false, message: 'the file differs' }
+            return real(request, context)
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('syncing'))
+    native.p2pWatcher?.(false)
+    hello.open()
+
+    await until(() => expect(syncStatus.getSnapshot().detail).toMatch(/Mine/))
+  })
+
+  it('leaves the switch’s sentence alone when a session finishes with nothing to say', async () => {
+    const hello = gate()
+    const { run } = await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.hello.name]: async (request, context, real) => {
+            await hello.promise
+            return real(request, context)
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('syncing'))
+    native.p2pWatcher?.(false)
+    hello.open()
+
+    await until(() => expect(named(run.events, 'sync.session-ok')).toHaveLength(1))
+    await settled(100)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
   })
 
   it('refuses a session by name when the runtime it belonged to is gone', async () => {

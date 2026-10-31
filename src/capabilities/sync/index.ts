@@ -30,7 +30,15 @@ import { bindRole, bindScheduler, currentRole, syncNow, syncStatus, unbindRole, 
 import { createDownloads, describeDownload } from './lib/downloads'
 import { describeArrival, dropArrival, readArrivals, recordArrival, type Arrival } from './lib/arrivals'
 import { createSyncScheduler, type SyncOutcome, type SyncScheduler } from './lib/scheduler'
-import { describeRefusal, describeSession, refusalKind, type RefusalNames, type SessionRefusal } from './lib/status'
+import {
+  describeRefusal,
+  describeSession,
+  isLinkClosure,
+  refusalKind,
+  saysMoreThanClosure,
+  type RefusalNames,
+  type SessionRefusal,
+} from './lib/status'
 import { createStorageModel, dropDownloadSize, recordDownloadSize, type StorageModel } from './ui/storageModel'
 import { StoragePane } from './ui/StoragePane'
 
@@ -231,7 +239,7 @@ async function refusalNames(): Promise<RefusalNames> {
  * hardware the reader may not own. The kind decides the sentence; the
  * shelf's own name and the book's title go where they belong.
  */
-async function degrade(refusal: SessionRefusal, owner: typeof running, where: 'link' | 'local' = 'link'): Promise<void> {
+async function degrade(thrown: unknown, owner: typeof running, book?: string): Promise<void> {
   /* OWNED BY THE RUNTIME THAT WAS UP WHEN THE WORK BEGAN — the caller's own,
    * not whichever runtime holds the slot now. `refusalNames` asks the plugin
    * for the shelf's name, which is IPC, and a teardown or a restart lands
@@ -247,14 +255,17 @@ async function degrade(refusal: SessionRefusal, owner: typeof running, where: 'l
   const names = await refusalNames()
   if (running !== owner) return
   /* The connection the reader just closed fails whatever was on it, and "isn't
-     reachable" would be the wrong reason. A local failure has nothing to do
-     with that connection, and its sentence is the only sign of it. */
-  if (where === 'link' && switchedOff !== null) return
+     reachable" would be the wrong reason. Decided by what failed rather than by
+     which action it was: a download's own local write has nothing to do with
+     that connection either, and its sentence is the only sign of it. */
+  if (switchedOff !== null && isLinkClosure(thrown)) return
+  const refusal: SessionRefusal = {
+    kind: refusalKind(thrown),
+    message: messageOf(thrown),
+    ...(book === undefined ? {} : { book }),
+  }
   syncStatus.set({ state: 'degraded', detail: describeRefusal(refusal, names) })
 }
-
-/** A thrown value as the refusal it is — the book added by a caller that has one. */
-const refusalOf = (thrown: unknown): SessionRefusal => ({ kind: refusalKind(thrown), message: messageOf(thrown) })
 
 /* IN FLIGHT, BY BOOK. The corner mark on the card and the Download item in
    the menu both run this, and neither disables itself while it works — so a
@@ -595,7 +606,7 @@ export const sync: Capability = {
       when: (book) => currentRole() === 'satchel' && book.hasContent !== true,
       run: (bookId) => {
         const owner = running
-        return downloadAction(bookId).catch((thrown: unknown) => degrade({ ...refusalOf(thrown), book: bookId }, owner))
+        return downloadAction(bookId).catch((thrown: unknown) => degrade(thrown, owner, bookId))
       },
     },
     {
@@ -624,7 +635,7 @@ export const sync: Capability = {
         return removeDownloadAction(bookId).catch((thrown: unknown) =>
           /* Content that stayed put must not look removed — same signal as a
            * failed download. */
-          degrade({ ...refusalOf(thrown), book: bookId }, owner, 'local'),
+          degrade(thrown, owner, bookId),
         )
       },
     },
@@ -1133,7 +1144,10 @@ export const sync: Capability = {
              * the same one `degrade` follows: whoever writes the module slot
              * re-reads ownership on the near side of the last await. */
             const names = await refusalNames()
-            if (running !== owner || switchedOff !== null) return 'ok'
+            if (running !== owner) return 'ok'
+            /* The switch's sentence stands over a session with nothing else to
+               say, and gives way to a book it could not move. */
+            if (switchedOff !== null && !saysMoreThanClosure(summary)) return 'ok'
             syncStatus.set({
               state: 'ok',
               detail: describeSession(summary, names),
@@ -1148,7 +1162,7 @@ export const sync: Capability = {
             })
             // Stryker disable next-line StringLiteral: the scheduler reads every outcome but `ok` as a failure.
             if (running !== owner) return 'failed'
-            await degrade(refusalOf(thrown), owner)
+            await degrade(thrown, owner)
             /* THE OUTCOME IS WHAT ARMS THE NEXT TICK, and it is the half that
                made `retryable: true` a promise nothing kept: `groupRefusal`
                ends the session on a retryable refusal by design, and until the

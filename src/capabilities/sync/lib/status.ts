@@ -220,6 +220,31 @@ export function refusalKind(thrown: unknown): RefusalKind {
   return 'unknown'
 }
 
+/** What a connection going away does to whatever was running on it. */
+const CLOSURE_KINDS: ReadonlySet<RefusalKind> = new Set<RefusalKind>(['unreachable', 'p2p-off', 'p2p-closed'])
+
+/**
+ * Whether a failure is the closed connection and nothing more, which is what
+ * the reader who just turned peer-to-peer off expects and is already told.
+ * Anything else, a local write above all, has no other way of being heard.
+ *
+ * `blobInterrupted` is named apart because its kind is `content`, which also
+ * covers bytes that arrived wrong, and only the plugin's kind can tell them apart.
+ */
+export function isLinkClosure(thrown: unknown): boolean {
+  if (CLOSURE_KINDS.has(refusalKind(thrown))) return true
+  return typeof thrown === 'object' && thrown !== null && (thrown as { kind?: unknown }).kind === 'blobInterrupted'
+}
+
+/** Whether a finished session has something to say apart from a closed connection. */
+export function saysMoreThanClosure(outcome: { readonly refused: readonly SessionRefusal[]; readonly quarantine: QuarantineReport }): boolean {
+  return (
+    outcome.refused.some((refusal) => !CLOSURE_KINDS.has(refusal.kind)) ||
+    outcome.quarantine.held > 0 ||
+    outcome.quarantine.dropped > 0
+  )
+}
+
 /* ---------------------------------------------------------- the words */
 
 /** The name-less fallback — what the Storage pane says for `degraded` with
