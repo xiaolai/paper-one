@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { marksPathIn, recordPath } from '../../core/bookFolder'
+import { folderOf, marksPathIn, recordPath } from '../../core/bookFolder'
+import { hlcOf } from '../../core/hlc'
 import { fakeFs } from '../../core/indexFsFake.testkit'
 import { MarksScanFailed, createMarkStore, type MarkSnapshot, type MarkStore } from '../../core/markStore'
 import {
@@ -290,6 +291,75 @@ describe('every mark, for something that is about to write a file', () => {
         await store.open(BOOK)
         await expect(store.loadAllNow()).resolves.toEqual([])
       })
+    })
+
+    describe('and the store holds a mark the disk does not', () => {
+      const losing = async () => {
+        const fs = shelf()
+        fs.store.set(marksPathIn(BOOK), new TextEncoder().encode('[]'))
+        const control = { unreadable: false }
+        const store = createMarkStore({
+          fs: {
+            ...fs,
+            writeFile: () => Promise.reject(new Error('disk full')),
+            readFile: async (path: string) => {
+              if (control.unreadable && path === marksPathIn(BOOK)) {
+                control.unreadable = false
+                throw new Error('EIO')
+              }
+              return fs.readFile(path)
+            },
+          },
+          queue: writeQueue(),
+        })
+        await store.open(BOOK)
+        await expect(store.add(createMark(highlight()))).rejects.toThrow('disk full')
+        return { fs, store, control }
+      }
+
+      it('refuses when reopening the book would not read, which cleared the failure', async () => {
+        const { store, control } = await losing()
+        control.unreadable = true
+        await store.open(BOOK)
+        expect(store.getSnapshot().persistent).toBe(false)
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+      })
+
+      it('refuses after another book opens, however often it is asked', async () => {
+        const { store } = await losing()
+        await store.open(OTHER)
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+      })
+
+      it('answers once that book reads back, when the screen agrees with the disk', async () => {
+        const { store } = await losing()
+        await store.open(OTHER)
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+        await store.open(BOOK)
+        await expect(store.loadAllNow()).resolves.toEqual([])
+      })
+    })
+
+    it('does not call a removed book a lost mark', async () => {
+      const fs = shelf()
+      const store = createMarkStore({ fs, queue: writeQueue() })
+      await store.open(BOOK)
+      await store.add(createMark(highlight()))
+      await store.open(null)
+      await fs.removeDir(folderOf(BOOK))
+      await expect(store.loadAllNow()).resolves.toEqual([])
+    })
+
+    it('does not call a mark lost when the disk holds a newer copy of it', async () => {
+      const fs = shelf()
+      const store = createMarkStore({ fs, queue: writeQueue() })
+      await store.open(BOOK)
+      await store.add(createMark(highlight()))
+      const [held] = store.getSnapshot().current
+      const newer = { ...held, note: 'written elsewhere', updatedAt: hlcOf(Date.now() + 86_400_000) }
+      fs.store.set(marksPathIn(BOOK), new TextEncoder().encode(JSON.stringify([newer])))
+      await expect(store.loadAllNow()).resolves.toHaveLength(1)
     })
 
     it('refuses when a book is rekeyed under the scan, rather than reading it as no marks', async () => {

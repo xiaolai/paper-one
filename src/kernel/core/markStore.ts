@@ -263,8 +263,9 @@ export interface MarkStore {
    * moved the empty archive one cause further along. It rejects too when the
    * scan landed without a book whose marks file is there and would not read, or
    * whose folder moved under it; a book with no marks file is simply a book with
-   * no marks. And it rejects while a failed write stands, until a book is read
-   * again: that mark is on the screen and not on the disk.
+   * no marks. And it rejects while the store holds a mark the disk does not,
+   * after a failed write, until that book reads back. A lost mark no longer in
+   * memory cannot be known, once a scan or a restart has dropped it.
    */
   loadAllNow(): Promise<readonly Mark[]>
   /**
@@ -766,6 +767,10 @@ export function createMarkStore({
         const { marks, refused } = readStoredMarks(raw)
         keptAside(bookId, refused)
         loaded = { bookId, marks }
+        /* THE SAME FACT IN THE CROSS-BOOK LIST, once it holds this book: a row a
+           failed write left there is what `loadAllNow` refuses over, and this read
+           is what settles it. Not added to a list nothing has scanned yet. */
+        if (all.some((mark) => mark.bookId === bookId)) all = [...marks, ...all.filter((mark) => mark.bookId !== bookId)]
         /* A read that landed is the screen agreeing with the disk again —
          * the point the failure note in `applyElsewhere` names as what
          * clears the flag; it cleared `failed` and left `persistent` false
@@ -881,6 +886,22 @@ export function createMarkStore({
     return applyTo(mark.bookId, (prev) => upsertOverlapping(prev, mark, at))
   }
 
+  /* What memory holds that the disk's rows do not, by the merge's own rule: a row the
+     disk has at the same stamp or newer adds nothing. A book whose folder has gone
+     was removed, and its rows are not a lost write. */
+  const unsavedAmong = async (held: readonly Mark[], rows: readonly Mark[]): Promise<readonly Mark[]> => {
+    if (!fs) return EMPTY
+    const target = fs
+    const onDisk = new Map(mergeMarks(EMPTY, rows).map((mark) => [mark.id, mark] as const))
+    const newer = held.filter((mark) => {
+      const row = onDisk.get(mark.id)
+      const known = row ? [row] : EMPTY
+      return mergeMarks(known, [mark]) !== known
+    })
+    const there = await Promise.all(newer.map((mark) => target.exists(folderOf(mark.bookId)).catch(() => true)))
+    return newer.filter((_, i) => there[i])
+  }
+
   const loadAllNow: MarkStore['loadAllNow'] = async () => {
     /* ⚠️ THE WRITES FIRST. The scan reads the disk, and a mark queued before it
      * is on the screen and not on the disk. Its count moved before the scan took
@@ -888,6 +909,7 @@ export function createMarkStore({
      * the mark just made. A write queued after this point is newer than the
      * export, and `writeGen` keeps that book's rows from memory. */
     await queue.idle()
+    const held = [...loaded.marks, ...all]
     const { rows, complete } = await scan()
     /* ⚠️ A FAILED SCAN STILL RESOLVES, so this is the only thing that tells it
      * from an empty library — see `MarksScanFailed`. `loadAll` catches the
@@ -901,8 +923,20 @@ export function createMarkStore({
      *
      * AND A WRITE THAT FAILED IS THE SAME OMISSION: the scan reads the disk, which
      * does not hold the mark the reader can still see. Read after the scan, so a
-     * failure while it ran counts too. */
+     * failure while it ran counts too.
+     *
+     * AND THE FLAG IS NOT THE FACT: `open` clears it before reading, whether that
+     * read lands or which book it is. So memory is compared with the disk too, and
+     * what is unsaved goes back into the list the scan just replaced, or asking a
+     * second time would find nothing held and answer. A row no longer in memory
+     * cannot be known about. */
     if (!complete || failed) throw new MarksScanFailed()
+    const unsaved = await unsavedAmong(held, rows)
+    if (unsaved.length > 0) {
+      all = mergeMarks(all, unsaved)
+      publish()
+      throw new MarksScanFailed()
+    }
     const fresh = project(rows, null, (live) => live.filter(isBookmark))
     /* ⚠️ ALL THREE CLASSES. They share a file and a store and are split at the
        projection; this said two, and a third arriving without this line is the
