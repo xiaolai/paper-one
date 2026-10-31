@@ -188,6 +188,7 @@ class FakeWireImpl implements FakeWire {
   /* ------------------------------------------------------------- commands */
 
   async status(): Promise<PeerStatus> {
+    this.refuseUnlessUp()
     return { pluginVersion: 'fake', endpointId: this.id, role: this.roleOf, ready: this.isReady, droppedInbound: 0 }
   }
 
@@ -217,12 +218,35 @@ class FakeWireImpl implements FakeWire {
     return this.p2pStored
   }
 
+  /** Set by turning the switch off, and cleared only by `restart()`. */
+  private closedThisRun = false
+
+  /**
+   * OFF CLOSES WHAT IS RUNNING, AND ON DOES NOT BRING IT BACK, as
+   * `PeerState::apply_switch` does. The fake used to store the word and carry
+   * on, so a test could turn the switch off and go on sending, proving a
+   * shutdown nothing had performed.
+   */
   async setP2p(on: boolean): Promise<void> {
     this.p2pStored = on
+    if (on) return
+    this.closedThisRun = true
+    for (const session of this.sessions.values()) this.closeSession(session, 'closed')
+  }
+
+  /** `PeerState::node_at`'s gates, in its order. Every command that needs the node passes them. */
+  private refuseUnlessUp(): void {
+    if (!this.p2pStored) throw peerError('p2pOff', 'peer-to-peer is off')
+    if (this.closedThisRun) throw peerError('peerClosed', 'the transport closed')
+  }
+
+  private get transportUp(): boolean {
+    return this.p2pStored && !this.closedThisRun
   }
 
   /** The next launch: what `setLocalRole` stored becomes what runs. */
   restart(): void {
+    this.closedThisRun = false
     if (this.pendingRole !== null) {
       this.roleOf = this.pendingRole
       this.pendingRole = null
@@ -234,6 +258,7 @@ class FakeWireImpl implements FakeWire {
   }
 
   async listPeers(): Promise<readonly WirePeer[]> {
+    this.refuseUnlessUp()
     return [...this.peers.values()]
   }
 
@@ -246,6 +271,7 @@ class FakeWireImpl implements FakeWire {
      stands for. `setGrants` beside it has always refused; these two disagreed
      about the same missing peer. */
   async forgetPeer(id: string): Promise<void> {
+    this.refuseUnlessUp()
     if (!this.peers.has(id)) throw peerError('peerUnknown', `no peer ${id}`)
     this.peers.delete(id)
     for (const session of this.sessions.values()) {
@@ -254,12 +280,14 @@ class FakeWireImpl implements FakeWire {
   }
 
   async setGrants(id: string, grants: readonly string[]): Promise<void> {
+    this.refuseUnlessUp()
     const held = this.peers.get(id)
     if (!held) throw peerError('peerUnknown', `no peer ${id}`)
     this.peers.set(id, { ...held, grants: [...grants] })
   }
 
   async hasGrant(id: string, grant: string): Promise<boolean> {
+    this.refuseUnlessUp()
     const held = this.peers.get(id)
     return held ? grantCovers(held.grants, grant) : false
   }
@@ -269,6 +297,7 @@ class FakeWireImpl implements FakeWire {
      Devices answering a circle request — and a fake that silently discards the
      one field a security decision reads is worse than no fake. */
   async pairBegin(name?: string, kind: PairKind = 'device'): Promise<PairOffer> {
+    this.refuseUnlessUp()
     this.offerKind = kind
     const secret = `s${Math.random().toString(36).slice(2)}`
     const offer: PairOffer = {
@@ -282,11 +311,13 @@ class FakeWireImpl implements FakeWire {
   }
 
   async pairCancel(): Promise<void> {
+    this.refuseUnlessUp()
     this.offer = null
     this.pending = null
   }
 
   async pairConfirm(accept: boolean, grants: readonly string[] | undefined, attemptId: string): Promise<WirePeer | null> {
+    this.refuseUnlessUp()
     const pending = this.pending
     if (!pending) throw peerError('noPendingPairing', 'nothing to confirm')
     /* Mirror the Rust: the attempt id must match the pending one, so a
@@ -347,6 +378,7 @@ class FakeWireImpl implements FakeWire {
   }
 
   async pairFromUri(uri: string, name?: string, grants?: readonly string[]): Promise<PairStart> {
+    this.refuseUnlessUp()
     const parsed = /^paper:\/\/pair\?v=1&id=([^&]+)&s=([^&]+)$/.exec(uri)
     if (!parsed) throw peerError('pairUriInvalid', `not a pairing URI: ${uri}`)
     const shelf = this.links.get(parsed[1] as string)
@@ -385,13 +417,15 @@ class FakeWireImpl implements FakeWire {
   }
 
   async ready(): Promise<void> {
+    this.refuseUnlessUp()
     this.isReady = true
   }
 
   async connect(peerId: string, hello?: unknown): Promise<number> {
+    this.refuseUnlessUp()
     const remote = this.links.get(peerId)
     if (!this.peers.has(peerId)) throw peerError('peerUnknown', `no peer ${peerId}`)
-    if (!remote || !this.online || !remote.online) throw peerError('iroh', 'peer unreachable')
+    if (!remote || !this.online || !remote.online || !remote.transportUp) throw peerError('iroh', 'peer unreachable')
     if (!remote.peers.has(this.id)) throw peerError('sessionRefused', 'unknown-peer')
     if (!remote.isReady) throw peerError('sessionRefused', 'not-ready')
     const mine: Session = { id: this.nextSession++, peerId, inbox: [], open: true, twin: null }
@@ -406,6 +440,7 @@ class FakeWireImpl implements FakeWire {
   }
 
   async send(sessionId: number, bytes: Uint8Array): Promise<void> {
+    this.refuseUnlessUp()
     const session = this.sessions.get(sessionId)
     if (!session || !session.open) throw peerError('sessionUnknown', `no session ${sessionId}`)
     const twin = session.twin
@@ -419,18 +454,21 @@ class FakeWireImpl implements FakeWire {
   }
 
   async sessionRecv(sessionId: number, max = 64): Promise<readonly Uint8Array[]> {
+    this.refuseUnlessUp()
     const session = this.sessions.get(sessionId)
     if (!session) throw peerError('sessionUnknown', `no session ${sessionId}`)
     return session.inbox.splice(0, max)
   }
 
   async close(sessionId: number): Promise<void> {
+    this.refuseUnlessUp()
     const session = this.sessions.get(sessionId)
     if (!session) return
     this.closeSession(session, 'closed')
   }
 
   async blobFetch(request: BlobRequest): Promise<number> {
+    this.refuseUnlessUp()
     const transferId = this.nextTransfer++
     const progress = (state: TransferProgress['state'], received: number, total: number, error?: string) =>
       this.emit('transfer', {
@@ -579,7 +617,8 @@ class FakeWireImpl implements FakeWire {
   admits: readonly string[] = []
   introduced: { readonly device: string; readonly addrs: readonly string[] | undefined }[] = []
 
-  circleIntroduce(device: string, addrs?: readonly string[]): Promise<boolean> {
+  async circleIntroduce(device: string, addrs?: readonly string[]): Promise<boolean> {
+    this.refuseUnlessUp()
     this.introduced.push({ device, addrs })
     /* Resolves either way: a refusal is an ANSWER. A fake that rejected would
        let a surface pass its tests while showing "something went wrong" for
@@ -592,7 +631,8 @@ class FakeWireImpl implements FakeWire {
   /** What this fake publishes with. `null` until a test sets one. */
   mine: PagePublisher | null = null
 
-  circleMine(): Promise<PagePublisher | null> {
+  async circleMine(): Promise<PagePublisher | null> {
+    this.refuseUnlessUp()
     return Promise.resolve(this.mine)
   }
 
@@ -601,7 +641,8 @@ class FakeWireImpl implements FakeWire {
     return Promise.resolve(this.mine === null ? null : [...this.mine.roster])
   }
 
-  circleRevoke(device: string): Promise<void> {
+  async circleRevoke(device: string): Promise<void> {
+    this.refuseUnlessUp()
     this.revoked.push(device)
     this.admits = this.admits.filter((one) => one !== device)
     return Promise.resolve()
@@ -669,20 +710,23 @@ class FakeWireImpl implements FakeWire {
   /** What `shareOfferBytes` was asked to offer, in order. */
   offeredBytes: { readonly folder: string; readonly name: string; readonly hash: string }[] = []
 
-  shareOfferBytes(folder: string, name: string, hash: string): Promise<void> {
+  async shareOfferBytes(folder: string, name: string, hash: string): Promise<void> {
+    this.refuseUnlessUp()
     this.offeredBytes.push({ folder, name, hash })
     this.switches(hash).bytes = true
     return Promise.resolve()
   }
 
-  shareOfferNotes(hash: string): Promise<void> {
+  async shareOfferNotes(hash: string): Promise<void> {
+    this.refuseUnlessUp()
     /* ⚠️ **`bytes` IS NOT TOUCHED.** The one line this fake exists to get
        right — see the block comment above. */
     this.switches(hash).notes = true
     return Promise.resolve()
   }
 
-  shareWithdraw(hash: string, service: ShareService): Promise<void> {
+  async shareWithdraw(hash: string, service: ShareService): Promise<void> {
+    this.refuseUnlessUp()
     const held = this.switches(hash)
     if (service === 'bytes') held.bytes = false
     else {
@@ -704,7 +748,8 @@ class FakeWireImpl implements FakeWire {
     return Promise.resolve('fake-share-endpoint-id')
   }
 
-  shareResolve(hash: string, service: ShareService): Promise<readonly string[]> {
+  async shareResolve(hash: string, service: ShareService): Promise<readonly string[]> {
+    this.refuseUnlessUp()
     return Promise.resolve(this.providers.get(`${hash}:${service}`) ?? [])
   }
 
@@ -768,7 +813,8 @@ class FakeWireImpl implements FakeWire {
     return Promise.resolve(before - this.retiredVoices.length)
   }
 
-  shareFetch(hash: string, folder: string, name: string): Promise<number> {
+  async shareFetch(hash: string, folder: string, name: string): Promise<number> {
+    this.refuseUnlessUp()
     /* ⚠️ **THE FAKE RECORDS THE FOLDER, BECAUSE THE FOLDER IS THE DECISION.**
        A test of the adoption guard asserts WHERE the bytes were told to land;
        a fake that only recorded the hash could not tell a correct import from
@@ -785,12 +831,13 @@ class FakeWireImpl implements FakeWire {
   /** Every ask, so a test can see the cursor a caller sent. */
   notesAsked: { hash: string; since: number; generation: number | undefined }[] = []
 
-  shareFetchNotes(
+  async shareFetchNotes(
     hash: string,
     _providers?: readonly string[],
     since?: number,
     generation?: number,
   ): Promise<FetchedNotes> {
+    this.refuseUnlessUp()
     const from = since ?? 0
     this.notesAsked.push({ hash, since: from, generation })
     const held = this.notesAvailable.get(hash)
