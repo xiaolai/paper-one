@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MobileApp } from './MobileApp'
 import { createKernelServices, type Composition } from '../../kernel'
-import { UNFINISHED_PANE_IDS } from '../../kernel/core/uiTypes'
 
 /**
  * EVERY TAB RENDERS — which is the thing a screenshot of one tab cannot say.
@@ -69,32 +68,10 @@ describe('the phone shell', () => {
     expect(screen.getByRole('button', { name: 'Library' }).getAttribute('aria-current')).toBe('page')
   })
 
-  /**
-   * ⚠️ **THIS ASSERTED `['Library', 'Reading', 'Cards', 'Settings']`**, and
-   * `cards` is in `UNFINISHED_PANE_IDS` — the list the desktop's rail, palette
-   * and digit accelerators all read to keep that deck away from a reader. The
-   * bar is mounted by this shell and by `main.web.tsx`, neither of which names
-   * `paneOffered`, so the test was pinning the defect: an unfinished panel as a
-   * permanent top-level tab on every phone and in every browser, with no chord
-   * anywhere to hide it.
-   *
-   * Derived from the rule rather than from a new literal, so that removing an
-   * id from `UNFINISHED_PANE_IDS` moves this expectation with it — which is
-   * what that list promises and, on this shell, did not deliver.
-   */
-  it('draws the tabs the design names, less any panel that is not finished', () => {
+  it('draws the tabs the design names', () => {
     mount()
     const bar = screen.getByRole('navigation', { name: 'Sections' })
-    const labels = [...bar.querySelectorAll('button')].map((b) => b.textContent)
-    const designed = ['Library', 'Reading', 'Cards', 'Settings']
-    /* `Reading` is this bar's own id and no panel; every other label is a pane
-       id spelled with a capital. */
-    const offered = designed.filter((one) => !(UNFINISHED_PANE_IDS as readonly string[]).includes(one.toLowerCase()))
-    expect(labels).toEqual(offered)
-    /* NON-VACUOUS both ways: the filter really removes something here, and
-       what is left is not empty. */
-    expect(offered.length).toBeLessThan(designed.length)
-    expect(labels).toContain('Library')
+    expect([...bar.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Library', 'Reading', 'Settings'])
   })
 
   it.each(['Settings'])('renders the %s screen when its tab is pressed', (tab) => {

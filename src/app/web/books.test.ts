@@ -56,7 +56,7 @@ describe('parseRows', () => {
    * React resolves a duplicate key by rendering one element and discarding the
    * other, so a shelf that sends the same book twice makes a book VANISH from
    * the shelf — no error, no warning a reader could see, and the cause three
-   * screens away. `marks.ts` and `cards.ts` both pin this; `books.ts` is the
+   * screens away. `marks.ts` pins this too; `books.ts` is the
    * one a reader looks at first.
    */
   it('keeps the first of two rows sharing an id', () => {

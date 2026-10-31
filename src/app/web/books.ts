@@ -102,7 +102,8 @@ export interface RemoteBooks {
  * disagreeing with this client about the wire, and `String(x)` would hide that
  * behind a plausible-looking row. */
 /* Shared with the other stores — see `wireRow.ts`, which was extracted when
- * `marks.ts` and `cards.ts` turned out to be casting where this file reads. */
+ * `marks.ts` and a `cards.ts` since deleted turned out to be casting where this
+ * file reads. */
 import { byFirstId, num, str, strings } from './wireRow'
 import { READING_STATES, STARS, isContentHash, isHlc, messageOf, notifyAll, type ReadingState, type Stars } from '../../kernel'
 

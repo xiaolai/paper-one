@@ -1,20 +1,18 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
-import { createRemoteCards, type CardsStore } from './cards'
+import { useEffect, useState } from 'react'
 import { createRemoteMarks, type MarksStore } from './marks'
 import type { ShelfChannel } from './channel'
 import type { ShelfLink } from './reconnect'
-import type { Card } from '../../kernel'
 
 /**
- * THE SHELF'S NOTES AND CARDS, for as long as the LINK is open.
+ * THE SHELF'S NOTES, for as long as the LINK is open.
  *
  * ## Why this is its own module
  *
  * `ShelfList` was two hundred and sixty lines holding navigation state, remote
  * mutation adaptation, store lifecycles, settings and four screens. This is the
- * lifecycle half: two stores, built per channel and disposed with it, and the
- * subscription the deck reads through. Nothing here knows there are tabs, and
- * nothing about the tabs needs to know when a store is rebuilt.
+ * lifecycle half: a store built per channel and disposed with it. Nothing here
+ * knows there are tabs, and nothing about the tabs needs to know when a store is
+ * rebuilt.
  *
  * ## One store per link, and why not per render
  *
@@ -36,15 +34,9 @@ import type { Card } from '../../kernel'
  * closed: an error per attempt, for ever, over a shelf the reader has left.
  */
 
-/** The same array until the deck changes — `getSnapshot`'s contract. */
-const EMPTY_CARDS: readonly Card[] = []
-
 export interface RemoteStores {
   /** Null between channels — the store is rebuilt, not carried across. */
   readonly marks: MarksStore | null
-  readonly cards: CardsStore | null
-  /** The deck, subscribed, so `Cards` stays a plain-props pane. */
-  readonly cardRows: readonly Card[]
 }
 
 export function useRemoteStores(channel: ShelfChannel & Partial<Pick<ShelfLink, 'onOpened'>>): RemoteStores {
@@ -55,16 +47,6 @@ export function useRemoteStores(channel: ShelfChannel & Partial<Pick<ShelfLink, 
     return () => {
       store.dispose()
       setMarks(null)
-    }
-  }, [channel])
-
-  const [cards, setCards] = useState<CardsStore | null>(null)
-  useEffect(() => {
-    const store = createRemoteCards(channel)
-    setCards(store)
-    return () => {
-      store.dispose()
-      setCards(null)
     }
   }, [channel])
 
@@ -81,14 +63,8 @@ export function useRemoteStores(channel: ShelfChannel & Partial<Pick<ShelfLink, 
     if (typeof channel.onOpened !== 'function') return
     return channel.onOpened(() => {
       marks?.refresh()
-      cards?.refresh()
     })
-  }, [channel, marks, cards])
+  }, [channel, marks])
 
-  const cardRows = useSyncExternalStore(
-    useCallback((l: () => void) => cards?.subscribe(l) ?? (() => {}), [cards]),
-    useCallback(() => cards?.all ?? EMPTY_CARDS, [cards]),
-  )
-
-  return { marks, cards, cardRows }
+  return { marks }
 }

@@ -1,10 +1,9 @@
-import { BookOpen, Layers, LibraryBig, Settings as SettingsIcon } from 'lucide-react'
+import { BookOpen, LibraryBig, Settings as SettingsIcon } from 'lucide-react'
 import { ICON } from '../../kernel/core/metrics'
-import { isKernelPaneId, paneOffered } from '../../kernel/core/uiTypes'
 import styles from './TabBar.module.css'
 
 /**
- * The four tabs — Library · Reading · Cards · Settings.
+ * The three tabs — Library · Reading · Settings.
  *
  * "The titlebar chip becomes a tab": on the desktop the open book is a chip in
  * the titlebar and the library is a screen you go back to. On a phone they are
@@ -15,10 +14,10 @@ import styles from './TabBar.module.css'
  * ## What is NOT a tab
  *
  * The mockup's Search is "its own screen, not an overlay" and reached from the
- * Library's search pill, not from a tab. So four, not five, and no tab is ever
+ * Library's search pill, not from a tab. So no tab for it, and no tab is ever
  * disabled — a tab that cannot be visited is not drawn.
  *
- * ## The fourth tab is Settings, and the mockup called it You
+ * ## The last tab is Settings, and the mockup called it You
  *
  * `dev-docs/design/Paper Mobile.dc.html` names it **You**, with a person icon,
  * and files the preferences under it. That framing was overruled: the screen
@@ -32,7 +31,7 @@ import styles from './TabBar.module.css'
  * "Disconnect this browser" button as well as the settings, which is still a
  * thing about this device rather than about a person.
  */
-export type Tab = 'library' | 'reading' | 'cards' | 'settings'
+export type Tab = 'library' | 'reading' | 'settings'
 
 export interface TabBarProps {
   readonly active: Tab
@@ -45,39 +44,22 @@ export interface TabBarProps {
 const TABS: readonly { readonly id: Tab; readonly label: string; readonly Icon: typeof BookOpen }[] = [
   { id: 'library', label: 'Library', Icon: LibraryBig },
   { id: 'reading', label: 'Reading', Icon: BookOpen },
-  { id: 'cards', label: 'Cards', Icon: Layers },
   { id: 'settings', label: 'Settings', Icon: SettingsIcon },
 ]
 
-/**
- * The tabs this build actually offers.
- *
- * ⚠️ **THIS LIST WAS A LITERAL FOUR, AND `cards` IS IN `UNFINISHED_PANE_IDS`.**
- * The desktop hides that panel from the rail, the palette and the digit
- * accelerators; this bar is mounted by BOTH other shells — `MobileApp` and
- * `main.web.tsx` — and neither root names `paneOffered` anywhere, so the one
- * deck the desktop refuses to show was a permanent top-level tab on every
- * phone and in every browser, with no chord to hide it and nothing to find.
- * The section above already states the rule this breaks: *"no tab is ever
- * disabled — a tab that cannot be visited is not drawn."*
- *
- * ASKED, NOT RESTATED. Filtering on `UNFINISHED_PANE_IDS` here would be a
- * second copy of the question; `paneOffered` is the answer the other four
- * surfaces take. `reading` is this bar's own id and no panel, so it is passed
- * through untouched — `isKernelPaneId` is what tells them apart.
- *
- * `developer` is `false` and not a parameter: the chord is a desktop surface
- * and these shells have no way to reach it, so an unfinished panel is simply
- * absent here rather than hidden behind something unreachable. Removing an id
- * from `UNFINISHED_PANE_IDS` ships it on all three shells at once, which is
- * what that list promises and did not deliver.
- */
-const OFFERED_TABS = TABS.filter(({ id }) => !isKernelPaneId(id) || paneOffered(id, false))
+/* ⚠️ **THERE WAS A CARDS TAB, FILTERED OUT OF EVERY BUILD, AND IT IS GONE.** This
+ * bar asked `paneOffered` with `developer` fixed at false, because these shells
+ * have no chord, and said that finishing the panel would "ship it on all three
+ * shells at once". The owner withdrew that on 2026-10-31
+ * (`dev-docs/decisions/2026-10-31-plugin-boundary.md`, D3): a panel reaches a
+ * phone or a browser when someone decides it should and builds it, and nothing
+ * here happens by itself. The card protocol stays, so a later client can read
+ * the deck. */
 
 export function TabBar({ active, onSelect, hasBook }: TabBarProps) {
   return (
     <nav className={styles.bar} aria-label="Sections">
-      {OFFERED_TABS.map(({ id, label, Icon }) => (
+      {TABS.map(({ id, label, Icon }) => (
         <button
           key={id}
           type="button"

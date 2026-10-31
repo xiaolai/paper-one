@@ -37,10 +37,6 @@
  * a second implementation of a list of books. */
 export { Library } from './screens/Library'
 
-/* THE DECK. Its `cards` prop is already narrowed to the three members it
- * reads, so the mobile shell hands it a slice of the same store. */
-export { Cards } from './pane/Cards'
-
 /* THE READER'S PREFERENCES, and the two probes it cannot draw without: a pane
  * cannot offer a typeface without knowing which the device actually has. */
 export { Settings } from './pane/Settings'
@@ -49,7 +45,6 @@ export { presentFaces } from './fontProbe'
 
 /* THE STORES BEHIND THEM, as hooks over the services the launch built. */
 export { useLibrary } from './hooks/useLibrary'
-export { useCards } from './hooks/useCards'
 
 /* THE APP'S OWN COLOURS, and the OS's preference behind them. Without the
  * second, a reader who leaves the theme following the system gets a dark book
