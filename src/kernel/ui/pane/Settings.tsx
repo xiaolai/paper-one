@@ -1,5 +1,5 @@
 import { useState, useSyncExternalStore } from 'react'
-import type { SettingsSection } from '../../core/capability'
+import type { PaneContribution, SettingsSection } from '../../core/capability'
 import {
   BRIGHTNESS,
   CONTRAST,
@@ -241,6 +241,12 @@ export interface SettingsProps {
    * Absent on a host with nothing to switch, and the group is not drawn.
    */
   optionalFeatures?: OptionalFeaturesProps | undefined
+  /**
+   * The capabilities' panels that call themselves unfinished, for the Developer
+   * band's rows. Passed whether or not developer options are on, because whether
+   * a capability's SETTINGS are offered depends on it either way.
+   */
+  unfinishedPanes?: readonly Pick<PaneContribution, 'id' | 'label'>[]
   /**
    * Whether anything chosen here will still be chosen next launch.
    *
@@ -740,6 +746,7 @@ export function Settings({
   sections,
   missing,
   optionalFeatures,
+  unfinishedPanes = [],
   narration,
   persistent = true,
   onTheme,
@@ -797,8 +804,12 @@ export function Settings({
      developer options off, where the list is never read, so a fallback here
      could not be told from none. */
   const offeredSections = sections.filter((section) =>
-    settingsSectionOffered(section, developer !== undefined, developer?.hidden),
+    settingsSectionOffered(section, developer !== undefined, developer?.hidden, unfinishedPanes),
   )
+  const unfinishedRows = [
+    ...UNFINISHED_PANE_IDS.map((id) => ({ id: id as string, label: PANE_TITLES[id] as string })),
+    ...unfinishedPanes,
+  ]
   const optionalRowsDrawn = optionalFeatures !== undefined && optionalFeatures.standing.some(hasRow)
   const appBandDrawn = offeredSections.length > 0 || (missing ?? []).length > 0 || optionalRowsDrawn
   const [faceMenuOpen, setFaceMenuOpen] = useState(false)
@@ -1427,10 +1438,10 @@ export function Settings({
                 labels the scrollbar row uses. The question here is the same
                 one ("is this drawn?") and answering it with On/Off would give
                 the reader two vocabularies for one idea. */}
-            {UNFINISHED_PANE_IDS.map((id) => (
+            {unfinishedRows.map(({ id, label }) => (
               <ToggleRow
                 key={id}
-                label={PANE_TITLES[id]}
+                label={label}
                 on={!developer.hidden.includes(id)}
                 onChange={(on) => developer.onSetHidden(id, !on)}
                 labels={SHOWN_HIDDEN}

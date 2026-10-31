@@ -14,7 +14,7 @@ import {
   type KernelPreferences,
 } from '../core/settings'
 import type { PaneContribution } from '../core/capability'
-import { isContributedPaneId, isContributedScreenId, paneOffered, type Align, type PageLayout, type PaneId, type ReadingStyle, type ReadingStyleKey, type Screen, type Side, type SpacingIndices, type SpacingKey, type Theme, type Typeface } from '../core/uiTypes'
+import { contributionOffered, isContributedPaneId, isContributedScreenId, paneOffered, type Align, type PageLayout, type PaneId, type ReadingStyle, type ReadingStyleKey, type Screen, type Side, type SpacingIndices, type SpacingKey, type Theme, type Typeface } from '../core/uiTypes'
 
 /**
  * Application state.
@@ -87,7 +87,7 @@ export type {
  * screens it fits. `PaneContribution` carries both, so the composition's list
  * is passed as is; the reducer reads nothing else off it.
  */
-export type ContributedPanes = readonly Pick<PaneContribution, 'id' | 'screens'>[]
+export type ContributedPanes = readonly Pick<PaneContribution, 'id' | 'screens' | 'unfinished'>[]
 // Stryker disable next-line ArrayDeclaration: every reader of the list asks `entry.id === pane` first, and a string entry has no `id`, so a list holding one fits exactly the panels an empty list fits
 const NO_CONTRIBUTED: ContributedPanes = []
 
@@ -849,14 +849,14 @@ export interface PaneAudience {
  * The cost is nothing at today's two, and the rule being in two places is not
  * nothing — the rail would have been the copy that forgot `screens`.
  */
-export function contributionFits(screen: Screen, entry: ContributedPanes[number]): boolean {
-  return entry.screens.includes(screen)
+export function contributionFits(screen: Screen, entry: ContributedPanes[number], audience: PaneAudience = {}): boolean {
+  return entry.screens.includes(screen) && contributionOffered(entry, audience.developer ?? false, audience.hiddenPanes)
 }
 
 export function paneFits(screen: Screen, pane: PaneId, audience: PaneAudience = {}): boolean {
   const contributed = audience.contributed ?? NO_CONTRIBUTED
   if (isContributedPaneId(pane)) {
-    return contributed.some((entry) => entry.id === pane && contributionFits(screen, entry))
+    return contributed.some((entry) => entry.id === pane && contributionFits(screen, entry, audience))
   }
   /* ⚠️ **NO KERNEL PANEL FITS A CONTRIBUTED SCREEN, and that is what makes a
    * screen a screen.** The rail below is panels about a book or about the
@@ -941,10 +941,24 @@ function afterVisibilityChange(next: AppState, contributed: ContributedPanes): A
   return {
     ...next,
     pane: next.pane === null ? null : paneFor(next.screen, next.pane, audience),
-    lastPane: paneOffered(next.lastPane, next.developer, next.hiddenPanes)
+    lastPane: stillOffered(next.lastPane, next, contributed)
       ? next.lastPane
       : defaultPaneFor(next.screen),
   }
+}
+
+/**
+ * Is this panel one this reader may see, whichever kind it is?
+ *
+ * ⚠️ **AN ID NOTHING CONTRIBUTES ANSWERS YES**, which is `paneOffered`'s answer
+ * for it and the one this keeps: hiding a panel is no reason to rewrite a memory
+ * of one this question was not about. `remembers` is what refuses a ghost.
+ */
+function stillOffered(pane: PaneId, state: AppState, contributed: ContributedPanes): boolean {
+  const entry = isContributedPaneId(pane) ? contributed.find((one) => one.id === pane) : undefined
+  return entry !== undefined
+    ? contributionOffered(entry, state.developer, state.hiddenPanes)
+    : paneOffered(pane, state.developer, state.hiddenPanes)
 }
 
 /** The audience a state describes, so the reducer's four calls cannot differ. */
@@ -961,7 +975,7 @@ function afterVisibilityChange(next: AppState, contributed: ContributedPanes): A
  * reducer is handed the registry — this is the one place that did not ask it.
  */
 function remembers(pane: PaneId, state: AppState, contributed: ContributedPanes): boolean {
-  if (!paneOffered(pane, state.developer, state.hiddenPanes)) return false
+  if (!stillOffered(pane, state, contributed)) return false
   return !isContributedPaneId(pane) || contributed.some((entry) => entry.id === pane)
 }
 

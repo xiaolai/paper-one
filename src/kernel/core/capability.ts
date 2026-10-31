@@ -155,6 +155,16 @@ export interface PaneContribution {
   readonly icon: ContributionIcon
   readonly screens: readonly Screen[]
   readonly order?: number
+  /**
+   * A panel that draws and does not yet answer what it promises.
+   *
+   * ⚠️ **WITHOUT THIS A MOVED PANEL REACHES EVERY READER.** A contributed pane
+   * fits wherever `screens` says, for everybody. Set, the rail, the palette and
+   * the reducer offer it only with developer options on and only while it has
+   * not been hidden there — `contributionOffered` is the rule, and the Developer
+   * band lists it by `label`.
+   */
+  readonly unfinished?: boolean
   readonly render: PaneRenderer
 }
 

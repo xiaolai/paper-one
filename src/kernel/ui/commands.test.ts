@@ -1357,6 +1357,14 @@ describe('contributed panels', () => {
     expect(dispatched).toEqual([{ type: 'openPane', pane: 'circle:book' }])
   })
 
+  it('get no row while the panel is unfinished, and one under developer options', () => {
+    const deck = { ...circle, id: 'deck:panel' as const, unfinished: true }
+    const reader = context({ screen: 'reader', pane: null })
+    expect(find(buildCommands({ ...reader.ctx, contributedPanes: [deck] }), 'pane:deck:panel')).toBeUndefined()
+    const dev = context({ screen: 'reader', pane: null, developer: true })
+    expect(find(buildCommands({ ...dev.ctx, contributedPanes: [deck] }), 'pane:deck:panel')?.label).toBe(`Open ${circle.label}`)
+  })
+
   it('offer to close the one that is open', () => {
     const { ctx, dispatched } = context({ screen: 'reader', pane: 'circle:book' })
     const row = find(buildCommands({ ...ctx, contributedPanes: [circle] }), 'pane:circle:book')

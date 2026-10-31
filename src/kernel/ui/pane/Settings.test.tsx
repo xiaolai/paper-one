@@ -631,6 +631,30 @@ describe('the two bands', () => {
     expect(bandOf('Study', revealed.container)).toBe('The app')
   })
 
+  it('hides the settings of a capability whose own panel calls itself unfinished, until that panel is offered', () => {
+    const both = [section('deck:study', 'Study'), section('peer:devices', 'Devices')]
+    const unfinishedPanes = [{ id: 'deck:panel', label: 'Deck' }]
+    const off = render(<Settings {...(full({ sections: both, unfinishedPanes }).props as ComponentProps<typeof Settings>)} />)
+    expect(bandOf('Devices', off.container)).toBe('The app')
+    expect(bandOf('Study', off.container)).toBeNull()
+    cleanup()
+
+    const on = render(
+      <Settings
+        {...(full({ sections: both, unfinishedPanes, developer: { hidden: [], onSetHidden: () => {}, recording: false } }).props as ComponentProps<typeof Settings>)}
+      />,
+    )
+    expect(bandOf('Study', on.container)).toBe('The app')
+    cleanup()
+
+    const hidden = render(
+      <Settings
+        {...(full({ sections: both, unfinishedPanes, developer: { hidden: ['deck:panel'], onSetHidden: () => {}, recording: false } }).props as ComponentProps<typeof Settings>)}
+      />,
+    )
+    expect(bandOf('Study', hidden.container)).toBeNull()
+  })
+
   /* ⚠️ **A SECTION COULD DECLARE ITSELF UNFINISHED, AND TWO CASES HERE COVERED
      THAT FLAG.** `SettingsSection.unfinished` is deleted — it had one declarer
      ever, the deleted inference capability's cloud endpoints — so the list is
@@ -969,6 +993,20 @@ describe('developer options', () => {
       ['cards', false],
       ['cards', true],
     ])
+  })
+
+  it('list a capability’s unfinished panel by its label, and a press names its id', () => {
+    const onSetHidden = vi.fn()
+    const { props } = full({
+      unfinishedPanes: [{ id: 'deck:panel', label: 'Deck' }],
+      developer: developer({ hidden: ['deck:panel'], onSetHidden }),
+    })
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    open('Unfinished panels')
+    const row = screen.getByRole('switch', { name: 'Deck' })
+    expect([row.getAttribute('aria-checked'), valueOf(row)]).toEqual(['false', 'Hidden'])
+    fireEvent.click(row)
+    expect(onSetHidden.mock.calls).toEqual([['deck:panel', false]])
   })
 
   /* REPORTED, NOT OFFERED: recording is a file read at boot, so the panel says

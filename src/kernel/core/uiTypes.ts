@@ -153,6 +153,22 @@ export function paneOffered(
 }
 
 /**
+ * Whether a CONTRIBUTED panel is one the reader may see right now: the rule
+ * `paneOffered` keeps for an unfinished kernel panel, for a panel that says of
+ * itself that it is unfinished.
+ *
+ * Structural rather than `PaneContribution`, because `capability.ts` already
+ * imports this file.
+ */
+export function contributionOffered(
+  entry: { readonly id: string; readonly unfinished?: boolean },
+  developer: boolean,
+  hidden: readonly string[] = [],
+): boolean {
+  return entry.unfinished !== true || (developer && !hidden.includes(entry.id))
+}
+
+/**
  * Whether a capability's SETTINGS section is one the reader may see right now.
  *
  * ⚠️ **`UNFINISHED_PANE_IDS` HID A PANEL AND NEVER ITS SETTINGS**, and the
@@ -196,8 +212,13 @@ export function settingsSectionOffered(
   section: { readonly id: string },
   developer: boolean,
   hidden: readonly string[] = [],
+  unfinishedPanes: readonly { readonly id: string }[] = [],
 ): boolean {
   const capability = section.id.slice(0, section.id.indexOf(':'))
+  /* A CONTRIBUTED PANEL CARRIES ITS OWN CAPABILITY'S NAME, so the same match
+   * finds it, and the section follows the panel it is about. */
+  const pane = unfinishedPanes.find((one) => one.id.startsWith(`${capability}:`))
+  if (pane !== undefined) return contributionOffered({ ...pane, unfinished: true }, developer, hidden)
   if (!(UNFINISHED_PANE_IDS as readonly string[]).includes(capability)) return true
   return paneOffered(capability as PaneId, developer, hidden)
 }

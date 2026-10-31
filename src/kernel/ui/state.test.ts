@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from '../core/metrics'
 import { createSettingsStore, readKernelPreferences } from '../core/settings'
 import { bootState, contributionFits, defaultPaneFor, initialState, paneFits, preferencesOf, readerTakesInput, reducer, screenFor, type Action, type AppState } from './state'
-import { paneOffered } from '../core/uiTypes'
+import { contributionOffered, paneOffered } from '../core/uiTypes'
 
 /**
  * The reducer's reading-size case.
@@ -1030,4 +1030,66 @@ describe('the voice a reader chooses, and the speeds beside it', () => {
       }
     },
   )
+})
+
+/*
+ * A PANEL THAT SAYS IT IS UNFINISHED. Moving Cards out of the kernel must not hand
+ * it to every reader, and the kernel rule it was under is about kernel ids.
+ */
+describe('a contributed panel that calls itself unfinished', () => {
+  const deck = { id: 'cards:deck', screens: ['reader', 'library'], unfinished: true } as const
+  const contributed = [deck]
+
+  it('is offered only under developer options, and not once hidden there', () => {
+    expect(contributionOffered(deck, false)).toBe(false)
+    expect(contributionOffered(deck, true)).toBe(true)
+    expect(contributionOffered(deck, true, ['cards:deck'])).toBe(false)
+    expect(contributionOffered(deck, true, ['cards'])).toBe(true)
+  })
+
+  it('leaves a finished one alone whatever the list says', () => {
+    const finished = { id: 'circle:book' }
+    expect(contributionOffered(finished, false)).toBe(true)
+    expect(contributionOffered(finished, false, ['circle:book'])).toBe(true)
+    expect(contributionOffered({ ...finished, unfinished: false }, false)).toBe(true)
+  })
+
+  it('does not fit any screen until it is offered', () => {
+    expect(paneFits('reader', deck.id, { contributed })).toBe(false)
+    expect(paneFits('library', deck.id, { contributed })).toBe(false)
+    expect(paneFits('reader', deck.id, { contributed, developer: true })).toBe(true)
+    expect(paneFits('reader', deck.id, { contributed, developer: true, hiddenPanes: [deck.id] })).toBe(false)
+    expect(contributionFits('reader', deck)).toBe(false)
+    expect(contributionFits('reader', deck, { developer: true })).toBe(true)
+    expect(contributionFits('reader', deck, { developer: true, hiddenPanes: [deck.id] })).toBe(false)
+  })
+
+  it('still answers to its screens when offered', () => {
+    const shelfOnly = { ...deck, screens: ['library'] as const }
+    expect(contributionFits('reader', shelfOnly, { developer: true })).toBe(false)
+    expect(contributionFits('library', shelfOnly, { developer: true })).toBe(true)
+  })
+
+  it('is not remembered for a reader who may not see it', () => {
+    const reader = { ...initialState, screen: 'reader' as const, pane: 'toc' as const, lastPane: 'toc' as const }
+    const next = reducer(reader, { type: 'openPane', pane: deck.id }, contributed)
+    expect(next.lastPane).toBe('toc')
+    const dev = reducer({ ...reader, developer: true }, { type: 'openPane', pane: deck.id }, contributed)
+    expect(dev.lastPane).toBe(deck.id)
+    expect(dev.pane).toBe(deck.id)
+  })
+
+  it('is forgotten, and the pane moves off it, when it is hidden while open', () => {
+    const open = reducer({ ...initialState, screen: 'reader', developer: true, pane: 'toc', lastPane: 'toc' }, { type: 'openPane', pane: deck.id }, contributed)
+    const hidden = reducer(open, { type: 'setPaneHidden', pane: deck.id, hidden: true }, contributed)
+    expect(hidden.pane).toBe(defaultPaneFor('reader'))
+    expect(hidden.lastPane).toBe(defaultPaneFor('reader'))
+  })
+
+  it('leaves a remembered finished panel alone when the visibility moves', () => {
+    const circle = { id: 'circle:book', screens: ['reader'] } as const
+    const state = { ...initialState, screen: 'reader' as const, developer: true, pane: circle.id, lastPane: circle.id }
+    const next = reducer(state, { type: 'setPaneHidden', pane: deck.id, hidden: true }, [circle, deck])
+    expect(next.lastPane).toBe(circle.id)
+  })
 })

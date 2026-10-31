@@ -192,7 +192,7 @@ export interface KernelCommandContext {
    * and a pane is not a command (2026-09-13 audit). Omitted, the kernel's
    * panels are alone, which is right for a host with no composition.
    */
-  contributedPanes?: readonly Pick<PaneContribution, 'id' | 'label' | 'screens'>[]
+  contributedPanes?: readonly Pick<PaneContribution, 'id' | 'label' | 'screens' | 'unfinished'>[]
 }
 
 /**

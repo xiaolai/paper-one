@@ -329,7 +329,7 @@ export function SidePane({
          `{ id, label, Icon }`, so the map only rebuilt equal objects. */
       ...railFor(state.screen, audience),
       ...contributed
-        .filter((entry) => contributionFits(state.screen, entry))
+        .filter((entry) => contributionFits(state.screen, entry, audience))
         /* THE CONTRIBUTION'S OWN GLYPH, not one glyph for all of them — see
            `CONTRIBUTION_ICONS`, which is also where the defect this replaces is
            written down. Circle and Publish were both `Puzzle`. */
@@ -429,6 +429,7 @@ export function SidePane({
                read — not on whether the host handed over the diagnostics
                wiring, which is a different question and used to be conflated
                with this one. */
+            unfinishedPanes={contributed.filter((entry) => entry.unfinished === true)}
             {...(state.developer
               ? {
                   developer: {

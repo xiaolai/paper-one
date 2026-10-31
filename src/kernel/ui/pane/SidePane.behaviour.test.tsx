@@ -240,6 +240,18 @@ describe('the rail', () => {
     expect(railNames(container)).toEqual(['Marginalia', 'Library', 'Settings'])
   })
 
+  it('leaves out a contributed panel that calls itself unfinished, until it is offered', () => {
+    const contributed = [{ id: 'deck:panel', label: 'Deck', icon: 'globe', screens: ['reader'], unfinished: true, render: () => null }] as never
+    const off = draw({ contributed })
+    expect(railNames(off.container)).not.toContain('Deck')
+    cleanup()
+    const on = draw({ contributed, state: stateOf({ developer: true }) })
+    expect(railNames(on.container)).toContain('Deck')
+    cleanup()
+    const hid = draw({ contributed, state: stateOf({ developer: true, hiddenPanes: ['deck:panel'] }) })
+    expect(railNames(hid.container)).not.toContain('Deck')
+  })
+
   it('puts a contributed pane after the kernel’s, only on the screens it fits', () => {
     const shelf = draw({ state: stateOf({ screen: 'library', pane: 'library', lastPane: 'library' }), contributed: [friends, publish] })
     expect(railNames(shelf.container)).toEqual(['Marginalia', 'Library', 'Settings', 'Friends'])
