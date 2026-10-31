@@ -861,6 +861,23 @@ describe('scanAllMarks', () => {
     expect(unreadable.sort()).toEqual(['book_b', 'book_d'])
   })
 
+  it('names a folder that moved after the listing, whose marks are somewhere it did not read', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/marks.json`]: JSON.stringify([1]),
+      [`${BOOKS_DIR}/book_b/book.json`]: '{}',
+    })
+    const moving: IndexFs = {
+      ...fs,
+      readFile: async (path) => {
+        if (path === `${BOOKS_DIR}/book_a/marks.json`) await fs.rename(`${BOOKS_DIR}/book_a`, `${BOOKS_DIR}/book_c`)
+        return fs.readFile(path)
+      },
+    }
+    const unreadable: string[] = []
+    expect(await scanAllMarks(moving, (folder) => unreadable.push(folder))).toEqual([])
+    expect(unreadable).toEqual(['book_a'])
+  })
+
   it('throws when the library itself will not list', async () => {
     const fs = fakeFs({ [`${BOOKS_DIR}/book_a/marks.json`]: '[]' })
     const broken: IndexFs = {

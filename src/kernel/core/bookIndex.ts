@@ -783,7 +783,10 @@ export async function scanAllMarks(fs: IndexFs, onUnreadable?: (folder: string) 
         if (Array.isArray(parsed)) return parsed
       } catch {
         const absent = await fs.exists(path).then((there) => !there, () => false)
-        if (absent) return null
+        /* THE FOLDER GONE TOO MEANS IT MOVED OR WENT AFTER THE LISTING, not that
+           this book has no marks: a rekey's rename carries them to a name this
+           walk did not list. */
+        if (absent && (await fs.exists(`${BOOKS_DIR}/${entry.name}`).catch(() => false))) return null
       }
       onUnreadable?.(entry.name)
       return null

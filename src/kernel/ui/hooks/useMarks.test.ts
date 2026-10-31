@@ -268,16 +268,47 @@ describe('every mark, for something that is about to write a file', () => {
         await expect(answer).resolves.toHaveLength(1)
       })
 
-      it('answers with the disk when the write fails, which the store has said', async () => {
+      it('refuses when the write fails: a backup may not leave out a mark on the screen', async () => {
         const { store, open } = writing()
         await store.open(BOOK)
         const saving = store.add(createMark(highlight()))
         const answer = store.loadAllNow()
         open(new Error('disk full'))
         await expect(saving).rejects.toThrow('disk full')
-        await expect(answer).resolves.toEqual([])
+        await expect(answer).rejects.toBeInstanceOf(MarksScanFailed)
         expect(store.getSnapshot().persistent).toBe(false)
       })
+
+      it('goes on refusing after the failure, and answers once the book is read again', async () => {
+        const { store, open } = writing()
+        await store.open(BOOK)
+        const saving = store.add(createMark(highlight()))
+        open(new Error('disk full'))
+        await expect(saving).rejects.toThrow('disk full')
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+
+        await store.open(BOOK)
+        await expect(store.loadAllNow()).resolves.toEqual([])
+      })
+    })
+
+    it('refuses when a book is rekeyed under the scan, rather than reading it as no marks', async () => {
+      const fs = shelf()
+      const at = marksPathIn(BOOK)
+      fs.store.set(at, new TextEncoder().encode(JSON.stringify([createMark(highlight())])))
+      const folder = at.slice(0, at.lastIndexOf('/'))
+      const store = createMarkStore({
+        fs: {
+          ...fs,
+          /* The move lands after the listing named the old folder, before its read. */
+          readFile: async (path: string) => {
+            if (path === at) await fs.rename(folder, `${folder}-rekeyed`)
+            return fs.readFile(path)
+          },
+        },
+        queue: writeQueue(),
+      })
+      await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
     })
 
     it('answers again once the file reads', async () => {

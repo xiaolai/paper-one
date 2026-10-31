@@ -261,8 +261,10 @@ export interface MarkStore {
    * than resolving with the empty list a failed scan leaves behind. That is
    * the second half of the same backup, and without it the first half only
    * moved the empty archive one cause further along. It rejects too when the
-   * scan landed without a book whose marks file is there and would not read; a
-   * book with no marks file is simply a book with no marks.
+   * scan landed without a book whose marks file is there and would not read, or
+   * whose folder moved under it; a book with no marks file is simply a book with
+   * no marks. And it rejects while a failed write stands, until a book is read
+   * again: that mark is on the screen and not on the disk.
    */
   loadAllNow(): Promise<readonly Mark[]>
   /**
@@ -895,8 +897,12 @@ export function createMarkStore({
      *
      * AND A SCAN THAT SKIPPED A DAMAGED BOOK STILL LANDS, which is right for
      * the panel and is that same empty-file trap for one book: a backup without
-     * its notes, reported as done. */
-    if (!complete) throw new MarksScanFailed()
+     * its notes, reported as done.
+     *
+     * AND A WRITE THAT FAILED IS THE SAME OMISSION: the scan reads the disk, which
+     * does not hold the mark the reader can still see. Read after the scan, so a
+     * failure while it ran counts too. */
+    if (!complete || failed) throw new MarksScanFailed()
     const fresh = project(rows, null, (live) => live.filter(isBookmark))
     /* ⚠️ ALL THREE CLASSES. They share a file and a store and are split at the
        projection; this said two, and a third arriving without this line is the
