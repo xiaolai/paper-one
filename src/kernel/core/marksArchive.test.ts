@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   archiveName,
+  ArchiveOverLimit,
+  archiveRows,
+  archiveText,
   exportMarks,
   parseArchive,
   planImport,
@@ -10,7 +13,7 @@ import {
 import type { IndexedBook } from './bookIndex'
 import type { Card } from './cards'
 import type { Mark } from './marks'
-import { ARCHIVE_MAX_ROWS } from './importLimits'
+import { ARCHIVE_MAX_BYTES, ARCHIVE_MAX_ROWS } from './importLimits'
 import { hlcOf } from './hlc'
 
 /**
@@ -1111,5 +1114,59 @@ describe('cards with no book on this shelf', () => {
     expect(md).toContain('- **Still worth keeping**')
     expect(md).toContain('  - Ishmael')
     expect(toMarkdown(exportMarks([BOOK()], [MARK()], []))).not.toContain('no book on this shelf')
+  })
+})
+
+/*
+ * WHAT IS EXPORTED MUST COME BACK. `parseArchive` stops at `ARCHIVE_MAX_ROWS` and
+ * the reader refuses a file over `ARCHIVE_MAX_BYTES`, and nothing on the way out
+ * knew either number: a big enough library wrote a backup that lost its last rows
+ * on import, without a word, and `looseCards` are the last rows.
+ */
+describe('an export at the limits of what can be read back', () => {
+  const looseRow = { bookId: 'gone', kind: 'Idea' as const, body: 'b', answer: '', source: '', createdAt: '2026-01-01T00:00:00.000Z', localAnchor: null }
+
+  /* ⚠️ `push(...rows)` PASSES EVERY ROW AS AN ARGUMENT, the trap `planImport` names:
+     past the engine's limit it throws RangeError, and this count is past it. */
+  it('gathers as many cards of one absent book as the parser permits', () => {
+    const many = Array.from({ length: ARCHIVE_MAX_ROWS }, (_, at) => CARD({ id: `c${at}`, bookId: 'gone' }))
+    expect(exportMarks([], [], many).looseCards).toHaveLength(ARCHIVE_MAX_ROWS)
+  })
+
+  it('counts rows the way the parser spends them: each book, mark, card and loose card', () => {
+    const doc = exportMarks([BOOK()], [MARK(), MARK({ id: 'm2', text: 'a second' })], [CARD(), CARD({ id: 'gone', bookId: 'gone' })])
+    expect(archiveRows(doc)).toBe(1 + 2 + 1 + 1)
+    expect(archiveRows({ version: 1, books: [] })).toBe(0)
+  })
+
+  it('reads back every row of an archive exactly at the row limit', () => {
+    const books = [{ bookId: 'b', title: 't', author: '', marks: [], cards: [looseRow] }]
+    const looseCards = Array.from({ length: ARCHIVE_MAX_ROWS - 2 }, () => looseRow)
+    const archive: MarksArchive = { version: 1, books, looseCards }
+    expect(archiveRows(archive)).toBe(ARCHIVE_MAX_ROWS)
+    const back = parseArchive(archiveText(archive))
+    expect(back?.books[0]?.cards).toHaveLength(1)
+    expect(back?.looseCards).toHaveLength(ARCHIVE_MAX_ROWS - 2)
+  })
+
+  it('refuses one row over, rather than write a file that loses it on the way back', () => {
+    const archive: MarksArchive = { version: 1, books: [], looseCards: Array.from({ length: ARCHIVE_MAX_ROWS + 1 }, () => looseRow) }
+    expect(() => archiveText(archive)).toThrow(ArchiveOverLimit)
+    expect(parseArchive(JSON.stringify(archive))?.looseCards, 'what the refusal saves the reader from').toHaveLength(ARCHIVE_MAX_ROWS)
+  })
+
+  it('refuses a file the reader would refuse by size, and counts bytes rather than characters', () => {
+    const shell = JSON.stringify({ version: 1, books: [], looseCards: [{ ...looseRow, body: '' }] }, null, 2).length
+    const fits = ARCHIVE_MAX_BYTES - shell
+    const carrying = (body: string): MarksArchive => ({ version: 1, books: [], looseCards: [{ ...looseRow, body }] })
+    expect(new TextEncoder().encode(archiveText(carrying('x'.repeat(fits)))).length).toBe(ARCHIVE_MAX_BYTES)
+    expect(() => archiveText(carrying('x'.repeat(fits + 1)))).toThrow(ArchiveOverLimit)
+    /* Three bytes each in UTF-8, one character each in a JavaScript string. */
+    expect(() => archiveText(carrying('漢'.repeat(Math.ceil(fits / 3) + 1)))).toThrow(ArchiveOverLimit)
+  })
+
+  it('writes what it has always written, pretty-printed, when the archive fits', () => {
+    const doc = exportMarks([BOOK()], [MARK()], [])
+    expect(archiveText(doc)).toBe(JSON.stringify(doc, null, 2))
   })
 })

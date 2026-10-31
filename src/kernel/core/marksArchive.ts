@@ -3,7 +3,7 @@ import type { Card, CardKind } from './cards'
 import { CARD_KINDS, MAX_CARD_TEXT, liveCards } from './cards'
 import { fold } from './library'
 import { cfiOverlaps } from './markMatch'
-import { ARCHIVE_MAX_ROWS } from './importLimits'
+import { ARCHIVE_MAX_BYTES, ARCHIVE_MAX_ROWS } from './importLimits'
 import {
   MARK_KINDS,
   MARK_STYLES,
@@ -445,7 +445,10 @@ export function exportMarks(
   const onShelf = new Set(books.map((book) => book.bookId))
   const looseCards: LooseCard[] = []
   for (const [bookId, cardRows] of cardsByBook) {
-    if (!onShelf.has(bookId)) looseCards.push(...cardRows.map((row) => ({ bookId, ...row })))
+    if (onShelf.has(bookId)) continue
+    /* APPENDED IN A LOOP, NOT SPREAD — see `planImport`. One absent book can
+     * hold more cards than the engine accepts arguments. */
+    for (const row of cardRows) looseCards.push({ bookId, ...row })
   }
 
   const rows: ArchivedMarkBook[] = []
@@ -466,6 +469,44 @@ export function exportMarks(
     })
   }
   return { version: 1, books: rows, ...(looseCards.length > 0 ? { looseCards } : {}) }
+}
+
+/** Refused on the way out: this file could not be read back whole. */
+export class ArchiveOverLimit extends Error {
+  override readonly name = 'ArchiveOverLimit'
+}
+
+/** How many rows of `parseArchive`'s budget this archive spends. */
+export function archiveRows(archive: MarksArchive): number {
+  return archive.books.reduce(
+    (sum, book) => sum + 1 + book.marks.length + book.cards.length,
+    archive.looseCards?.length ?? 0,
+  )
+}
+
+/**
+ * The archive as the file it becomes, or a refusal.
+ *
+ * ⚠️ **BOTH OF THE READER'S LIMITS, ASKED BEFORE THERE IS A FILE.** `parseArchive`
+ * stops at `ARCHIVE_MAX_ROWS` without a word and the importer refuses a file over
+ * `ARCHIVE_MAX_BYTES`, so a library past either wrote a backup that reported a
+ * success and could not be restored whole — with `looseCards`, the last rows read,
+ * the first lost. Nothing in the stores bounds what a reader may accumulate, so
+ * this cannot be argued away; refusing leaves any earlier backup standing and says
+ * so, which a truncated file overwriting it would not.
+ *
+ * JSON ONLY. Markdown is a reading copy and is never read back.
+ */
+export function archiveText(archive: MarksArchive): string {
+  const rows = archiveRows(archive)
+  if (rows > ARCHIVE_MAX_ROWS) throw new ArchiveOverLimit(`${rows} rows, past ${ARCHIVE_MAX_ROWS}`)
+  /* Pretty-printed on purpose. This is a document the reader keeps, may open in
+     a text editor, and may well repair by hand — the whole reason it exists is
+     that their marginalia was previously locked inside the app. */
+  const text = JSON.stringify(archive, null, 2)
+  const bytes = new TextEncoder().encode(text).length
+  if (bytes > ARCHIVE_MAX_BYTES) throw new ArchiveOverLimit(`${bytes} bytes, past ${ARCHIVE_MAX_BYTES}`)
+  return text
 }
 
 const str = (value: unknown, max = 100_000): string =>

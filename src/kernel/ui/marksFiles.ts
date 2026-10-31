@@ -7,6 +7,7 @@ import type { Card } from '../core/cards'
 import type { Mark } from '../core/marks'
 import {
   archiveName,
+  archiveText,
   exportMarks,
   parseArchive,
   toMarkdown,
@@ -74,10 +75,7 @@ export async function exportMarksToFile(
   if (!path) return null
   const archive = exportMarks(books, marks, cards)
   const format: 'json' | 'md' = /\.md$/i.test(path) ? 'md' : 'json'
-  /* Pretty-printed on purpose. This is a document the reader keeps, may open in
-     a text editor, and may well repair by hand — the whole reason it exists is
-     that their marginalia was previously locked inside the app. */
-  await writeTextFile(path, format === 'md' ? toMarkdown(archive) : JSON.stringify(archive, null, 2))
+  await writeTextFile(path, format === 'md' ? toMarkdown(archive) : archiveText(archive))
   return {
     path,
     format,

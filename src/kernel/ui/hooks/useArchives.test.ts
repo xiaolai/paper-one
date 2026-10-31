@@ -3,6 +3,7 @@ import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { IndexedBook } from '../../core/bookIndex'
 import { importTagsFromFile } from '../tagFiles'
+import { ArchiveOverLimit } from '../../core/marksArchive'
 import { exportMarksToFile, importMarksFromFile } from '../marksFiles'
 import { useArchives } from './useArchives'
 import type { CardsView } from './useCards'
@@ -481,5 +482,23 @@ describe('useArchives — importing cards with no book on this shelf', () => {
       { bookId: 'returned', kind: 'Idea', body: 'Still worth keeping', answer: '', source: 'Loomings', cfi: 'epubcfi(/6/2!/4/2)' },
     ])
     expect(notice).toHaveBeenCalledWith('Added 0 marks and 1 card across 0 books.')
+  })
+})
+
+describe('useArchives — an export too big to read back', () => {
+  it('says so, and does not blame the disk', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(exportMarksToFile).mockRejectedValue(new ArchiveOverLimit('200001 rows, past 200000'))
+    const marks = { loadAllNow: vi.fn(async () => []) } as unknown as MarksView
+    const cards = { all: [] } as unknown as CardsView
+    const library = { books: [] } as unknown as LibraryView
+    const notice = vi.fn()
+    const hook = renderHook(() => useArchives({ library, marks, cards, notice }))
+    await act(async () => {
+      hook.result.current.exportMarks?.()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+    })
+    expect(notice.mock.calls).toEqual([['You have more marks and cards than one file can hold and be read back — nothing was exported.']])
+    logged.mockRestore()
   })
 })

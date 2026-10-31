@@ -2,7 +2,7 @@ import { useCallback } from 'react'
 import { canArchiveMarks, exportMarksToFile, importMarksFromFile } from '../marksFiles'
 import { canArchiveTags, exportTagsToFile, importTagsFromFile } from '../tagFiles'
 import { planImport } from '../../core/tagArchive'
-import { planImport as planMarksImport } from '../../core/marksArchive'
+import { ArchiveOverLimit, planImport as planMarksImport } from '../../core/marksArchive'
 import type { CardsView } from './useCards'
 import type { LibraryView } from './useLibrary'
 import { MarksScanFailed, type MarksView } from './useMarks'
@@ -188,6 +188,13 @@ const exportMarksNow = useCallback(() => {
     if (cause instanceof MarksScanFailed) {
       console.error('Paper: could not read your marginalia to export it', cause)
       notice('Your marks could not be read — nothing was exported.')
+      return
+    }
+    /* NOT THE DISK'S FAULT, and retrying will not help. Said so the reader knows
+       the backup they already have is still the one they have. */
+    if (cause instanceof ArchiveOverLimit) {
+      console.error('Paper: your marginalia is past what one archive can hold', cause)
+      notice('You have more marks and cards than one file can hold and be read back — nothing was exported.')
       return
     }
     console.error('Paper: could not export your marginalia', cause)
