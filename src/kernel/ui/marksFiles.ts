@@ -83,7 +83,7 @@ export async function exportMarksToFile(
     format,
     books: archive.books.length,
     marks: archive.books.reduce((sum, book) => sum + book.marks.length, 0),
-    cards: archive.books.reduce((sum, book) => sum + book.cards.length, 0),
+    cards: archive.books.reduce((sum, book) => sum + book.cards.length, archive.looseCards?.length ?? 0),
   }
 }
 

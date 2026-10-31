@@ -986,3 +986,130 @@ describe('provenance per row (WI-21.1)', () => {
     expect(plan.unplacedBooks).toEqual([{ title: 'Moby-Dick', author: 'Herman Melville', marks: 1 }])
   })
 })
+
+/*
+ * A CARD WITH NO BOOK ON THIS SHELF WAS SILENTLY LEFT OUT OF THE EXPORT. A card
+ * is explicitly cross-book and outlives the book it was made in, and `exportMarks`
+ * walked the shelf, so a reader's backup lacked exactly the cards whose only
+ * remaining copy it might be. The fix is an ADDITIVE field: every archive already
+ * written still parses, and an archive with no such card is the same bytes as
+ * before (`archiveFixtures.test.ts` holds that).
+ */
+describe('cards with no book on this shelf', () => {
+  const GONE = CARD({ id: 'gone', bookId: 'returned-to-the-library', body: 'Still worth keeping', cfi: 'epubcfi(/6/2!/4/2,/1:0,/1:3)' })
+
+  it('exports them under their own field, each keeping the book id it was made in', () => {
+    const doc = exportMarks([BOOK()], [], [GONE])
+    expect(doc.books).toEqual([])
+    expect(doc.looseCards).toEqual([
+      {
+        bookId: 'returned-to-the-library',
+        kind: 'Recall',
+        body: 'Still worth keeping',
+        answer: 'Ishmael',
+        source: GONE.source,
+        createdAt: new Date(GONE.createdAt).toISOString(),
+        localAnchor: { cfi: 'epubcfi(/6/2!/4/2,/1:0,/1:3)' },
+      },
+    ])
+  })
+
+  it('does not double a card whose book is on the shelf, and drops a tombstoned loose one', () => {
+    const doc = exportMarks([BOOK()], [], [CARD(), { ...GONE, deletedAt: hlcOf(3) }])
+    expect(doc.books[0]?.cards).toHaveLength(1)
+    expect('looseCards' in doc).toBe(false)
+  })
+
+  it('writes no field at all when there are none, so the bytes of such an archive do not move', () => {
+    const doc = exportMarks([BOOK()], [MARK()], [CARD()])
+    expect(Object.keys(doc)).toEqual(['version', 'books'])
+    expect(JSON.stringify(doc)).not.toContain('looseCards')
+  })
+
+  it('survives a round trip through the file, row for row', () => {
+    const doc = exportMarks([BOOK()], [MARK()], [GONE])
+    expect(parseArchive(JSON.stringify(doc))?.looseCards).toEqual(doc.looseCards)
+  })
+
+  it('reads an archive written before the field existed, as having none', () => {
+    const parsed = parseArchive(JSON.stringify({ version: 1, books: [] }))
+    expect(parsed).toEqual({ version: 1, books: [] })
+  })
+
+  it('reads an archive holding nothing but loose cards', () => {
+    const doc = exportMarks([], [], [GONE])
+    expect(doc.books).toEqual([])
+    expect(parseArchive(JSON.stringify(doc))?.looseCards).toHaveLength(1)
+  })
+
+  it.each([
+    ['not a list', 'nope'],
+    ['a list of nothing readable', [null, 3, { body: '' }]],
+  ])('ignores a field that is %s, rather than refusing the archive', (_name, value) => {
+    const parsed = parseArchive(JSON.stringify({ version: 1, books: [], looseCards: value }))
+    expect(parsed).toEqual({ version: 1, books: [] })
+  })
+
+  it('counts each loose row against the archive row budget', () => {
+    const row = { bookId: 'x', kind: 'Idea', body: 'b', answer: '', source: '', createdAt: '2026-01-01T00:00:00.000Z', localAnchor: null }
+    const many = Array.from({ length: ARCHIVE_MAX_ROWS + 5 }, () => row)
+    expect(parseArchive(JSON.stringify({ version: 1, books: [], looseCards: many }))?.looseCards).toHaveLength(ARCHIVE_MAX_ROWS)
+    const full = Array.from({ length: ARCHIVE_MAX_ROWS - 2 }, () => ({ bookId: 'b', title: 't', marks: [], cards: [] }))
+    expect(parseArchive(JSON.stringify({ version: 1, books: [{ bookId: 'b', title: 't', cards: [row] }, ...full], looseCards: [row, row, row, row] })) ?? {}).not.toHaveProperty('looseCards')
+  })
+
+  it('caps a forged book id, as the row book id is capped', () => {
+    const row = { bookId: 'x'.repeat(500), kind: 'Idea', body: 'b', answer: '', source: '', createdAt: '2026-01-01T00:00:00.000Z', localAnchor: null }
+    expect(parseArchive(JSON.stringify({ version: 1, books: [], looseCards: [row] }))?.looseCards?.[0]?.bookId).toHaveLength(200)
+  })
+
+  it('a card that really has no book reads back with the empty id it was written with', () => {
+    const doc = exportMarks([], [], [CARD({ id: 'none', bookId: '', body: 'Free standing' })])
+    expect(parseArchive(JSON.stringify(doc))?.looseCards?.[0]).toMatchObject({ bookId: '', body: 'Free standing' })
+  })
+
+  it('plans them for import, counted as cards added, under their own book id with the anchor', () => {
+    const doc = exportMarks([BOOK()], [], [GONE])
+    const plan = planImport(doc, [BOOK()], [], [])
+    expect(plan.additions).toEqual([])
+    expect(plan.unmatched).toEqual([])
+    expect(plan.booksTouched).toBe(0)
+    expect(plan.cardsAdded).toBe(1)
+    expect(plan.looseCards).toEqual(doc.looseCards)
+  })
+
+  it('counts a re-import as duplicates, by book and body', () => {
+    const doc = exportMarks([BOOK()], [], [GONE])
+    const plan = planImport(doc, [BOOK()], [], [GONE])
+    expect(plan.looseCards).toEqual([])
+    expect(plan.cardsAdded).toBe(0)
+    expect(plan.duplicates).toBe(1)
+  })
+
+  it('takes the same body under another book as a different card', () => {
+    const doc = exportMarks([BOOK()], [], [GONE])
+    const plan = planImport(doc, [BOOK()], [], [{ ...GONE, bookId: 'some-other-book' }])
+    expect(plan.looseCards).toHaveLength(1)
+    expect(plan.duplicates).toBe(0)
+  })
+
+  it('folds a body repeated inside the file to one', () => {
+    const doc = exportMarks([BOOK()], [], [GONE, { ...GONE, id: 'gone-2' }])
+    expect(doc.looseCards).toHaveLength(2)
+    const plan = planImport(doc, [BOOK()], [], [])
+    expect(plan.looseCards).toHaveLength(1)
+    expect(plan.duplicates).toBe(1)
+  })
+
+  it('has an empty list on a plan for an archive without any', () => {
+    expect(planImport({ version: 1, books: [] }, [BOOK()], [], []).looseCards).toEqual([])
+  })
+
+  it('shows them in the reading copy under their own heading, and only when there are any', () => {
+    const md = toMarkdown(exportMarks([BOOK()], [], [GONE]))
+    expect(md).toContain('## Cards with no book on this shelf')
+    expect(md).toContain('- **Still worth keeping**')
+    expect(md).toContain('  - Ishmael')
+    expect(toMarkdown(exportMarks([BOOK()], [MARK()], []))).not.toContain('no book on this shelf')
+  })
+})

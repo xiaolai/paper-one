@@ -41,6 +41,19 @@ import {
 export interface MarksArchive {
   readonly version: 1
   readonly books: readonly ArchivedMarkBook[]
+  /**
+   * Cards whose book is not on the shelf that wrote this file.
+   *
+   * ⚠️ **ADDITIVE, AND ABSENT WHEN EMPTY.** `version` stays 1: a build that does
+   * not know this field ignores it and loses nothing it ever had, every archive
+   * written before it still parses, and an archive with no such card is the
+   * same bytes it always was (`archiveFixtures.test.ts`).
+   *
+   * THEY WERE LEFT OUT ENTIRELY BEFORE IT. A card is cross-book and outlives the
+   * book it was made in, and `exportMarks` walked the shelf, so a backup silently
+   * lacked exactly the cards whose only remaining copy it might have been.
+   */
+  readonly looseCards?: readonly LooseCard[]
 }
 
 /**
@@ -226,6 +239,11 @@ export interface MarksImportPlan {
   readonly cardsAdded: number
   /** Rows already present, by overlap — see `planImport`. */
   readonly duplicates: number
+  /**
+   * The archive's `looseCards` not already here. Counted in `cardsAdded` and in
+   * no book, since they went to none.
+   */
+  readonly looseCards: readonly LooseCard[]
 }
 
 export interface BookImport {
@@ -295,6 +313,18 @@ export interface BookImport {
    * anchor — deciding the outcome by where the rows sat in the file.
    */
   readonly cards: readonly ArchivedCard[]
+}
+
+/**
+ * A card with no row of its own to sit under, so it says which book it was made
+ * in. Empty for a card that never had one.
+ *
+ * ITS `bookId` IS WHAT MAKES ITS ANCHOR SAFE TO KEEP: the card goes back under
+ * the id it left with, so the CFI still names the bytes it was made against. A
+ * name match, the case that drops an anchor, never happens to one of these.
+ */
+export interface LooseCard extends ArchivedCard {
+  readonly bookId: string
 }
 
 export interface UnmatchedBook {
@@ -412,6 +442,12 @@ export function exportMarks(
     else cardsByBook.set(card.bookId, [row])
   }
 
+  const onShelf = new Set(books.map((book) => book.bookId))
+  const looseCards: LooseCard[] = []
+  for (const [bookId, cardRows] of cardsByBook) {
+    if (!onShelf.has(bookId)) looseCards.push(...cardRows.map((row) => ({ bookId, ...row })))
+  }
+
   const rows: ArchivedMarkBook[] = []
   for (const book of books) {
     const bookMarks = marksByBook.get(book.bookId) ?? []
@@ -429,7 +465,7 @@ export function exportMarks(
       cards: bookCards,
     })
   }
-  return { version: 1, books: rows }
+  return { version: 1, books: rows, ...(looseCards.length > 0 ? { looseCards } : {}) }
 }
 
 const str = (value: unknown, max = 100_000): string =>
@@ -629,7 +665,17 @@ export function parseArchive(raw: string): MarksArchive | null {
       cards,
     })
   }
-  return { version: 1, books }
+  /* THE SAME BUDGET as the rows above, for the same reason: this list is as
+   * cheap to forge as they are. What is unreadable is dropped row by row, and a
+   * field that is not a list is no field — the books beside it are still good. */
+  const looseRows = Array.isArray(doc['looseCards'])
+    ? doc['looseCards'].slice(0, Math.max(0, ARCHIVE_MAX_ROWS - rows))
+    : []
+  const looseCards = looseRows.flatMap((raw): LooseCard[] => {
+    const card = parseCard(raw)
+    return card ? [{ bookId: str((raw as Record<string, unknown>)['bookId'], 200), ...card }] : []
+  })
+  return { version: 1, books, ...(looseCards.length > 0 ? { looseCards } : {}) }
 }
 
 /**
@@ -888,8 +934,23 @@ export function planImport(
     cardsAdded += freshCards.length
   }
 
+  /* BY BOOK AND BODY, the rule above, growing the same way: a repeat inside the
+   * file folds, and the same words under another book are another card. Kept
+   * apart from `additions` because that list is the books an import touched,
+   * and the notice counts it as such. */
+  const looseCards = (archive.looseCards ?? []).filter((incoming) => {
+    const bodies = haveCards.get(incoming.bookId) ?? new Set<string>()
+    haveCards.set(incoming.bookId, bodies)
+    const already = bodies.has(incoming.body)
+    if (already) duplicates += 1
+    else bodies.add(incoming.body)
+    return !already
+  })
+  cardsAdded += looseCards.length
+
   return {
     additions,
+    looseCards,
     unmatched,
     unplacedBooks,
     booksTouched: additions.length,
@@ -1027,6 +1088,15 @@ export function toMarkdown(archive: MarksArchive): string {
       }
       out.push('')
     }
+  }
+  const loose = archive.looseCards ?? []
+  if (loose.length > 0) {
+    out.push('## Cards with no book on this shelf', '')
+    for (const card of loose) {
+      out.push(`- **${mdEscape(card.body)}**`)
+      if (card.answer) out.push(`  - ${mdEscape(card.answer)}`)
+    }
+    out.push('')
   }
   return `${out.join('\n').trimEnd()}\n`
 }

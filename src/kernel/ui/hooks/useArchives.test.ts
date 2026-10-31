@@ -446,3 +446,40 @@ describe('a book found by name, and marks that cannot be placed', () => {
     logged.mockRestore()
   })
 })
+
+describe('useArchives — importing cards with no book on this shelf', () => {
+  it('writes each under the book id it left with, anchor kept, and counts it in the sentence', async () => {
+    const makeMany = vi.fn(async () => {})
+    const marks = { loadAllNow: vi.fn(async () => []), addMany: vi.fn(async () => {}) } as unknown as MarksView
+    const cards = { all: [], makeMany } as unknown as CardsView
+    const library = { books: [] } as unknown as LibraryView
+    const notice = vi.fn()
+    vi.mocked(importMarksFromFile).mockResolvedValue({
+      path: 'marks.json',
+      archive: {
+        version: 1,
+        books: [],
+        looseCards: [
+          {
+            bookId: 'returned',
+            kind: 'Idea',
+            body: 'Still worth keeping',
+            answer: '',
+            source: 'Loomings',
+            createdAt: '2026-01-03T00:00:00.000Z',
+            localAnchor: { cfi: 'epubcfi(/6/2!/4/2)' },
+          },
+        ],
+      },
+    })
+    const hook = renderHook(() => useArchives({ library, marks, cards, notice }))
+    await act(async () => {
+      hook.result.current.importMarks?.()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+    })
+    expect(makeMany).toHaveBeenCalledWith([
+      { bookId: 'returned', kind: 'Idea', body: 'Still worth keeping', answer: '', source: 'Loomings', cfi: 'epubcfi(/6/2!/4/2)' },
+    ])
+    expect(notice).toHaveBeenCalledWith('Added 0 marks and 1 card across 0 books.')
+  })
+})

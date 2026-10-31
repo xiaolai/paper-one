@@ -286,16 +286,17 @@ const importMarksNow = useCallback(() => {
         ),
       ),
       cards.makeMany(
-        plan.additions.flatMap((one) =>
-          one.cards.map((card) => ({
-            bookId: one.bookId,
-            kind: card.kind,
-            body: card.body,
-            answer: card.answer,
-            source: card.source,
-            cfi: card.localAnchor?.cfi ?? null,
-          })),
-        ),
+        [
+          ...plan.additions.flatMap((one) => one.cards.map((card) => ({ ...card, bookId: one.bookId }))),
+          ...plan.looseCards,
+        ].map((card) => ({
+          bookId: card.bookId,
+          kind: card.kind,
+          body: card.body,
+          answer: card.answer,
+          source: card.source,
+          cfi: card.localAnchor?.cfi ?? null,
+        })),
       ),
     ])
     for (const outcome of settled) {
