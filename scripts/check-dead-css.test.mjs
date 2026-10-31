@@ -163,6 +163,69 @@ describe('a class the markup names and no stylesheet declares', () => {
   })
 })
 
+/*
+ * ⚠️ **PROSE IS NOT A READ, IN EITHER DIRECTION.** Reading the source as text
+ * failed the gate over a comment recording that a class had gone, and, worse,
+ * kept a dead rule alive for as long as a comment or a string mentioned it.
+ */
+describe('what reads a class, once the source is parsed', () => {
+  const missing = (root) => undefinedClasses(root).map((u) => u.name)
+
+  it('does not take a comment or a string for a read of a missing class', () => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n',
+      'src/A.tsx':
+        "import styles from './A.module.css'\n" +
+        '// styles.gone was removed\n' +
+        '/* styles.goneToo as well */\n' +
+        "export const A = () => [styles.live, 'styles.goneThree', `styles.goneFour`]\n",
+    })
+    expect(missing(root)).toEqual([])
+  })
+
+  it('does not let a comment or a string keep a dead rule alive', () => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n.orphan { color: blue; }\n.orphanToo { color: blue; }\n',
+      'src/A.tsx':
+        "import styles from './A.module.css'\n" +
+        '// styles.orphan\n' +
+        "export const A = () => [styles.live, 'styles.orphanToo']\n",
+    })
+    expect(names(root)).toEqual(['orphan', 'orphanToo'])
+  })
+
+  it('does not take an import written in a comment or a string for an import', () => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n',
+      'src/B.tsx': "/*\nimport notes from './A.module.css'\n*/\nexport const B = (notes: { gone: string }) => notes.gone\n",
+    })
+    expect(missing(root)).toEqual([])
+  })
+
+  it.each([
+    ['JSX', 'export const A = () => <p className={styles.gone} />'],
+    ['a template', 'export const A = () => `a ${styles.gone}`'],
+    ['an optional chain', 'export const A = () => styles?.gone'],
+    ['a non-null assertion', 'export const A = () => styles!.gone'],
+    ['parentheses', 'export const A = () => (styles).gone'],
+    ['a literal lookup', "export const A = () => styles['gone']"],
+  ])('still finds a read in %s', (_how, line) => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n',
+      'src/A.tsx': `import styles from './A.module.css'\n${line}\n`,
+    })
+    expect(missing(root)).toEqual(['gone'])
+  })
+
+  it('finds a read through a namespace import', () => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n',
+      'src/A.tsx': "import * as sheet from './A.module.css'\nexport const A = () => sheet.gone\n",
+    })
+    expect(missing(root)).toEqual(['gone'])
+  })
+})
+
 describe('a class reached under another import name', () => {
   /* `.popover` was deleted as unreachable while three files drew it, because
      they import the module as `editorStyles` and this gate read only `styles.`.

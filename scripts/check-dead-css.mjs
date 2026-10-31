@@ -2,6 +2,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 import { isProcessEntry } from './lib/entry.mjs'
 
 /**
@@ -18,10 +19,11 @@ import { isProcessEntry } from './lib/entry.mjs'
  *
  * NOT A LINTER, and deliberately not: this repo gates with small scripts that
  * answer one question each, and the question here is narrow enough to answer
- * exactly. A class is used when some source names it as `styles.<name>`, or
- * under whatever other name that source imported the module by — the only way
- * a module class is read in this codebase, verified by there being no
- * `styles[...]` lookup anywhere — or when another module `composes` it.
+ * exactly. A class is used when some source reads it as `styles.<name>` or
+ * `styles['<name>']`, or under whatever other name that source imported the
+ * module by, or when another module `composes` it. The source is PARSED: a
+ * comment or a string that mentions `styles.gone` reads nothing, whichever way
+ * that would have misled the gate.
  *
  * WHAT IT DELIBERATELY DOES NOT DO. It does not check whether the RULE has any
  * effect, or whether the element it lands on is rendered, or whether a
@@ -52,19 +54,60 @@ function walk(dir, out = []) {
   return out
 }
 
+/** `styles`, `styles!`, `(styles)`, `styles as X`: the expression under its wrappers. */
+function unwrapped(node) {
+  let inner = node
+  while (ts.isParenthesizedExpression(inner) || ts.isNonNullExpression(inner) || ts.isAsExpression(inner) || ts.isSatisfiesExpression(inner)) {
+    inner = inner.expression
+  }
+  return inner
+}
+
+/** `{ object, name }` for `object.name` and `object['name']`; null for anything else. */
+function memberRead(node) {
+  if (ts.isPropertyAccessExpression(node)) return { object: unwrapped(node.expression), name: node.name.text }
+  if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) {
+    return { object: unwrapped(node.expression), name: node.argumentExpression.text }
+  }
+  return null
+}
+
+/** Every member read in a source: what it was read off, and the name. */
+function memberReads(file) {
+  const kind = extname(file) === '.tsx' ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true, kind)
+  const reads = []
+  const visit = (node) => {
+    const read = memberRead(node)
+    if (read !== null) reads.push(read)
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return { source, reads }
+}
+
 /** The module classes a source reads: `{ alias, modulePath, name }` for each. */
 function moduleReads(file) {
-  const text = readFileSync(file, 'utf8')
-  const reads = []
-  for (const [, alias, path] of text.matchAll(/^import\s+(\w+)\s+from\s+['"]([^'"]+\.module\.css)['"]/gm)) {
-    /* The lookbehind is for the import line itself: `controls.module` in
-       `'../styles/controls.module.css'` is a path, not a read. */
-    const read = new RegExp(`(?<![\\w./'"-])${alias}\\.([A-Za-z_][A-Za-z0-9_]*)`, 'g')
-    for (const m of text.matchAll(read)) {
-      reads.push({ alias, modulePath: resolve(dirname(file), path), name: m[1] })
-    }
+  const { source, reads } = memberReads(file)
+  const modules = new Map()
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement) || !statement.moduleSpecifier.text.endsWith('.module.css')) continue
+    const modulePath = resolve(dirname(file), statement.moduleSpecifier.text)
+    const clause = statement.importClause
+    if (clause?.name) modules.set(clause.name.text, modulePath)
+    if (clause?.namedBindings && ts.isNamespaceImport(clause.namedBindings)) modules.set(clause.namedBindings.name.text, modulePath)
   }
-  return reads
+  return reads.flatMap(({ object, name }) =>
+    ts.isIdentifier(object) && modules.has(object.text) ? [{ alias: object.text, modulePath: modules.get(object.text), name }] : [],
+  )
+}
+
+/** Names read off anything called `styles`, imported here or handed in: `styles.a`, `props.styles.a`. */
+function readsOffStyles(file) {
+  return memberReads(file).reads.flatMap(({ object, name }) => {
+    const called = ts.isIdentifier(object) ? object.text : ts.isPropertyAccessExpression(object) ? object.name.text : null
+    return called === 'styles' ? [name] : []
+  })
 }
 
 /** Class selectors in a stylesheet, with its comments gone: prose declares nothing. */
@@ -116,9 +159,7 @@ export function deadClasses(root, roots = ROOTS) {
      which file did the using is not this gate's question. */
   const used = new Set()
   for (const file of sources) {
-    for (const m of readFileSync(file, 'utf8').matchAll(/\bstyles\.([A-Za-z][A-Za-z0-9_]*)/g)) {
-      used.add(m[1])
-    }
+    for (const name of readsOffStyles(file)) used.add(name)
     /* UNDER ANY IMPORT NAME. Reading only `styles.` called `.popover` unreachable
        while three files drew it as `editorStyles.popover`, and it was deleted on
        this gate's word (`74aa52b`). */
