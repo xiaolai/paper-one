@@ -36,11 +36,11 @@ describe('what a capability holds after a pick', () => {
   })
 
   it.each([
-    ['/made/up/a/b.md', 'b.md'],
-    ['C:\\made\\up\\b.json', 'b.json'],
-    ['b.json', 'b.json'],
-    ['/made/up/dir/', ''],
-  ])('names %s as %j', (path, name) => {
+    ['a POSIX path', '/made/up/a/b.md', 'b.md'],
+    ['a Windows path', 'C:\\made\\up\\b.json', 'b.json'],
+    ['a bare name', 'b.json', 'b.json'],
+    ['a folder', '/made/up/dir/', ''],
+  ])('names %s by its last part', (_shape, path, name) => {
     expect(fileNameOf(path)).toBe(name)
   })
 
