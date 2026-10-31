@@ -10805,6 +10805,8 @@
     "src/kernel/ui/reader/readingSurface.test.tsx > a tap > is silent where there is no caret under the point",
     "src/kernel/ui/reader/readingSurface.test.tsx > a tap > reports the offset in the section’s text",
     "src/kernel/ui/reader/readingSurface.test.tsx > a tap > stops when unsubscribed, leaving another listener alone",
+    "src/kernel/ui/reader/readingSurface.test.tsx > a walk of the book > calls a finished walk incomplete if the book was replaced while it ran",
+    "src/kernel/ui/reader/readingSurface.test.tsx > a walk of the book > keeps an incomplete walk incomplete with the book unchanged",
     "src/kernel/ui/reader/readingSurface.test.tsx > a walk of the book > passes on the contents, the skip, and whether to stop",
     "src/kernel/ui/reader/readingSurface.test.tsx > a walk of the book > stops part way when the book is replaced under it",
     "src/kernel/ui/reader/readingSurface.test.tsx > a walk of the book > survives a chapter turn, which is the same opening",
