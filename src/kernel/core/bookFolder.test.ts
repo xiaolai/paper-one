@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { refusalOf } from '../../kernel/testkit'
 import { asHlc, hlcOf } from './hlc'
 import { storedBookName, type VaultFs } from './bookVault'
-import { workKey } from './workKey'
 import {
   BOOKS_DIR,
   META_SCHEMA,
@@ -1086,6 +1085,11 @@ describe('atomicWrite', () => {
  * another download of the same work.
  */
 describe('the work identifier', () => {
+  /* A local stand-in for the circle's `workKey`: this suite asks only that the
+     identifier arrives in a form a key can be derived from, and the kernel must
+     not depend on circle to ask it. */
+  const isbnKeyOf = (identifier: string | undefined) => identifier?.replace(/^urn:isbn:/, 'isbn:')
+
   it('round-trips through book.json', () => {
     /* The whole acceptance criterion for the storage half: what a parse
        produced is what the next launch reads back. */
@@ -1097,7 +1101,7 @@ describe('the work identifier', () => {
     expect(parsed.identifier).toBe('urn:isbn:9780142437247')
     const back = parseRecord(JSON.stringify(parsed))
     expect(back?.identifier).toBe('urn:isbn:9780142437247')
-    expect(workKey(back?.identifier)?.key).toBe('isbn:9780142437247')
+    expect(isbnKeyOf(back?.identifier)).toBe('isbn:9780142437247')
   })
 
   it('is ABSENT, not empty, when the book declares none', () => {

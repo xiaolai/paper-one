@@ -1,22 +1,10 @@
-import {
-  WIRE_VERSION,
-  chainHash,
-  checkDelegation,
-  checkPage,
-  compareEntries,
-  compareItems,
-  isCanonical,
-  isPageShape,
-  resolved,
-  type Entry,
-  type ListItem,
-  type Hlc,
-  type Page,
-  type PageCrypto,
-  type PageRefusal,
-  type WorkClaim,
-} from '../../../kernel'
-import { matchWork } from '../../../kernel'
+import { type Hlc } from '../../../kernel'
+import { WIRE_VERSION, chainHash, checkPage, isCanonical, isPageShape, type Page, type PageCrypto, type PageRefusal } from './page'
+import { checkDelegation } from './identity'
+import { compareEntries, resolved, type Entry } from './log'
+import { compareItems, type ListItem } from './list'
+import { type WorkClaim } from './workClaim'
+import { matchWork } from './workClaim'
 import type { ForeignFile, HeldList, HeldOpinion } from './store'
 
 /**

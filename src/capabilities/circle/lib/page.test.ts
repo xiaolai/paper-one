@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { canonicalJson } from '../canonicalJson'
-import { hlcOf } from '../hlc'
+import { canonicalJson } from '../../../kernel'
+import { hlcOf } from '../../../kernel'
 import type { Entry } from './log'
 import {
   carriedBy,

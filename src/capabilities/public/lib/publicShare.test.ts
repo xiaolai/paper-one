@@ -83,7 +83,7 @@ describe('offerAbsentBecause', () => {
 
   it('gives a sentence for every state that is not offerable', () => {
     /* ⚠️ **A CALLER RENDERS THE CONTROL OR THE SENTENCE, NEVER NEITHER.** The
-       same contract `shareAbsentBecause` carries in `circle/foreign.ts`, and
+       same contract `shareAbsentBecause` carries in the circle's `foreign.ts`, and
        the reason WI-25.2's acceptance says "and says why". */
     const states: readonly PublicOfferability[] = ['offerable', 'no-content', 'no-content-hash']
     for (const state of states) {

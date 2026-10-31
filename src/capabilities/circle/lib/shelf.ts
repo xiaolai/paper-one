@@ -1,16 +1,7 @@
 import { cutToField, hasOnly, isPublishableWork } from './workField'
-import {
-  OWN_SHELF_PATH,
-  atomicWrite,
-  compareEntries,
-  primaryLanguage,
-  type Entry,
-  type Hlc,
-  type ShelvedWork,
-  type VaultFs,
-  type WriteQueue,
-  isHlc,
-} from '../../../kernel'
+import { OWN_SHELF_PATH, atomicWrite, type Hlc, type VaultFs, type WriteQueue, isHlc } from '../../../kernel'
+import { compareEntries, type Entry, type ShelvedWork } from './log'
+import { primaryLanguage } from './workClaim'
 import { isSealedPage, isWithdrawal, pagesOver, withdrawnBy, type Bounds, type Publisher, type SealedPage, type Withdrawal, DEFAULT_BOUNDS, boundariesInOrder } from './publish'
 
 /**

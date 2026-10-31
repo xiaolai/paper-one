@@ -1,4 +1,5 @@
-import { matchWork, type Hlc } from '../../../kernel'
+import { type Hlc } from '../../../kernel'
+import { matchWork } from './workClaim'
 import { claimOfShelved } from './circleView'
 import { bookVia, claimOf, indexOf, type BookLike } from './exchange'
 import { createList, deleteList, placeOnList, removeFromList, retitleList, stateOf, type ListFile, MAX_LIST_NOTE, MAX_LIST_TITLE } from './lists'

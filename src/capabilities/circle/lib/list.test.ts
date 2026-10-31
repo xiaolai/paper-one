@@ -1,6 +1,6 @@
 import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
-import { hlcOf, type Hlc } from '../hlc'
+import { hlcOf, type Hlc } from '../../../kernel'
 import { compactedList, compareItems, foldList, NO_LIST, type ListItem } from './list'
 import { type Entry, type ShelvedWork } from './log'
 

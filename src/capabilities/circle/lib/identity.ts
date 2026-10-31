@@ -1,4 +1,4 @@
-import { type Hlc } from '../hlc'
+import { type Hlc } from '../../../kernel'
 
 /**
  * Person identity: roles, versions, delegation, revocation — WI-22.B1, B2, B3.

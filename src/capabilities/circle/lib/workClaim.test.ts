@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CORPUS_BUILDS, BUILD_IDS } from '../markCorpus.testkit'
+import { CORPUS_BUILDS, BUILD_IDS } from '../../../kernel/testkit'
 import { MAX_CLAIM_DIGESTS, SHELF_WORK, claimFor, indexKeys, isClaimShape, listIdOf, listWork, logOfClaim, matchWork, normaliseName, primaryLanguage, titleProper } from './workClaim'
 
 /**

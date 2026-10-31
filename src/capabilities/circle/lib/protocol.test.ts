@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_COVER_BYTES, MAX_ROSTER_DEVICES, isPageShape } from '../../../kernel'
-import { WIRE_VERSION, type WorkClaim } from '../../../kernel'
+import { MAX_COVER_BYTES } from '../../../kernel'
+import { MAX_ROSTER_DEVICES, isPageShape } from './page'
+import { WIRE_VERSION } from './page'
+import { type WorkClaim } from './workClaim'
 import {
   CIRCLE_PROTO,
   CIRCLE_SERVICES,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { resolvedCfiForTesting } from '../resolvedCfi.testkit'
-import { readersAmong } from '../foreignAnnotation'
+import { resolvedCfiForTesting } from '../../../kernel/testkit'
+import { readersAmong } from '../../../kernel'
 import {
   drawable,
   offersShare,

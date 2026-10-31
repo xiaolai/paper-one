@@ -1,5 +1,5 @@
-import { canonicalJson } from '../canonicalJson'
-import { isHlc } from '../hlc'
+import { canonicalJson } from '../../../kernel'
+import { isHlc } from '../../../kernel'
 import type { Entry } from './log'
 import { isClaimShape, logOfClaim, type WorkClaim } from './workClaim'
 

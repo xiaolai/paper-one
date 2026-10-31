@@ -1,4 +1,6 @@
-import { MAX_COVER_BYTES, MAX_ROSTER_DEVICES, SUPPORTED, isClaimShape, negotiate, type VersionRange, type WorkClaim, MAX_PAGE_CHARS as KERNEL_MAX_PAGE_CHARS, MAX_CLAIM_DIGESTS } from '../../../kernel'
+import { MAX_COVER_BYTES } from '../../../kernel'
+import { MAX_ROSTER_DEVICES, SUPPORTED, negotiate, type VersionRange, MAX_PAGE_CHARS as KERNEL_MAX_PAGE_CHARS } from './page'
+import { isClaimShape, type WorkClaim, MAX_CLAIM_DIGESTS } from './workClaim'
 
 /**
  * The circle's own vocabulary on the wire — WI-22.C1.

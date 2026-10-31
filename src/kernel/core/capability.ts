@@ -440,7 +440,7 @@ export interface Capability {
    * line `panes` does not cross — a pane renders into a slot the kernel owns.
    *
    * Every annotation carries a `ResolvedCfi`, so a passage that did not anchor
-   * in THIS build cannot be handed over at all. See `core/circle/overlay.ts`.
+   * in THIS build cannot be handed over at all. See `core/overlay.ts`.
    */
   readonly overlays?: readonly OverlayContribution[]
   /**

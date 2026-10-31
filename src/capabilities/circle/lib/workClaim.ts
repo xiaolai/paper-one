@@ -1,4 +1,4 @@
-import { workKey } from '../workKey'
+import { workKey } from './workKey'
 
 /**
  * What a build CLAIMS about the work it is — WI-22.C1.

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { WIRE_VERSION, canonicalJson, chainHash, checkPage, hlcOf, signedBytes, type Page } from '../../../kernel'
+import { canonicalJson, hlcOf } from '../../../kernel'
+import { WIRE_VERSION, chainHash, checkPage, signedBytes, type Page } from './page'
 import { pageCrypto, unhex } from './crypto'
 
 /**

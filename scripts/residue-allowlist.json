@@ -79,62 +79,6 @@
       "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
     },
     {
-      "id": "circle",
-      "file": "src/kernel/index.ts",
-      "match": "./core/circle/bound",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/index.ts",
-      "match": "./core/circle/foreign",
-      "count": 3,
-      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/index.ts",
-      "match": "./core/circle/identity",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/index.ts",
-      "match": "./core/circle/list",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/index.ts",
-      "match": "./core/circle/log",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/index.ts",
-      "match": "./core/circle/page",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/index.ts",
-      "match": "./core/circle/relationships",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
-    },
-    {
-      "id": "circle",
-      "file": "src/kernel/index.ts",
-      "match": "./core/circle/workClaim",
-      "count": 2,
-      "reason": "The entry re-exports the contract the kernel holds for circle; the module moves out in Phase 2"
-    },
-    {
       "id": "passages",
       "file": "src/kernel/ui/App.tsx",
       "match": "passages:",

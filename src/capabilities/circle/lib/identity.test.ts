@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hlcOf } from '../hlc'
+import { hlcOf } from '../../../kernel'
 import {
   DELEGATION_MS,
   SKEW_MS,

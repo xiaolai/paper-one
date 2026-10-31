@@ -6,7 +6,6 @@ import {
   parseCards,
   parseRecord,
   validMarks,
-  workKey,
   type BookRecord,
   type Card,
   type Mark,
@@ -571,6 +570,11 @@ describe('digests', () => {
  * These are the specific cases, stated so a failure names the mechanism.
  */
 describe('the work identifier, replicated', () => {
+  /* A local stand-in for the circle's `workKey`: this suite asks only that the
+     identifier arrives in a form a key can be derived from, and sync must not
+     depend on circle to ask it. */
+  const isbnKeyOf = (identifier: string | undefined) => identifier?.replace(/^urn:isbn:/, 'isbn:')
+
   const parsed = (over: Partial<BookRecord>): BookRecord =>
     parseRecord(JSON.stringify({ title: 'Moby-Dick', author: 'Melville', ...over }))!
 
@@ -580,7 +584,7 @@ describe('the work identifier, replicated', () => {
     const here = parsed({ identifier: 'urn:isbn:9780142437247', parsedAt: 10, metaSchema: 1 })
     const there = fromWire(JSON.parse(JSON.stringify(toWire(here))))
     expect(there?.identifier).toBe('urn:isbn:9780142437247')
-    expect(workKey(there?.identifier)?.key).toBe(workKey(here.identifier)?.key)
+    expect(isbnKeyOf(there?.identifier)).toBe(isbnKeyOf(here.identifier))
   })
 
   it('travels with the parse that produced it, not on its own', () => {

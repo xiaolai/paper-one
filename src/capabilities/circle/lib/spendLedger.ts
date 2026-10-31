@@ -1,4 +1,4 @@
-import { NOTHING_SPENT, charge, type Budget, type Spend } from '../../../kernel'
+import { NOTHING_SPENT, charge, type Budget, type Spend } from './bound'
 
 /**
  * The per-person spend ledger — one for the run, shared by the round and the

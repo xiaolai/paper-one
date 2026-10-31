@@ -1,12 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  CAPABILITY_UI,
-  messageOf,
-  offersShare,
-  offersUnshare,
-  shareAbsentBecause,
-  type Highlight,
-} from '../../../kernel'
+import { CAPABILITY_UI, messageOf, type Highlight } from '../../../kernel'
+import { offersShare, offersUnshare, shareAbsentBecause } from '../lib/foreign'
 import { useP2pLive } from '../../peer'
 import type { SharePort, ShareState } from '../lib/sharing'
 

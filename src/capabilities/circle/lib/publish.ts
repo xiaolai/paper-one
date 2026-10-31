@@ -1,27 +1,8 @@
 import { MAX_ANSWER_CHARS } from './protocol'
-import {
-  READING_STATES,
-  STARS,
-  WIRE_VERSION,
-  atomicWrite,
-  canonicalJson,
-  carriedBy,
-  compareEntries,
-  isClaimShape,
-  paginate,
-  sharedPathIn,
-  signedBytes,
-  type Entry,
-  type Hlc,
-  type Page,
-  type Passage,
-  type ReadingState,
-  type Stars,
-  type VaultFs,
-  type WorkClaim,
-  type WriteQueue,
-  isHlc,
-} from '../../../kernel'
+import { READING_STATES, STARS, atomicWrite, canonicalJson, sharedPathIn, type Hlc, type ReadingState, type Stars, type VaultFs, type WriteQueue, isHlc } from '../../../kernel'
+import { WIRE_VERSION, carriedBy, paginate, signedBytes, type Page } from './page'
+import { compareEntries, type Entry, type Passage } from './log'
+import { isClaimShape, type WorkClaim } from './workClaim'
 import { MAX_PAGES_PER_ANSWER, MAX_PAGE_CHARS } from './protocol'
 import type { LaneFor } from './store'
 

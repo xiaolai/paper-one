@@ -197,7 +197,7 @@ export interface BookRecord {
    * files — and foliate has been parsing this all along while `recordFromMeta`
    * dropped it on the floor.
    *
-   * `workKey.ts` is what turns it into something comparable. Read that before
+   * The circle capability's `lib/workKey.ts` is what turns it into something comparable. Read that before
    * comparing two of these directly: one build declares an ISBN-10 and another
    * the ISBN-13 for the same work, and as strings they do not match.
    */

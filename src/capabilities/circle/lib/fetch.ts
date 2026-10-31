@@ -1,16 +1,8 @@
-import {
-  DEFAULT_BUDGET,
-  SHELF_WORK,
-  acceptsTransport,
-  chainHash,
-  compareHlc,
-  listIdOf,
-  listWork,
-  messageOf,
-  type Budget,
-  type PageCrypto,
-  type Relationship,
-} from '../../../kernel'
+import { compareHlc, messageOf } from '../../../kernel'
+import { DEFAULT_BUDGET, type Budget } from './bound'
+import { SHELF_WORK, listIdOf, listWork } from './workClaim'
+import { acceptsTransport, type Relationship } from './relationshipState'
+import { chainHash, type PageCrypto } from './page'
 import { CIRCLE_FETCH_EVERY_MS } from './cadence'
 import { claimOf, type BookLike } from './exchange'
 import {

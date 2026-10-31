@@ -1,4 +1,4 @@
-import { type Hlc } from '../hlc'
+import { type Hlc } from '../../../kernel'
 import { compareEntries, mergeLogs, type Entry, type ShelvedWork, type Stamped } from './log'
 
 /**

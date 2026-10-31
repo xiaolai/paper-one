@@ -1,4 +1,4 @@
-import { compareEntries } from '../../../kernel'
+import { compareEntries } from './log'
 import type { BookRecord, Hlc, ReadingState, Stars } from '../../../kernel'
 import { nextSeqFor, type OpinionRow, type ReviewRow, type SharedFile, type Withdrawal, MAX_TAGS } from './publish'
 

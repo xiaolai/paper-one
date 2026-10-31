@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BUILD_IDS, CORPUS_BUILDS } from './markCorpus.testkit'
+import { BUILD_IDS, CORPUS_BUILDS } from '../../../kernel/testkit'
 import { sameWork, workKey } from './workKey'
 
 /**

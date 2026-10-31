@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { hlcOf, matchWork, newRelationship, readmit, type Hlc, type Relationship } from '../../../kernel'
+import { hlcOf, type Hlc } from '../../../kernel'
+import { matchWork } from './workClaim'
+import { newRelationship, readmit, type Relationship } from './relationshipState'
 import { namesOf, sentencesOf, starsText, viewOf, type PersonHeld } from './circleView'
 import { NOTHING_SHARED, type ForeignFile } from './store'
 

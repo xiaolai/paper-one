@@ -1,6 +1,6 @@
-import { canonicalJson } from '../canonicalJson'
-import { type Hlc } from '../hlc'
-import type { ReadingState, Stars } from '../readingState'
+import { canonicalJson } from '../../../kernel'
+import { type Hlc } from '../../../kernel'
+import type { ReadingState, Stars } from '../../../kernel'
 
 /**
  * The shared log — WI-22.C1 and WI-22.C2, and WI-23.B1's four kinds.

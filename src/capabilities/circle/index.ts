@@ -1,33 +1,6 @@
-import {
-  acceptsTransport,
-  canonicalJson,
-  createCoverFactsPass,
-  drawable,
-  drawsEntry,
-  folderOf,
-  listTrash,
-  messageOf,
-  overlayKeyOf,
-  publishableCover,
-  readmit,
-  type Capability,
-  type CapabilityContext,
-  type Disposable,
-  type ForeignAnnotation,
-  type ForeignEntry,
-  type HashPort,
-  type Hlc,
-  type IndexFs,
-  type IndexedBook,
-  type Library,
-  type OverlayRequest,
-  type Relationship,
-  type ResolvedPassage,
-  type SettingsStore,
-  type TrashFs,
-  type VaultFs,
-  type WriteQueue,
-} from '../../kernel'
+import { canonicalJson, createCoverFactsPass, folderOf, listTrash, messageOf, overlayKeyOf, publishableCover, type Capability, type CapabilityContext, type Disposable, type ForeignAnnotation, type HashPort, type Hlc, type IndexFs, type IndexedBook, type Library, type OverlayRequest, type ResolvedPassage, type SettingsStore, type TrashFs, type VaultFs, type WriteQueue } from '../../kernel'
+import { acceptsTransport, drawsEntry, readmit, type Relationship } from './lib/relationshipState'
+import { drawable, type ForeignEntry } from './lib/foreign'
 import { createElement } from 'react'
 import { peopleFor, readForeign, type ForeignFile } from './lib/store'
 import { answerCover, answerPages, welcome, type BookLike, type Sealed, type Serving } from './lib/exchange'

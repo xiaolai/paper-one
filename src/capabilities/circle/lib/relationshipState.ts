@@ -1,4 +1,4 @@
-import { laterHlc, type Hlc } from '../hlc'
+import { laterHlc, type Hlc } from '../../../kernel'
 import { BLOCKED_BUDGET, DEFAULT_BUDGET, type Budget } from './bound'
 
 /**

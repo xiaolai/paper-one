@@ -1,20 +1,5 @@
-import {
-  atomicWrite,
-  circleFolderIn,
-  circlePathIn,
-  mergeRelationship,
-  newRelationship,
-  personFolderIn,
-  relationshipPathIn,
-  trashOf,
-  type Hlc,
-  type IndexFs,
-  type Relationship,
-  type VaultFs,
-  type WriteQueue,
-  hlcOf,
-  isHlc,
-} from '../../../kernel'
+import { atomicWrite, circleFolderIn, circlePathIn, personFolderIn, relationshipPathIn, trashOf, type Hlc, type IndexFs, type VaultFs, type WriteQueue, hlcOf, isHlc } from '../../../kernel'
+import { mergeRelationship, newRelationship, type Relationship } from './relationshipState'
 import { purgeForeign, type LaneFor } from './store'
 
 /**
@@ -187,7 +172,7 @@ function circleFileOf(bookId: string, person: string): string {
 const STATES = new Set(['admitted', 'muted', 'blocked', 'exited'])
 const RETAINS = new Set(['keep', 'purge'])
 
-/** A record of the shape `relationships.ts` decides, for THIS person, or null. */
+/** A record of the shape `relationshipState.ts` decides, for THIS person, or null. */
 function readRecord(value: unknown, person: string): Relationship | null {
   /* Stryker disable next-line ConditionalExpression: a non-object has no `person` member, so the check below refuses it anyway. */
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null

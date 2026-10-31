@@ -373,13 +373,6 @@ export { META_SCHEMA } from './core/bookFolder'
 export type { BookRecord, CoverFacts, CoverName, TagClock, TagClockEntry } from './core/bookFolder'
 export { MAX_COVER_BYTES, createCoverFactsPass, measureCover, publishableCover } from './core/coverFacts'
 export type { CoverFactsPass, CoverFs } from './core/coverFacts'
-/* The work key (WI-21.3): what a book's declared `identifier` says about the
- * WORK, as one comparable string. Exported here rather than kept private
- * because "two devices derive the same key" is a claim about two PROCESSES,
- * and a host that cannot call it cannot check it. Pure string work — nothing
- * platform-bound joins the browser-safe subtree by this. */
-export { sameWork, workKey } from './core/workKey'
-export type { WorkKey, WorkKeyKind } from './core/workKey'
 export { INDEX_FILE, loadShelf, parseIndex, scanBooks, writeIndex } from './core/bookIndex'
 export type { IndexFs, IndexedBook, ShelfSource } from './core/bookIndex'
 /* The FLAT STORE's seam and its opener. Public since phase 11: a host outside
@@ -433,7 +426,6 @@ export {
 } from './core/bookFolder'
 export type { PublicPassage } from './core/ports'
 export type { ForeignAnnotation, ForeignOpinion, OverlayAudience } from './core/foreignAnnotation'
-export type { ForeignEntry } from './core/circle/foreign'
 /* The overlay seam's vocabulary — a capability implementing one needs to name
    the request it is handed and the resolver inside it. */
 export type {
@@ -445,70 +437,8 @@ export type {
   ResolveResult,
 } from './core/overlay'
 export { foreignWeight, overlayKey, overlayKeyOf, readersAmong } from './core/foreignAnnotation'
-export { drawable, offersShare, offersUnshare, shareAbsentBecause } from './core/circle/foreign'
-export type { Publishability } from './core/circle/foreign'
-/* The page protocol. Pure, and deliberately so — the crypto is INJECTED, which
-   is what keeps `page.ts` inside `check-browser-safe.mjs`'s pinned set while
-   the Ed25519 that satisfies it lives in a capability. */
-export {
-  MAX_ENTRIES_PER_PAGE,
-  MAX_PAGE_CHARS,
-  MAX_ROSTER_DEVICES,
-  SUPPORTED,
-  WIRE_VERSION,
-  carriedBy,
-  chainHash,
-  checkPage,
-  integersOnly,
-  isCanonical,
-  isEntryShape,
-  isPageShape,
-  negotiate,
-  paginate,
-  signedBytes,
-} from './core/circle/page'
-export type { Page, PageCrypto, PageRefusal, SignedKind, VersionRange } from './core/circle/page'
-/* The log a page carries, and the fold that turns one into what is held. */
 export { READING_STATES, STARS } from './core/readingState'
 export type { ReadingState, Stars } from './core/readingState'
-export { compacted, compareEntries, fold, mergeLogs, nextSeq, resolved } from './core/circle/log'
-export type {
-  Entry,
-  Folded,
-  Held,
-  HeldReview,
-  HeldWork,
-  Passage,
-  Register,
-  ShelvedWork,
-} from './core/circle/log'
-/* What a book is called when two libraries have to agree it is the same book.
-   Never a hash of the file — `wire.md` §"`workKey` cannot be the log key". */
-export { LIST_ID, MAX_CLAIM_DIGESTS, SHELF_WORK, claimFor, indexKeys, isClaimShape, listIdOf, listWork, logOfClaim, matchWork, primaryLanguage } from './core/circle/workClaim'
-export type { ClaimSource, WorkClaim, WorkMatch } from './core/circle/workClaim'
-/* A list's log, folded — WI-23.E1. */
-export { NO_LIST, compactedList, compareItems, foldList } from './core/circle/list'
-export type { ListItem, ListState } from './core/circle/list'
-/* The bound that runs BEFORE a page is parsed, and the states it reads. */
-export { BLOCKED_BUDGET, DEFAULT_BUDGET, NOTHING_SPENT, charge, readRouting } from './core/circle/bound'
-export type { Budget, Charge, Routing, Spend } from './core/circle/bound'
-export {
-  acceptsTransport,
-  admits,
-  budgetFor,
-  changeState,
-  drawsEntry,
-  drawsOverlays,
-  mergeRelationship,
-  FIRST_EPOCH,
-  newRelationship,
-  readmit,
-  showShelf,
-} from './core/circle/relationships'
-export type { Relationship, RelationshipState, Retain } from './core/circle/relationships'
-/* Whether the device that signed a page may still speak for its person. */
-export { SKEW_MS, checkDelegation, maySpeak, shouldRenew, type Liveness } from './core/circle/identity'
-export type { Delegation as CircleDelegation } from './core/circle/identity'
 export { tagKey } from './core/tags'
 
 /* The ledger's primitives: the stamp, the presence register, the formats. */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import { hlcOf } from '../hlc'
+import { hlcOf } from '../../../kernel'
 import { NOTHING_SPENT, charge } from './bound'
 import {
   admits,
@@ -15,7 +15,7 @@ import {
   type Relationship,
   newRelationship,
   showShelf,
-} from './relationships'
+} from './relationshipState'
 
 /** WI-22.E1, E2 and E3 — the review's ninth condition. */
 

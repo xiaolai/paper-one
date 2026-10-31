@@ -8,14 +8,8 @@ import { NO_LIST_HELD,
   type ForeignFile,
   type LaneFor,
 } from './lib/store'
-import {
-  circlePathIn,
-  hlcOf,
-  type ForeignEntry,
-  type IndexFs,
-  type ResolveResult,
-  type WriteQueue,
-} from '../../kernel'
+import { circlePathIn, hlcOf, type IndexFs, type ResolveResult, type WriteQueue } from '../../kernel'
+import { type ForeignEntry } from './lib/foreign'
 import { personListPathIn, personListsDirIn, personShelfPathIn } from '../../kernel'
 import { NOTHING_SHARED, heldListIdsOf, readHeldList, readHeldShelf, writeHeldList, writeHeldShelf } from './lib/store'
 /* ⚠️ THROUGH THE TESTKIT ENTRY, not the module. `kernel-testkit-in-tests-only`

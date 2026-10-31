@@ -1,27 +1,9 @@
 import { isReceivedWork } from './workField'
-import {
-  READING_STATES,
-  STARS,
-  atomicWrite,
-  circleFolderIn,
-  circlePathIn,
-  isHlc,
-  compareItems,
-  personFolderIn,
-  personListPathIn,
-  personListsDirIn,
-  personShelfPathIn,
-  type ForeignEntry,
-  type HeldWork,
-  type Hlc,
-  type IndexFs,
-  type ListItem,
-  type ReadingState,
-  type Stars,
-  type VaultFs,
-  type WriteQueue,
-  LIST_ID,
-} from '../../../kernel'
+import { READING_STATES, STARS, atomicWrite, circleFolderIn, circlePathIn, isHlc, personFolderIn, personListPathIn, personListsDirIn, personShelfPathIn, type Hlc, type IndexFs, type ReadingState, type Stars, type VaultFs, type WriteQueue } from '../../../kernel'
+import { compareItems, type ListItem } from './list'
+import { type ForeignEntry } from './foreign'
+import { type HeldWork } from './log'
+import { LIST_ID } from './workClaim'
 
 /**
  * Where a friend's passages live on this device — WI-22.D1 and WI-22.E3.

@@ -1,6 +1,6 @@
-import type { ForeignAnnotation, ForeignOpinion } from '../foreignAnnotation'
-import type { Hlc } from '../hlc'
-import type { ResolvedCfi } from '../resolvedCfi'
+import type { ForeignAnnotation, ForeignOpinion } from '../../../kernel'
+import type { Hlc } from '../../../kernel'
+import type { ResolvedCfi } from '../../../kernel'
 import type { Passage } from './log'
 
 /**
@@ -42,7 +42,7 @@ export interface ForeignEntry {
   readonly pub: string
   readonly person: string
   readonly passage: Passage
-  /** Which relationship epoch this arrived under — see `relationships.ts`. */
+  /** Which relationship epoch this arrived under — see `relationshipState.ts`. */
   readonly epoch: number
   readonly receivedAt: number
   /**

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { circlePathIn, hlcOf, mergeRelationship, newRelationship, personFolderIn, relationshipPathIn, showShelf, type IndexFs, type Relationship, type WriteQueue, trashOf } from '../../../kernel'
+import { circlePathIn, hlcOf, personFolderIn, relationshipPathIn, type IndexFs, type WriteQueue, trashOf } from '../../../kernel'
+import { mergeRelationship, newRelationship, showShelf, type Relationship } from './relationshipState'
 import { fakeFs } from '../../../kernel/testkit'
 import { purgePerson, readRelationship, writeRelationship } from './relationships'
 

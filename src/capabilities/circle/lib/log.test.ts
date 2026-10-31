@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { hlcOf } from '../hlc'
+import { hlcOf } from '../../../kernel'
 import fc from 'fast-check'
 import { compacted, compareEntries, fold, mergeLogs, nextSeq, type Entry, type Passage } from './log'
-import type { ReadingState, Stars } from '../readingState'
+import type { ReadingState, Stars } from '../../../kernel'
 
 /** WI-22.C1 and WI-22.C2 — the log, and the tombstone that names what it takes back. */
 
