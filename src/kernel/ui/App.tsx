@@ -70,6 +70,7 @@ import { tagCounts } from '../core/library'
 import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
 import { chapterSteps } from './tocOrder'
+import { useReadingSurface } from './reader/readingSurface'
 import { useSpeech } from './reader/useSpeech'
 import { useAutoAdvance } from './reader/useAutoAdvance'
 import { documentLang } from './reader/speech'
@@ -378,7 +379,27 @@ export function App({
     () => ({ bookId: book.bookId, sectionIndex: book.docSection }),
     [book.bookId, book.docSection],
   )
-  const speech = useSpeech(book.doc, speechPaging, speechPrefs, voiceEngine, speechPlace)
+  /* The book, for the export. Everything in it comes from `useBook`, so that a
+     walk can be bound to one opening: see `readyBookOf`. */
+  const speechBook = useMemo(
+    () => ({
+      generation: book.generation,
+      bookId: book.bookId,
+      doc: book.doc,
+      meta: book.meta,
+      toc: book.toc,
+      fixedLayout: book.fixedLayout,
+      sectionTexts: book.sectionTexts,
+    }),
+    [book.generation, book.bookId, book.doc, book.meta, book.toc, book.fixedLayout, book.sectionTexts],
+  )
+  const readingSurface = useReadingSurface({
+    doc: book.doc,
+    place: speechPlace,
+    paging: speechPaging,
+    book: speechBook,
+  })
+  const speech = useSpeech({ sectionKey: book.doc, surface: readingSurface.surface }, speechPrefs, voiceEngine)
   /**
    * The book turning itself, at the pace the time-left estimate uses.
    *

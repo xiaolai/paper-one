@@ -1,7 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { Speaker, speechAvailable, type DoneReason, type SpeakPrefs, type SpeakerCallbacks } from './speaker'
-import { collectText, documentLang, offsetIn, placeOfRange, rangeAt, textAtPoint, type SpokenText } from './speech'
-import { placeSpokenWord, removeSpokenWord } from './rulerBand'
 import {
   blockIndexAt,
   sentenceIndexAt,
@@ -13,11 +11,15 @@ import { EngineSpeaker } from './engineSpeaker'
 import type { AudioHost } from './enginePlayer'
 import { engineVoiceFor } from './engineVoice'
 import { routedSpeaker, speakerFor, type SeekingSpeaker } from './speakerRouting'
-import { textDigest } from './clipKey'
-import { canonicalTextOf } from './passageText'
-import type { ClipKey, SpeechRequest, SpokenAudio, VoicePack } from '../../core/ports'
-import { resolveSegmenterLocale } from './wordSnap/classify'
-import { sentenceSpansOf } from './wordSnap/sentenceOf'
+import type {
+  ClipKey,
+  ReadingSurface,
+  SpeechRequest,
+  SpeechSkipPrefs,
+  SpokenAudio,
+  SpokenSection,
+  VoicePack,
+} from '../../core/ports'
 
 /**
  * Reading the book aloud, with the spoken word followed on the page.
@@ -53,18 +55,16 @@ export interface ReadingEngine {
 }
 
 /**
- * Which book and which section is on screen, so a render can be addressed.
+ * The reader, as a reading is given it.
  *
- * ⚠️ **A WRONG SECTION INDEX COSTS A REDUNDANT RENDER AND NEVER WRONG AUDIO**,
- * which is what makes reading it from the reader's POSITION safe rather than
- * needing the session to answer for the document. The clip's key carries a digest
- * of the section's text as well as its index, so a stale index can only fail to
- * FIND a clip — and a clip it does find under a stale index has the same text
- * digest, which means the same words, which means the right audio.
+ * `sectionKey` is what says the section changed, by render, so the change lands
+ * in one commit with everything else. Everything else a reading wants to know is
+ * `surface`'s to answer, as of the moment it is asked: see `ReadingSurface` for
+ * what makes that safe from a child of the component that commits it.
  */
-export interface SpeechPlace {
-  readonly bookId: string | null
-  readonly sectionIndex: number | null
+export interface ReadingContext {
+  readonly sectionKey: unknown
+  readonly surface: ReadingSurface
 }
 
 export interface Speech {
@@ -152,7 +152,7 @@ export interface Speech {
    *
    * ⚠️ **PUBLISHED SO THE TRANSPORT CAN LEAVE THE BUTTON OUT RATHER THAN DRAW A
    * DEAD ONE.** Without it the control would have to guess, and the honest answer
-   * is known only here — see `SpeechPaging.chapter`, which a book that cannot
+   * is known only here — see `SurfacePaging.chapter`, which a book that cannot
    * place the reader in its own contents does not supply.
    *
    * ⚠️ **AND IT WAS ONE BOOLEAN FOR BOTH DIRECTIONS, WHICH IS A DEAD BUTTON BY
@@ -163,63 +163,6 @@ export interface Speech {
    * caller already knew both answers separately and threw one away.
    */
   readonly chapters: { readonly back: boolean; readonly forward: boolean }
-}
-
-/**
- * What the reading needs from the reader.
- *
- * `next` is one page forward in READING order — not `goRight`, because the voice
- * is always ahead of where it was, and in a right-to-left book ahead is to the
- * left. The session's own `next` is exactly this and is what the arrow key runs.
- */
-export interface SpeechPaging {
-  next: () => void
-  /**
-   * One page BACK in reading order.
-   *
-   * ⚠️ **ADDED FOR PHASE 34, AND ITS ABSENCE WAS A DEFECT FROM THE MOMENT SEEKING
-   * LANDED — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.** Before this phase the
-   * voice only ever moved forward, so a page turn only ever needed one direction.
-   * Every seek this phase adds can go BACKWARD — a tap on a word above, a scrub to
-   * the left, a step to the previous sentence or paragraph — and with no way back
-   * the word being spoken was classified `behind` and the handler simply returned:
-   * the reading carried on off the top of the page, and the reader was left
-   * looking at text nobody was reading.
-   *
-   * Optional for the reason `chapter` is: a host that cannot page backwards says
-   * so by not offering it, and the follow-along then does what it did before.
-   */
-  prev?: () => void
-  /**
-   * A whole chapter away, or absent where the book cannot say.
-   *
-   * ⚠️ **OPTIONAL, AND THE TRANSPORT HIDES THE BUTTON RATHER THAN DRAWING A DEAD
-   * ONE.** It needs the TOC and the reader's place in it — `stepChapter` in
-   * `tocOrder.ts` over `position.chapterHref` — and a book whose current spine
-   * item no contents entry points at genuinely has no next chapter to offer. A
-   * control that navigates nowhere is worse than one that is not there.
-   *
-   * ⚠️ **`go` ANSWERS WHETHER IT MOVED, AND IT USED TO ANSWER NOTHING.**
-   * Returning `void`, it could not be distinguished from a no-op — so
-   * `stepChapter` tore down the pending sentence gap and the section
-   * continuation BEFORE asking, and a press at either end of the book destroyed
-   * the only future work the reading had while leaving `speaking` true. The
-   * voice stopped, the transport went on showing a reading in progress, and
-   * nothing could restart it but the reader pressing stop.
-   *
-   * `can` is the same question WITHOUT taking the step, which is what a render
-   * needs and what an action cannot give it: asking by navigating is not asking.
-   * Both live under one field so they cannot drift into disagreeing about the
-   * same book — a separate `chapters` flag beside a `chapter` function is two
-   * statements of one fact, and this file has just finished removing a set of
-   * those.
-   */
-  chapter?:
-    | {
-        readonly can: (by: -1 | 1) => boolean
-        readonly go: (by: -1 | 1) => boolean
-      }
-    | undefined
 }
 
 /**
@@ -278,11 +221,13 @@ export const CONTINUE_GRACE_MS = 4000
 const NO_PREFS: SpeakPrefs = {}
 
 /**
- * The place an absent argument stands for. A MODULE CONSTANT for the reason
- * `NO_PREFS` is one: a fresh literal per render is a trap left lying for whoever
- * puts it in a dependency array.
+ * What a section is read with: the reader's own skip choice.
+ *
+ * ⚠️ **ASKED OF THE REF, BY THE TWO THAT ASK**, because both run from callbacks
+ * built once: an audit found a captured `prefs` read here, a reader turning notes
+ * on mid-book got the old choice for every remaining section (2026-09-30).
  */
-export const NOWHERE_IN_PARTICULAR: SpeechPlace = { bookId: null, sectionIndex: null }
+const skipOf = (prefs: SpeakPrefs): SpeechSkipPrefs => ({ notes: prefs.notesAloud ?? false })
 
 /**
  * How often the position is sampled while a reading speaks.
@@ -321,11 +266,9 @@ export const POSITION_TICK_MS = 250
  * what the eight in `useSpeech.test.tsx` about pause, stop and stepping are.
  */
 export function useSpeech(
-  doc: Document | null,
-  paging: SpeechPaging,
+  { sectionKey, surface }: ReadingContext,
   prefs: SpeakPrefs = NO_PREFS,
   engine: ReadingEngine | null = null,
-  place: SpeechPlace = NOWHERE_IN_PARTICULAR,
 ): Speech {
   const [speaking, setSpeaking] = useState(false)
   const [paused, setPaused] = useState(false)
@@ -353,8 +296,14 @@ export function useSpeech(
   const [preparing, setPreparing] = useState(false)
   const [refusal, setRefusal] = useState<string | null>(null)
 
-  const docRef = useRef<Document | null>(doc)
-  const pagingRef = useRef(paging)
+  /* Which section this hook last rendered with, for the walk that has to see the
+   * next one arrive: see `continueReading`. */
+  const sectionKeyRef = useRef(sectionKey)
+  /* ⚠️ **THROUGH A REF, FOR THE REASON EVERY VALUE HERE IS.** `speakDocument` and
+   * the speaker's callbacks are built once, and `ReadingSurface` is one object for
+   * the life of its host, so nothing here should ever see this change. If it did,
+   * a captured one would read a reader that had gone. */
+  const surfaceRef = useRef(surface)
   /* READ AT `speak` TIME, never captured — see `SpeakPrefs`. A reading walks
    * many sections and each one is its own utterance, so a voice or rate the
    * reader changes mid-chapter takes effect at the next section rather than
@@ -366,38 +315,16 @@ export function useSpeech(
    * would keep the platform voice until the reading was restarted — which is
    * not something anybody would guess to do. */
   const engineRef = useRef(engine)
-  /**
-   * WHERE THE READER IS, read at `speak` time and never captured.
+  /* The section AND what was worked out from it, together.
    *
-   * ⚠️ **IT WAS A CAPTURED PROP, AND THAT KILLED READING ALOUD OUTRIGHT —
-   * MEASURED IN THE RUNNING APP, 2026-09-30.** `speakDocument` is a `useCallback`
-   * whose dependency list is `[speaker, speakSentence]`; reading `place` from the
-   * closure meant reading it as of the FIRST render, where `bookId` is null
-   * (`bookIdFor` resolves a content hash asynchronously) and `docSection` is null
-   * (no document has loaded). So every clip key carried an empty book and no
-   * section, the plugin refused it, and every Listen ended with *"This chapter
-   * could not be made into audio"*.
-   *
-   * Every other value this hook reads from outside already goes through a ref for
-   * exactly this reason — `docRef`, `pagingRef`, `prefsRef`, `engineRef` — and
-   * each of their comments says so. This one was written without one, and 3 007
-   * tests could not see it because a test supplies its place at mount and never
-   * changes it.
-   */
-  const placeRef = useRef(place)
-  /* The collected text AND the document it was collected from, together.
-   *
-   * Kept as one value on purpose. Held apart, `docRef` is reassigned during
-   * render the moment the spine item changes, while `spokenRef` still holds the
-   * previous section's node index — and a boundary event arriving in that gap
-   * resolves offsets from the OLD chapter against the NEW document, which is
-   * how the highlight ends up on an unrelated word. Pairing them makes that
-   * state unrepresentable: the handler uses the document the text came from,
-   * and does nothing once that is no longer the document on screen. */
+   * Kept as one value on purpose. A boundary event arriving after the section
+   * changed must not resolve offsets from the OLD chapter against the NEW document,
+   * which is how the highlight ends up on an unrelated word. The section is bound
+   * to the document its text came from, so that state is unrepresentable: it paints
+   * there, and does nothing once that is no longer the document on screen. */
   const spokenRef = useRef<{
-    doc: Document
-    spoken: SpokenText
-    /** The sentences and paragraphs of `spoken.text` — see `ReadingPlan`. */
+    section: SpokenSection
+    /** The sentences and paragraphs of `section.text` — see `ReadingPlan`. */
     plan: ReadingPlan
     /** `documentLang`'s answer, kept so each sentence is spoken in it. */
     lang: string | null
@@ -406,10 +333,9 @@ export function useSpeech(
      *
      * ⚠️ **DERIVED FROM THE SAME VALUE THE TEXT COMES FROM, WHICH IS WHY IT IS
      * HERE AND NOT IN A REF OF ITS OWN.** `EngineSpeakerDeps.clip` reads it at
-     * `speak` time; held apart from `spoken`, the two could name different
+     * `speak` time; held apart from `section`, the two could name different
      * sections, and the failure would be a whole chapter of audio filed under the
-     * wrong key. Paired, that state is unrepresentable — the same reason `doc` and
-     * `spoken` are one value.
+     * wrong key. Paired, that state is unrepresentable.
      */
     clip: ClipKey
     /**
@@ -464,6 +390,12 @@ export function useSpeech(
    */
   /* Stryker disable next-line ArrowFunction,BooleanLiteral: the layout effect below writes this on every commit, before anything can read it. */
   const advanceRef = useRef<(at: number) => boolean>(() => false)
+  /* Stryker disable next-line BooleanLiteral: the same layout effect writes this on every commit, before a tap can arrive. */
+  const seekRef = useRef<(offset: number) => boolean>(() => false)
+  /** The tap listener on the section being read, while one is. */
+  const tapOff = useRef<(() => void) | null>(null)
+  /** This reading's hold on the book's pace, while it is reading. */
+  const paceHold = useRef<(() => void) | null>(null)
   /** `endReading`, committed — see `advanceRef` for why this is a ref. */
   const endRef = useRef<() => void>(() => {})
   /** `continueReading`, so `resume` can restart a walk `pause` suspended. */
@@ -512,14 +444,19 @@ export function useSpeech(
    * concurrent one it had not committed — left engine callbacks and the
    * continuation tick reading a document the tree never showed. A LAYOUT
    * effect runs after commit and before the passive document effect below, so
-   * the continuation's own ordering claim — "docRef is reassigned before that
-   * effect runs" — stays true, now of committed values only. */
+   * the continuation's own ordering claim — "sectionKeyRef is reassigned before
+   * that effect runs" — stays true, now of committed values only.
+   *
+   * ⚠️ **AND IT MAY NOT ASK `surface` ANYTHING.** This hook runs in a child of
+   * whatever commits the surface, and a child's layout effects run first: here the
+   * surface still answers for the previous commit. By the passive document effect
+   * below it answers for this one, because React flushes every layout effect of a
+   * commit before any passive one. */
   useLayoutEffect(() => {
-    docRef.current = doc
-    pagingRef.current = paging
+    sectionKeyRef.current = sectionKey
+    surfaceRef.current = surface
     prefsRef.current = prefs
     engineRef.current = engine
-    placeRef.current = place
     followsRef.current = followsWords
   })
 
@@ -552,6 +489,28 @@ export function useSpeech(
     }
   }, [])
 
+  /** Take the spoken word off the page, if a section is being read. */
+  const clearBand = useCallback(
+    () => spokenRef.current?.section.clearWord(),
+    // Stryker disable next-line ArrayDeclaration: this reads only a ref, so a constant list is a constant identity whatever is in it.
+    [],
+  )
+
+  /**
+   * Stop answering taps.
+   *
+   * ⚠️ **HELD BY THE READING, BECAUSE A TAP MEANS SOMETHING ONLY DURING ONE.** With
+   * nothing being read there is nowhere to go, so a tap does what it always did.
+   */
+  const retireTap = useCallback(
+    () => {
+      tapOff.current?.()
+      tapOff.current = null
+    },
+    // Stryker disable next-line ArrayDeclaration: this reads only a ref, so a constant list is a constant identity whatever is in it.
+    [],
+  )
+
   /* TYPED AS `SpeakerLike`, WHICH IS WHAT THE READING ACTUALLY TALKS TO. The
      inferred union `Speaker | SpeakerLike` has none of the optional members —
      the platform speaker declares no `at` and no seek — so the transport's
@@ -571,25 +530,26 @@ export function useSpeech(
        * — or the grace runs out, which is the end of the book.
        */
       const continueReading = () => {
-        removeSpokenWord(docRef.current)
+        clearBand()
+        retireTap()
         spokenRef.current = null
         turnedAt.current = null
-        const from = docRef.current
+        const from = sectionKeyRef.current
         const started = Date.now()
         const tick = () => {
           continuing.current = null
           if (!readingRef.current) return
           /* Already moved: the new document's effect is about to speak it, or
            * has. Asking `next` again here would turn its first page away before
-           * a word of it was read. `docRef` commits in the layout effect above,
-           * which runs before that document effect, so this sees the arrival
-           * first. */
-          if (docRef.current !== from) return
+           * a word of it was read. `sectionKeyRef` commits in the layout effect
+           * above, which runs before that document effect, so this sees the
+           * arrival first. */
+          if (sectionKeyRef.current !== from) return
           if (Date.now() - started >= CONTINUE_GRACE_MS) {
             finish()
             return
           }
-          pagingRef.current.next()
+          surfaceRef.current.turn(1)
           continuing.current = setTimeout(tick, CONTINUE_TICK_MS)
         }
         tick()
@@ -605,8 +565,7 @@ export function useSpeech(
           if (!current || !followsRef.current) return
           // The section changed under the utterance; the words being reported no
           // longer exist on screen.
-          if (current.doc !== docRef.current) return
-          const target = current.doc
+          if (!current.section.live()) return
           /* REBASED ONTO THE UTTERANCE — see `baseRef`. `index` counts from the
            * start of what was spoken, which is one sentence, so without its own
            * offset every sentence after the first would highlight words at the top
@@ -621,15 +580,10 @@ export function useSpeech(
           if (current.unit === 'section') {
             cursorRef.current = sentenceIndexAt(current.plan, index)
           }
-          const range = rangeAt(current.spoken, target, baseRef.current + index, length)
-          if (!range) return
-          const placed = placeOfRange(range, target)
+          const placed = current.section.paintWord(baseRef.current + index, length)
           if (!placed) return
-          // Viewport coordinates, unadjusted: `placeSpokenWord` converts into
-          // body's space, which is invariant under scrolling.
-          placeSpokenWord(target, placed.box)
 
-          if (placed.place === 'visible') {
+          if (placed === 'visible') {
             turnedAt.current = null
             /* CAUGHT UP. The reading is looking at the page the reader is, so a
                later `behind` is theirs again rather than the seek's. */
@@ -659,17 +613,12 @@ export function useSpeech(
            * The settle throttle covers both directions from the one timestamp: a
            * turn either way is a page that has just moved, and a boundary arriving
            * during the reflow must not turn it again. */
-          const turn =
-            placed.place === 'ahead'
-              ? pagingRef.current.next
-              : chasingRef.current
-                ? pagingRef.current.prev
-                : undefined
-          if (!turn) return
+          const by = placed === 'ahead' ? 1 : chasingRef.current ? -1 : null
+          if (by === null) return
           const now = Date.now()
           if (turnedAt.current !== null && now - turnedAt.current < TURN_SETTLE_MS) return
           turnedAt.current = now
-          turn()
+          surfaceRef.current.turn(by)
         },
         onDone: (reason: DoneReason) => {
           /* ⚠️ **`taken` MUST NOT CONTINUE, AND IT USED TO ARRIVE AS `ended`.**
@@ -721,7 +670,7 @@ export function useSpeech(
           // band parked on the first word for the rest of the chapter would be
           // worse than not drawing one.
           setFollowsWords(false)
-          removeSpokenWord(docRef.current)
+          clearBand()
         },
       }
 
@@ -788,8 +737,8 @@ export function useSpeech(
         () => downloaded()?.packs() ?? [],
       )
     },
-    // Stryker disable next-line ArrayDeclaration: all three are built once — `available` from an empty list, both clears from no dependency — so this list never moves.
-    [available, clearGap, clearContinuation],
+    // Stryker disable next-line ArrayDeclaration: all of these are built once — `available` from an empty list, the rest from no dependency — so this list never moves.
+    [available, clearGap, clearContinuation, clearBand, retireTap],
   )
 
   /**
@@ -835,9 +784,9 @@ export function useSpeech(
        * highlight pointing confidently at the wrong place, which is worse than
        * none. Removed here rather than in the boundary handler, because the case
        * is a sentence that produces no boundary at all. */
-      removeSpokenWord(current.doc)
+      current.section.clearWord()
       const began = speaker!.speak(
-        current.spoken.text.slice(sentence.start, sentence.end),
+        current.section.text.slice(sentence.start, sentence.end),
         current.lang,
         prefsRef.current,
       )
@@ -924,51 +873,20 @@ export function useSpeech(
    * why `start` marks the reading as under way only once this has answered.
    */
   const speakDocument = useCallback(
-    (target: Document, from = 0): boolean => {
+    (section: SpokenSection, from = 0): boolean => {
       if (!speaker) return false
-      /* THE READER'S SKIP CHOICE, from the same prefs the voice and the gaps
-         come from — so the words the reading speaks and the words the export
-         writes are decided by one value rather than two defaults. */
-      /* ⚠️ **THROUGH THE REF, AND IT WAS THE PROP — FOUND BY AN INDEPENDENT
-       * AUDIT, 2026-09-30.** This callback's dependency list is `[speaker,
-       * speakSentence]`, so the captured `prefs` is the value at the render that
-       * built it: a reader turning notes on mid-book got the old choice for every
-       * remaining section, and the `prefsRef` a dozen lines up exists for exactly
-       * this. **It is the same defect the in-app run found in `place`, in the
-       * same function, three lines apart** — which is what a second instance of
-       * one shape means: the class is "an outside value read from this closure",
-       * and the fix is the ref every other one already uses. */
-      const spoken = collectText(target, { notes: prefsRef.current.notesAloud ?? false })
-      const lang = documentLang(target)
-      /* THE LOCALE IS RESOLVED, NOT PASSED THROUGH. `sentenceSpansOf` constructs
-       * an `Intl.Segmenter` with it, and a book may declare anything at all in
-       * `dc:language` — `resolveSegmenterLocale` is the function that already
-       * answers which tags are safe to build one from, and `undefined` is its
-       * answer for a book that declares none, which the segmenter reads as "let
-       * each sentence speak for itself by script". */
-      const plan: ReadingPlan = {
-        sentences: sentenceSpansOf(spoken.text, resolveSegmenterLocale(lang)),
-        blocks: spoken.blocks,
-      }
-      /* ⚠️ **THE DIGEST IS OVER `indexText`'s CANONICAL FORM AND NOT OVER
-       * `spoken.text`.** The plan's requirement, and its reason is agreement: it
-       * is the same walk phase 31 indexes, so the audio key and the search index
-       * cannot disagree about what a section says. The digest of `spoken.text`
-       * itself is the PORT's to compute — see `SpeechRequest.clip`, which says
-       * why the two are different questions. */
-      /* THROUGH THE REF, never the prop — see `placeRef`, which records what a
-         captured `place` cost. */
-      const where = placeRef.current
+      const { lang } = section
+      const plan: ReadingPlan = { sentences: section.sentences, blocks: section.blocks }
       const clip: ClipKey = {
-        bookId: where.bookId ?? '',
+        bookId: section.bookId,
         /* ⚠️ **NO `?? -1` HERE, AND THAT SENTINEL IS WHAT BROKE READING ALOUD ON
          * A REAL MACHINE.** The plugin's `section` is a `u32`; a negative is
          * refused at the IPC boundary, so every Listen died with *"This chapter
          * could not be made into audio"* and nothing in 3 007 tests could see it
          * because every one supplied a section. Null is the honest value and the
          * key carries it — see `ClipKey.section`. */
-        section: where.sectionIndex,
-        textDigest: textDigest(canonicalTextOf(target)),
+        section: section.sectionIndex,
+        textDigest: section.digest,
       }
       /* WHICH SPEAKER IS ABOUT TO READ, asked with the same pure function
          `routedSpeaker` uses to choose — so the unit and the routing cannot
@@ -978,8 +896,17 @@ export function useSpeech(
         speakerFor(engineRef.current?.packs() ?? [], lang, prefsRef.current) === 'engine'
           ? 'section'
           : 'sentence'
-      spokenRef.current = { doc: target, spoken, plan, lang, clip, unit }
+      spokenRef.current = { section, plan, lang, clip, unit }
       turnedAt.current = null
+      /* ⚠️ **THE SECTION UNIT ONLY.** The platform speaker is handed one sentence
+       * and cannot seek inside it at all, so a tap there would report `false` and
+       * leave the reader with a gesture that silently does nothing.
+       *
+       * ⚠️ **AND BEFORE `speak`, WHICH CAN END THE READING BEFORE IT RETURNS**: see
+       * the note on `setPreparing` below. Subscribed afterwards, it would outlive
+       * the reading it belongs to. */
+      retireTap()
+      if (unit === 'section') tapOff.current = section.onTap((offset) => seekRef.current(offset))
 
       /* ⚠️ **THE WHOLE SECTION, ONCE — WHICH IS THE PHASE.** One render, kept on
        * disk, one `words` array: the sentence plan above is still built, because
@@ -1016,7 +943,7 @@ export function useSpeech(
         /* The whole text IS the utterance, so a boundary's index is already an
            offset into it. */
         baseRef.current = 0
-        return speaker.speak(spoken.text, lang, prefsRef.current)
+        return speaker.speak(section.text, lang, prefsRef.current)
       }
 
       /* ⚠️ **A SECTION WITH NO SENTENCES GOES TO THE ENGINE ANYWAY, AND SKIPPING
@@ -1035,12 +962,12 @@ export function useSpeech(
         /* The whole text IS the utterance here, so a boundary's index is already
            an offset into it. */
         baseRef.current = 0
-        return speaker.speak(spoken.text, lang, prefsRef.current)
+        return speaker.speak(section.text, lang, prefsRef.current)
       }
       return speakSentence(from)
     },
-    // Stryker disable next-line ArrayDeclaration: both follow `speaker`, which never moves — as above.
-    [speaker, speakSentence],
+    // Stryker disable next-line ArrayDeclaration: all three follow `speaker`, or nothing, and none moves — as above.
+    [speaker, speakSentence, retireTap],
   )
 
   /* COMMITTED, like the refs above, and for the same reason: the `Speaker` is
@@ -1049,11 +976,34 @@ export function useSpeech(
   useLayoutEffect(() => {
     advanceRef.current = advance
     endRef.current = endReading
+    seekRef.current = seekToOffset
   })
 
+  /**
+   * Whether a reading is under way, and with it who decides the book's pace.
+   *
+   * ⚠️ **SYNCHRONOUS, AND HELD THROUGH EVERY PAUSE AND GAP, WHICH IS WHY IT IS ONE
+   * FUNCTION WITH THE FLAG.** The book must not turn itself while a reading is
+   * between sentences, or paused and about to go on. A hold tied to `speaking`'s
+   * next render would leave a window, and one tied to the sound would open at
+   * every gap. This flag is true for exactly the reading.
+   */
+  const setReading = useCallback((reading: boolean) => {
+    readingRef.current = reading
+    if (reading) {
+      paceHold.current ??= surfaceRef.current.holdPace()
+      return
+    }
+    paceHold.current?.()
+    paceHold.current = null
+  }, [])
+
   const start = useCallback(() => {
-    const target = docRef.current
-    if (!speaker || !target) return
+    /* THE READER'S SKIP CHOICE, from the same prefs the voice and the gaps come
+       from — so the words the reading speaks and the words the export writes are
+       decided by one value rather than two defaults. */
+    const section = speaker && surfaceRef.current.speakable(skipOf(prefsRef.current))
+    if (!section) return
     clearContinuation()
     setFollowsWords(true)
     /* THE READER'S OWN LISTEN CLEARS THE LAST REFUSAL. Left standing, a sentence
@@ -1063,10 +1013,10 @@ export function useSpeech(
      * `speakDocument`: the empty case has already reported done by the time
      * `speak` returns, and a flag set afterwards would overwrite it, leaving
      * the Listen control switched on with silence behind it. */
-    const queued = speakDocument(target)
-    readingRef.current = queued
+    const queued = speakDocument(section)
+    setReading(queued)
     setSpeaking(queued)
-  }, [speaker, speakDocument, clearContinuation])
+  }, [speaker, speakDocument, clearContinuation, setReading])
 
   /**
    * The reading is over, however it ended.
@@ -1088,7 +1038,8 @@ export function useSpeech(
    */
   const endReading = useCallback(
     () => {
-      readingRef.current = false
+      setReading(false)
+      retireTap()
       heldContinuation.current = false
       clearGap()
       clearContinuation()
@@ -1101,10 +1052,10 @@ export function useSpeech(
        * and on the next Listen it would show that stale number for the whole of a
        * render, which WI-34.0 measured at 315 s. */
       setAt(null)
-      removeSpokenWord(docRef.current)
+      clearBand()
     },
-    // Stryker disable next-line ArrayDeclaration: `speaker` and the two clears are all built once — as above.
-    [speaker, clearGap, clearContinuation],
+    // Stryker disable next-line ArrayDeclaration: `speaker` and the rest are all built once — as above.
+    [speaker, clearGap, clearContinuation, clearBand, retireTap, setReading],
   )
 
   const stop = endReading
@@ -1438,7 +1389,7 @@ export function useSpeech(
          went silent with `speaking` still true and no timer left to wake it.
          Nothing is cleared unless the document is actually changing, in which
          case the document effect below takes over the reading. */
-      if (pagingRef.current.chapter?.go(by) !== true) return
+      if (!surfaceRef.current.chapter.go(by)) return
       clearGap()
       clearContinuation()
     },
@@ -1488,58 +1439,6 @@ export function useSpeech(
     setPreparing(false)
   }, [at])
 
-  /**
-   * A tap on a word in the book puts the voice there.
-   *
-   * ⚠️ **THE DIRECTION THAT WAS NOT EXPRESSIBLE BEFORE PHASE 34**, and the plan
-   * names it as one of the three seeks. An utterance used to be a SENTENCE, so an
-   * offset elsewhere in the section named a position in no buffer that existed;
-   * one buffer makes a tap a place the reading can go.
-   *
-   * ⚠️ **FOUR REFUSALS, EACH OF WHICH IS A DEFECT IF IT IS MISSED**, and they are
-   * `ReaderSession.#watchPlates`'s — this listener sits on the same document as
-   * the plates, the selection, the keys and the wheel, so it has to give way the
-   * same way:
-   *
-   * - **A link follows the link.** A footnote or a chapter reference is an `<a>`,
-   *   and navigating is what the reader asked for.
-   * - **A live selection wins.** A click that ends a drag arrives here too, so
-   *   without this every marked passage would also move the voice.
-   * - **A modified click is the platform's.** Command, Control, Shift and Alt all
-   *   mean something to macOS and to the fork.
-   * - **An already-handled click is somebody else's** — `defaultPrevented` is how
-   *   a plate and a footnote say they took it.
-   *
-   * ⚠️ **AND IT IS ONLY INSTALLED WHILE A READING IS SPEAKING**, which is what
-   * keeps it from being a gesture the reader has to know about: with nothing
-   * being read there is nowhere to go, so a tap does exactly what it always did.
-   */
-  useEffect(() => {
-    if (!speaking || !doc) return
-    const onClick = (event: MouseEvent) => {
-      if (event.defaultPrevented || event.button !== 0) return
-      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-      const target = event.target as Element | null
-      if (target && typeof target.closest === 'function' && target.closest('a')) return
-      const selection = doc.defaultView?.getSelection()
-      if (selection && !selection.isCollapsed) return
-      const current = spokenRef.current
-      /* ⚠️ **THE SECTION UNIT ONLY.** The platform speaker is handed one sentence
-       * and cannot seek inside it at all, so a tap there would report `false` and
-       * leave the reader with a gesture that silently does nothing. */
-      if (!current || current.doc !== doc || current.unit !== 'section') return
-      const at = textAtPoint(doc, event.clientX, event.clientY)
-      if (!at) return
-      const offset = offsetIn(current.spoken, at.node, at.offset)
-      /* NULL IS A REAL ANSWER: a tap on text the voice does not read — a hidden
-         note, a caption `collectText` skips — has nowhere in the sound to go. */
-      if (offset === null) return
-      seekToOffset(offset)
-    }
-    doc.addEventListener('click', onClick)
-    return () => doc.removeEventListener('click', onClick)
-  }, [speaking, doc, seekToOffset])
-
   /* The spine document changing is a step INSIDE the reading, not its end.
    *
    * Two ways it happens while the voice is going: the reading's own `next`
@@ -1548,11 +1447,13 @@ export function useSpeech(
    * screen, and the answer to both is the same: read the document that is. A
    * null document is the book closing, which is an end.
    *
-   * The cleanup takes the highlight out of the document that is LEAVING —
-   * `doc` from the closure, not `docRef.current`, which by then already names
-   * the incoming one — and does not touch the engine: the next document's
-   * `speak` cancels the old utterance itself, and stopping here is what used
-   * to make every chapter break a silence. */
+   * The surface takes the highlight out of the document that is LEAVING, because
+   * its section can no longer do it, and nothing here touches the engine: the next
+   * document's `speak` cancels the old utterance itself, and stopping here is what
+   * used to make every chapter break a silence.
+   *
+   * ⚠️ **PASSIVE, WHICH IS WHAT LETS IT ASK THE SURFACE**: see the layout effect at
+   * the top of this hook. */
   useEffect(() => {
     if (!readingRef.current) return
     clearGap()
@@ -1565,23 +1466,27 @@ export function useSpeech(
      * of releasing the speaker: pages turned under a paused voice. The flag is
      * about a walk that no longer exists. */
     heldContinuation.current = false
-    if (!doc) {
+    const section = surfaceRef.current.speakable(skipOf(prefsRef.current))
+    if (!section) {
       /* The book closing is an END, and it used to leave `paused` set and the
          band drawn in a document that was going away. */
       endReading()
       return
     }
-    const queued = speakDocument(doc)
+    const queued = speakDocument(section)
     if (queued) setSpeaking(true)
-  }, [speaker, doc, speakDocument, endReading, clearGap, clearContinuation])
+  }, [speaker, sectionKey, speakDocument, endReading, clearGap, clearContinuation])
 
-  useEffect(() => {
-    const leaving = doc
-    return () => {
-      removeSpokenWord(leaving)
+  /* `clearBand` DOES NOTHING HERE FOR A DOCUMENT THAT WAS REPLACED, WHICH IS FINE:
+   * the surface already took it out. It is what takes it out on an unmount, where
+   * the document is still on screen and nothing else will. */
+  useEffect(
+    () => () => {
+      clearBand()
       spokenRef.current = null
-    }
-  }, [doc])
+    },
+    [sectionKey, clearBand],
+  )
 
   /* Speech is a property of the window, not of the component: an utterance
    * outlives an unmount and would go on reading a book that has been closed. */
@@ -1593,16 +1498,18 @@ export function useSpeech(
     [endReading],
   )
 
-  /* READ FROM THE PROP, not from `pagingRef`: this decides what is RENDERED, so
-   * it has to be a value the render sees change. The ref exists for callbacks
-   * that need the value as of now, which is the opposite problem.
+  /* A SUBSCRIPTION, not a read through `surfaceRef`: this decides what is RENDERED,
+   * so it has to be a value the render sees change. The ref exists for callbacks
+   * that need the value as of now, which is the opposite problem. And it cannot be
+   * read once per render either, because the surface commits AFTER this child
+   * renders: it would be one commit behind until something else re-rendered it.
    *
    * MEMOISED ON THE TWO BOOLEANS rather than built inline, because `Speech` is
    * itself a memo and an object literal here would be a fresh identity on every
    * render — which would make every consumer of `Speech` re-render on every one
    * of the reading's own state changes, several a second while the voice runs. */
-  const canBack = paging.chapter?.can(-1) ?? false
-  const canForward = paging.chapter?.can(1) ?? false
+  const canBack = useSyncExternalStore(surface.chapter.subscribe, () => surface.chapter.can(-1))
+  const canForward = useSyncExternalStore(surface.chapter.subscribe, () => surface.chapter.can(1))
   const chapters = useMemo(() => ({ back: canBack, forward: canForward }), [canBack, canForward])
 
   return useMemo<Speech>(

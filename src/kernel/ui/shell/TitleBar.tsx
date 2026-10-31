@@ -520,7 +520,7 @@ interface ReadingTransportProps {
  * else", rather than the titlebar size `.action` uses.
  *
  * ⚠️ **THE CHAPTER BUTTONS ARE ABSENT, NOT DISABLED, WHERE THE BOOK CANNOT STEP
- * CHAPTERS.** `SpeechPaging.chapter` is optional because a reader can be in a
+ * CHAPTERS.** `SurfacePaging.chapter` is optional because a reader can be in a
  * spine item no contents entry points at, and there is genuinely no next chapter
  * to go to. A disabled control says "not now"; an absent one says "not here",
  * and the second is the true statement.
