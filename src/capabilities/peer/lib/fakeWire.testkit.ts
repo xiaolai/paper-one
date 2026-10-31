@@ -12,6 +12,7 @@ import type {
   PairingPending,
   PairingResult,
   PeerRole,
+  P2pAnswer,
   PeerStatus,
   PeerWire,
   SessionClosed,
@@ -227,11 +228,13 @@ class FakeWireImpl implements FakeWire {
    * on, so a test could turn the switch off and go on sending, proving a
    * shutdown nothing had performed.
    */
-  async setP2p(on: boolean): Promise<void> {
+  async setP2p(on: boolean): Promise<P2pAnswer> {
     this.p2pStored = on
-    if (on) return
-    this.closedThisRun = true
-    for (const session of this.sessions.values()) this.closeSession(session, 'closed')
+    if (!on) {
+      this.closedThisRun = true
+      for (const session of this.sessions.values()) this.closeSession(session, 'closed')
+    }
+    return { closed: this.closedThisRun, recordError: null }
   }
 
   /** `PeerState::node_at`'s gates, in its order. Every command that needs the node passes them. */

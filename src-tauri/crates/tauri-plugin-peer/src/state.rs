@@ -73,6 +73,22 @@ pub struct PeerState {
     closing: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// What setting the P2P switch did: two facts, because neither implies the other.
+///
+/// ⚠️ **THE WEBVIEW USED TO INFER THE FIRST FROM THE SECOND.** A rejected command
+/// was read as a closed transport, and a rejection can happen before any of this
+/// runs, an IPC failure say, which told the reader the connections had gone while
+/// they kept serving. A rejection now means only that this answer never arrived.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchAnswer {
+    /// This run refuses transport work from now on, and its close is under way.
+    /// The close may outlast the answer: see `SWITCH_CLOSE_DEADLINE`.
+    pub closed: bool,
+    /// Why the choice was not recorded, or `None` when it is durable.
+    pub record_error: Option<crate::error::Error>,
+}
+
 impl std::fmt::Debug for PeerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PeerState")
@@ -141,14 +157,20 @@ impl PeerState {
     /// ⚠️ **OFF CLOSES EVEN WHEN THE RECORD FAILED.** A write can fail after its
     /// rename, while syncing the directory, with the file already saying off; and
     /// a reader who asked for off wants the connections gone whatever the disk
-    /// says. So a failed Off still closes, and the error still goes back: the
-    /// webview takes any answer to an Off as the transport having closed.
-    pub async fn apply_switch(&self, root: PathBuf, on: bool) -> Result<()> {
-        let recorded = crate::commands::off_thread(move || crate::p2p::set(&root, on)).await;
+    /// says, including a data folder that would not resolve. So the two facts go
+    /// back apart: see [`SwitchAnswer`].
+    pub async fn apply_switch(&self, root: Result<PathBuf>, on: bool) -> SwitchAnswer {
+        let recorded = match root {
+            Ok(root) => crate::commands::off_thread(move || crate::p2p::set(&root, on)).await,
+            Err(unresolved) => Err(unresolved),
+        };
         if !on && !closed_within(SWITCH_CLOSE_DEADLINE, self.begin_close()).await {
             log::warn!("peer: closing after the switch went off passed its deadline");
         }
-        recorded
+        SwitchAnswer {
+            closed: self.closing.load(std::sync::atomic::Ordering::SeqCst),
+            record_error: recorded.err(),
+        }
     }
 
     /// Start the share endpoint if this device still has something offered.
@@ -411,6 +433,7 @@ mod tests {
 
     mod switch {
         use super::*;
+        use crate::error::Error;
         use crate::node::testkit::TestNode;
         use crate::role::Role;
         use crate::testutil::ScratchDir;
@@ -472,11 +495,21 @@ mod tests {
                 .await
                 .unwrap();
             state
-                .apply_switch(scratch.path().to_path_buf(), false)
+                .apply_switch(Ok(scratch.path().to_path_buf()), false)
                 .await
                 .unwrap();
             assert!(running.node.endpoint().is_closed());
             assert!(!crate::p2p::is_on(scratch.path()).unwrap());
+        }
+
+        impl SwitchAnswer {
+            /// The answer, having insisted the choice was recorded.
+            fn unwrap(self) -> Self {
+                if let Some(refused) = &self.record_error {
+                    panic!("the choice was not recorded: {refused}");
+                }
+                self
+            }
         }
 
         /// A file where the data folder should be: the write fails, as a disk
@@ -495,10 +528,44 @@ mod tests {
             let state = PeerState::default();
             state.node.set(running.node.clone()).ok().unwrap();
             let answer = state
-                .apply_switch(scratch.path().join("not-a-folder"), false)
+                .apply_switch(Ok(scratch.path().join("not-a-folder")), false)
                 .await;
-            assert!(answer.is_err(), "the failed record has to reach the reader");
+            assert!(
+                answer.record_error.is_some(),
+                "the failed record has to reach the reader"
+            );
+            assert!(answer.closed);
             assert!(running.node.endpoint().is_closed());
+        }
+
+        #[tokio::test]
+        async fn turning_off_closes_a_running_node_even_when_the_data_folder_will_not_resolve() {
+            let running = TestNode::start("state-switch-off-no-root-node", Role::Shelf).await;
+            let state = PeerState::default();
+            state.node.set(running.node.clone()).ok().unwrap();
+            let answer = state.apply_switch(Err(Error::P2pOff), false).await;
+            assert_eq!(answer.record_error.unwrap().kind(), "p2pOff");
+            assert!(answer.closed);
+            assert!(running.node.endpoint().is_closed());
+        }
+
+        #[test]
+        fn the_answer_says_both_facts_under_the_names_the_webview_reads() {
+            let recorded = SwitchAnswer {
+                closed: true,
+                record_error: None,
+            };
+            assert_eq!(
+                serde_json::to_value(&recorded).unwrap(),
+                serde_json::json!({ "closed": true, "recordError": null }),
+            );
+            let refused = SwitchAnswer {
+                closed: false,
+                record_error: Some(Error::P2pOff),
+            };
+            let answer = serde_json::to_value(&refused).unwrap();
+            assert_eq!(answer["closed"], false);
+            assert_eq!(answer["recordError"]["kind"], "p2pOff");
         }
 
         #[tokio::test]
@@ -508,9 +575,10 @@ mod tests {
             let state = PeerState::default();
             state.node.set(running.node.clone()).ok().unwrap();
             let answer = state
-                .apply_switch(scratch.path().join("not-a-folder"), true)
+                .apply_switch(Ok(scratch.path().join("not-a-folder")), true)
                 .await;
-            assert!(answer.is_err());
+            assert!(answer.record_error.is_some());
+            assert!(!answer.closed);
             assert!(!running.node.endpoint().is_closed());
         }
 
@@ -521,7 +589,7 @@ mod tests {
             let state = PeerState::default();
             state.node.set(running.node.clone()).ok().unwrap();
             state
-                .apply_switch(scratch.path().to_path_buf(), true)
+                .apply_switch(Ok(scratch.path().to_path_buf()), true)
                 .await
                 .unwrap();
             assert!(!running.node.endpoint().is_closed());
@@ -540,8 +608,8 @@ mod tests {
                 .await
                 .unwrap();
             let root = scratch.path().to_path_buf();
-            state.apply_switch(root.clone(), false).await.unwrap();
-            state.apply_switch(root, true).await.unwrap();
+            state.apply_switch(Ok(root.clone()), false).await.unwrap();
+            state.apply_switch(Ok(root), true).await.unwrap();
             let refused = state
                 .node_at(scratch.path(), || async {
                     panic!("started a second node in one run")
@@ -560,7 +628,7 @@ mod tests {
             let refused = state
                 .node_at(scratch.path(), || async {
                     state
-                        .apply_switch(scratch.path().to_path_buf(), false)
+                        .apply_switch(Ok(scratch.path().to_path_buf()), false)
                         .await
                         .unwrap();
                     Ok(running.node.clone())
@@ -592,7 +660,7 @@ mod tests {
                 })
             };
             tokio::time::sleep(Duration::from_millis(50)).await;
-            state.apply_switch(root, false).await.unwrap();
+            state.apply_switch(Ok(root), false).await.unwrap();
             finish_sweep.send(()).unwrap();
             let refused = tokio::time::timeout(Duration::from_secs(5), waiting)
                 .await
@@ -606,11 +674,11 @@ mod tests {
             let scratch = on("state-switch-share-again");
             let state = PeerState::default();
             state
-                .apply_switch(scratch.path().to_path_buf(), false)
+                .apply_switch(Ok(scratch.path().to_path_buf()), false)
                 .await
                 .unwrap();
             state
-                .apply_switch(scratch.path().to_path_buf(), true)
+                .apply_switch(Ok(scratch.path().to_path_buf()), true)
                 .await
                 .unwrap();
             let refused = state
@@ -654,7 +722,7 @@ mod tests {
                 })
             };
             tokio::time::sleep(Duration::from_millis(20)).await;
-            state.apply_switch(root, false).await.unwrap();
+            state.apply_switch(Ok(root), false).await.unwrap();
             fail_first.send(()).unwrap();
             assert_eq!(first.await.unwrap().unwrap_err().kind(), "shareRefused");
             let refused = tokio::time::timeout(Duration::from_secs(5), second)

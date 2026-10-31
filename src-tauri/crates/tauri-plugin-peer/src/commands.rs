@@ -25,7 +25,7 @@ use crate::role::{local_role, set_stored_role, Role};
 use crate::session;
 use crate::share::policy::{SharePolicy, ShareService};
 use crate::share::ContentHash;
-use crate::state::PeerState;
+use crate::state::{PeerState, SwitchAnswer};
 
 /// What `peer_status` returns.
 #[derive(Debug, Clone, Serialize)]
@@ -87,13 +87,15 @@ pub async fn peer_p2p_on<R: Runtime>(app: AppHandle<R>) -> Result<bool> {
 /// Off closes whatever is running before it returns, so the promise holds
 /// without waiting for the relaunch. On takes effect at the next launch, like
 /// the role: the webview composed itself around the switch when it started.
+/// `Result` only because Tauri requires it of an async command that borrows
+/// state: a failed record is in the answer, beside what happened to the transport.
 #[tauri::command]
 pub async fn peer_set_p2p<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, PeerState>,
     on: bool,
-) -> Result<()> {
-    state.apply_switch(data_root(&app)?, on).await
+) -> Result<SwitchAnswer> {
+    Ok(state.apply_switch(data_root(&app), on).await)
 }
 
 /// This device's role, decided in Rust.

@@ -1,4 +1,5 @@
 import { notifyAll } from '../../../kernel'
+import type { P2pAnswer } from './wire'
 
 /**
  * What the reader sees the switch called, here and on every row that follows it.
@@ -30,7 +31,7 @@ export interface P2pSwitch {
   readonly subscribeWriting: (listener: () => void) => () => void
 }
 
-export function createP2pSwitch(launchedOn: boolean, write: (on: boolean) => Promise<void>): P2pSwitch {
+export function createP2pSwitch(launchedOn: boolean, write: (on: boolean) => Promise<P2pAnswer>): P2pSwitch {
   let chosen = launchedOn
   /* Off closes the transport for the rest of the run, so a run that started on
      and went off cannot get it back by going on again: only a launch can. */
@@ -53,14 +54,12 @@ export function createP2pSwitch(launchedOn: boolean, write: (on: boolean) => Pro
       if (!queued) notifyAll(writingListeners, 'P2P switch writing')
       const landed = (async () => {
         if (queued) await ahead.catch(() => {})
-        /* A refused Off closed too (`PeerState::apply_switch`), so the row has to
-           say a launch is needed even though the answer did not change. */
-        try {
-          await write(on)
-          chosen = on
-        } finally {
-          if (launchedOn && !on) closed = true
-        }
+        /* Only what the plugin says it did. A rejection is no answer: it can come
+           before the plugin ran, with the endpoints still serving. */
+        const answer = await write(on)
+        if (launchedOn && answer.closed) closed = true
+        if (answer.recordError !== null) throw answer.recordError
+        chosen = on
         notifyAll(listeners, 'P2P switch')
       })().finally(() => {
         unfinished -= 1

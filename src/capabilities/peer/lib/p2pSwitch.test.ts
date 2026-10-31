@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createP2pSwitch } from './p2pSwitch'
+import type { P2pAnswer } from './wire'
 
-const write = async () => {}
+const write = async (on: boolean) => ({ closed: !on, recordError: null })
 
 describe('the P2P switch across one run', () => {
   it('needs nothing until the answer changes', () => {
@@ -49,8 +50,8 @@ describe('the P2P switch across one run', () => {
     const held = () => {
       const started: { on: boolean; land: () => void; refuse: () => void }[] = []
       const write = (on: boolean) =>
-        new Promise<void>((resolve, reject) => {
-          started.push({ on, land: resolve, refuse: () => reject(new Error('disk full')) })
+        new Promise<P2pAnswer>((resolve, reject) => {
+          started.push({ on, land: () => resolve({ closed: !on, recordError: null }), refuse: () => reject(new Error('disk full')) })
         })
       return { started, write }
     }
@@ -83,18 +84,33 @@ describe('the P2P switch across one run', () => {
       expect(p2p.chosen()).toBe(false)
     })
 
-    it('needs a launch after a refused Off, which closed the transport, and not after a refused On', async () => {
-      const refused = async () => {
-        throw new Error('disk full')
-      }
-      const launchedOn = createP2pSwitch(true, refused)
-      await expect(launchedOn.set(false)).rejects.toThrow('disk full')
-      expect(launchedOn.chosen()).toBe(true)
-      expect(launchedOn.needsReopen()).toBe(true)
+    it('needs a launch when the plugin says an Off closed the transport without recording it', async () => {
+      const p2p = createP2pSwitch(true, async () => ({ closed: true, recordError: new Error('disk full') }))
+      await expect(p2p.set(false)).rejects.toThrow('disk full')
+      expect(p2p.chosen()).toBe(true)
+      expect(p2p.needsReopen()).toBe(true)
+    })
 
-      const launchedOff = createP2pSwitch(false, refused)
-      await expect(launchedOff.set(true)).rejects.toThrow('disk full')
-      expect(launchedOff.needsReopen()).toBe(false)
+    /* An IPC failure, say: the endpoints are still serving, so saying "closed"
+       would tell the reader the connections had gone while they had not. */
+    it('claims no close when an Off is rejected, because that says nothing of the transport', async () => {
+      const p2p = createP2pSwitch(true, () => Promise.reject(new Error('ipc down')))
+      await expect(p2p.set(false)).rejects.toThrow('ipc down')
+      expect(p2p.chosen()).toBe(true)
+      expect(p2p.needsReopen()).toBe(false)
+    })
+
+    it('claims no close when the plugin says it did not, whatever the answer asked for', async () => {
+      const p2p = createP2pSwitch(true, async () => ({ closed: false, recordError: new Error('disk full') }))
+      await expect(p2p.set(false)).rejects.toThrow('disk full')
+      expect(p2p.needsReopen()).toBe(false)
+    })
+
+    it('needs no launch when a refused On closed nothing', async () => {
+      const p2p = createP2pSwitch(false, async () => ({ closed: false, recordError: new Error('disk full') }))
+      await expect(p2p.set(true)).rejects.toThrow('disk full')
+      expect(p2p.chosen()).toBe(false)
+      expect(p2p.needsReopen()).toBe(false)
     })
 
     it('calls the write before returning when nothing is ahead of it', () => {
