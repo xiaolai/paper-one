@@ -299,3 +299,150 @@ describe('the CLI', () => {
     expect(run.status).toBe(0)
   })
 })
+
+/*
+ * ⚠️ **A READ IS A BINDING, NOT A SPELLING.** The gate has been wrong twice about
+ * a form it did not read, so these are the forms, whole: every way a source can
+ * hold a stylesheet, and what it can do with it.
+ */
+describe('which binding a read goes through', () => {
+  const missing = (root) => undefinedClasses(root).map((u) => u.name).sort()
+  const over = (source) =>
+    fixture({ 'src/A.module.css': '.live { color: red; }\n', 'src/A.tsx': `${source}\n` })
+  const IMPORT = "import styles from './A.module.css'\n"
+
+  it.each([
+    ['a parameter', 'export const f = (styles: any) => styles.gone'],
+    ['a destructured parameter', 'export const f = ({ styles }: any) => styles.gone'],
+    ['a local in an inner block', 'export const f = () => { { const styles = {} as any; return styles.gone } }'],
+    ['a function name', 'export const f = () => { function styles() {} return (styles as any).gone }'],
+    ['a catch binding', 'export const f = () => { try { } catch (styles: any) { return styles.gone } }'],
+  ])('does not take a read through %s that shadows the import for a read of the module', (_what, body) => {
+    expect(missing(over(IMPORT + body))).toEqual([])
+  })
+
+  it('settles on a binding reassigned between stylesheets', () => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n',
+      'src/B.module.css': '.other { color: red; }\n',
+      'src/A.tsx': "import a from './A.module.css'\nimport b from './B.module.css'\nlet s = a\ns = b\nlet t = s\ns = t\nexport const f = () => [s.live, b.other]\n",
+    })
+    expect(missing(root)).toEqual([])
+  })
+
+  it('still reads the import outside the scope that shadows it', () => {
+    const root = over(`${IMPORT}export const f = (styles: any) => styles.other\nexport const g = () => styles.gone`)
+    expect(missing(root)).toEqual(['gone'])
+  })
+
+  it.each([
+    ['an optional read', `${IMPORT}export const f = () => styles?.gone`],
+    ['a template key', `${IMPORT}export const f = () => styles[\`gone\`]`],
+    ['a key in a conditional', `${IMPORT}export const f = (x: boolean) => styles[x ? 'gone' : 'live']`],
+    ['a key in a fallback', `${IMPORT}export const f = (x: any) => styles[x ?? 'gone']`],
+    ['a named default import', "import { default as s } from './A.module.css'\nexport const f = () => s.gone"],
+    ['a named import', "import { gone } from './A.module.css'\nexport const f = () => gone"],
+    ['a renamed named import', "import { gone as g } from './A.module.css'\nexport const f = () => g"],
+    ['an import assignment', "import s = require('./A.module.css')\nexport const f = () => s.gone"],
+    ['a local alias', `${IMPORT}const s = styles\nexport const f = () => s.gone`],
+    ['an alias of an alias, declared later', `${IMPORT}export const f = () => { const t = s; return t.gone }\nconst s = styles`],
+    ['an assigned alias', `${IMPORT}let s: any\ns = styles\nexport const f = () => s.gone`],
+    ['a defaulted parameter', `${IMPORT}export const f = (s = styles) => s.gone`],
+    ['a destructuring', `${IMPORT}const { gone } = styles\nexport const f = () => gone`],
+    ['a renaming destructuring', `${IMPORT}const { gone: g } = styles\nexport const f = () => g`],
+    ['a computed destructuring', `${IMPORT}const { ['gone']: g } = styles\nexport const f = () => g`],
+    ['a rest binding', `${IMPORT}const { live, ...rest } = styles\nexport const f = () => [live, rest.gone]`],
+    ['a destructuring parameter default', `${IMPORT}export const f = ({ gone } = styles) => gone`],
+    ['a destructuring assignment', `${IMPORT}let g: any\n;({ gone: g } = styles)\nexport const f = () => g`],
+  ])('reports a missing class through %s', (_what, source) => {
+    expect(missing(over(source))).toEqual(['gone'])
+  })
+
+  it.each([
+    ['a destructuring', "import styles from './A.module.css'\nconst { target } = styles\nexport const f = () => target"],
+    ['a named import', "import { target } from './A.module.css'\nexport const f = () => target"],
+    ['a conditional key', "import styles from './A.module.css'\nexport const f = (x: boolean) => styles[x ? 'target' : 'other']"],
+    ['a destructuring of what was handed in', 'export const f = ({ styles }: any) => { const { target } = styles; return target }'],
+    ['a nested destructuring of what was handed in', 'export const f = ({ styles: { target } }: any) => target'],
+    ['a renamed handing-in', 'export const f = ({ styles: s }: any) => s.target'],
+    ['a member of what was handed in', 'export const f = (props: any) => props.styles.target'],
+    ['a shadowing parameter, which is what handing in looks like', "import styles from './B.module.css'\nexport const f = (styles: any) => styles.target"],
+  ])('keeps a class alive through %s', (_what, source) => {
+    const root = fixture({
+      'src/A.module.css': '.target { color: red; }\n.other { color: red; }\n',
+      'src/B.module.css': '',
+      'src/A.tsx': `${source}\n`,
+      'src/C.tsx': "import styles from './A.module.css'\nexport const C = () => styles.other\n",
+    })
+    expect(names(root)).toEqual([])
+  })
+})
+
+/*
+ * WHAT A MODULE EXPORTS IS NOT EVERY DOT IN ITS SELECTORS. `:global` hands a class
+ * to the page: the import holds no such key, so a read of it is `undefined`.
+ */
+describe('what a stylesheet exports', () => {
+  const reading = (css, ...classes) =>
+    fixture({
+      'src/A.module.css': `${css}\n`,
+      'src/A.tsx': `import styles from './A.module.css'\nexport const A = () => [${classes.map((c) => `styles.${c}`).join(', ')}]\n`,
+    })
+  const missing = (root) => undefinedClasses(root).map((u) => u.name).sort()
+
+  it.each([
+    ['a global function', ':global(.gone) { color: red; }'],
+    ['a global function after a local class', '.live :global(.gone) { color: red; }'],
+    ['a global function holding a list', ':global(.other, .gone) { color: red; }'],
+    ['a nested paren in a global function', ':global(.other:not(.gone)) { color: red; }'],
+    ['a switch to global', ':global .gone { color: red; }'],
+    ['a switch to global after a local class', '.live :global .other .gone { color: red; }'],
+    ['a global block', ':global { .gone { color: red; } }'],
+    ['a block nested in a global block', ':global { @media (min-width: 1px) { .gone { color: red; } } }'],
+    ['an unquoted attribute value', '[href$=.gone] { color: red; }'],
+  ])('does not export a class from %s', (_what, css) => {
+    expect(missing(reading(css, 'gone'))).toEqual(['gone'])
+  })
+
+  it.each([
+    ['a local function', ':local(.target) { color: red; }'],
+    ['a local function in a global switch', ':global .other :local(.target) { color: red; }'],
+    ['a local switch', ':global .other :local .target { color: red; }'],
+    ['a selector after a comma ends a global switch', ':global .other, .target { color: red; }'],
+    ['a class beside a global function', ':global(.other) .target { color: red; }'],
+    ['a local block in a global block', ':global { :local { .target { color: red; } } }'],
+    ['a rule after a global block', ':global { .other { color: red; } }\n.target { color: red; }'],
+    ['a pseudo-class list', ':is(.other, .target) { color: red; }'],
+    ['nesting', '.other { &.target { color: red; } }'],
+    ['an escaped name', '.target\\:x, .target { color: red; }'],
+    ['an :export key', ':export { target: 1px; }'],
+    ['an @value', '@value target: 1px;'],
+  ])('exports what stands in %s', (_what, css) => {
+    expect(missing(reading(css, 'target'))).toEqual([])
+  })
+
+  it('reads an escaped class under its unescaped name', () => {
+    const root = fixture({
+      'src/A.module.css': '.a\\:b { color: red; }\n',
+      'src/A.tsx': "import styles from './A.module.css'\nexport const A = () => styles['a:b']\n",
+    })
+    expect(missing(root)).toEqual([])
+    expect(names(root)).toEqual([])
+  })
+
+  it('does not call a global class dead, because no read could ever reach it', () => {
+    const root = fixture({ 'src/A.module.css': ':global(.page) { color: red; }\n:global .also { color: red; }\n', 'src/A.tsx': 'export {}\n' })
+    expect(names(root)).toEqual([])
+  })
+
+  it('calls a local class dead wherever in a selector it stands', () => {
+    const root = fixture({
+      'src/A.module.css': '.live.orphan { color: red; }\n:is(.alsoOrphan) { color: red; }\n',
+      'src/A.tsx': "import styles from './A.module.css'\nexport const A = () => styles.live\n",
+    })
+    expect(deadClasses(root).dead.map((d) => [d.name, d.line])).toEqual([
+      ['alsoOrphan', 2],
+      ['orphan', 1],
+    ])
+  })
+})
