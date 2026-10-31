@@ -166,6 +166,67 @@ describe('every mark, for something that is about to write a file', () => {
       expect(result.current.all.map((mark) => mark.bookId)).toEqual([BOOK])
     })
 
+    /* The panel keeps the row aside and draws the rest, which is right for a
+       panel. A backup would lose that mark without a word. */
+    it('refuses to answer when a file holds a row that will not validate', async () => {
+      const store = await damaged((fs) => {
+        const row = { ...createMark(highlight()), id: 'refused-row', bookId: OTHER, sectionIndex: -1 }
+        fs.store.set(marksPathIn(OTHER), new TextEncoder().encode(JSON.stringify([row])))
+        return fs
+      })
+      const { result } = renderHook(() => useMarks(store, BOOK))
+
+      await act(async () => {
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+      })
+      expect(result.current.scanFailed).toBe(false)
+      expect(result.current.all.map((mark) => mark.bookId)).toEqual([BOOK])
+    })
+
+    /* Two scans let go together land one after the other, and the later one's
+       `publish` runs before the earlier one's caller resumes: reading the shared
+       snapshot there answered a complete scan with the partial scan's rows. */
+    describe('and a panel scan overlaps the one about to write', () => {
+      const overlapping = () => {
+        const fs = shelf()
+        let open = () => {}
+        const held = new Promise<void>((resolve) => (open = resolve))
+        const gated = {
+          ...fs,
+          readDir: async (path: string) => {
+            await held
+            return fs.readDir(path)
+          },
+        }
+        return { fs, gated, open }
+      }
+
+      it('answers with its own rows when the panel scan loses a book', async () => {
+        const { fs, gated, open } = overlapping()
+        fs.store.set(recordPath(OTHER), new TextEncoder().encode('{}'))
+        const writer = createMarkStore({ fs, queue: writeQueue() })
+        await writer.open(BOOK)
+        await writer.addMany(BOOK, [createMark(highlight())])
+        let reads = 0
+        const store = createMarkStore({
+          fs: {
+            ...gated,
+            readFile: async (path: string) => {
+              if (path === marksPathIn(BOOK) && ++reads === 2) return new TextEncoder().encode('not json')
+              return fs.readFile(path)
+            },
+          },
+          queue: writeQueue(),
+        })
+
+        const answer = store.loadAllNow()
+        const panel = store.loadAll()
+        open()
+        await expect(answer).resolves.toHaveLength(1)
+        await panel
+      })
+    })
+
     it('answers again once the file reads', async () => {
       const fs = shelf()
       fs.store.set(marksPathIn(OTHER), new TextEncoder().encode('not json'))

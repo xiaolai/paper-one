@@ -804,10 +804,11 @@ export function createMarkStore({
     return marks
   }
 
-  /* Resolves with whether the scan read everything that is there. The answer
-     is this scan's own, so an overlapping scan cannot speak for it. */
-  const scan = (): Promise<boolean> => {
-    if (!fs) return Promise.resolve(true)
+  /* Resolves with this scan's own rows, and whether they are everything that is
+     there. Together and its own, because scans overlap: the shared lists can
+     hold another scan's result by the time the caller of this one resumes. */
+  const scan = (): Promise<{ readonly rows: readonly Mark[]; readonly complete: boolean }> => {
+    if (!fs) return Promise.resolve({ rows: all, complete: true })
     let complete = true
     /* WHERE EVERY BOOK STOOD WHEN THE SCAN STARTED — see `writeGen`. Anything
        that moves between here and the result landing is newer than the scan. */
@@ -833,7 +834,9 @@ export function createMarkStore({
               ]
         scanFailed = false
         publish()
-        return complete
+        /* A row that would not validate is kept aside for the panel, and is
+           still a mark that a backup would leave out. */
+        return { rows: all, complete: complete && read.refused.length === 0 }
       })
       .catch(() => {
         // A failed scan has not established that there is nothing; it has
@@ -841,7 +844,7 @@ export function createMarkStore({
         all = []
         scanFailed = true
         publish()
-        return false
+        return { rows: EMPTY, complete: false }
       })
   }
 
@@ -877,28 +880,24 @@ export function createMarkStore({
   }
 
   const loadAllNow: MarkStore['loadAllNow'] = async () => {
-    const complete = await scan()
-    const fresh = snapshot
-    /* ⚠️ A FAILED SCAN STILL RESOLVES, so the flag is the only thing that
-     * tells it from an empty library — see `MarksScanFailed`. `loadAll`
-     * catches the scan's failure and installs `[]` on purpose, for the
-     * panel that has to draw something; this caller has to WRITE something,
-     * and an empty answer becoming a file on disk is the one outcome worth
-     * refusing. Read from the snapshot the scan just published rather than
-     * from the hook's `all`, which is a commit behind. */
-    if (fresh.scanFailed) throw new MarksScanFailed()
-    /* AND A SCAN THAT SKIPPED A DAMAGED BOOK STILL LANDS, which is right for
+    const { rows, complete } = await scan()
+    /* ⚠️ A FAILED SCAN STILL RESOLVES, so this is the only thing that tells it
+     * from an empty library — see `MarksScanFailed`. `loadAll` catches the
+     * scan's failure and installs `[]` on purpose, for the panel that has to
+     * draw something; this caller has to WRITE something, and an empty answer
+     * becoming a file on disk is the one outcome worth refusing.
+     *
+     * AND A SCAN THAT SKIPPED A DAMAGED BOOK STILL LANDS, which is right for
      * the panel and is that same empty-file trap for one book: a backup without
      * its notes, reported as done. */
     if (!complete) throw new MarksScanFailed()
-    /* BOTH CLASSES. They share a file and a store and are split at the
-       snapshot; anything that wants the whole of what a reader left in
-       their books has to put them back together. */
-    /* ⚠️ ALL THREE CLASSES. This said two, and a third arriving without
-       this line is the empty-file trap wearing a new hat: an export would
-       write a backup that silently omitted every unplaced mark, and the
-       file is not read again until the day the reader needs it. */
-    return [...fresh.all, ...fresh.allUnplaced, ...fresh.allBookmarks]
+    const fresh = project(rows, null, (live) => live.filter(isBookmark))
+    /* ⚠️ ALL THREE CLASSES. They share a file and a store and are split at the
+       projection; this said two, and a third arriving without this line is the
+       empty-file trap wearing a new hat: an export would write a backup that
+       silently omitted every unplaced mark, and the file is not read again
+       until the day the reader needs it. */
+    return [...fresh.annotations, ...fresh.unplaced, ...fresh.bookmarks]
   }
 
   const addMany: MarkStore['addMany'] = (bookId, marks) => {
