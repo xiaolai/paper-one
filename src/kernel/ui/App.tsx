@@ -78,7 +78,7 @@ import { NO_GOOD_VOICE, voiceFor } from './reader/voiceChoice'
 import { engineVoiceFor, missingPackNotice } from './reader/engineVoice'
 import { useVoicePacks } from './hooks/useVoicePacks'
 import { useVoices } from './hooks/useVoices'
-import { audiobookSourceOf, useAudiobook } from './hooks/useAudiobook'
+import { useAudiobook } from './hooks/useAudiobook'
 
 
 /**
@@ -816,28 +816,10 @@ export function App({
   }, [services, setImportNotice])
   /* The audiobook export, reachable from the command palette and nowhere else —
      see `useAudiobook` for why that is the whole surface for now. */
+  const readyBook = useSyncExternalStore(readingSurface.surface.subscribeBook, readingSurface.surface.book)
   const audiobookSource = useMemo(
-    () =>
-      audiobookSourceOf(
-        {
-          bookId: book.bookId,
-          doc: book.doc,
-          meta: book.meta,
-          toc: book.toc,
-          fixedLayout: book.fixedLayout,
-          sectionTexts: book.sectionTexts,
-        },
-        state.readingNotesAloud,
-      ),
-    [
-      book.bookId,
-      book.meta,
-      book.doc,
-      book.toc,
-      book.fixedLayout,
-      book.sectionTexts,
-      state.readingNotesAloud,
-    ],
+    () => readyBook && { ...readyBook, skip: { notes: state.readingNotesAloud } },
+    [readyBook, state.readingNotesAloud],
   )
   const audiobook = useAudiobook({
     /* The engine is macOS-only and the commands refuse elsewhere by name, so the
