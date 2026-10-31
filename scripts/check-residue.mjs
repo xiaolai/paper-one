@@ -23,11 +23,18 @@ import { isProcessEntry } from './lib/entry.mjs'
  *   - a literal with `<id>:` or `<id>.` at its start or after a slash:
  *     `sync:presence`, `/public.jsonl`;
  *   - `services.<id>`, however it is reached: `ctx['services']['circle']`,
- *     `(env.services!).circle`, `const { circle } = env.services`;
+ *     `(env.services!).circle`, `const { circle } = env.services`,
+ *     `({ services: { circle } }) => …`, `const s = env.services; s.circle`,
+ *     `(s: KernelServices) => s.circle`. See `namingsIn` for the whole of it;
  *   - `<id>` as a key of an object VALUE, however it is written: `circle: { … }`,
  *     `{ circle }`, `{ ['circle']: … }`, `circle() {}`, `get circle() {}`. A member
  *     of a type is not one, since a type holds no behaviour for a cut capability
  *     to orphan.
+ *
+ * WHAT IT CANNOT SEE: a key that is computed (`services[key]`, `'cir' + 'cle'`),
+ * services returned by a call or handed under another name and type
+ * (`getServices().circle`, `Reflect.get(services, 'circle')`), and a class member,
+ * a JSX attribute or an enum member, which are not the keys of an object value.
  *
  * A literal equal to the id and nothing more (`'circle'`) is not matched: the
  * shapes above are the ones the plan fixed, and `core/capability.ts` shows why a
@@ -84,14 +91,22 @@ function unwrapped(node) {
   return inner
 }
 
-/** `services`, `env.services`, `ctx?.services`, `ctx['services']`: an expression ending in that name. */
-function endsInServices(node) {
+/** The keys an expression can only be: `'a'`, `x ? 'a' : 'b'`, `x ?? 'a'`. Empty for anything else. */
+function literalKeys(node) {
   const inner = unwrapped(node)
-  return (
-    (ts.isIdentifier(inner) && inner.text === 'services') ||
-    (ts.isPropertyAccessExpression(inner) && inner.name.text === 'services') ||
-    (ts.isElementAccessExpression(inner) && ts.isStringLiteralLike(inner.argumentExpression) && inner.argumentExpression.text === 'services')
-  )
+  if (ts.isStringLiteralLike(inner)) return [inner.text]
+  if (ts.isConditionalExpression(inner)) return [...literalKeys(inner.whenTrue), ...literalKeys(inner.whenFalse)]
+  if (ts.isBinaryExpression(inner) && [ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken].includes(inner.operatorToken.kind)) {
+    return [...literalKeys(inner.left), ...literalKeys(inner.right)]
+  }
+  return []
+}
+
+/** A type that is the kernel's services, or is cut from them: `KernelServices`, `Pick<KernelServices, 'a'>`. */
+function namesServicesType(type) {
+  if (!ts.isTypeReferenceNode(type)) return false
+  const called = ts.isIdentifier(type.typeName) ? type.typeName.text : type.typeName.right.text
+  return called === 'KernelServices' || (type.typeArguments ?? []).some(namesServicesType)
 }
 
 /** The text of a key that says it: `a`, `'a'`, `['a']`. Null for `[a]`, which could be anything. */
@@ -100,25 +115,119 @@ function keyText(name) {
   return ts.isComputedPropertyName(name) && ts.isStringLiteralLike(name.expression) ? name.expression.text : null
 }
 
+/** Whether an object literal is the left of an assignment, so its keys read rather than write. */
+function isDestructuringTarget(literal) {
+  let node = literal
+  while (ts.isParenthesizedExpression(node.parent)) node = node.parent
+  const parent = node.parent
+  if (ts.isBinaryExpression(parent)) return parent.left === node && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+  return ts.isPropertyAssignment(parent) && parent.initializer === node && isDestructuringTarget(parent.parent)
+}
+
 const isObjectMember = (node) =>
   (ts.isPropertyAssignment(node) ||
     ts.isShorthandPropertyAssignment(node) ||
     ts.isMethodDeclaration(node) ||
     ts.isGetAccessorDeclaration(node) ||
     ts.isSetAccessorDeclaration(node)) &&
-  ts.isObjectLiteralExpression(node.parent)
+  ts.isObjectLiteralExpression(node.parent) &&
+  !isDestructuringTarget(node.parent)
+
+/** The one file, its scopes bound and nothing else: no library, no resolving. */
+function scopesOf(text, fileName) {
+  const options = { noResolve: true, noLib: true, types: [], jsx: ts.JsxEmit.Preserve, target: ts.ScriptTarget.Latest, noEmit: true }
+  const kind = fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, kind)
+  const host = {
+    ...ts.createCompilerHost(options),
+    getSourceFile: (name) => (name === fileName ? source : undefined),
+    fileExists: (name) => name === fileName,
+    readFile: (name) => (name === fileName ? text : undefined),
+    getCurrentDirectory: () => '',
+  }
+  return { source, checker: ts.createProgram([fileName], options, host).getTypeChecker() }
+}
 
 /**
  * Every naming of an id in one file's text: `{ id, match }`, one per occurrence.
  * `match` is what a row quotes: the literal's whole text, `services.<id>`, or
  * `<id>:`.
+ *
+ * WHAT HOLDS THE SERVICES IS A BINDING, and the compiler's scopes say which. It is
+ * an expression ending in the name, a binding of the kernel's services type, or
+ * whatever was filled from one of those: by a declaration, a default, an assignment
+ * or a pattern. In a pattern over the services every key is a naming and the rest is
+ * another holder; in a pattern over anything else a `services` key is one, at any
+ * depth. Run until nothing changes, because an alias can be written above the one
+ * it copies.
  */
 export function namingsIn(text, fileName, ids) {
   const known = new Set(ids)
   const found = []
   const inLiteral = ids.map((id) => ({ id, shape: new RegExp(`(?:^|/)${id}(?:[:./]|$)`) }))
-  const kind = fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, kind)
+  const { source, checker } = scopesOf(text, fileName)
+
+  const holders = new Set()
+  /* A pattern is met again on every pass, and a key is one naming however often. */
+  const named = new Set()
+  let changed = false
+
+  const hold = (identifier) => {
+    const symbol = checker.getSymbolAtLocation(identifier)
+    if (symbol === undefined || holders.has(symbol)) return
+    holders.add(symbol)
+    changed = true
+  }
+  const name = (key, at) => {
+    if (key === null || !known.has(key) || named.has(at)) return
+    named.add(at)
+    found.push({ id: key, match: `services.${key}` })
+  }
+  const isServices = (node) => {
+    const inner = unwrapped(node)
+    if (ts.isIdentifier(inner)) return inner.text === 'services' || holders.has(checker.getSymbolAtLocation(inner))
+    if (ts.isPropertyAccessExpression(inner)) return inner.name.text === 'services'
+    return ts.isElementAccessExpression(inner) && literalKeys(inner.argumentExpression).includes('services')
+  }
+  /** A binding name or an assignment target that takes the services. */
+  const takeServices = (target) => {
+    if (ts.isIdentifier(target)) hold(target)
+    else if (ts.isObjectBindingPattern(target)) {
+      for (const element of target.elements) {
+        if (element.dotDotDotToken) takeServices(element.name)
+        else name(keyText(element.propertyName ?? element.name), element)
+      }
+    } else if (ts.isObjectLiteralExpression(target)) {
+      for (const member of target.properties) {
+        if (ts.isSpreadAssignment(member)) takeServices(unwrapped(member.expression))
+        else name(keyText(member.name), member)
+      }
+    }
+  }
+
+  const flows = []
+  const servicesKeys = []
+  const typed = []
+  const scanForScopes = (node) => {
+    if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) {
+      if (node.initializer) flows.push([node.name, node.initializer])
+    }
+    if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && node.type && namesServicesType(node.type)) typed.push(node.name)
+    if (ts.isBindingElement(node) && !node.dotDotDotToken && keyText(node.propertyName ?? node.name) === 'services') servicesKeys.push(node.name)
+    if (ts.isPropertyAssignment(node) && ts.isObjectLiteralExpression(node.parent) && isDestructuringTarget(node.parent) && keyText(node.name) === 'services') {
+      servicesKeys.push(unwrapped(node.initializer))
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) flows.push([unwrapped(node.left), node.right])
+    ts.forEachChild(node, scanForScopes)
+  }
+  scanForScopes(source)
+
+  do {
+    changed = false
+    for (const target of servicesKeys) takeServices(target)
+    for (const target of typed) takeServices(target)
+    for (const [target, from] of flows) if (isServices(from)) takeServices(target)
+  } while (changed)
 
   const visit = (node) => {
     const literal = literalText(node)
@@ -128,18 +237,9 @@ export function namingsIn(text, fileName, ids) {
         if (literal !== id && shape.test(literal)) found.push({ id, match: literal })
       }
     }
-    if (ts.isPropertyAccessExpression(node) && known.has(node.name.text) && endsInServices(node.expression)) {
-      found.push({ id: node.name.text, match: `services.${node.name.text}` })
-    }
-    if (ts.isElementAccessExpression(node) && endsInServices(node.expression) && ts.isStringLiteralLike(node.argumentExpression)) {
-      const id = node.argumentExpression.text
-      if (known.has(id)) found.push({ id, match: `services.${id}` })
-    }
-    if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer && endsInServices(node.initializer)) {
-      for (const element of node.name.elements) {
-        const id = keyText(element.propertyName ?? element.name)
-        if (id !== null && known.has(id)) found.push({ id, match: `services.${id}` })
-      }
+    if (ts.isPropertyAccessExpression(node) && isServices(node.expression)) name(node.name.text, node)
+    if (ts.isElementAccessExpression(node) && isServices(node.expression)) {
+      for (const key of literalKeys(node.argumentExpression)) if (known.has(key)) found.push({ id: key, match: `services.${key}` })
     }
     if (isObjectMember(node)) {
       const key = keyText(node.name)
