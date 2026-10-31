@@ -81,7 +81,7 @@ export { messageOf } from './core/messageOf'
 /* How a voice pack's size is spelled for a reader. ONE formatter: the
    Listen control's notice and the Voices pane both say a pack's size, and
    their two copies had already drifted apart at 1 023.6 MiB. */
-export { packArrived, packSize } from './ui/reader/engineVoice'
+export { packArrived, packSize } from './core/packSize'
 /* The digest a rendered section is keyed by. Exported for the voices
    capability's port, which is the one place a `spokenDigest` is computed —
    see `SpeechRequest.clip`. */

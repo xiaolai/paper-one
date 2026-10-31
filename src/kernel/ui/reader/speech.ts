@@ -47,7 +47,8 @@
  * the user agent would be wrong on the engines that do support it.
  */
 
-import { DEFAULT_SPEECH_SKIP, speechSkip, type SpeechSkipPrefs } from './speechSkip'
+import type { SpeechSkipPrefs } from '../../core/ports'
+import { DEFAULT_SPEECH_SKIP, speechSkip } from './speechSkip'
 import {
   blockAncestor,
   frameBoxInHost,

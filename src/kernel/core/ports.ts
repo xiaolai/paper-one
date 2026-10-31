@@ -371,6 +371,55 @@ export interface ClipUsage {
 }
 
 /**
+ * What a listener has chosen to hear, for the parts that are theirs to choose.
+ *
+ * ONE FIELD, because one entry in the skippability vocabulary is content this
+ * app currently suppresses. EPUB Media Overlays names a dozen more — `sidebar`,
+ * `marginalia`, `table`, `list` — and none of those is suppressed here at all,
+ * so there is nothing for a preference to govern yet. A field per spec entry
+ * would be twelve switches over one behaviour.
+ */
+export interface SpeechSkipPrefs {
+  /** Read a footnote or endnote BODY where the book leaves one on the page. */
+  readonly notes: boolean
+}
+
+/** One section's readable text, as `ReaderSession.sectionTexts` answers it. */
+export interface SectionText {
+  readonly index: number
+  /** The table of contents' own label for this section, where it has one. */
+  readonly title: string | null
+  readonly text: string
+  /**
+   * A digest of the section's CANONICAL text — see `clipKey.textDigest`.
+   *
+   * Carried so the export can ask the rendered-reading store for audio the reader
+   * has already heard, instead of rendering the chapter a second time.
+   */
+  readonly textDigest: string
+}
+
+/**
+ * What a walk of the spine's text produced, and whether it finished.
+ *
+ * ⚠️ **`complete` EXISTS BECAUSE A PARTIAL WALK USED TO BE INDISTINGUISHABLE FROM
+ * A WHOLE ONE.** `sectionTexts` stops when the book closes, is replaced, or the
+ * caller asks — and it returned a bare array either way, so the audiobook export
+ * shipped a truncated book as a finished one. That is the same failure
+ * `narrate_render` records for an empty buffer mid-stream: a complete-looking file
+ * with a fraction of the book in it, and no error anywhere.
+ *
+ * `reanchorUnplaced` in this same class already answers this way, and its comment
+ * gives the rule: *"Nothing was looked at, so nothing has been established."* A
+ * walk that did not finish has established nothing about the sections it never
+ * reached.
+ */
+export interface SectionTextWalk {
+  readonly sections: readonly SectionText[]
+  readonly complete: boolean
+}
+
+/**
  * The downloadable voices: what may be had, getting one, and reading with it.
  *
  * ⚠️ **BOUND BY A CAPABILITY, ABSENT ON A HOST WITHOUT ONE**, like the size and

@@ -44,6 +44,7 @@
  * So the answer is three-valued rather than a boolean.
  */
 
+import type { SpeechSkipPrefs } from '../../core/ports'
 import { ariaRoles, epubTypes } from './epubSemantics'
 
 export type SpeechSkip =
@@ -176,20 +177,6 @@ const NEVER_SPOKEN_TYPES = typesOf(NEVER_SPOKEN)
 const NEVER_SPOKEN_ROLES = rolesOf(NEVER_SPOKEN)
 const NOTE_BODY_TYPES = typesOf(NOTE_BODIES)
 const NOTE_BODY_ROLES = rolesOf(NOTE_BODIES)
-
-/**
- * What a listener has chosen to hear, for the parts that are theirs to choose.
- *
- * ONE FIELD, because one entry in the skippability vocabulary is content this
- * app currently suppresses. EPUB Media Overlays names a dozen more — `sidebar`,
- * `marginalia`, `table`, `list` — and none of those is suppressed here at all,
- * so there is nothing for a preference to govern yet. A field per spec entry
- * would be twelve switches over one behaviour.
- */
-export interface SpeechSkipPrefs {
-  /** Read a footnote or endnote BODY where the book leaves one on the page. */
-  readonly notes: boolean
-}
 
 /**
  * What a reading does when nobody has said otherwise.

@@ -3,13 +3,12 @@ import {
   engineVoiceFor,
   installedPacksFor,
   missingPackNotice,
-  packArrived,
-  packSize,
   packVoiceOf,
   packsFor,
   qualify,
   unqualify,
 } from './engineVoice'
+import { packArrived, packSize } from '../../core/packSize'
 import type { VoicePack } from '../../core/ports'
 
 function pack(over: Partial<VoicePack> = {}): VoicePack {
