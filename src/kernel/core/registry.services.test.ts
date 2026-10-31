@@ -206,6 +206,22 @@ describe('what a capability is handed, and what is said when one fails', () => {
     composition.dispose()
   })
 
+  it('skips a dependant of an unavailable capability, and reports that as a failure of the dependant', async () => {
+    /* TODAY'S BEHAVIOUR, NAMED SO THAT THE CHANGE TO IT IS VISIBLE: the capability
+       that answered `false` is no failure, and the one that required it is. */
+    const said: { event: string; fields: Record<string, unknown> }[] = []
+    const base = api()
+    const loud = { ...base, diagnostics: { ...base.diagnostics, error: (event: string, fields: Record<string, unknown>) => void said.push({ event, fields }) } }
+    const start = vi.fn(() => ({ dispose: () => {} }))
+    const unavailable: Capability = { id: 'peer', available: () => false, start }
+    const dependant: Capability = { id: 'circle', requires: ['peer'], start }
+    const composition = await composeCapabilities([unavailable, dependant], loud as never, signal())
+    expect(start).not.toHaveBeenCalled()
+    expect(composition.failures.map((one) => [one.id, one.kind])).toEqual([['circle', 'requires-failed']])
+    expect(said.map((one) => one.fields)).toEqual([expect.objectContaining({ capability: 'circle', kind: 'requires-failed', because: 'peer' })])
+    composition.dispose()
+  })
+
   it('starts a capability that says it is available', async () => {
     const start = vi.fn(() => ({ dispose: () => {} }))
     const composition = await composeCapabilities([{ id: 'circle', available: () => true, start }], api(), signal())

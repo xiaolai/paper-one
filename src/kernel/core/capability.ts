@@ -410,8 +410,13 @@ export interface Capability {
   readonly requires?: readonly string[]
   /**
    * Asked at composition, before `start`: a `false` leaves this capability out
-   * of this run exactly as a build that never composed it, and that is not a
-   * failure. One that throws is a failure, and the capability is left out too.
+   * of this run and is not a failure for it. One that throws is a failure, and
+   * the capability is left out too.
+   *
+   * ⚠️ **NOT "AS IF NEVER COMPOSED", FOR A CAPABILITY THAT REQUIRES THIS ONE.** A
+   * dependant is skipped as `requires-failed` and reported as a failure, whereas
+   * a build that never composed the dependency is refused by name before anything
+   * starts. No composed capability requires one that can answer `false` today.
    */
   available?(): boolean | Promise<boolean>
   readonly panes?: readonly PaneContribution[]

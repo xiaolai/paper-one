@@ -7800,6 +7800,7 @@
     "src/kernel/core/registry.services.test.ts > what a capability is handed, and what is said when one fails > leaves out a capability that cannot say, and reports it",
     "src/kernel/core/registry.services.test.ts > what a capability is handed, and what is said when one fails > leaves out a capability that says it is unavailable, without starting it or calling it a failure",
     "src/kernel/core/registry.services.test.ts > what a capability is handed, and what is said when one fails > reports a failure under its event, naming the capability it depended on when that is why",
+    "src/kernel/core/registry.services.test.ts > what a capability is handed, and what is said when one fails > skips a dependant of an unavailable capability, and reports that as a failure of the dependant",
     "src/kernel/core/registry.services.test.ts > what a capability is handed, and what is said when one fails > starts a capability that says it is available",
     "src/kernel/core/registry.services.test.ts > what a capability is handed, and what is said when one fails > starts a capability with the kernel’s services, its settings and its diagnostics in hand",
     "src/kernel/core/relativeTime.test.ts > relativeTime > carries the year for anything older than one",
