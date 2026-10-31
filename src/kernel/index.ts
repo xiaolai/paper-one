@@ -266,7 +266,6 @@ export {
 } from './core/diagnosticsLog'
 export type { DiagnosticEntry, DiagnosticLog, DiagnosticSpool } from './core/diagnosticsLog'
 export { CAPABILITY_UI, type CapabilityUiClass } from './core/capabilityUi'
-export { inlineQrSvg } from './core/qrSvg'
 /* ⚠️ **`core/capabilitySession.ts` AND `core/renderSlot.ts` ARE DELETED**, with
  * the clauses that re-exported them. `openSession` released everything a
  * capability's `start` acquired; `createRenderSlot` was a STACK for the value a

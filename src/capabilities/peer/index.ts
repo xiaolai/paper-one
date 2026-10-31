@@ -857,6 +857,7 @@ export type {
  * format — every one of them a shape a consumer could pin and a refactor could
  * then break. Anything inside the capability imports `./lib/envelope`
  * directly, which is where its own tests get them. */
+export { inlineQrSvg } from './lib/qrSvg'
 export { ServiceCallError } from './lib/envelope'
 export type { ServiceError } from './lib/envelope'
 export type { CallOptions, Client, ClientOptions, Frame, FrameKind, Router, RouterConnection, RouterOptions } from './lib/envelope'

@@ -1,5 +1,6 @@
 import { useState, useSyncExternalStore } from 'react'
-import { CAPABILITY_UI as ui, inlineQrSvg, messageOf } from '../../../kernel'
+import { CAPABILITY_UI as ui, messageOf } from '../../../kernel'
+import { inlineQrSvg } from '../lib/qrSvg'
 import type { P2pSwitch } from '../lib/p2pSwitch'
 import type { DevicesModel } from './devicesModel'
 import {
