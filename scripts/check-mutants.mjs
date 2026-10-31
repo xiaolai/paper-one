@@ -3397,7 +3397,7 @@ function isInstalled(specifier, root) {
  * ⚠️ **THE WIDENED SWEEP HAD NO BOUND, AND A CI STEP HAS ONE** (2026-09-17). It
  * costs a whole extra sweep of the file, plus that sweep's settle run: measured
  * on `session.ts`, 31 and 30 minutes against a 12-minute narrow run. On the
- * heaviest subject this gate has — itself, estimated at 179 to 357 minutes for ONE
+ * heaviest subject this gate has — itself, about 545 minutes for ONE
  * plain pass — starting a second one unbounded is how a 345-minute step ends
  * with no answer at all, which is worse than the wrong answer it was trying to
  * correct.
