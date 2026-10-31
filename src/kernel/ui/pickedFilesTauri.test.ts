@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { open, save } from '@tauri-apps/plugin-dialog'
-import { readTextFile, stat, writeTextFile } from '@tauri-apps/plugin-fs'
 import { tauriFilePicker } from './pickedFilesTauri'
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }))
-vi.mock('@tauri-apps/plugin-fs', () => ({ readTextFile: vi.fn(), stat: vi.fn(), writeTextFile: vi.fn() }))
+/* HELD HERE AND NOT IMPORTED, because only the adapter may name the fs plugin
+   (`no-direct-fs-plugin-outside-storage`), its test included. */
+const { readTextFile, stat, writeTextFile } = vi.hoisted(() => ({ readTextFile: vi.fn(), stat: vi.fn(), writeTextFile: vi.fn() }))
+vi.mock('@tauri-apps/plugin-fs', () => ({ readTextFile, stat, writeTextFile }))
 
 const FILTERS = [{ name: 'Paper tags', extensions: ['json'] }]
 
