@@ -718,7 +718,11 @@ export function parseArchive(raw: string): MarksArchive | null {
     : []
   const looseCards = looseRows.flatMap((raw): LooseCard[] => {
     const card = parseCard(raw)
-    return card ? [{ bookId: str((raw as Record<string, unknown>)['bookId'], 200), ...card }] : []
+    const bookId = card ? (raw as Record<string, unknown>)['bookId'] : null
+    /* An EMPTY id is a card that really has no book, and reads back as written. An id
+       that is not a string is a broken row: read as empty, it would turn a card the
+       file placed on a book into a free-standing one. */
+    return card && typeof bookId === 'string' ? [{ bookId: str(bookId, 200), ...card }] : []
   })
   return { version: 1, books, ...(looseCards.length > 0 ? { looseCards } : {}) }
 }

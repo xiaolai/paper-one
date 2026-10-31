@@ -1062,6 +1062,20 @@ describe('cards with no book on this shelf', () => {
     expect(parseArchive(JSON.stringify({ version: 1, books: [], looseCards: [row] }))?.looseCards?.[0]?.bookId).toHaveLength(200)
   })
 
+  /* The empty id means a card that really has no book, so a broken id read as empty
+     would import a card as free-standing that the file said belonged somewhere. */
+  it.each([
+    ['a number', 7],
+    ['null', null],
+    ['a list', ['b']],
+    ['an object', { id: 'b' }],
+    ['missing', undefined],
+  ])('refuses a loose card whose book id is %s, and keeps the row beside it', (_shape, bookId) => {
+    const row = { bookId: 'x', kind: 'Idea', body: 'good', answer: '', source: '', createdAt: '2026-01-01T00:00:00.000Z', localAnchor: null }
+    const parsed = parseArchive(JSON.stringify({ version: 1, books: [], looseCards: [{ ...row, body: 'broken', bookId }, row] }))
+    expect(parsed?.looseCards?.map((card) => [card.bookId, card.body])).toEqual([['x', 'good']])
+  })
+
   it('a card that really has no book reads back with the empty id it was written with', () => {
     const doc = exportMarks([], [], [CARD({ id: 'none', bookId: '', body: 'Free standing' })])
     expect(parseArchive(JSON.stringify(doc))?.looseCards?.[0]).toMatchObject({ bookId: '', body: 'Free standing' })
