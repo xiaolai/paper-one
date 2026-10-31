@@ -107,6 +107,20 @@ describe('a section is bound to the document it was made from', () => {
     expect(section.live()).toBe(true)
   })
 
+  it('cuts Chinese into sentences, with no spaces to help', () => {
+    /* Chinese has no word gaps, so what a band and a tap can rely on is the
+       sentence the segmenter finds and the offset into the text. */
+    const one = page('<p>第一句话。第二句话！第三句话？</p>', 'zh-Hans')
+    const section = createReadingSurface(source(one.doc)).surface.speakable(NO_NOTES)!
+    expect(section.lang).toBe('zh-Hans')
+    expect(section.sentences.map(({ start, end }) => section.text.slice(start, end).trim())).toEqual([
+      '第一句话。',
+      '第二句话！',
+      '第三句话？',
+    ])
+    expect(section.digest).toBe(textDigest(canonicalTextOf(one.doc)))
+  })
+
   it('names no book until the hash resolves, and no section where the place cannot', () => {
     /* ⚠️ **NULL, AND NOT A SENTINEL**: a negative index is what `ClipKey.section`
        records killing every Listen. */

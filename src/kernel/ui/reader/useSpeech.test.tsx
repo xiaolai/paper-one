@@ -3140,6 +3140,19 @@ describe('the transport pressed when there is nothing to press it on', () => {
  * ⚠️ **WHAT THE SURFACE ADDED TO A READING, WHICH THE CASES ABOVE COULD NOT ASK**:
  * they were written before a reading held anything or listened through a section.
  */
+describe('a reading in Chinese', () => {
+  it('speaks a sentence at a time in the language of the section, and goes on to the next', () => {
+    const a = section('第一句话。第二句话。', 'zh-Hans')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    expect(spoken()).toEqual(['第一句话。'])
+    expect(synth.queued[0]?.lang).toBe('zh-Hans')
+    ends()
+    expect(spoken()).toEqual(['第一句话。', '第二句话。'])
+    a.remove()
+  })
+})
+
 describe('the pace a reading holds', () => {
   it('is taken by the Listen itself, not by the render after it', () => {
     const a = section('Bonjour le monde.')
