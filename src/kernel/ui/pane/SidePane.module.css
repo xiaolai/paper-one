@@ -140,6 +140,10 @@
   color: var(--muted);
 }
 
+.panelMeta:empty {
+  display: none;
+}
+
 .filters {
   display: flex;
   gap: var(--space-6);

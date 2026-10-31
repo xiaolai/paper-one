@@ -1998,3 +1998,95 @@ describe('a note editor, while its writes are out', () => {
     expect(written(), 'an editor that had gone went on writing').toEqual(['refused at the close'])
   })
 })
+
+describe('what a mark control is given', () => {
+  it('draws one placed among the actions in the row’s action buttons and not under the note', () => {
+    draw({
+      all: [ANNOTATION()],
+      markControls: [
+        { id: 'cap:under', render: () => <button type="button">under</button> },
+        { id: 'cap:action', place: 'actions', render: () => <button type="button">action</button> },
+      ],
+    })
+    const action = screen.getByRole('button', { name: 'action' })
+    const under = screen.getByRole('button', { name: 'under' })
+    /* The row's source line holds the actions, and the under-the-note control is
+       above that line. */
+    expect(action.closest('[data-mark-control]')?.getAttribute('data-mark-control')).toBe('cap:action')
+    expect(action.closest('[data-mark-control]')?.parentElement?.className).toMatch(/rowActions/u)
+    expect(under.closest('[data-mark-control]')?.parentElement?.className ?? '').not.toMatch(/rowActions/u)
+  })
+
+  it('keeps a placed control from taking the row with it when it throws', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    draw({
+      all: [ANNOTATION()],
+      markControls: [{ id: 'cap:action', place: 'actions', render: () => { throw new Error('port gone') } }],
+    })
+    expect(screen.getByText(/A mark control could not be drawn/u)).toBeTruthy()
+    expect(rowFor('call me ishmael')).toBeTruthy()
+    spy.mockRestore()
+  })
+
+  /* #128, HELD AT THE SEAM: a control moved out of this file must still read the
+     words the reader just typed, before the store has answered. */
+  it('hands over the note just written, before the list has caught up with it', () => {
+    let noted: string | undefined
+    const control: MarkControl = {
+      id: 'cap:note',
+      place: 'actions',
+      render: (mark, tools) => (
+        <button type="button" onClick={() => { noted = tools.noteAsWritten(mark).note }}>
+          press
+        </button>
+      ),
+    }
+    const at = (current: string) => (
+      <Marginalia
+        marks={marksView({ all: [ANNOTATION({ id: 'm1', bookId: 'other-book', note: current })] })}
+        bookId="open-book"
+        platform="macos"
+        focus={{ id: 'm1', edit: true, nonce: 1 }}
+        markControls={[control]}
+      />
+    )
+    const view = render(at('the old note'))
+    const field = screen.getByPlaceholderText('Write a note')
+    fireEvent.change(field, { target: { value: 'the new note' } })
+    fireEvent.blur(field)
+    fireEvent.click(screen.getByRole('button', { name: 'press' }))
+    expect(noted).toBe('the new note')
+    /* And a later note from elsewhere wins, once the row has moved on. */
+    view.rerender(at('from another device'))
+    fireEvent.click(screen.getByRole('button', { name: 'press' }))
+    expect(noted).toBe('from another device')
+  })
+
+  it('draws a notice once over the list, however many rows, and not over an empty one', () => {
+    const control: MarkControl = { id: 'cap:note', render: () => null, notice: () => <span>not saving</span> }
+    draw({ all: [ANNOTATION(), ANNOTATION({ id: 'm2', text: 'another passage' })], markControls: [control] })
+    expect(screen.getAllByText('not saving')).toHaveLength(1)
+    cleanup()
+    draw({ all: [ANNOTATION()], markControls: [control] })
+    expect(document.querySelector('[data-mark-control-notice]')?.getAttribute('data-mark-control-notice')).toBe('cap:note')
+    cleanup()
+    draw({ markControls: [control] })
+    expect(screen.queryByText('not saving')).toBeNull()
+  })
+
+  it('draws no notice for a control with none, or one that answers nothing', () => {
+    draw({ all: [ANNOTATION()], markControls: [{ id: 'cap:note', render: () => null }] })
+    expect(document.querySelector('[data-mark-control-notice]')).toBeNull()
+    cleanup()
+    draw({ all: [ANNOTATION()], markControls: [{ id: 'cap:note', render: () => null, notice: () => null }] })
+    expect(document.querySelector('[data-mark-control-notice]')?.childElementCount).toBe(0)
+  })
+
+  it('keeps a throwing notice from taking the panel with it', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    draw({ all: [ANNOTATION()], markControls: [{ id: 'cap:note', render: () => null, notice: () => { throw new Error('gone') } }] })
+    expect(screen.getByText(/A mark control could not be drawn/u)).toBeTruthy()
+    expect(rowFor('call me ishmael')).toBeTruthy()
+    spy.mockRestore()
+  })
+})

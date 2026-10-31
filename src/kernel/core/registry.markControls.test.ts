@@ -44,7 +44,7 @@ describe('a mark control, through the composition', () => {
       api(),
       signal(),
     )
-    const rendered = composition.markControls[0]!.render({ id: 'm1' } as never)
+    const rendered = composition.markControls[0]!.render({ id: 'm1' } as never, { noteAsWritten: (mark) => mark })
     expect(rendered).toBe('drawn')
     expect(seen).toEqual(['m1'])
     composition.dispose()

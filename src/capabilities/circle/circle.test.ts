@@ -838,7 +838,7 @@ describe('the share control contribution — WI-23.A1', () => {
     /* A row rendered before `start`, or after `dispose`, must not hold a port
        into a filesystem the run no longer owns. The control draws nothing
        for a null port, which is the honest rendering. */
-    const element = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as {
+    const element = shareControl()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as {
       readonly props: { readonly port: unknown; readonly mark: { readonly id: string } }
     }
     expect(element.props.port).toBeNull()
@@ -860,14 +860,14 @@ describe('the share control contribution — WI-23.A1', () => {
       } as never,
       new AbortController().signal,
     ) as { dispose(): void }
-    const during = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }
+    const during = shareControl()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as { readonly props: { readonly port: unknown } }
     expect(during.props.port).not.toBeNull()
     /* ONE port per run: two rows share it, so the effect each keys on it
        does not re-read the store on every render. */
-    const again = shareControl()?.render({ id: 'm2', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }
+    const again = shareControl()?.render({ id: 'm2', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as { readonly props: { readonly port: unknown } }
     expect(again.props.port).toBe(during.props.port)
     disposable.dispose()
-    const after = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }
+    const after = shareControl()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as { readonly props: { readonly port: unknown } }
     expect(after.props.port).toBeNull()
   })
 
@@ -889,7 +889,7 @@ describe('the share control contribution — WI-23.A1', () => {
       new AbortController().signal,
     ) as { dispose(): void }
     try {
-      const element = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as {
+      const element = shareControl()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as {
         readonly props: { readonly port: { state(mark: unknown): Promise<unknown>; share(mark: unknown, note: boolean): Promise<void> } }
       }
       const mark = { id: 'm1', bookId: BOOK, text: 'q', prefix: '', suffix: '', chapter: '', note: '' }
@@ -1626,9 +1626,9 @@ describe('the disposer on the kernel’s stack — round 3 #97', () => {
     )
     expect(cleanups).toHaveLength(1)
     const control = () => circle.markControls?.find((one) => one.id === 'circle:share')
-    expect((control()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }).props.port).not.toBeNull()
+    expect((control()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as { readonly props: { readonly port: unknown } }).props.port).not.toBeNull()
     cleanups[0]!()
-    expect((control()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }).props.port).toBeNull()
+    expect((control()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as { readonly props: { readonly port: unknown } }).props.port).toBeNull()
   })
 })
 

@@ -298,7 +298,34 @@ export interface MarkControl {
   /** `<capability>:<name>`, like a pane — so an id says who owns it. */
   readonly id: `${string}:${string}`
   /** The element for THIS mark — a highlight, never a companion annotation. Called on every render of the row. */
-  render(mark: Highlight): unknown
+  render(mark: Highlight, tools: MarkControlTools): unknown
+  /**
+   * Where on the row. Absent is under the note; `'actions'` is the row's own
+   * action buttons, beside delete, for a control that is one icon and not a
+   * sentence.
+   */
+  readonly place?: 'actions'
+  /**
+   * A line over the list, for something every row's control has in common and
+   * no row should repeat. Null draws nothing. Not drawn while the list is empty,
+   * since then no control is there for it to be about.
+   */
+  notice?(): unknown
+}
+
+/** What the marks panel knows about a row and the row's `mark` cannot say. */
+export interface MarkControlTools {
+  /**
+   * This mark with the note the reader last typed, whether or not the store has
+   * answered yet.
+   *
+   * ⚠️ **READ AT THE CLICK, NOT THE RENDER (#128).** The pointer going down on a
+   * control blurs the note editor, which saves, and that write lands only after
+   * the click. So the mark the control was drawn with holds the OLD note at the
+   * moment a press reads it, and whatever it builds from `mark.note` loses the
+   * words the reader just typed. Only the panel holds what was written.
+   */
+  noteAsWritten(mark: Highlight): Highlight
 }
 
 export interface BookAction {

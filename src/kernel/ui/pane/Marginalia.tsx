@@ -39,11 +39,27 @@ const UNPLACED_TITLE = 'From another edition of this book — Paper has not foun
 import { onBeforeClose } from '../../core/beforeClose'
 import { relativeTime } from '../../core/relativeTime'
 import type { CardsView } from '../hooks/useCards'
-import type { MarkControl } from '../../core/capability'
+import type { MarkControl, MarkControlTools } from '../../core/capability'
 
 /* The context a mark control's contribution is drawn under: the open book, which the control's own render never reads — it is handed the mark. */
 // Stryker disable next-line ObjectLiteral,ArrowFunction: no control reads the context, so what it holds — or that it is nothing — cannot be seen.
 const controlContext = (bookId: string | null): { readonly bookId: string | null } => ({ bookId })
+
+/**
+ * A control's line over the list, or nothing.
+ *
+ * THE WRAPPER IS ALWAYS HERE, and `.panelMeta:empty` is what stops it being a
+ * blank line: a notice is free to be a component that subscribes to its store and
+ * draws nothing while there is nothing to say, so whether anything was drawn is
+ * not known at this level.
+ */
+function ControlNotice({ id, notice, bookId }: { readonly id: string; readonly notice: () => unknown; readonly bookId: string | null }) {
+  return (
+    <div className={styles.panelMeta} data-mark-control-notice={id}>
+      <ContributionBody id={id} render={() => notice()} context={controlContext(bookId)} />
+    </div>
+  )
+}
 
 /**
  * Whether an annotation carries a note the reader can see.
@@ -881,6 +897,7 @@ export function Marginalia({
     const kept = written.current.get(mark.id)
     return kept !== undefined && kept.behind.has(mark.note.trim()) ? { ...mark, note: kept.note } : mark
   }
+  const controlTools: MarkControlTools = { noteAsWritten }
   useEffect(() => {
     for (const [id, kept] of written.current) {
       const mark = everything.find((one) => one.id === id)
@@ -1114,6 +1131,19 @@ export function Marginalia({
         </div>
       )}
 
+      {/* ABOVE THE ROWS THAT DRAW THE CONTROL, and not over a panel with none:
+          there is nothing there for it to be about. The class is the one the
+          two lines above draw in. */}
+      {markControls?.flatMap((control) =>
+        control.notice === undefined
+          ? []
+          : [
+              <ContributionBoundary key={control.id} label="A mark control" id={control.id} resetKey={control.id}>
+                <ControlNotice id={control.id} notice={control.notice} bookId={bookId} />
+              </ContributionBoundary>,
+            ],
+      )}
+
       {/* BOTH AXES ON ONE LINE, with a rule between them.
           As words the chips wrapped to three lines of chrome above the list at
           the pane's 400px. As icons they are one, and the rule is what keeps
@@ -1254,10 +1284,10 @@ export function Marginalia({
               is the capability's own, narrowed by `renderContribution` the
               way a contributed pane is; the kernel supplies the mark and
               never learns what the control does. */}
-          {markControls?.map((control) => (
+          {markControls?.filter((control) => control.place === undefined).map((control) => (
             <div key={control.id} data-mark-control={control.id}>
               <ContributionBoundary label="A mark control" id={control.id} resetKey={control.id}>
-                <ContributionBody id={control.id} render={() => control.render(mark)} context={controlContext(bookId)} />
+                <ContributionBody id={control.id} render={() => control.render(mark, controlTools)} context={controlContext(bookId)} />
               </ContributionBoundary>
             </div>
           ))}
@@ -1280,6 +1310,15 @@ export function Marginalia({
                   <Layers size={ICON.inline} strokeWidth={ICON.stroke} />
                 </button>
               )}
+              {/* A CAPABILITY'S ICON AMONG THE ROW'S OWN, ahead of the bin, so
+                  the destructive one stays where the hand expects it. */}
+              {markControls?.filter((control) => control.place === 'actions').map((control) => (
+                <span key={control.id} data-mark-control={control.id}>
+                  <ContributionBoundary label="A mark control" id={control.id} resetKey={control.id}>
+                    <ContributionBody id={control.id} render={() => control.render(mark, controlTools)} context={controlContext(bookId)} />
+                  </ContributionBoundary>
+                </span>
+              ))}
               {/* Not drawn without `onDelete` — see the prop. A disabled bin
                   would claim the mark is deletable and merely not now. */}
               {onDelete && (

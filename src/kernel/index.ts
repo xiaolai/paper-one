@@ -128,6 +128,7 @@ export type {
   Disposable,
   KernelApi,
   MarkControl,
+  MarkControlTools,
   PaneContext,
   PaneContribution,
   ScreenContribution,
