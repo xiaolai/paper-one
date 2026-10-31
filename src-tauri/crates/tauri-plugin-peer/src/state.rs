@@ -8,7 +8,10 @@
 //! once; every later call gets the same node back. Events go out through
 //! `app.emit` under the names in `events.rs`.
 
+use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Runtime};
@@ -20,6 +23,9 @@ use crate::events::EventSink;
 use crate::node::{Node, NodeConfig};
 use crate::role::local_role;
 use crate::share::{ShareConfig, ShareNode};
+
+/// How long turning the switch off waits for the endpoints to close.
+const SWITCH_CLOSE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Plugin state managed by Tauri; one per app.
 ///
@@ -79,16 +85,64 @@ impl PeerState {
     /// The node, starting it on first use. Concurrent first callers wait on
     /// the same start rather than each binding their own sockets.
     pub async fn node<R: Runtime>(&self, app: &AppHandle<R>) -> Result<Arc<Node>> {
-        self.node
+        let root = data_root(app)?;
+        self.node_at(&root, || async {
+            let role = local_role(&root)?;
+            let sink = tauri_sink(app.clone());
+            Node::start(NodeConfig::for_app(root.clone(), role, sink)).await
+        })
+        .await
+    }
+
+    /// [`node`](Self::node)'s gates, apart from how a node is built.
+    async fn node_at<F, Fut>(&self, root: &Path, start: F) -> Result<Arc<Node>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Arc<Node>>>,
+    {
+        crate::p2p::require_on(root)?;
+        self.refuse_if_closed()?;
+        let started = self
+            .node
             .get_or_try_init(|| async {
                 self.await_before_start().await;
-                let root = data_root(app)?;
-                let role = local_role(&root)?;
-                let sink = tauri_sink(app.clone());
-                Node::start(NodeConfig::for_app(root, role, sink)).await
+                /* The sweep can take a while on a large library, and a switch
+                that went off during it must not be answered with a bind. */
+                self.refuse_if_closed()?;
+                start().await
             })
             .await
-            .cloned()
+            .cloned()?;
+        /* Checked again on the way out, as `share_node` does: `close()` may have
+        run during the sweep or the bind, when the cell it inspected was empty. */
+        if let Err(closed) = self.refuse_if_closed() {
+            started.close().await;
+            return Err(closed);
+        }
+        Ok(started)
+    }
+
+    fn refuse_if_closed(&self) -> Result<()> {
+        if self.closing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::error::Error::PeerClosed);
+        }
+        Ok(())
+    }
+
+    /// Record the reader's P2P switch, and close what is running if it went off.
+    ///
+    /// ⚠️ **THE DEADLINE BOUNDS THE WAIT, NOT THE CLOSE.** The close chain has
+    /// stalled at exit before (`lib.rs`), and an unbounded wait here would hold
+    /// the control disabled and reading On after the answer had changed. It runs
+    /// as its own task because a `timeout` around it would drop the close part
+    /// way, and an endpoint abandoned there goes on answering strangers while
+    /// the switch reads off.
+    pub async fn apply_switch(&self, root: PathBuf, on: bool) -> Result<()> {
+        crate::commands::off_thread(move || crate::p2p::set(&root, on)).await?;
+        if !on && !closed_within(SWITCH_CLOSE_DEADLINE, self.begin_close()).await {
+            log::warn!("peer: closing after the switch went off passed its deadline");
+        }
+        Ok(())
     }
 
     /// Start the share endpoint if this device still has something offered.
@@ -106,12 +160,7 @@ impl PeerState {
     /// reader who has offered nothing should pay. `SharePolicy::load` touches
     /// no network and starts nothing.
     pub async fn resume_share<R: Runtime>(&self, app: &AppHandle<R>) -> Result<bool> {
-        let root = data_root(app)?;
-        let offers = crate::share::policy::SharePolicy::load_or_refuse_all(&root);
-        let offered = crate::share::policy::ShareService::ALL
-            .iter()
-            .any(|service| !offers.offered(*service).is_empty());
-        if !offered {
+        if !should_resume(&data_root(app)?)? {
             return Ok(false);
         }
         self.share_node(app).await?;
@@ -126,29 +175,39 @@ impl PeerState {
     /// of that. Every command that reaches it is one a reader asked for — or
     /// [`resume_share`](Self::resume_share), which asks the file first.
     pub async fn share_node<R: Runtime>(&self, app: &AppHandle<R>) -> Result<Arc<ShareNode>> {
+        let root = data_root(app)?;
+        self.share_node_at(&root, || {
+            ShareNode::start(ShareConfig::for_app(root.clone()))
+        })
+        .await
+    }
+
+    /// [`share_node`](Self::share_node)'s gates, apart from how one is built.
+    async fn share_node_at<F, Fut>(&self, root: &Path, start: F) -> Result<Arc<ShareNode>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Arc<ShareNode>>>,
+    {
+        crate::p2p::require_on(root)?;
         /* ⚠️ **NOT AFTER `close()`.** Binding a second UDP port and opening a
          * blob store during shutdown leaves both behind: `close()` has already
          * looked at the cell. Refused rather than started. */
-        if self.closing.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(crate::error::Error::ShareRefused(
-                "this device is shutting down".into(),
-            ));
-        }
+        self.refuse_if_closed()?;
         let started = self
             .share
             .get_or_try_init(|| async {
-                let root = data_root(app)?;
-                ShareNode::start(ShareConfig::for_app(root)).await
+                /* A caller queued behind a start that failed gets its turn here,
+                perhaps after the switch went off. */
+                self.refuse_if_closed()?;
+                start().await
             })
             .await
             .cloned()?;
         /* Checked again on the way out: `close()` may have run while the bind
         above was in flight, and the cell it inspected was still empty. */
-        if self.closing.load(std::sync::atomic::Ordering::SeqCst) {
+        if let Err(closed) = self.refuse_if_closed() {
             started.close().await;
-            return Err(crate::error::Error::ShareRefused(
-                "this device is shutting down".into(),
-            ));
+            return Err(closed);
         }
         Ok(started)
     }
@@ -257,6 +316,11 @@ impl PeerState {
     /// Close the node if it was ever started. Waits for the QUIC close to go
     /// out, so peers see a clean close instead of an idle timeout.
     pub async fn close(&self) {
+        self.begin_close().await;
+    }
+
+    /// Refuses new work now, and answers a future that closes what is running.
+    fn begin_close(&self) -> impl Future<Output = ()> + Send + 'static {
         /* ⚠️ **THE FLAG FIRST, THEN THE TASK, THEN THE CELLS.** A resumption
          * that is still initialising is not in a cell yet, so closing the
          * cells alone left an endpoint that finished starting after cleanup.
@@ -273,18 +337,58 @@ impl PeerState {
         {
             task.abort();
         }
-        if let Some(node) = self.node.get() {
-            node.close().await;
-        }
+        let node = self.node.get().cloned();
+        let share = self.share.get().cloned();
         /* ⚠️ **BOTH, AND THE SECOND ONE IS EASY TO FORGET.** An endpoint that
          * vanishes rather than closing leaves its peers to time out, and a
          * share endpoint that stays bound after the app closes takes 47822
          * with it — the same trap `Node::close` was written for, one port
          * over. */
-        if let Some(share) = self.share.get() {
-            share.close().await;
+        async move {
+            close_each(
+                async {
+                    if let Some(node) = node {
+                        node.close().await;
+                    }
+                },
+                async {
+                    if let Some(share) = share {
+                        share.close().await;
+                    }
+                },
+            )
+            .await;
         }
     }
+}
+
+/// Two closes at once, because the endpoints are independent and one that stalls
+/// must not keep the other serving.
+async fn close_each(first: impl Future<Output = ()>, second: impl Future<Output = ()>) {
+    tokio::join!(first, second);
+}
+
+/// Whether a close finished within `deadline`. It carries on regardless.
+async fn closed_within(
+    deadline: Duration,
+    closing: impl Future<Output = ()> + Send + 'static,
+) -> bool {
+    tokio::time::timeout(deadline, tokio::spawn(closing))
+        .await
+        .is_ok()
+}
+
+/// Whether a launch has offers to resume serving: never while the switch is off.
+/// Off is an answer here, not a failure: refused further down, it would tell the
+/// reader their offers could not resume.
+fn should_resume(root: &Path) -> Result<bool> {
+    if !crate::p2p::is_on(root)? {
+        return Ok(false);
+    }
+    let offers = crate::share::policy::SharePolicy::load_or_refuse_all(root);
+    Ok(crate::share::policy::ShareService::ALL
+        .iter()
+        .any(|service| !offers.offered(*service).is_empty()))
 }
 
 fn tauri_sink<R: Runtime>(app: AppHandle<R>) -> EventSink {
@@ -298,6 +402,275 @@ fn tauri_sink<R: Runtime>(app: AppHandle<R>) -> EventSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod switch {
+        use super::*;
+        use crate::node::testkit::TestNode;
+        use crate::role::Role;
+        use crate::testutil::ScratchDir;
+
+        fn off(label: &str) -> ScratchDir {
+            let scratch = ScratchDir::new(label);
+            crate::p2p::set(scratch.path(), false).unwrap();
+            scratch
+        }
+
+        fn on(label: &str) -> ScratchDir {
+            let scratch = ScratchDir::new(label);
+            crate::p2p::set(scratch.path(), true).unwrap();
+            scratch
+        }
+
+        #[tokio::test]
+        async fn off_starts_no_node() {
+            let scratch = off("state-off-node");
+            let refused = PeerState::default()
+                .node_at(scratch.path(), || async {
+                    panic!("started a node while off")
+                })
+                .await;
+            assert_eq!(refused.err().unwrap().kind(), "p2pOff");
+        }
+
+        #[tokio::test]
+        async fn off_starts_no_share_endpoint() {
+            let scratch = off("state-off-share");
+            let refused = PeerState::default()
+                .share_node_at(scratch.path(), || async {
+                    panic!("started a share endpoint while off")
+                })
+                .await;
+            assert_eq!(refused.err().unwrap().kind(), "p2pOff");
+        }
+
+        #[test]
+        fn off_resumes_no_offers() {
+            let scratch = on("state-off-resume");
+            std::fs::create_dir_all(scratch.path().join(crate::identity::PEER_DIR)).unwrap();
+            let hash = crate::share::ContentHash::parse(&"a".repeat(64)).unwrap();
+            crate::share::policy::SharePolicy::load_or_refuse_all(scratch.path())
+                .set(&hash, crate::share::policy::ShareService::Bytes, true)
+                .unwrap();
+            assert!(should_resume(scratch.path()).unwrap());
+            crate::p2p::set(scratch.path(), false).unwrap();
+            assert!(!should_resume(scratch.path()).unwrap());
+        }
+
+        #[tokio::test]
+        async fn turning_off_closes_a_running_node_and_records_it() {
+            let scratch = on("state-switch-off");
+            let running = TestNode::start("state-switch-off-node", Role::Shelf).await;
+            let state = PeerState::default();
+            state
+                .node_at(scratch.path(), || async { Ok(running.node.clone()) })
+                .await
+                .unwrap();
+            state
+                .apply_switch(scratch.path().to_path_buf(), false)
+                .await
+                .unwrap();
+            assert!(running.node.endpoint().is_closed());
+            assert!(!crate::p2p::is_on(scratch.path()).unwrap());
+        }
+
+        #[tokio::test]
+        async fn turning_on_records_it_and_closes_nothing() {
+            let scratch = off("state-switch-on");
+            let running = TestNode::start("state-switch-on-node", Role::Shelf).await;
+            let state = PeerState::default();
+            state.node.set(running.node.clone()).ok().unwrap();
+            state
+                .apply_switch(scratch.path().to_path_buf(), true)
+                .await
+                .unwrap();
+            assert!(!running.node.endpoint().is_closed());
+            assert!(crate::p2p::is_on(scratch.path()).unwrap());
+        }
+
+        /// Off then on in one run: the switch reads on, the node in the cell is
+        /// closed, and the caller must hear that rather than get a dead node.
+        #[tokio::test]
+        async fn on_again_in_the_same_run_says_closed_rather_than_handing_out_a_dead_node() {
+            let scratch = on("state-switch-again");
+            let running = TestNode::start("state-switch-again-node", Role::Shelf).await;
+            let state = PeerState::default();
+            state
+                .node_at(scratch.path(), || async { Ok(running.node.clone()) })
+                .await
+                .unwrap();
+            let root = scratch.path().to_path_buf();
+            state.apply_switch(root.clone(), false).await.unwrap();
+            state.apply_switch(root, true).await.unwrap();
+            let refused = state
+                .node_at(scratch.path(), || async {
+                    panic!("started a second node in one run")
+                })
+                .await;
+            assert_eq!(refused.err().unwrap().kind(), "peerClosed");
+        }
+
+        /// Off arriving during the bind: `close` saw an empty cell, so only the
+        /// check on the way out can stop this node from serving.
+        #[tokio::test]
+        async fn a_node_still_starting_when_the_switch_goes_off_is_closed() {
+            let scratch = on("state-switch-inflight");
+            let running = TestNode::start("state-switch-inflight-node", Role::Shelf).await;
+            let state = PeerState::default();
+            let refused = state
+                .node_at(scratch.path(), || async {
+                    state
+                        .apply_switch(scratch.path().to_path_buf(), false)
+                        .await
+                        .unwrap();
+                    Ok(running.node.clone())
+                })
+                .await;
+            assert_eq!(refused.err().unwrap().kind(), "peerClosed");
+            assert!(running.node.endpoint().is_closed());
+        }
+
+        /// Off arriving during the library sweep, before anything has started.
+        #[tokio::test]
+        async fn a_node_waiting_on_the_sweep_when_the_switch_goes_off_never_starts() {
+            let scratch = on("state-switch-sweep");
+            let root = scratch.path().to_path_buf();
+            let state = Arc::new(PeerState::default());
+            let (finish_sweep, sweep) = tokio::sync::oneshot::channel::<()>();
+            state.start_after(tauri::async_runtime::spawn(async move {
+                let _ = sweep.await;
+            }));
+            let waiting = {
+                let (state, root) = (state.clone(), root.clone());
+                tokio::spawn(async move {
+                    state
+                        .node_at(&root, || async {
+                            panic!("bound after the switch went off")
+                        })
+                        .await
+                        .map(|_| ())
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            state.apply_switch(root, false).await.unwrap();
+            finish_sweep.send(()).unwrap();
+            let refused = tokio::time::timeout(Duration::from_secs(5), waiting)
+                .await
+                .expect("the waiter never finished")
+                .expect("the waiter started a node");
+            assert_eq!(refused.unwrap_err().kind(), "peerClosed");
+        }
+
+        #[tokio::test]
+        async fn on_again_refuses_the_share_endpoint_with_the_same_advice() {
+            let scratch = on("state-switch-share-again");
+            let state = PeerState::default();
+            state
+                .apply_switch(scratch.path().to_path_buf(), false)
+                .await
+                .unwrap();
+            state
+                .apply_switch(scratch.path().to_path_buf(), true)
+                .await
+                .unwrap();
+            let refused = state
+                .share_node_at(scratch.path(), || async {
+                    panic!("started a share endpoint on a closed run")
+                })
+                .await;
+            assert_eq!(refused.err().unwrap().kind(), "peerClosed");
+        }
+
+        /// The second caller waited on the cell through the Off that the first
+        /// one's failure then let it past.
+        #[tokio::test]
+        async fn a_share_start_queued_behind_a_failure_does_not_run_after_off() {
+            let scratch = on("state-switch-share-queue");
+            let root = scratch.path().to_path_buf();
+            let state = Arc::new(PeerState::default());
+            let (fail_first, first_fails) = tokio::sync::oneshot::channel::<()>();
+            let first = {
+                let (state, root) = (state.clone(), root.clone());
+                tokio::spawn(async move {
+                    state
+                        .share_node_at(&root, || async {
+                            let _ = first_fails.await;
+                            Err(crate::error::Error::ShareRefused("would not bind".into()))
+                        })
+                        .await
+                        .map(|_| ())
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let second = {
+                let (state, root) = (state.clone(), root.clone());
+                tokio::spawn(async move {
+                    state
+                        .share_node_at(&root, || async {
+                            panic!("started a share endpoint after the switch went off")
+                        })
+                        .await
+                        .map(|_| ())
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            state.apply_switch(root, false).await.unwrap();
+            fail_first.send(()).unwrap();
+            assert_eq!(first.await.unwrap().unwrap_err().kind(), "shareRefused");
+            let refused = tokio::time::timeout(Duration::from_secs(5), second)
+                .await
+                .expect("the second caller never finished")
+                .expect("the second caller started an endpoint");
+            assert_eq!(refused.unwrap_err().kind(), "peerClosed");
+        }
+
+        /// Off and then quit closes everything a second time.
+        #[tokio::test]
+        async fn closing_a_running_share_endpoint_twice_finishes() {
+            let share = crate::share::testkit::TestShare::start("state-switch-close-twice").await;
+            let state = PeerState::default();
+            state.share.set(share.node.clone()).ok().unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                state.close().await;
+                state.close().await;
+            })
+            .await
+            .expect("the second close stalled");
+        }
+
+        #[tokio::test]
+        async fn a_stalled_close_does_not_keep_the_other_endpoint_open() {
+            let (closed, other) = tokio::sync::oneshot::channel::<()>();
+            let both = close_each(std::future::pending(), async move {
+                closed.send(()).unwrap();
+            });
+            tokio::select! {
+                _ = both => panic!("a close that never finishes finished"),
+                done = other => done.unwrap(),
+                _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("the stall held up the other close"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_close_past_its_deadline_keeps_going() {
+            let (release, stall) = tokio::sync::oneshot::channel::<()>();
+            let (finished, done) = tokio::sync::oneshot::channel::<()>();
+            let closing = async move {
+                let _ = stall.await;
+                finished.send(()).unwrap();
+            };
+            assert!(!closed_within(Duration::from_millis(20), closing).await);
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), done)
+                .await
+                .expect("the deadline dropped the close")
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_close_inside_its_deadline_says_so() {
+            assert!(closed_within(Duration::from_secs(5), async {}).await);
+        }
+    }
 
     /// ⚠️ **THE GATE EXISTS BECAUSE PLUGIN SETUP RUNS BEFORE THE LIBRARY
     /// LOCK.** A second Paper that the lock was about to refuse had already

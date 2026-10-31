@@ -34,6 +34,7 @@ pub mod policy;
 pub mod topic;
 pub mod voice;
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -176,6 +177,13 @@ impl ShareConfig {
     }
 }
 
+/// Where this node stands with the DHT.
+enum DhtSlot {
+    NotJoined,
+    Joined(Announcer),
+    Closed,
+}
+
 /// The share endpoint, its store, and what it will serve.
 pub struct ShareNode {
     root: PathBuf,
@@ -197,7 +205,15 @@ pub struct ShareNode {
     /// audit. A `Mutex` holding the joined handle retries instead; `Announcer`
     /// is `Clone` because mainline's `Dht` is a handle, so callers take a copy
     /// rather than borrowing across the guard.
-    announcer: tokio::sync::Mutex<Option<Announcer>>,
+    ///
+    /// ⚠️ **AND CLOSED IS A STATE OF ITS OWN.** Close used to mean the process
+    /// was exiting; now the P2P switch can close a node in a run that goes on. A
+    /// fetch in flight then fails over to discovery, and an empty slot would
+    /// rejoin the public DHT for the rest of the run while the switch says off.
+    announcer: tokio::sync::Mutex<DhtSlot>,
+    /// Set first thing in [`close`](Self::close), for a DHT call already under
+    /// way: its handle keeps the DHT's socket alive past the slot's.
+    closed: tokio::sync::watch::Sender<bool>,
     dht_enabled: bool,
     /// The loop that authorizes every blob request. Aborted on close.
     gate: std::sync::Mutex<Option<JoinHandle<()>>>,
@@ -355,7 +371,8 @@ impl ShareNode {
             bounds,
             store,
             router,
-            announcer: tokio::sync::Mutex::new(None),
+            announcer: tokio::sync::Mutex::new(DhtSlot::NotJoined),
+            closed: tokio::sync::watch::channel(false).0,
             dht_enabled: config.dht,
             gate: std::sync::Mutex::new(Some(gate)),
             renewal: std::sync::Mutex::new(None),
@@ -801,7 +818,10 @@ impl ShareNode {
         let Some(dht) = self.dht().await else {
             return Vec::new();
         };
-        let found = dht.resolve(hash, ShareService::Bytes).await;
+        let looked_up = self.unless_closed(dht.resolve(hash, ShareService::Bytes));
+        let Some(found) = looked_up.await else {
+            return Vec::new();
+        };
         let hints: Vec<std::net::SocketAddr> = found
             .addresses
             .iter()
@@ -890,7 +910,9 @@ impl ShareNode {
                 "public discovery is off on this device".into(),
             ));
         };
-        Ok(dht.resolve(hash, service).await)
+        self.unless_closed(dht.resolve(hash, service))
+            .await
+            .ok_or(Error::PeerClosed)
     }
 
     async fn announce(&self, hash: &ContentHash, service: ShareService) {
@@ -904,7 +926,8 @@ impl ShareNode {
             .bound_sockets()
             .first()
             .map_or(SHARE_BIND_PORT, |a| a.port());
-        if let Err(err) = dht.announce(hash, service, self.id(), port).await {
+        let announced = self.unless_closed(dht.announce(hash, service, self.id(), port));
+        if let Some(Err(err)) = announced.await {
             log::info!(
                 "peer: could not announce {hash} ({}): {err}",
                 service.as_str()
@@ -912,24 +935,48 @@ impl ShareNode {
         }
     }
 
+    /// `work`, abandoned at its next await if this node closes first. Only for
+    /// what reaches out: a withdrawal is left to finish, because finishing it is
+    /// what a reader turning P2P off wants.
+    async fn unless_closed<T>(&self, work: impl Future<Output = T>) -> Option<T> {
+        let mut closed = self.closed.subscribe();
+        tokio::select! {
+            _ = closed.wait_for(|closed| *closed) => None,
+            done = work => Some(done),
+        }
+    }
+
     /// The DHT, joined on first use. `None` when discovery is off or the node
     /// would not start — neither is fatal to serving, only to being found.
     async fn dht(&self) -> Option<Announcer> {
+        self.dht_joining_with(Announcer::join).await
+    }
+
+    /// [`dht`](Self::dht), apart from how the DHT is joined: no test may join
+    /// the real one.
+    async fn dht_joining_with(
+        &self,
+        join: impl FnOnce() -> Result<Announcer>,
+    ) -> Option<Announcer> {
         if !self.dht_enabled {
             return None;
         }
         let mut held = self.announcer.lock().await;
-        if held.is_none() {
-            match Announcer::join() {
-                Ok(node) => *held = Some(node),
+        match &*held {
+            DhtSlot::Closed => None,
+            DhtSlot::Joined(node) => Some(node.clone()),
+            DhtSlot::NotJoined => match join() {
+                Ok(node) => {
+                    *held = DhtSlot::Joined(node.clone());
+                    Some(node)
+                }
                 Err(err) => {
                     /* Not cached: the next caller tries again. See the field. */
                     log::warn!("peer: public discovery is unavailable: {err}");
-                    return None;
+                    None
                 }
-            }
+            },
         }
-        held.clone()
     }
 
     /// The blob store, for the tests that assert what is pinned in it.
@@ -942,11 +989,12 @@ impl ShareNode {
     /// tests, which are the only thing that can see it.
     #[cfg(test)]
     pub async fn has_dht(&self) -> bool {
-        self.announcer.lock().await.is_some()
+        matches!(*self.announcer.lock().await, DhtSlot::Joined(_))
     }
 
     /// Stop answering, close the endpoint and the store.
     pub async fn close(&self) {
+        self.closed.send_replace(true);
         if let Some(gate) = self.gate.lock().expect("share gate lock").take() {
             gate.abort();
         }
@@ -961,9 +1009,11 @@ impl ShareNode {
          * out — a test that closes and asserts, or a plugin teardown that
          * outlives one clone, kept a DHT participant alive on a machine that
          * had stopped sharing. Dropping the handle here is what actually ends
-         * it, and a later `dht()` would rejoin rather than answer from a stale
-         * one, which is now safe because only success is cached. */
-        drop(self.announcer.lock().await.take());
+         * it, and a later `dht()` answers none rather than rejoining. */
+        drop(std::mem::replace(
+            &mut *self.announcer.lock().await,
+            DhtSlot::Closed,
+        ));
         /* ⚠️ **EVERY STEP RUNS, AND EVERY FAILURE IS SAID.** `.ok()` discarded
          * both of these: a router that would not shut down and a store that
          * could not flush are exactly the states worth knowing about at close,
@@ -1376,5 +1426,79 @@ pub(crate) mod testkit {
         pub async fn close(self) {
             self.node.close().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod dht_after_close {
+    use super::*;
+    use crate::testutil::ScratchDir;
+
+    /// A node that would join if it were asked, with a joiner that never touches
+    /// the real DHT.
+    async fn discovering(label: &str) -> (Arc<ShareNode>, ScratchDir) {
+        let dir = ScratchDir::new(label);
+        let node = ShareNode::start(ShareConfig {
+            root: dir.path().to_path_buf(),
+            relay_mode: RelayMode::Disabled,
+            discovery: Discovery::NONE,
+            bind_port: None,
+            limits: ShareLimits::default(),
+            dht: true,
+        })
+        .await
+        .expect("the share endpoint starts");
+        (node, dir)
+    }
+
+    #[tokio::test]
+    async fn a_closed_node_never_rejoins_the_dht() {
+        let (node, _dir) = discovering("share-dht-closed").await;
+        node.close().await;
+        let dht = node
+            .dht_joining_with(|| panic!("joined the DHT after close"))
+            .await;
+        assert!(dht.is_none());
+        assert!(!node.has_dht().await);
+    }
+
+    #[tokio::test]
+    async fn a_close_abandons_a_dht_call_already_under_way() {
+        let (node, _dir) = discovering("share-dht-inflight").await;
+        let under_way = {
+            let node = node.clone();
+            tokio::spawn(async move { node.unless_closed(std::future::pending::<()>()).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        node.close().await;
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(5), under_way)
+            .await
+            .expect("the call outlived the close")
+            .unwrap();
+        assert_eq!(answered, None);
+    }
+
+    #[tokio::test]
+    async fn an_open_node_lets_a_dht_call_finish() {
+        let (node, _dir) = discovering("share-dht-finish").await;
+        assert_eq!(node.unless_closed(async { 7 }).await, Some(7));
+        node.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_open_node_still_asks_again_after_a_failed_join() {
+        let (node, _dir) = discovering("share-dht-open").await;
+        let mut asked = 0;
+        for _ in 0..2 {
+            let dht = node
+                .dht_joining_with(|| {
+                    asked += 1;
+                    Err(Error::ShareRefused("no network".into()))
+                })
+                .await;
+            assert!(dht.is_none());
+        }
+        assert_eq!(asked, 2);
+        node.close().await;
     }
 }

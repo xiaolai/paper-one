@@ -1,5 +1,5 @@
 import { messageOf, servableToAnotherDevice } from '../../kernel'
-import { createElement } from 'react'
+import { createElement, useSyncExternalStore } from 'react'
 import type { Capability, CapabilityContext, DevicePort, DeviceRow, Disposable, ServiceContribution } from '../../kernel'
 import { createPeerPort, type PeerPort } from './lib/port'
 import {
@@ -20,6 +20,7 @@ import {
   type WirePeer,
 } from './lib/wire'
 import { createDevicesModel, type DevicesModel } from './ui/devicesModel'
+import { createP2pSwitch, type P2pSwitch } from './lib/p2pSwitch'
 import { DevicesPane } from './ui/DevicesPane'
 
 /**
@@ -678,6 +679,44 @@ export function serveWhenShelf(options: {
   }
 }
 
+/**
+ * Whether the capabilities that only make sense over P2P compose this run.
+ *
+ * Outside the Tauri app there is no plugin and no switch, and those
+ * capabilities already answer for that themselves.
+ */
+export async function p2pAvailable(): Promise<boolean> {
+  return hasTauri() ? tauriWire().p2pOn() : true
+}
+
+/**
+ * Told when the reader changes the switch in this run, for whatever is still
+ * running on the transport that change closes.
+ */
+export function watchP2p(listener: (on: boolean) => void): () => void {
+  const held = p2pSwitch
+  if (held === null) return () => {}
+  return held.subscribe(() => listener(held.chosen()))
+}
+
+/**
+ * Whether a control that reaches a peer can still work in this run.
+ *
+ * The composed list of controls is fixed at launch, so a control on a row has to
+ * take itself away when the switch goes off: the transport is closed from then
+ * on, including after the switch goes back on, until a relaunch.
+ */
+export function useP2pLive(): boolean {
+  return useSyncExternalStore(subscribeToP2p, p2pLiveNow)
+}
+
+const subscribeToP2p = (changed: () => void): (() => void) => watchP2p(changed)
+
+const p2pLiveNow = (): boolean => p2pSwitch === null || !p2pSwitch.needsReopen()
+
+/** The switch as the Devices section draws it. Null where there is no plugin. */
+let p2pSwitch: P2pSwitch | null = null
+
 export const peer: Capability = {
   id: 'peer',
   requires: [],
@@ -691,11 +730,11 @@ export const peer: Capability = {
        * changes its mind, and the gap leaves room to slot something between
        * them without renumbering either. */
       order: 20,
-      render: () => (model ? createElement(DevicesPane, { model, syncNow }) : null),
+      render: () => (model ? createElement(DevicesPane, { model, syncNow, p2p: p2pSwitch }) : null),
     },
   ],
 
-  start(api: CapabilityContext, signal: AbortSignal): Disposable {
+  async start(api: CapabilityContext, signal: AbortSignal): Promise<Disposable> {
     /* TEARDOWN FIRST, ACQUISITIONS AFTER. `stop` is registered with the
      * kernel's disposer stack BEFORE anything is acquired, so a
      * `createDevicesModel` that throws leaves no live port behind. And it
@@ -704,12 +743,14 @@ export const peer: Capability = {
     // Stryker disable next-line ObjectLiteral: every field is null until acquired; `releasePeer` reads them by name.
     const held: PeerResources = { port: null, model: null, serviceHost: null, devicePort: null, hashPort: null }
     let stopped = false
+    let mySwitch: P2pSwitch | null = null
     const stop = () => {
       if (stopped) return
       stopped = true
       signal.removeEventListener('abort', stop)
       releasePeer(held, api.diagnostics)
       if (model === held.model) model = null
+      if (p2pSwitch === mySwitch) p2pSwitch = null
       if (port === held.port) {
         port = null
         /* Cleared WITH the port, so "peer is running" stays one fact. A wire
@@ -721,7 +762,24 @@ export const peer: Capability = {
     api.onCleanup(stop)
     signal.addEventListener('abort', stop, { once: true })
 
-    const built = hasTauri() ? tauriWire() : null
+    const plugin = hasTauri() ? tauriWire() : null
+    /* OFF IS THE SAME SHAPE AS NO PLUGIN: every port stays null, so `sync` runs
+       local-only and keeps its clock and journal, and edits made while off
+       still reach other devices when the switch comes back on. A switch that
+       cannot be read counts as off, and not as a failed start, which would
+       take `sync` and the journal down with it. */
+    let on = false
+    if (plugin) {
+      try {
+        on = await plugin.p2pOn()
+      } catch (cause) {
+        api.diagnostics.warn('peer.switch-unreadable', { message: messageOf(cause) })
+      }
+      if (stopped) return { dispose: stop }
+      mySwitch = createP2pSwitch(on, (next) => plugin.setP2p(next))
+      p2pSwitch = mySwitch
+    }
+    const built = on ? plugin : null
     wire = built
     held.port = built === null ? null : createPeerPort(built)
     port = held.port
@@ -750,7 +808,7 @@ export const peer: Capability = {
       held.hashPort = api.services.bindHashPort({ hashFile: (folder, name) => port.hashFile(folder, name) })
     }
 
-    api.diagnostics.info('peer.started', { available: held.port !== null })
+    api.diagnostics.info('peer.started', { available: held.port !== null, p2pOn: on })
     return { dispose: stop }
   },
 }

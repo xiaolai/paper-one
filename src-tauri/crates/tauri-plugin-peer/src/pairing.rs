@@ -2513,9 +2513,13 @@ mod tests {
         answer: Answer,
     ) -> (Endpoint, Arc<std::sync::atomic::AtomicUsize>, PairUri) {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        // On loopback like every test node; see `endpoint::builder_for`.
         let ep = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .alpns(vec![PAIR_ALPN.to_vec()])
+            .clear_ip_transports()
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
             .bind()
             .await
             .unwrap();

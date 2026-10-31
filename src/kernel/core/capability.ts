@@ -408,6 +408,12 @@ export interface Capability {
   readonly id: string
   /** Ids of the capabilities this one needs; absent means none. */
   readonly requires?: readonly string[]
+  /**
+   * Asked at composition, before `start`: a `false` leaves this capability out
+   * of this run exactly as a build that never composed it, and that is not a
+   * failure. One that throws is a failure, and the capability is left out too.
+   */
+  available?(): boolean | Promise<boolean>
   readonly panes?: readonly PaneContribution[]
   /** Whole screens — see `ScreenContribution`. */
   readonly screens?: readonly ScreenContribution[]

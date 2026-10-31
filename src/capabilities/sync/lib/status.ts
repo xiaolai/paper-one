@@ -84,6 +84,10 @@ export const REFUSAL_KINDS = [
   'broken-peer',
   /** This device is out of space. */
   'disk-full',
+  /** The reader turned peer-to-peer off, so this device connects to nothing. */
+  'p2p-off',
+  /** Peer-to-peer went off and on again; its transport waits for a relaunch. */
+  'p2p-closed',
   'unknown',
 ] as const
 
@@ -160,6 +164,8 @@ const KIND_BY_PLUGIN_KIND: Readonly<Record<string, RefusalKind>> = {
   blobMismatch: 'content',
   blobInterrupted: 'content',
   blobTooLarge: 'content',
+  p2pOff: 'p2p-off',
+  peerClosed: 'p2p-closed',
 }
 
 const DISK_FULL = /no space left|enospc|quota(?:\s|_)?exceeded|disk full/i
@@ -252,6 +258,10 @@ export function describeRefusal(refusal: SessionRefusal, names: RefusalNames): s
       return `Paper on ${shelf} and this device couldn’t understand each other`
     case 'disk-full':
       return 'This device is out of space, so nothing more could be saved'
+    case 'p2p-off':
+      return 'Peer-to-peer is off'
+    case 'p2p-closed':
+      return 'Quit and reopen Paper to use peer-to-peer'
     case 'unknown':
       /* The raw message goes to the diagnostic (`sync.session-failed`,
        * `sync.push-refused`), never here — `SessionRefusal.message`'s own

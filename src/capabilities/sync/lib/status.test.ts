@@ -82,6 +82,8 @@ describe('classifying what a session threw', () => {
     [{ kind: 'blobRefused', message: 'ungranted' }, 'revoked'],
     [{ kind: 'blobHashMismatch', message: 'digest differs' }, 'content'],
     [{ kind: 'blobInterrupted', message: 'short read' }, 'content'],
+    [{ kind: 'p2pOff', message: 'peer-to-peer is off' }, 'p2p-off'],
+    [{ kind: 'peerClosed', message: 'peer-to-peer was closed' }, 'p2p-closed'],
     [new Error('not paired with a shelf'), 'unpaired'],
     [new Error('No space left on device (os error 28)'), 'disk-full'],
     [new Error('sync.push answered an ack that does not match the pushed group'), 'broken-peer'],
@@ -193,6 +195,10 @@ describe('audit-fix round 1 — what the classifier got wrong', () => {
   })
   it('a refusal reason this build does not know is unknown — the peer was reached', () => {
     expect(refusalKind({ kind: 'sessionRefused', message: 'some-new-reason' })).toBe('unknown')
+  })
+  it('a switch the reader turned off is not reported as a failure', () => {
+    expect(describeRefusal({ kind: 'p2p-off', message: 'x' }, names)).toBe('Peer-to-peer is off')
+    expect(describeRefusal({ kind: 'p2p-closed', message: 'x' }, names)).toBe('Quit and reopen Paper to use peer-to-peer')
   })
   it('the raw message never becomes the sentence', () => {
     expect(describeRefusal({ kind: 'unknown', message: '/Users/x/Library/…/journal: EACCES' }, names)).toBe('Sync failed')

@@ -13,7 +13,7 @@ import {
   type OverlayRequest,
   type PublicPassage,
 } from '../../kernel'
-import { sharePort, voicePort } from '../peer'
+import { p2pAvailable, sharePort, voicePort } from '../peer'
 import { publicAnnotationsFor } from './lib/overlay'
 import { publicPortOver, type PublicPort } from './lib/publicPort'
 import { publishPortOver, type PublishPublicPort } from './lib/publishPort'
@@ -383,6 +383,7 @@ function runningOver(ctx: CapabilityContext): Running {
 export const publicSharing: Capability = {
   id: 'public',
   requires: ['peer'],
+  available: () => p2pAvailable(),
   /**
    * Publishing one passage, on the mark's own row — WI-26.4's surface.
    *

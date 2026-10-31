@@ -1,5 +1,6 @@
 import { useState, useSyncExternalStore } from 'react'
-import { CAPABILITY_UI as ui, inlineQrSvg } from '../../../kernel'
+import { CAPABILITY_UI as ui, inlineQrSvg, messageOf } from '../../../kernel'
+import type { P2pSwitch } from '../lib/p2pSwitch'
 import type { DevicesModel } from './devicesModel'
 import {
   ROLE_CHOICES,
@@ -38,15 +39,63 @@ import {
  * gets its own idea of what Paper looks like.
  */
 
+/**
+ * ONE CONTROL, AND IT SAYS WHAT IT COSTS. Off stops the connections as soon as
+ * the write lands; the screens composed around the old answer until a relaunch,
+ * which is the same deal the role choice makes below.
+ */
+function P2pSwitchRow({ p2p }: { readonly p2p: P2pSwitch }) {
+  const chosen = useSyncExternalStore(p2p.subscribe, p2p.chosen)
+  const [writing, setWriting] = useState(false)
+  const [failure, setFailure] = useState<string | null>(null)
+  return (
+    <>
+      <div className={ui.row}>
+        <span className={ui.grow}>Peer-to-peer</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={chosen}
+          aria-label="Peer-to-peer"
+          className={ui.button}
+          disabled={writing}
+          onClick={() => {
+            const next = !chosen
+            setWriting(true)
+            setFailure(null)
+            p2p
+              .set(next)
+              .catch((cause: unknown) => setFailure(messageOf(cause)))
+              .finally(() => setWriting(false))
+          }}
+        >
+          {chosen ? 'On' : 'Off'}
+        </button>
+      </div>
+      <div className={ui.hint}>
+        Connects Paper directly to your other devices, your Circle and public sharing. Off, Paper makes none of those
+        connections, and your pairings and what friends shared stay on this device.
+      </div>
+      {p2p.needsReopen() && <div className={ui.hint}>Quit and reopen Paper to finish turning this {chosen ? 'on' : 'off'}.</div>}
+      {failure !== null && <div className={ui.hint}>Could not change this: {failure}</div>}
+    </>
+  )
+}
+
+const noSwitchToWatch = () => () => {}
+
 export interface DevicesPaneProps {
   readonly model: DevicesModel
+  /** Null where there is no plugin to switch: a browser tab, or a test's fake. */
+  readonly p2p?: P2pSwitch | null
   /** "Sync now" — supplied by the sync capability through the peer's slot;
    *  null renders no button (sync not composed, or not started yet). */
   readonly syncNow: (() => void) | null
 }
 
-export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
+export function DevicesPane({ model, syncNow, p2p = null }: DevicesPaneProps) {
   const snapshot = useSyncExternalStore(model.subscribe, model.getSnapshot)
+  const needsReopen = useSyncExternalStore(p2p?.subscribe ?? noSwitchToWatch, () => p2p?.needsReopen() ?? false)
   const [code, setCode] = useState('')
   /* Reset by the offer's identity, so a second pairing does not open already
      saying "Copied" about an invite the reader has not copied. */
@@ -66,6 +115,14 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
   const [settingRole, setSettingRole] = useState(false)
   const [updatingGrants, setUpdatingGrants] = useState<ReadonlySet<string>>(() => new Set())
 
+  if (p2p && !p2p.launchedOn) {
+    return (
+      <div className={ui.section}>
+        <P2pSwitchRow p2p={p2p} />
+      </div>
+    )
+  }
+
   if (!snapshot.available) {
     /* INSIDE A SECTION, like every other state this pane can be in. The
        section is what carries the inset that lines a contributed row up with
@@ -80,6 +137,7 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
 
   return (
     <div className={ui.section}>
+      {p2p && <P2pSwitchRow p2p={p2p} />}
       <div className={ui.row}>
         <span className={ui.grow}>This device</span>
         {/* WHAT IT DOES, NOT WHAT THE PROTOCOL CALLS IT. The endpoint id went
@@ -339,7 +397,7 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
           how three unrelated things came to sit side by side. Registered only
           on a satchel (`sync/index.ts` — a shelf answers rather than dials),
           so on a shelf it is absent rather than inert. */}
-      {syncNow && (
+      {syncNow && !needsReopen && (
         <div className={ui.actions}>
           <button type="button" className={ui.button} onClick={syncNow}>
             Sync now

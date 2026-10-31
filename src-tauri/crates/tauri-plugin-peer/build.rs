@@ -21,6 +21,8 @@
 const COMMANDS: &[&str] = &[
     // WI-5.8
     "peer_status",
+    "peer_p2p_on",
+    "peer_set_p2p",
     "peer_local_role",
     // The role a reader can change. THIS LIST IS WHAT GENERATES THE
     // PERMISSIONS — `peer_set_local_role` was registered in `lib.rs` and its

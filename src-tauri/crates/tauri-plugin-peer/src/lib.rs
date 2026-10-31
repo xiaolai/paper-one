@@ -41,6 +41,7 @@ mod identity;
 mod keeper;
 mod keyfile;
 mod node;
+mod p2p;
 mod pairing;
 mod paths;
 mod peers;
@@ -129,6 +130,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("peer")
         .invoke_handler(tauri::generate_handler![
             commands::peer_status,
+            commands::peer_p2p_on,
+            commands::peer_set_p2p,
             commands::peer_local_role,
             commands::peer_set_local_role,
             commands::paper_data_root,

@@ -18,7 +18,7 @@ import {
   type ServiceHandler,
   type Setting,
 } from '../../kernel'
-import { peerPort, readRole, registerSyncNow, type PeerPort } from '../peer'
+import { p2pAvailable, peerPort, readRole, registerSyncNow, watchP2p, type PeerPort } from '../peer'
 import { createClock, ensureDeviceId, isHlc } from './lib/clock'
 import { createBackfill } from './lib/backfill'
 import { stampMeasured, unstampUnlessVerified } from './lib/coverStamps'
@@ -202,6 +202,9 @@ async function withShelf<T>(task: (channel: SyncChannel) => Promise<T>): Promise
   }
 }
 
+/** Set once the reader changes the P2P switch in a wired run; its sentence then stands. */
+let switchedOff: string | null = null
+
 /**
  * The names a refusal sentence needs, from the runtime that is up: the
  * shelf's pairing name (IPC, so best-effort — a status line that could not
@@ -239,6 +242,9 @@ async function degrade(refusal: SessionRefusal, owner: typeof running): Promise<
    * and painted over it. The press is what owns the sentence. */
   const names = await refusalNames()
   if (running !== owner) return
+  /* The connection the reader just closed fails whatever was on it, and "isn't
+     reachable" would be the wrong reason. */
+  if (switchedOff !== null) return
   syncStatus.set({ state: 'degraded', detail: describeRefusal(refusal, names) })
 }
 
@@ -483,6 +489,18 @@ async function integrityPass(
   return { ok: findings.length === 0, findings, notes }
 }
 
+/** What the status says once the reader changed the P2P switch in this run. */
+const switchDetail = (on: boolean): string =>
+  describeRefusal({ kind: on ? 'p2p-closed' : 'p2p-off', message: '' }, { shelf: null, title: () => null })
+
+/** Why this run will never sync, in the words the Storage pane shows. */
+async function unwiredDetail(hasFilesystem: boolean): Promise<string> {
+  if (!hasFilesystem) return 'No filesystem in a browser tab'
+  /* The peer capability counts a switch it cannot read as off; so does this. */
+  const on = await p2pAvailable().catch(() => false)
+  return on ? 'Peer plugin unavailable' : 'Peer-to-peer is off'
+}
+
 export const sync: Capability = {
   id: 'sync',
   requires: ['peer'],
@@ -642,6 +660,7 @@ export const sync: Capability = {
        the teardown hands one back without asking whether a role was bound. */
     let boundRole: object = {}
     let stopped = false
+    let unwatchP2p = (): void => {}
 
     const step = (label: string, fn: () => void): void => {
       try {
@@ -659,6 +678,10 @@ export const sync: Capability = {
       // Stryker disable next-line StringLiteral,CallExpression: a listener left on the signal can only call this again, and it returns above.
       signal.removeEventListener('abort', stop)
       step('scheduler', () => scheduler?.stop())
+      step('p2p-watch', () => {
+        unwatchP2p()
+        switchedOff = null
+      })
       /* A stopped scheduler ignores `syncNow`, so the slot still holding one
        * changes nothing a caller can see — this lets it go. */
       // Stryker disable next-line StringLiteral,BlockStatement,CallExpression: see above; and `unbindScheduler` does not throw.
@@ -993,6 +1016,7 @@ export const sync: Capability = {
            * them — so "sync now" there is a request with nobody to make it
            * of, and saying so beats returning `started: true` for nothing. */
           if (role !== 'satchel') return { started: false, detail: 'a shelf answers satchels; it does not dial them' }
+          if (switchedOff !== null) return { started: false, detail: switchedOff }
           syncNow()
           return { started: true, detail: null }
         },
@@ -1103,7 +1127,7 @@ export const sync: Capability = {
              * the same one `degrade` follows: whoever writes the module slot
              * re-reads ownership on the near side of the last await. */
             const names = await refusalNames()
-            if (running !== owner) return 'ok'
+            if (running !== owner || switchedOff !== null) return 'ok'
             syncStatus.set({
               state: 'ok',
               detail: describeSession(summary, names),
@@ -1207,7 +1231,18 @@ export const sync: Capability = {
        * journals nothing and the UI says so instead of pretending. */
       myStorageModel = createStorageModel({ services, coverCache: null, status: syncStatus, removeDownload: null })
       storageModel = myStorageModel
-      syncStatus.set({ state: 'idle', detail: fs ? 'Peer plugin unavailable' : 'No filesystem in a browser tab' })
+      const detail = await unwiredDetail(Boolean(fs))
+      if (!stopped) syncStatus.set({ state: 'idle', detail })
+    }
+
+    /* OFF CLOSES THE TRANSPORT FOR THE REST OF THE RUN, so the schedule stops
+       with it: every tick would only flash "Syncing…" and write a warning. */
+    if (running !== null) {
+      unwatchP2p = watchP2p((on) => {
+        switchedOff = switchDetail(on)
+        scheduler?.stop()
+        syncStatus.set({ state: 'idle', detail: switchedOff })
+      })
     }
 
     api.diagnostics.info('sync.started', { wired: running !== null })

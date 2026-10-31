@@ -48,6 +48,10 @@ import { SYNC_QUARANTINE_SETTING } from './lib/quarantine'
 const native = vi.hoisted(() => ({
   /** What `peerPort()` answers — the port `peer.start` would have built over the plugin. */
   port: null as unknown,
+  /** What the P2P switch answers. */
+  p2pOn: (async () => true) as () => Promise<boolean>,
+  /** Whoever is watching the switch, to change it under them. */
+  p2pWatcher: null as ((on: boolean) => void) | null,
   /** The "Sync now" feeds registered with the Devices pane. */
   syncNow: new Set<() => void>(),
   /** Whether taking a feed back throws — the pane failing to let go. */
@@ -57,6 +61,13 @@ const native = vi.hoisted(() => ({
 vi.mock('../peer', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../peer')>()),
   peerPort: () => native.port,
+  p2pAvailable: () => native.p2pOn(),
+  watchP2p: (listener: (on: boolean) => void) => {
+    native.p2pWatcher = listener
+    return () => {
+      native.p2pWatcher = null
+    }
+  },
   registerSyncNow: (fn: () => void) => {
     native.syncNow.add(fn)
     return () => {
@@ -1493,6 +1504,20 @@ describe('a runtime with no transport', () => {
     expect(sync.settings?.[0]?.render({ bookId: null })).toBeNull()
   })
 
+  it.each([
+    ['off', async () => false],
+    ['unreadable', () => Promise.reject(new Error('unreadable'))],
+  ])('says peer-to-peer is off, not that a plugin is missing, while the switch is %s', async (_name, answer) => {
+    const before = native.p2pOn
+    native.p2pOn = answer
+    try {
+      await start({ fs: crashableFs(book('book:a', 'Alpha', 'bytes')), noPlugin: true })
+      expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+    } finally {
+      native.p2pOn = before
+    }
+  })
+
   it('journals the library it has, and says the peer plugin is unavailable', async () => {
     const run = await start({ fs: crashableFs(book('book:a', 'Alpha', 'bytes')), noPlugin: true })
 
@@ -2808,6 +2833,38 @@ describe('whose sentence a failure is', () => {
     await action('sync:download').run('book:ghost')
 
     expect(syncStatus.getSnapshot()).toMatchObject({ state: 'degraded', detail: '“book:ghost” couldn’t be read on one of the devices' })
+  })
+
+  it('stops the schedule and says why when the switch goes off, and a failure on the closed link does not reword it', async () => {
+    const { run } = await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.content.name]: () => {
+            throw { code: 'unreadable', retryable: true, message: 'the record will not read' }
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    const sessions = named(run.events, 'sync.session-ok').length
+
+    native.p2pWatcher?.(false)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+    await action('sync:download').run('book:ghost')
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+    /* Past the backstop's whole period, so a live schedule would have run again. */
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(named(run.events, 'sync.session-ok')).toHaveLength(sessions)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+    await expect(run.services.shelf()?.sync()).resolves.toEqual({ started: false, detail: 'Peer-to-peer is off' })
+
+    native.p2pWatcher?.(true)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Quit and reopen Paper to use peer-to-peer' })
+
+    run.handle.dispose()
+    expect(native.p2pWatcher).toBeNull()
   })
 
   it('refuses a session by name when the runtime it belonged to is gone', async () => {

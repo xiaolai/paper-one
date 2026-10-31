@@ -244,6 +244,14 @@ pub enum Error {
     /// book".
     #[error("{0}")]
     ShareRefused(String),
+
+    /// The reader's P2P switch is off, so no endpoint may start. See `p2p.rs`.
+    #[error("peer-to-peer is turned off")]
+    P2pOff,
+    /// Closed in this run, by the switch or by exit. Only a new launch reopens
+    /// it: `PeerState` keeps the closed endpoints in its cells.
+    #[error("peer-to-peer was closed; quit and reopen Paper to use it")]
+    PeerClosed,
 }
 
 impl Error {
@@ -295,6 +303,8 @@ impl Error {
             Error::TransferBusy(_) => "transferBusy",
             Error::ShareMalformed { .. } => "shareMalformed",
             Error::ShareRefused(_) => "shareRefused",
+            Error::P2pOff => "p2pOff",
+            Error::PeerClosed => "peerClosed",
         }
     }
 }
@@ -489,6 +499,8 @@ mod tests {
             }
             .kind(),
             Error::ShareRefused(String::new()).kind(),
+            Error::P2pOff.kind(),
+            Error::PeerClosed.kind(),
         ];
         let unique: std::collections::BTreeSet<_> = all.iter().collect();
         assert_eq!(unique.len(), all.len());

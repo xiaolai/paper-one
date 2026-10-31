@@ -1,9 +1,16 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Annotation, Highlight } from '../../../kernel'
 import type { SharePort, ShareState } from '../lib/sharing'
 import { ShareControl } from './ShareControl'
+
+const live = vi.hoisted(() => ({ now: true }))
+
+vi.mock('../../peer', async (original) => ({
+  ...(await original<typeof import('../../peer')>()),
+  useP2pLive: () => live.now,
+}))
 
 /**
  * The share control — WI-23.A1's surface.
@@ -14,7 +21,10 @@ import { ShareControl } from './ShareControl'
  * as "Share".
  */
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  live.now = true
+})
 
 const mark = (over: Partial<Highlight> = {}): Highlight =>
   ({
@@ -45,6 +55,13 @@ const portWith = (state: ShareState, over: Partial<SharePort> = {}): SharePort =
 const button = (name: string) => screen.queryByRole('button', { name })
 
 describe('the share control', () => {
+  it('draws nothing once the P2P switch has closed the transport', async () => {
+    live.now = false
+    const { container } = render(<ShareControl mark={mark()} port={portWith({ publishability: 'usable', published: false })} />)
+    await act(async () => {})
+    expect(container.textContent).toBe('')
+  })
+
   it('offers Share, and not Share with note, for a bare highlight', async () => {
     render(<ShareControl mark={mark()} port={portWith({ publishability: 'usable', published: false })} />)
     await waitFor(() => expect(button('Share')).not.toBeNull())

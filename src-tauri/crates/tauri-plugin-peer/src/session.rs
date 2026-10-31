@@ -361,7 +361,8 @@ pub(crate) fn endpoint_addr(id: EndpointId, hints: &[String]) -> EndpointAddr {
     let mut addr = EndpointAddr::new(id);
     for hint in hints {
         if let Ok(ip) = hint.parse::<std::net::SocketAddr>() {
-            if is_synthetic(ip.ip()) {
+            // Test nodes live on loopback; see `endpoint::builder_for`.
+            if is_synthetic(ip.ip()) && !(cfg!(test) && ip.ip().is_loopback()) {
                 continue;
             }
             addr = addr.with_ip_addr(ip);
@@ -1327,7 +1328,11 @@ mod tests {
 
         // The acceptor is paused right before registration: forget the peer in
         // exactly the window the finding describes, then release.
-        reached_rx.await.unwrap();
+        // Bounded: a dial that fails never reaches the gate, and this hung forever.
+        tokio::time::timeout(std::time::Duration::from_secs(60), reached_rx)
+            .await
+            .expect("the dial reached the admit gate")
+            .unwrap();
         shelf.node.forget_peer(&satchel.id()).unwrap();
         release_tx.send(()).unwrap();
 
@@ -1370,6 +1375,41 @@ mod tests {
         assert!(opened.is_err(), "the shelf never announces an open session");
         shelf.close().await;
         satchel.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_closed_node_answers_no_dial_while_something_still_holds_it() {
+        // Turning P2P off closes the node while `PeerState` keeps its cell, so
+        // the UDP sockets stay bound until the app quits. Bound must not mean
+        // answering, or the switch would say off while a peer got through.
+        let (shelf, satchel) = linked("sess-closed-held").await;
+        let held = shelf.node.clone();
+        let addr = shelf.addr();
+        shelf.close().await;
+        let answered = crate::endpoint::dial(
+            satchel.node.endpoint(),
+            addr,
+            PEER_ALPN,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(!matches!(answered, Some(Ok(_))), "a closed node answered");
+        drop(held);
+        satchel.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_test_node_publishes_only_loopback() {
+        // A real interface here makes every dialling test depend on the host's
+        // firewall, which fails as a thirty-second timeout naming nothing.
+        let node = TestNode::start("sess-loopback", Role::Shelf).await;
+        let addrs = node.addr_strings();
+        assert!(!addrs.is_empty());
+        for addr in &addrs {
+            let addr: std::net::SocketAddr = addr.parse().unwrap();
+            assert!(addr.ip().is_loopback(), "published a real interface");
+        }
+        node.close().await;
     }
 
     #[tokio::test]

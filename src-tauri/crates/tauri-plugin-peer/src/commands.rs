@@ -74,6 +74,28 @@ pub async fn peer_status<R: Runtime>(
     })
 }
 
+/// Whether the reader's P2P switch is on. Decides and records the first answer;
+/// see `p2p.rs`. Starts nothing.
+#[tauri::command]
+pub async fn peer_p2p_on<R: Runtime>(app: AppHandle<R>) -> Result<bool> {
+    let root = data_root(&app)?;
+    off_thread(move || crate::p2p::is_on(&root)).await
+}
+
+/// Set the reader's P2P switch.
+///
+/// Off closes whatever is running before it returns, so the promise holds
+/// without waiting for the relaunch. On takes effect at the next launch, like
+/// the role: the webview composed itself around the switch when it started.
+#[tauri::command]
+pub async fn peer_set_p2p<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, PeerState>,
+    on: bool,
+) -> Result<()> {
+    state.apply_switch(data_root(&app)?, on).await
+}
+
 /// This device's role, decided in Rust.
 /// ⚠️ **ASYNC AND OFF-THREAD, BECAUSE IT TOUCHES THE DISK.** A synchronous
 /// `#[tauri::command]` runs on the thread that dispatches commands, so a read

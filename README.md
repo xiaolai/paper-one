@@ -34,7 +34,8 @@ If you want a finished EPUB reader today, you want a different repository.
 - Optional on-device language model for a "gloss" — a short explanation of a
   word or phrase in the sentence it appears in, as an alternative to a
   dictionary lookup
-- Optional sync between the user's own machines, peer to peer
+- Optional sync between the user's own machines, peer to peer. All peer-to-peer
+  is off until it is turned on in Settings, under Devices
 
 The optional pieces are optional in the real sense: with nothing installed, the
 app is a reader and the features are simply absent.

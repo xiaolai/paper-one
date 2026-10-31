@@ -186,6 +186,10 @@ export interface PeerWire {
    * outright there.
    */
   setLocalRole(role: PeerRole): Promise<void>
+  /** The reader's P2P switch — see the plugin's `p2p.rs`. Starts nothing. */
+  p2pOn(): Promise<boolean>
+  /** Off closes what is running before it answers; on applies at the next launch. */
+  setP2p(on: boolean): Promise<void>
   dataRoot(): Promise<string>
 
   listPeers(): Promise<readonly WirePeer[]>
@@ -661,6 +665,8 @@ export function tauriWire(): PeerWire {
     status: () => invoke(command('peer_status')),
     localRole: () => invoke(command('peer_local_role')),
     setLocalRole: (role) => invoke(command('peer_set_local_role'), { role }),
+    p2pOn: () => invoke(command('peer_p2p_on')),
+    setP2p: (on) => invoke(command('peer_set_p2p'), { on }),
     dataRoot: () => invoke(command('paper_data_root')),
 
     listPeers: () => invoke(command('peer_list_peers')),

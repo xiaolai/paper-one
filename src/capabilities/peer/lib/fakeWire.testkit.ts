@@ -210,6 +210,17 @@ class FakeWireImpl implements FakeWire {
     this.pendingRole = role
   }
 
+  /** The switch's stored answer. Only the composition reads it, at launch. */
+  p2pStored = true
+
+  async p2pOn(): Promise<boolean> {
+    return this.p2pStored
+  }
+
+  async setP2p(on: boolean): Promise<void> {
+    this.p2pStored = on
+  }
+
   /** The next launch: what `setLocalRole` stored becomes what runs. */
   restart(): void {
     if (this.pendingRole !== null) {

@@ -5,6 +5,13 @@ import { PUBLIC_LINKS_DISCLOSURE, disclosureFor, linksVoiceToPerson, type Public
 import type { PublishPublicPort } from '../lib/publishPort'
 import { PublishControl } from './PublishControl'
 
+const live = vi.hoisted(() => ({ now: true }))
+
+vi.mock('../../peer', async (original) => ({
+  ...(await original<typeof import('../../peer')>()),
+  useP2pLive: () => live.now,
+}))
+
 /**
  * The publish control — WI-26.4's surface.
  *
@@ -16,7 +23,10 @@ import { PublishControl } from './PublishControl'
  * the rule passed throughout. What was missing was a test of the WIRING.
  */
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  live.now = true
+})
 
 const PASSAGE: PublicPassage = { quote: 'Call me Ishmael', prefix: '', suffix: '', chapter: 'Loomings' }
 
@@ -35,6 +45,13 @@ const portWith = (over: Partial<PublishPublicPort> = {}): PublishPublicPort =>
 const button = (name: string | RegExp) => screen.queryByRole('button', { name })
 
 describe('the publish control', () => {
+  it('draws nothing once the P2P switch has closed the transport', () => {
+    live.now = false
+    render(<PublishControl bookId="book:1" passage={PASSAGE} port={portWith()} />)
+    expect(screen.queryByText('Say this publicly')).toBeNull()
+    expect(button('Publish…')).toBeNull()
+  })
+
   it('publishes nothing on the first click — the disclosure is a step', async () => {
     const port = portWith()
     render(<PublishControl bookId="book:1" passage={PASSAGE} port={port} />)

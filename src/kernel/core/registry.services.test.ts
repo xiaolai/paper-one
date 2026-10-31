@@ -191,6 +191,37 @@ describe('what a capability is handed, and what is said when one fails', () => {
   const api = () => kernelApi(createKernelServices({ fs: null, storage: null }))
   const signal = () => new AbortController().signal
 
+  it('leaves out a capability that says it is unavailable, without starting it or calling it a failure', async () => {
+    const start = vi.fn(() => ({ dispose: () => {} }))
+    const cap: Capability = {
+      id: 'circle',
+      available: async () => false,
+      start,
+      screens: [{ id: 'circle:circle', label: 'Circle', icon: 'people', render: () => null }],
+    }
+    const composition = await composeCapabilities([cap], api(), signal())
+    expect(start).not.toHaveBeenCalled()
+    expect(composition.failures).toEqual([])
+    expect(composition.screens).toEqual([])
+    composition.dispose()
+  })
+
+  it('starts a capability that says it is available', async () => {
+    const start = vi.fn(() => ({ dispose: () => {} }))
+    const composition = await composeCapabilities([{ id: 'circle', available: () => true, start }], api(), signal())
+    expect(start).toHaveBeenCalledOnce()
+    composition.dispose()
+  })
+
+  it('leaves out a capability that cannot say, and reports it', async () => {
+    const start = vi.fn(() => ({ dispose: () => {} }))
+    const cap: Capability = { id: 'circle', available: () => Promise.reject(new Error('unreadable')), start }
+    const composition = await composeCapabilities([cap], api(), signal())
+    expect(start).not.toHaveBeenCalled()
+    expect(composition.failures.map((one) => one.id)).toEqual(['circle'])
+    composition.dispose()
+  })
+
   it('starts a capability with the kernel’s services, its settings and its diagnostics in hand', async () => {
     let handed: Record<string, unknown> | null = null
     const cap: Capability = {

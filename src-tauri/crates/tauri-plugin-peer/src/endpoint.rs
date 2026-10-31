@@ -302,6 +302,19 @@ fn builder_for(
                     format!("peer: bad bind address: {err}"),
                 ))
             }),
+        /* ⚠️ **A TEST NODE STAYS ON LOOPBACK**, or every test that dials is a
+        test of the machine's firewall: macOS drops inbound UDP to an unsigned
+        binary on every interface except loopback, without an error, so a
+        fresh test binary times out dialling itself. */
+        None if cfg!(test) => builder
+            .clear_ip_transports()
+            .bind_addr(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .map_err(|err| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("peer: bad bind address: {err}"),
+                ))
+            }),
         None => Ok(builder),
     }
 }

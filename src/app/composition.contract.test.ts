@@ -1382,3 +1382,19 @@ describe('overlays — the fourth contribution type (WI-22.D1)', () => {
     expect(composition.overlays).toEqual([])
   })
 })
+
+describe('the P2P switch reaches every capability that only works over P2P', () => {
+  /* `sync` stays composed because it also holds the clock and the journal, and
+     runs local-only without a port. Everything else that requires `peer` is
+     P2P and nothing else, so a new one that forgot the switch fails here. */
+  it.each([
+    ['desktop', desktop],
+    ['ios', ios],
+    ['android', android],
+  ] as const)('%s', (_name, composition) => {
+    const uncovered = composition
+      .filter((cap) => cap.requires?.includes('peer') && cap.id !== 'sync' && cap.available === undefined)
+      .map((cap) => cap.id)
+    expect(uncovered).toEqual([])
+  })
+})

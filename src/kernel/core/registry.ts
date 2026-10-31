@@ -1009,6 +1009,15 @@ export async function composeCapabilities(
       skip(cap.id, 'requires-failed', new Error(`capability "${cap.id}" requires "${missing}", which did not compose`), missing)
       continue
     }
+    try {
+      if (cap.available && !(await cap.available())) {
+        failed.add(cap.id)
+        continue
+      }
+    } catch (cause) {
+      skip(cap.id, 'start-failed', cause)
+      continue
+    }
     /* This capability's disposer stack: each resource it acquires registers
      * its own teardown through `onCleanup`. Run in reverse, it undoes a
      * half-finished `start` (so a throw leaves nothing) and, harmlessly

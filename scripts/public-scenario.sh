@@ -36,6 +36,12 @@
 # held nothing. A gate that can only be read after the irreversible step is not
 # a gate.
 #
+# ## ⚠️ PEER-TO-PEER MUST ALREADY BE ON
+#
+# A machine that has never used it launches with it off, and every command this
+# run depends on answers `p2pOff`. Turn it on in Settings, under Devices, and
+# reopen Paper on both machines first.
+#
 # ## ⚠️ WHAT THIS SCRIPT DOES NOT DO
 #
 # IT DOES NOT WRITE `public.jsonl`. Every mutation goes through the app's own
