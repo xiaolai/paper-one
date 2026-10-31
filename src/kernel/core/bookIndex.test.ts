@@ -849,6 +849,18 @@ describe('scanAllMarks', () => {
     expect(await scanAllMarks(fs)).toEqual([1, 2, 3])
   })
 
+  it('names the folders it skipped because a file there would not read, and not the ones with no file', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/marks.json`]: JSON.stringify([1]),
+      [`${BOOKS_DIR}/book_b/marks.json`]: 'not json',
+      [`${BOOKS_DIR}/book_c/book.json`]: '{}',
+      [`${BOOKS_DIR}/book_d/marks.json`]: '{}',
+    })
+    const unreadable: string[] = []
+    expect(await scanAllMarks(fs, (folder) => unreadable.push(folder))).toEqual([1])
+    expect(unreadable.sort()).toEqual(['book_b', 'book_d'])
+  })
+
   it('throws when the library itself will not list', async () => {
     const fs = fakeFs({ [`${BOOKS_DIR}/book_a/marks.json`]: '[]' })
     const broken: IndexFs = {

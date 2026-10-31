@@ -260,7 +260,9 @@ export interface MarkStore {
    * ⚠️ **REJECTS WITH `MarksScanFailed` WHEN THE SCAN DID NOT LAND**, rather
    * than resolving with the empty list a failed scan leaves behind. That is
    * the second half of the same backup, and without it the first half only
-   * moved the empty archive one cause further along.
+   * moved the empty archive one cause further along. It rejects too when the
+   * scan landed without a book whose marks file is there and would not read; a
+   * book with no marks file is simply a book with no marks.
    */
   loadAllNow(): Promise<readonly Mark[]>
   /**
@@ -802,12 +804,17 @@ export function createMarkStore({
     return marks
   }
 
-  const loadAll: MarkStore['loadAll'] = () => {
-    if (!fs) return Promise.resolve()
+  /* Resolves with whether the scan read everything that is there. The answer
+     is this scan's own, so an overlapping scan cannot speak for it. */
+  const scan = (): Promise<boolean> => {
+    if (!fs) return Promise.resolve(true)
+    let complete = true
     /* WHERE EVERY BOOK STOOD WHEN THE SCAN STARTED — see `writeGen`. Anything
        that moves between here and the result landing is newer than the scan. */
     const before = new Map(writeGen)
-    return scanAllMarks(fs)
+    return scanAllMarks(fs, () => {
+      complete = false
+    })
       .then((raw) => {
         const read = readStoredMarks(raw)
         keptAside('the library', read.refused)
@@ -826,6 +833,7 @@ export function createMarkStore({
               ]
         scanFailed = false
         publish()
+        return complete
       })
       .catch(() => {
         // A failed scan has not established that there is nothing; it has
@@ -833,8 +841,11 @@ export function createMarkStore({
         all = []
         scanFailed = true
         publish()
+        return false
       })
   }
+
+  const loadAll: MarkStore['loadAll'] = () => scan().then(() => {})
 
   /* THE STAMP IS MINTED ONCE, OUTSIDE THE MUTATION. `applyTo` runs the
    * mutation twice — optimistically over the screen's list, then over the
@@ -866,7 +877,7 @@ export function createMarkStore({
   }
 
   const loadAllNow: MarkStore['loadAllNow'] = async () => {
-    await loadAll()
+    const complete = await scan()
     const fresh = snapshot
     /* ⚠️ A FAILED SCAN STILL RESOLVES, so the flag is the only thing that
      * tells it from an empty library — see `MarksScanFailed`. `loadAll`
@@ -876,6 +887,10 @@ export function createMarkStore({
      * refusing. Read from the snapshot the scan just published rather than
      * from the hook's `all`, which is a commit behind. */
     if (fresh.scanFailed) throw new MarksScanFailed()
+    /* AND A SCAN THAT SKIPPED A DAMAGED BOOK STILL LANDS, which is right for
+     * the panel and is that same empty-file trap for one book: a backup without
+     * its notes, reported as done. */
+    if (!complete) throw new MarksScanFailed()
     /* BOTH CLASSES. They share a file and a store and are split at the
        snapshot; anything that wants the whole of what a reader left in
        their books has to put them back together. */

@@ -752,12 +752,16 @@ export async function writeIndex(
  * where nobody did.
  *
  * A book whose marks will not read contributes none rather than failing the
- * scan: one damaged book should cost that book's notes, not the pane.
+ * scan: one damaged book should cost that book's notes, not the pane. Something
+ * that writes those notes elsewhere needs to know they were left out, which is
+ * what `onUnreadable` tells it: the folder of a file that is there and would not
+ * read. A book with no marks file is not one; an `exists` that fails proves
+ * nothing, so it counts as there.
  *
  * This is the shape a SQLite index would eventually replace — and replacing it
  * would change nothing above, because the folders stay the truth either way.
  */
-export async function scanAllMarks(fs: IndexFs): Promise<unknown[]> {
+export async function scanAllMarks(fs: IndexFs, onUnreadable?: (folder: string) => void): Promise<unknown[]> {
   /* ABSENT AND UNREADABLE, distinguished — `listBooksDir` is that rule, held
    * in common with the shelf scan and the trust check. Resolving with `[]` for
    * both used to mean this function could not fail, so the caller's `.catch`
@@ -772,13 +776,17 @@ export async function scanAllMarks(fs: IndexFs): Promise<unknown[]> {
     entries.filter((entry) => entry.isDirectory),
     SCAN_WIDTH,
     async (entry) => {
+      const path = `${BOOKS_DIR}/${entry.name}/marks.json`
       try {
-        const bytes = await fs.readFile(`${BOOKS_DIR}/${entry.name}/marks.json`)
+        const bytes = await fs.readFile(path)
         const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes))
-        return Array.isArray(parsed) ? parsed : null
+        if (Array.isArray(parsed)) return parsed
       } catch {
-        return null
+        const absent = await fs.exists(path).then((there) => !there, () => false)
+        if (absent) return null
       }
+      onUnreadable?.(entry.name)
+      return null
     },
   )
   return marks.flatMap((one) => one ?? [])

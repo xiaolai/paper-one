@@ -112,6 +112,85 @@ describe('every mark, for something that is about to write a file', () => {
     expect(result.current.scanFailed).toBe(true)
   })
 
+  /* ONE DAMAGED BOOK COSTS THE PANE THAT BOOK'S NOTES, and that is right for a
+     pane. A backup that left them out would say nothing, and the file is not
+     read again until the day the reader needs it. */
+  describe('when one book in the library will not read', () => {
+    const OTHER = 'book:other'
+    /** A healthy book's marks on disk, and `damage` done to another book's. */
+    const damaged = async (damage: (fs: ReturnType<typeof shelf>) => ReturnType<typeof shelf>) => {
+      const fs = shelf()
+      fs.store.set(recordPath(OTHER), new TextEncoder().encode('{}'))
+      fs.store.set(marksPathIn(OTHER), new TextEncoder().encode('[]'))
+      const writer = createMarkStore({ fs, queue: writeQueue() })
+      await writer.open(BOOK)
+      await writer.addMany(BOOK, [createMark(highlight())])
+      return createMarkStore({ fs: damage(fs), queue: writeQueue() })
+    }
+    const refusingOther = (fs: ReturnType<typeof shelf>) => ({
+      ...fs,
+      readFile: async (path: string) => {
+        if (path === marksPathIn(OTHER)) throw new Error('the disk will not answer')
+        return fs.readFile(path)
+      },
+    })
+    const writing = (bytes: string) => (fs: ReturnType<typeof shelf>) => {
+      fs.store.set(marksPathIn(OTHER), new TextEncoder().encode(bytes))
+      return fs
+    }
+
+    it.each([
+      ['will not parse', writing('not json')],
+      ['holds something that is not a list', writing('{"marks":[]}')],
+      ['will not read', refusingOther],
+      [
+        'will not read, and nobody can say whether it is there',
+        (fs: ReturnType<typeof shelf>) => ({
+          ...refusingOther(fs),
+          exists: async (path: string) => {
+            if (path === marksPathIn(OTHER)) throw new Error('the disk will not answer')
+            return fs.exists(path)
+          },
+        }),
+      ],
+    ])('refuses to answer when its file %s', async (_name, damage) => {
+      const store = await damaged(damage)
+      const { result } = renderHook(() => useMarks(store, BOOK))
+
+      await act(async () => {
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+      })
+      /* The panel's reading of the same scan is untouched: the book that did
+         read is drawn, and the shelf is not said to have failed. */
+      expect(result.current.scanFailed).toBe(false)
+      expect(result.current.all.map((mark) => mark.bookId)).toEqual([BOOK])
+    })
+
+    it('answers again once the file reads', async () => {
+      const fs = shelf()
+      fs.store.set(marksPathIn(OTHER), new TextEncoder().encode('not json'))
+      const store = createMarkStore({ fs, queue: writeQueue() })
+      await act(async () => {
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+      })
+
+      fs.store.set(marksPathIn(OTHER), new TextEncoder().encode('[]'))
+
+      await act(async () => {
+        await expect(store.loadAllNow()).resolves.toEqual([])
+      })
+    })
+
+    it('answers for a book that has no marks file at all', async () => {
+      const fs = shelf()
+      const store = createMarkStore({ fs, queue: writeQueue() })
+
+      await act(async () => {
+        await expect(store.loadAllNow()).resolves.toEqual([])
+      })
+    })
+  })
+
   it('hands back both classes when the scan lands', async () => {
     const fs = shelf()
     const writer = createMarkStore({ fs, queue: writeQueue() })
