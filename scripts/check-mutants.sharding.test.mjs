@@ -2047,6 +2047,8 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
         ['a wall-clock timeout', [{ status: 'Timeout' }], null, false],
         ['a wall-clock timeout that repeated', [{ status: 'Timeout' }], [{ status: 'Timeout' }], false],
         ['no coverage', [{ status: 'NoCoverage' }], null, false],
+        ['a runtime error', [{ status: 'RuntimeError' }], null, false],
+        ['a compile error', [{ status: 'CompileError' }], null, false],
       ]
       for (const [what, first, settle, discharged] of cases) {
         await inScratch('mutants-aggregate-', async (root) => {
@@ -2106,29 +2108,107 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
       }
     })
 
-    /** A checkout of a file with two identical statements in one scope, planned by the real planner, whose plan names its real mutants. */
-    const DUPLICATED = "export function f(on) {\n  if (on) return 'x'\n  return 'x'\n}\n"
-    const plannedDuplicate = async (root) => {
-      const files = checkout(root, { 'src/a.ts': DUPLICATED, 'src/a.test.mjs': "import './a'\n" })
+    /* ⚠️ **A RESULT THAT CLAIMS THE DISCHARGE IS THE CASE THAT MATTERS.** Above, a
+       status that decides nothing is met by an honest result, which fails whether the
+       aggregate reads the status or not. Here the result says nothing is owed, so the
+       status is all that stands between a forged report and a pass. What discharges:
+       `Killed`, or a `Timeout` at the original's hit limit, which is a detection. A
+       wall-clock `Timeout` does not, because it is usually load. */
+    it('refuses a result claiming the discharge on any status that decides nothing', async () => {
+      for (const status of ['Survived', 'NoCoverage', 'RuntimeError', 'CompileError', 'Timeout']) {
+        await inScratch('mutants-aggregate-', async (root) => {
+          const at = path.join(root, 'src/a.ts')
+
+          const { stderr, code } = await reconcileWide(root, at, wideRun(reportOf(at, [{ status }])))
+
+          expect(stderr, status).toContain(`mismatched: ${resultFile(root)} — the merge base's evidence does not support it`)
+          expect(code, status).toBe(1)
+        })
+      }
+    })
+
+    /* The same place and the same replacement, by two mutators: no source the real
+       instrumenter was found to mutate that way, so the plan is written by hand. A kill
+       of one still answers for nothing about the other. */
+    it('does not let a kill by one mutator discharge another with the same replacement at the same place', () =>
+      inScratch('mutants-aggregate-', async (root) => {
+        const at = path.join(root, 'src/a.ts')
+        const other = { ...IDENTITY, mutatorName: 'ObjectLiteral' }
+        const plan = planOf([subjectOf({ mutants: 2, identities: [other, IDENTITY] })])
+        const narrow = reportOf(at, [{ ...other, status: 'Survived' }, { status: 'Survived' }])
+        const wide = wideRun(reportOf(at, [{ ...other, status: 'Killed' }, { status: 'Survived' }]))
+
+        const { stderr, code } = await reconcile(root, plan, (digest) => ({
+          'shard-1/a.result.json': resultOf(digest, {
+            outcome: 'survived',
+            mutants: 2,
+            report: narrow,
+            base: killedAtBase(at, { wide }),
+          }),
+          'shard-1/receipt.json': receiptOf(digest),
+        }))
+
+        expect(stderr).toContain(`mismatched: ${resultFile(root)} — the merge base's evidence does not support it`)
+        expect(code).toBe(1)
+      }))
+
+    /** A checkout of `source`, planned by the real planner, whose plan names its real mutants. */
+    const plannedOver = async (root, source) => {
+      const files = checkout(root, { 'src/a.ts': source, 'src/a.test.mjs': "import './a'\n" })
       const subjects = ['src/a.ts']
       const tree = ['src/a.ts', 'src/a.test.mjs']
-      const origins = (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: digestOf(DUPLICATED) }]))
+      const origins = (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: digestOf(source) }]))
       const { manifest } = await planOver(root, { subjects, tree, origins })
       const { identities } = (await readJson(manifest)).subjects[0]
       const report = (statusOf) => ({
         files: {
           [files['src/a.ts']]: {
-            source: DUPLICATED,
+            source,
             mutants: identities.map((identity, id) => ({ id: String(id), static: false, ...identity, coveredBy: ['1'], killedBy: ['1'], statusReason: 'some words', status: statusOf(identity) })),
           },
         },
       })
       const placeOfIt = ({ location: { start } }) => `${start.line}:${start.column}`
-      const strings = identities.filter((one) => one.mutatorName === 'StringLiteral').map(placeOfIt)
+      return { files, subjects, tree, manifest, report, placeOfIt, identities }
+    }
+    /** A file with two identical statements in one scope. */
+    const DUPLICATED = "export function f(on) {\n  if (on) return 'x'\n  return 'x'\n}\n"
+    const plannedDuplicate = async (root) => {
+      const planned = await plannedOver(root, DUPLICATED)
+      const strings = planned.identities.filter((one) => one.mutatorName === 'StringLiteral').map(planned.placeOfIt)
       /* What this whole case rests on: two mutants of one statement. */
       expect(strings).toEqual(['2:18', '3:10'])
-      return { files, subjects, tree, manifest, report, placeOfIt }
+      return planned
     }
+
+    /* Two mutants at ONE place, told apart only by what they put there: a kill of
+       `true` says nothing about `false`, and a discharge by place would spend it on both. */
+    it('leaves charged the replacement the wide run did not kill at a place where it killed another', () =>
+      inScratch('mutants-shard-', async (root) => {
+        const SOURCE = 'export function f(x) {\n  return x > 1\n}\n'
+        const { subjects, tree, manifest, report, placeOfIt, identities } = await plannedOver(root, SOURCE)
+        const isIt = (one, replacement) => one.mutatorName === 'ConditionalExpression' && one.replacement === replacement && placeOfIt(one) === '2:10'
+        /* What this whole case rests on: both of them, at the one place. */
+        expect(identities.filter((one) => isIt(one, 'true') || isIt(one, 'false')).length).toBe(2)
+        const narrow = report((one) => (isIt(one, 'true') || isIt(one, 'false') ? 'Survived' : 'Killed'))
+        const wide = report((one) => (isIt(one, 'false') ? 'Survived' : 'Killed'))
+        const atBase = { exitedCleanly: true, durationMs: 900, report: report(() => 'Killed') }
+
+        const shard = await shardOf(root, manifest, '1/1', {
+          subjects,
+          tree,
+          stryker: inTurn(root, [narrow, wide]),
+          measure: () => ({ install: 'linked', outcome: 'killed', durationMs: 900, sha256: digestOf(SOURCE), source: SOURCE, first: atBase, settle: null }),
+        })
+        const written = await readJson(resultIn(path.join(root, 'results'), 1, 'src/a.ts'))
+        const aggregate = await aggregateOf(root, manifest)
+
+        expect(shard.code).toBe(1)
+        expect(written.base.added.map(({ at, identity }) => [at, identity.replacement])).toEqual([['2:10', 'false']])
+        expect(aggregate.stderr).not.toContain('mismatched')
+        expect(aggregate.stderr).toContain('  added: src/a.ts:2:10 — ConditionalExpression replacing "x > 1" with "false"')
+        expect(aggregate.code).toBe(1)
+      }))
     /** Stands in for Stryker over one subject: each run writes the next report and says its exit. */
     const inTurn = (root, reports) => {
       let at = 0
