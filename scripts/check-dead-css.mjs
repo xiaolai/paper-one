@@ -4,14 +4,14 @@ import { dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import { isProcessEntry } from './lib/entry.mjs'
+import { followHolders, staticText, unwrapped } from './lib/holders.mjs'
 
 /**
  * `pnpm css:check` — every class in a CSS module has a consumer, and every class
  * a source names from a CSS module exists.
  *
- * A STATIC HEURISTIC WITH NAMED LIMITS, not a proof: it reads syntax and one file's
- * scopes, with no types resolved. WHAT IT CANNOT SEE lists what a clean run does not
- * cover.
+ * A STATIC CHECK, not a proof: it reads syntax and one file's scopes, carries what
+ * crosses a file itself, and resolves no types. What it cannot follow it says so about.
  *
  * A RULE OUTLIVES THE COMPONENT THAT ORPHANED IT, silently. A panel loses its
  * empty state, a popover becomes a full-width sheet, a status line is replaced
@@ -24,19 +24,25 @@ import { isProcessEntry } from './lib/entry.mjs'
  * NOT A LINTER, and deliberately not: this repo gates with small scripts that
  * answer one question each, and the question here is narrow enough to answer
  * exactly. A class is used when some source reads it off a binding that holds a
- * stylesheet (see `readsIn` for every form), or when another module `composes`
+ * stylesheet (see `readsIn`, and `lib/holders.mjs` for every form), or when another module `composes`
  * it. The source is PARSED: a comment or a string that mentions `styles.gone`
  * reads nothing, whichever way that would have misled the gate.
  *
- * WHAT IT CANNOT SEE. A stylesheet handed on under another name (`f(styles)`,
- * `{ ...styles }`, `Object.keys(styles)`), a computed key (`styles[name]`), a
- * stylesheet reached through a re-export or a dynamic import, or chosen by an
- * expression (`const s = x ? a : b`): no read is recorded. A binding reassigned to
- * a second stylesheet is read against the first.
- * A class read only that way is reported dead, which is loud, and a missing class
- * read that way is not reported. `<X styles={styles}>` is seen where it is read
- * as `styles`. A namespace import read as `css.default.x` reports `default` as
- * undefined and reads no `x`, which is loud too; read `css.x` or a default import.
+ * WHAT IT FOLLOWS, across files as well as within one: an alias, an assignment, a
+ * pattern, `x ? a : b`, an array, an object bound to a name, a spread, a function that
+ * returns one, a call that hands one to a function another source exports, an export,
+ * a re-export (`export { default as s } from './a.module.css'`, `export * as s`, and
+ * through source files), `import()`, `require()`, `css.default.x` and `Object.keys`.
+ * A binding that can hold two stylesheets is read against each, since nothing here
+ * knows which branch ran.
+ *
+ * WHAT IT CANNOT FOLLOW IT REFUSES, by file and line: `unfollowedStylesheets`. A key
+ * nothing can read (`styles[name]`), a stylesheet handed to a call this cannot see
+ * into (`f(styles)` for a library's `f`), one spread into props, assigned to a member,
+ * returned from a method or inside an array or object, or an array or object that
+ * goes on holding one. The way out is a class read by name, or the stylesheet handed
+ * on as `styles`: `<X styles={styles}>` is seen where it is read as `styles`, which
+ * proves the class is used and cannot say which module it must be in.
  *
  * WHAT IT DELIBERATELY DOES NOT DO. It does not check whether the RULE has any
  * effect, or whether the element it lands on is rendered, or whether a
@@ -67,55 +73,84 @@ function walk(dir, out = []) {
   return out
 }
 
-/** `styles`, `styles!`, `(styles)`, `styles as X`: the expression under its wrappers. */
-function unwrapped(node) {
-  let inner = node
-  while (ts.isParenthesizedExpression(inner) || ts.isNonNullExpression(inner) || ts.isAsExpression(inner) || ts.isSatisfiesExpression(inner)) {
-    inner = inner.expression
-  }
-  return inner
-}
-
-/** The keys an expression can only be: `'a'`, `x ? 'a' : 'b'`, `x ?? 'a'`. Empty for anything else. */
-function literalKeys(node) {
-  const inner = unwrapped(node)
-  if (ts.isStringLiteralLike(inner)) return [inner.text]
-  if (ts.isConditionalExpression(inner)) return [...literalKeys(inner.whenTrue), ...literalKeys(inner.whenFalse)]
-  if (ts.isBinaryExpression(inner) && [ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken].includes(inner.operatorToken.kind)) {
-    return [...literalKeys(inner.left), ...literalKeys(inner.right)]
-  }
-  return []
-}
-
-/** `a`, `'a'`, `['a']`: the key a pattern or an object names. Null for `[a]`, which could be anything. */
-function keyOf(name) {
-  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text
-  return ts.isComputedPropertyName(name) && ts.isStringLiteralLike(name.expression) ? name.expression.text : null
-}
-
-/** What a pattern's value assigns to: `s` in `{ a: s }` and in `{ a: s = {} }`. */
-function assignedTarget(node) {
-  const inner = unwrapped(node)
-  return ts.isBinaryExpression(inner) && inner.operatorToken.kind === ts.SyntaxKind.EqualsToken ? assignedTarget(inner.left) : inner
-}
-
-/** Whether an object literal is the left of an assignment, so its keys read rather than write. */
-function isDestructuringTarget(literal) {
-  let node = literal
-  while (ts.isParenthesizedExpression(node.parent)) node = node.parent
-  const parent = node.parent
-  if (ts.isBinaryExpression(parent)) return parent.left === node && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
-  return ts.isPropertyAssignment(parent) && parent.initializer === node && isDestructuringTarget(parent.parent)
-}
-
 const isModuleImport = (specifier) => ts.isStringLiteralLike(specifier) && specifier.text.endsWith('.module.css')
 
-/** Handed in by whoever called: no stylesheet is known, so a read proves only that a class is used. */
-const HANDED_IN = Object.freeze({ modulePath: null })
+/*
+ * WHAT A BINDING CAN HOLD. A stylesheet, as a default import reads it; the module
+ * object, as `import * as` and `import()` read it, whose `default` is the stylesheet;
+ * one handed in by whoever called, whose module is not known, so a read of it proves
+ * only that a class is used; and another source file's module object, which holds
+ * whatever that file exports.
+ */
+const interned = (make) => {
+  const made = new Map()
+  return (key) => {
+    if (!made.has(key)) made.set(key, make(key))
+    return made.get(key)
+  }
+}
+const sheetOf = interned((modulePath) => Object.freeze({ kind: 'sheet', modulePath }))
+const namespaceOf = interned((modulePath) => Object.freeze({ kind: 'namespace', modulePath }))
+const sourceModuleOf = interned((file) => Object.freeze({ kind: 'source', file, modulePath: null }))
+const HANDED_IN = Object.freeze({ kind: 'handedIn', modulePath: null })
+
+/** The source file a relative specifier means, or null: this tree writes no extensions. */
+function sourceAt(file, specifier, functions) {
+  if (!specifier.startsWith('.')) return null
+  const bare = resolve(dirname(file), specifier)
+  for (const candidate of [bare, `${bare}.ts`, `${bare}.tsx`, join(bare, 'index.ts'), join(bare, 'index.tsx')]) {
+    if (functions.has(candidate)) return candidate
+  }
+  return null
+}
+
+/** The functions a file exports, by name, whatever else is known of it. A call into one is followed. */
+function exportedFunctions(source) {
+  const found = new Map()
+  const isExported = (node) => (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Export) !== 0
+  for (const statement of source.statements) {
+    if (ts.isFunctionDeclaration(statement) && isExported(statement)) {
+      const isDefault = (ts.getCombinedModifierFlags(statement) & ts.ModifierFlags.Default) !== 0
+      if (isDefault) found.set('default', statement)
+      else if (statement.name) found.set(statement.name.text, statement)
+    }
+    if (ts.isVariableStatement(statement) && isExported(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        const value = declaration.initializer === undefined ? undefined : unwrapped(declaration.initializer)
+        if (ts.isIdentifier(declaration.name) && value !== undefined && (ts.isArrowFunction(value) || ts.isFunctionExpression(value))) found.set(declaration.name.text, value)
+      }
+    }
+  }
+  return found
+}
+
+const emptyExport = () => ({ value: new Set(), returns: new Set() })
+
+/** `followHolders`' answer for a file with nothing in it to follow. */
+const NOTHING_HELD = { originsOf: () => [], heldBy: () => [], returnsOf: () => [] }
+
+/** One round's view of every file: what each exports, and what callers hand its functions. */
+const emptyTable = () => ({ exports: new Map(), handed: new Map() })
+
+function exportFrom(table, file, name) {
+  let exported = table.exports.get(file)
+  if (exported === undefined) table.exports.set(file, (exported = new Map()))
+  let entry = exported.get(name)
+  if (entry === undefined) exported.set(name, (entry = emptyExport()))
+  return entry
+}
+
+const tableText = (table) =>
+  JSON.stringify([
+    [...table.exports].map(([file, names]) => [file, [...names].map(([name, entry]) => [name, [...entry.value].map(originText), [...entry.returns].map(originText)])]),
+    [...table.handed].map(([key, origins]) => [key, [...origins].map(originText)]),
+  ])
+const originText = (origin) => `${origin.kind}:${origin.modulePath ?? origin.file ?? ''}`
 
 /**
- * Every class one source reads: `{ modulePath, name }`, `modulePath` null for a
- * stylesheet that was handed in.
+ * Every class one source reads, `{ modulePath, name }`, `modulePath` null for a
+ * stylesheet that was handed in; every stylesheet it reads whole; and what it does
+ * with one that this cannot follow.
  *
  * WHAT HOLDS A STYLESHEET IS A BINDING, so the compiler's scopes decide: an
  * identifier means what it resolves to, and a parameter that shadows an import is
@@ -123,116 +158,241 @@ const HANDED_IN = Object.freeze({ modulePath: null })
  * anything called `styles` still counts as one, and that keeps its classes alive
  * without saying which module they must be in.
  *
- * A binding is filled from an import, a declaration, a default or an assignment,
- * directly or through a pattern; a pattern's keys are reads and its rest is another
- * holder. Run until nothing changes, because an alias can be
- * written above the one it copies.
+ * `lib/holders.mjs` follows it within the file. This adds what crosses a file, which
+ * only the whole walk can see: an export, a re-export, an import of either, and a
+ * call handing one to a function another file exports.
  */
-function readsIn(file, source, checker) {
-  const holders = new Map()
+function readsIn(file, source, checker, functions, known, next) {
   const reads = new Map()
-  const read = (origin, name) => {
-    if (name !== null) reads.set(JSON.stringify([origin.modulePath, name]), { modulePath: origin.modulePath, name })
+  const whole = new Set()
+  const unfollowed = []
+  const say = (at, how) => unfollowed.push({ line: source.getLineAndCharacterOfPosition(at.getStart()).line + 1, what: at.getText().replace(/\s+/g, ' ').slice(0, 60), how })
+  const readName = (origin, name) => {
+    if (origin.kind !== 'source') reads.set(JSON.stringify([origin.modulePath, name]), { modulePath: origin.modulePath, name })
   }
 
-  const originOf = (node) => {
-    const inner = unwrapped(node)
-    if (ts.isIdentifier(inner)) return holders.get(checker.getSymbolAtLocation(inner)) ?? (inner.text === 'styles' ? HANDED_IN : null)
-    const called = ts.isPropertyAccessExpression(inner) ? [inner.name.text] : ts.isElementAccessExpression(inner) ? literalKeys(inner.argumentExpression) : []
-    return called.includes('styles') ? HANDED_IN : null
+  const importedFrom = new Map()
+  const seeds = []
+  const returning = []
+  const takeFrom = (target, name, nameNode) => {
+    importedFrom.set(checker.getSymbolAtLocation(nameNode), { target, name })
+    const entry = known.exports.get(target)?.get(name)
+    if (entry === undefined) return
+    if (entry.value.size > 0) seeds.push([nameNode, [...entry.value]])
+    if (entry.returns.size > 0) returning.push([checker.getSymbolAtLocation(nameNode), [...entry.returns]])
   }
-
-  let changed = false
-  const hold = (identifier, origin) => {
-    /* In `({ s = x } = o)` the name's own symbol is the key; the variable is the holder. */
-    const symbol = ts.isShorthandPropertyAssignment(identifier.parent) ? checker.getShorthandAssignmentValueSymbol(identifier.parent) : checker.getSymbolAtLocation(identifier)
-    /* THE FIRST STYLESHEET A BINDING TAKES IS THE ONE IT HOLDS, so this only ever
-       moves one way and the loop below ends, whatever a reassignment does. Knowing
-       the module outranks knowing only that one was handed in. */
-    if (symbol === undefined || (holders.has(symbol) && holders.get(symbol) !== HANDED_IN) || holders.get(symbol) === origin) return
-    holders.set(symbol, origin)
-    changed = true
-  }
-  /** A declaration's name, or an assignment's target, taking the stylesheet in `origin`. */
-  const fill = (target, origin) => {
-    if (origin === null) return
-    if (ts.isIdentifier(target)) hold(target, origin)
-    else if (ts.isObjectBindingPattern(target)) {
-      for (const element of target.elements) {
-        if (element.dotDotDotToken) fill(element.name, origin)
-        else read(origin, keyOf(element.propertyName ?? element.name))
-      }
-    } else if (ts.isObjectLiteralExpression(target)) {
-      for (const member of target.properties) {
-        if (ts.isSpreadAssignment(member)) fill(unwrapped(member.expression), origin)
-        else read(origin, keyOf(member.name))
-      }
-    }
-  }
-
-  const flows = []
-  const handedIn = []
-  const members = []
-  const visit = (node) => {
-    if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) {
-      if (node.initializer) flows.push([node.name, node.initializer])
-    }
-    if (ts.isShorthandPropertyAssignment(node) && node.objectAssignmentInitializer) flows.push([node.name, node.objectAssignmentInitializer])
-    if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent) && !node.dotDotDotToken && keyOf(node.propertyName ?? node.name) === 'styles') {
-      handedIn.push(node.name)
-    }
-    if (ts.isPropertyAssignment(node) && ts.isObjectLiteralExpression(node.parent) && isDestructuringTarget(node.parent) && keyOf(node.name) === 'styles') {
-      handedIn.push(assignedTarget(node.initializer))
-    }
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
-      flows.push([unwrapped(node.left), node.right])
-    } else if (ts.isPropertyAccessExpression(node)) {
-      members.push([node.expression, [node.name.text]])
-    } else if (ts.isElementAccessExpression(node)) {
-      members.push([node.expression, literalKeys(node.argumentExpression)])
-    }
-    ts.forEachChild(node, visit)
-  }
-  visit(source)
 
   for (const statement of source.statements) {
     if (ts.isImportEqualsDeclaration(statement) && ts.isExternalModuleReference(statement.moduleReference) && isModuleImport(statement.moduleReference.expression)) {
-      hold(statement.name, { modulePath: resolve(dirname(file), statement.moduleReference.expression.text) })
+      seeds.push([statement.name, [sheetOf(resolve(dirname(file), statement.moduleReference.expression.text))]])
     }
-    if (!ts.isImportDeclaration(statement) || !isModuleImport(statement.moduleSpecifier)) continue
-    const origin = { modulePath: resolve(dirname(file), statement.moduleSpecifier.text) }
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteralLike(statement.moduleSpecifier)) continue
     const clause = statement.importClause
-    if (clause?.name) hold(clause.name, origin)
-    if (clause?.namedBindings && ts.isNamespaceImport(clause.namedBindings)) hold(clause.namedBindings.name, origin)
-    if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
-      for (const element of clause.namedBindings.elements) {
-        const imported = (element.propertyName ?? element.name).text
-        if (imported === 'default') hold(element.name, origin)
-        else read(origin, imported)
+    if (clause === undefined) continue
+    if (isModuleImport(statement.moduleSpecifier)) {
+      const modulePath = resolve(dirname(file), statement.moduleSpecifier.text)
+      if (clause.name) seeds.push([clause.name, [sheetOf(modulePath)]])
+      if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) seeds.push([clause.namedBindings.name, [namespaceOf(modulePath)]])
+      if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+        for (const element of clause.namedBindings.elements) {
+          const imported = (element.propertyName ?? element.name).text
+          if (imported === 'default') seeds.push([element.name, [sheetOf(modulePath)]])
+          else readName(sheetOf(modulePath), imported)
+        }
+      }
+      continue
+    }
+    const target = sourceAt(file, statement.moduleSpecifier.text, functions)
+    if (target === null) continue
+    if (clause.name) takeFrom(target, 'default', clause.name)
+    if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+      importedFrom.set(checker.getSymbolAtLocation(clause.namedBindings.name), { target, name: null })
+      if ((known.exports.get(target)?.size ?? 0) > 0) seeds.push([clause.namedBindings.name, [sourceModuleOf(target)]])
+    }
+    if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      for (const element of clause.namedBindings.elements) takeFrom(target, (element.propertyName ?? element.name).text, element.name)
+    }
+  }
+
+  /* What another file's call hands this one's function. */
+  const elementSeeds = []
+  for (const [key, origins] of known.handed) {
+    const [into, name, index] = JSON.parse(key)
+    if (into !== file) continue
+    const { parameters } = functions.get(file).get(name)
+    const last = parameters[parameters.length - 1]
+    if (last?.dotDotDotToken && index >= parameters.length - 1) elementSeeds.push([last.name, [...origins]])
+    else if (parameters[index] !== undefined) seeds.push([parameters[index].name, [...origins]])
+  }
+
+  const through = (origins, keys) =>
+    origins.flatMap((origin) => {
+      if (origin.kind === 'namespace' && keys.includes('default')) return [sheetOf(origin.modulePath)]
+      if (origin.kind === 'source') return keys.flatMap((key) => (key === null ? [] : [...(known.exports.get(origin.file)?.get(key)?.value ?? [])]))
+      return []
+    })
+
+  const rootOf = (inner) => {
+    if (!ts.isCallExpression(inner)) return []
+    /* `re.f()`, a function another file exports that hands one back. */
+    const callee = unwrapped(inner.expression)
+    if (ts.isPropertyAccessExpression(callee)) {
+      const from = ts.isIdentifier(callee.expression) ? importedFrom.get(checker.getSymbolAtLocation(callee.expression)) : undefined
+      return from?.name === null ? [...(known.exports.get(from.target)?.get(callee.name.text)?.returns ?? [])] : []
+    }
+    if (inner.arguments.length === 0) return []
+    const isLoad = inner.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(inner.expression) && inner.expression.text === 'require')
+    if (!isLoad) return []
+    const specifier = staticText(inner.arguments[0], checker)
+    if (specifier === null) return []
+    if (specifier.endsWith('.module.css')) return [namespaceOf(resolve(dirname(file), specifier))]
+    const target = sourceAt(file, specifier, functions)
+    return target !== null && (known.exports.get(target)?.size ?? 0) > 0 ? [sourceModuleOf(target)] : []
+  }
+
+  /* NOTHING IN A FILE THAT CANNOT HOLD ONE: the walk is the cost of this gate, and most
+     sources mention no stylesheet and were handed none. */
+  const couldHoldOne = seeds.length > 0 || elementSeeds.length > 0 || returning.length > 0 || /styles|\.module|\bimport\(|\brequire\(/.test(source.text)
+
+  /* A stylesheet chosen at run time names no module, so nothing can be said of it. */
+  if (/\.module\.css/.test(source.text)) {
+    const loads = (node) => {
+      if (ts.isCallExpression(node) && node.arguments.length > 0 && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+        if (staticText(node.arguments[0], checker) === null && node.arguments[0].getText().includes('.module.css')) say(node, 'a stylesheet chosen at run time')
+      }
+      ts.forEachChild(node, loads)
+    }
+    loads(source)
+  }
+
+  const followed = !couldHoldOne ? NOTHING_HELD : followHolders({
+    source,
+    checker,
+    rootName: 'styles',
+    rootOrigin: HANDED_IN,
+    rootOf,
+    seeds,
+    elementSeeds,
+    returning,
+    through,
+    read: (origins, name, at) => {
+      for (const origin of origins) {
+        if (origin.kind === 'source') {
+          const exported = known.exports.get(origin.file)
+          if (name === null) say(at, 'a module read by a key this cannot read')
+          else if ((exported?.get(name)?.returns.size ?? 0) > 0 && !(ts.isPropertyAccessExpression(at) && ts.isCallExpression(at.parent) && at.parent.expression === at)) say(at, 'a function that returns it, handed on')
+        } else if (name === null) say(at, 'a key this cannot read: name the class')
+        else readName(origin, name)
+      }
+    },
+    enumerated: (origins, at) => {
+      for (const origin of origins) {
+        if (origin.kind === 'source') continue
+        if (origin.modulePath === null) say(at, 'every key of a stylesheet handed in, whose module is not known')
+        else whole.add(origin.modulePath)
+      }
+    },
+    escaped: (origins, at, how) => {
+      if (origins.some((origin) => origin.kind !== 'source')) say(at, how)
+    },
+    handedOn: (callee, index, origins) => {
+      if (index < 0) return false
+      const inner = unwrapped(callee)
+      const named = ts.isIdentifier(inner)
+        ? importedFrom.get(checker.getSymbolAtLocation(inner))
+        : ts.isPropertyAccessExpression(inner) && ts.isIdentifier(inner.expression)
+          ? (() => {
+              const from = importedFrom.get(checker.getSymbolAtLocation(inner.expression))
+              return from?.name === null ? { target: from.target, name: inner.name.text } : undefined
+            })()
+          : undefined
+      if (named === undefined || !functions.get(named.target)?.has(named.name)) return false
+      const key = JSON.stringify([named.target, named.name, index])
+      const held = next.handed.get(key) ?? new Set()
+      for (const origin of origins) held.add(origin)
+      next.handed.set(key, held)
+      return true
+    },
+  })
+
+  /* What leaves, for the next round to read on the other side. */
+  const addExport = (name, value, returns) => {
+    if (value.length === 0 && returns.length === 0) return
+    const entry = exportFrom(next, file, name)
+    for (const origin of value) entry.value.add(origin)
+    for (const origin of returns) entry.returns.add(origin)
+  }
+  const isExported = (node) => (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Export) !== 0
+  const isDefault = (node) => (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Default) !== 0
+  const addSymbol = (name, symbol) => addExport(name, followed.heldBy(symbol), followed.returnsOf(symbol))
+  for (const statement of source.statements) {
+    if (ts.isFunctionDeclaration(statement) && isExported(statement) && statement.name) addSymbol(isDefault(statement) ? 'default' : statement.name.text, checker.getSymbolAtLocation(statement.name))
+    if (ts.isVariableStatement(statement) && isExported(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) addSymbol(declaration.name.text, checker.getSymbolAtLocation(declaration.name))
+      }
+    }
+    if (ts.isExportAssignment(statement)) {
+      const value = unwrapped(statement.expression)
+      if (ts.isIdentifier(value)) addSymbol('default', checker.getSymbolAtLocation(value))
+      addExport('default', followed.originsOf(value), [])
+    }
+    if (!ts.isExportDeclaration(statement)) continue
+    const specifier = statement.moduleSpecifier
+    const sheet = specifier !== undefined && isModuleImport(specifier) ? resolve(dirname(file), specifier.text) : null
+    const target = specifier !== undefined && sheet === null && ts.isStringLiteralLike(specifier) ? sourceAt(file, specifier.text, functions) : null
+    const clause = statement.exportClause
+    if (clause === undefined) {
+      /* `export * from`: every name goes on, and `default` does not. */
+      if (sheet !== null) whole.add(sheet)
+      if (target !== null) {
+        for (const [name, entry] of known.exports.get(target) ?? []) if (name !== 'default') addExport(name, [...entry.value], [...entry.returns])
+      }
+    } else if (ts.isNamespaceExport(clause)) {
+      if (sheet !== null) addExport(clause.name.text, [namespaceOf(sheet)], [])
+      if (target !== null && (known.exports.get(target)?.size ?? 0) > 0) addExport(clause.name.text, [sourceModuleOf(target)], [])
+    } else {
+      for (const element of clause.elements) {
+        const from = (element.propertyName ?? element.name).text
+        if (sheet !== null) {
+          if (from === 'default') addExport(element.name.text, [sheetOf(sheet)], [])
+          else readName(sheetOf(sheet), from)
+        } else if (target !== null) {
+          const entry = known.exports.get(target)?.get(from)
+          if (entry !== undefined) addExport(element.name.text, [...entry.value], [...entry.returns])
+        } else if (specifier === undefined) {
+          addSymbol(element.name.text, checker.getExportSpecifierLocalTargetSymbol(element))
+        }
       }
     }
   }
-
-  do {
-    changed = false
-    for (const name of handedIn) fill(name, HANDED_IN)
-    for (const [target, from] of flows) fill(target, originOf(from))
-  } while (changed)
-
-  for (const [object, names] of members) {
-    const origin = originOf(object)
-    if (origin !== null) for (const name of names) read(origin, name)
-  }
-  return [...reads.values()]
+  return { reads: [...reads.values()], whole: [...whole], unfollowed }
 }
 
-/** Every class each source reads, parsed once for the whole walk, as a map from file to its reads. */
+/** `readsBySource` for every source under `root`. */
+export function scanSources(root, roots = ROOTS) {
+  const files = roots.flatMap((dir) => (existsSync(join(root, dir)) ? walk(join(root, dir)) : []))
+  return readsBySource(files.filter((f) => ['.ts', '.tsx'].includes(extname(f))))
+}
+
+/**
+ * What every source does with a stylesheet, parsed once for the whole walk: a map
+ * from file to `readsIn`'s answer. Rounds until what crosses a file stops changing,
+ * since a re-export of a re-export arrives a round later.
+ */
 function readsBySource(sources) {
   /* NO LIBRARY AND NO RESOLVING: the scopes are all this asks of the compiler, and
-     they are within one file. */
+     they are within one file. What crosses a file is `readsIn`'s to carry. */
   const program = ts.createProgram(sources, { noResolve: true, noLib: true, types: [], jsx: ts.JsxEmit.Preserve, target: ts.ScriptTarget.Latest, noEmit: true })
   const checker = program.getTypeChecker()
-  return new Map(sources.map((file) => [file, readsIn(file, program.getSourceFile(file), checker)]))
+  const functions = new Map(sources.map((file) => [file, exportedFunctions(program.getSourceFile(file))]))
+  let known = emptyTable()
+  for (;;) {
+    const next = emptyTable()
+    const answers = new Map(sources.map((file) => [file, readsIn(file, program.getSourceFile(file), checker, functions, known, next)]))
+    if (tableText(next) === tableText(known)) return answers
+    known = next
+  }
 }
 
 /** Comments, strings and `url(...)` gone, in one pass: each can hold what opens another. */
@@ -358,11 +518,9 @@ function declaredClasses(file) {
  * rules it meant to remove, and the search field went on looking like that for
  * six weeks under a gate that was green.
  */
-export function undefinedClasses(root, roots = ROOTS) {
-  const files = roots.flatMap((dir) => (existsSync(join(root, dir)) ? walk(join(root, dir)) : []))
+export function undefinedClasses(root, roots = ROOTS, scanned = scanSources(root, roots)) {
   const found = []
-  const sources = files.filter((f) => ['.ts', '.tsx'].includes(extname(f)))
-  for (const [file, reads] of readsBySource(sources)) {
+  for (const [file, { reads }] of scanned) {
     for (const { modulePath, name } of reads) {
       if (modulePath === null) continue
       const known = existsSync(modulePath) && declaredClasses(modulePath).has(name)
@@ -376,6 +534,18 @@ export function undefinedClasses(root, roots = ROOTS) {
 }
 
 /**
+ * Every place a source takes a stylesheet where this cannot follow, so that neither
+ * direction above can answer for it: `{ file, line, what, how }`.
+ */
+export function unfollowedStylesheets(root, roots = ROOTS, scanned = scanSources(root, roots)) {
+  const found = []
+  for (const [file, { unfollowed }] of scanned) {
+    for (const one of unfollowed) found.push({ file: relative(root, file).split(sep).join('/'), ...one })
+  }
+  return found
+}
+
+/**
  * Every class a CSS module declares that nothing can reach, under `root`.
  *
  * Rooted rather than reading this repository directly, so the gate's own test
@@ -384,10 +554,9 @@ export function undefinedClasses(root, roots = ROOTS) {
  * whatever that repository happens to contain today — which is how a gate ends
  * up passing because it found nothing to look at.
  */
-export function deadClasses(root, roots = ROOTS) {
+export function deadClasses(root, roots = ROOTS, scanned = scanSources(root, roots)) {
   const files = roots.flatMap((dir) => (existsSync(join(root, dir)) ? walk(join(root, dir)) : []))
   const modules = files.filter((f) => f.endsWith('.module.css'))
-  const sources = files.filter((f) => ['.ts', '.tsx'].includes(extname(f)))
 
   /* Every `styles.name` in every source file, and every `composes:` in every
      stylesheet — one flat set, because a class is used if ANYTHING uses it and
@@ -396,8 +565,14 @@ export function deadClasses(root, roots = ROOTS) {
   /* UNDER ANY IMPORT NAME. Reading only `styles.` called `.popover` unreachable
      while three files drew it as `editorStyles.popover`, and it was deleted on
      this gate's word (`74aa52b`). */
-  for (const reads of readsBySource(sources).values()) {
+  const wholeSheets = new Set()
+  for (const { reads, whole } of scanned.values()) {
     for (const { name } of reads) used.add(name)
+    for (const sheet of whole) wholeSheets.add(sheet)
+  }
+  /* `Object.keys(styles)` reaches every class in it, by no name a search would find. */
+  for (const sheet of wholeSheets) {
+    if (existsSync(sheet)) for (const name of moduleExports(readFileSync(sheet, 'utf8')).classes) used.add(name)
   }
   for (const file of modules) {
     /* BOTH SPELLINGS OF `composes`. Cross-file is `composes: x from './y.css'`;
@@ -435,13 +610,15 @@ export function deadClasses(root, roots = ROOTS) {
    own test emitted the repository's result in the middle of its output — and
    an importer that only wanted `deadClasses` paid for a full walk of `src`. */
 if (isProcessEntry(import.meta)) {
-  const { dead, modules, used } = deadClasses(REPO)
-  const missing = undefinedClasses(REPO)
+  const scanned = scanSources(REPO)
+  const { dead, modules, used } = deadClasses(REPO, ROOTS, scanned)
+  const missing = undefinedClasses(REPO, ROOTS, scanned)
+  const unfollowed = unfollowedStylesheets(REPO, ROOTS, scanned)
   for (const { file, name, line } of dead) {
     process.stdout.write(`${file}:${line}  .${name} — no source names \`styles.${name}\`\n`)
   }
   process.stdout.write(
-    `check-dead-css: ${modules} modules, ${used} classes used, ${dead.length} unreachable, ${missing.length} undefined\n`,
+    `check-dead-css: ${modules} modules, ${used} classes used, ${dead.length} unreachable, ${missing.length} undefined, ${unfollowed.length} unfollowed\n`,
   )
   for (const { file, name } of missing) {
     process.stdout.write(`${file}  .${name} — named here, declared by no rule in the module it imports\n`)
@@ -452,6 +629,16 @@ if (isProcessEntry(import.meta)) {
         'an error. Restore the rule, or stop naming the class.\n',
     )
   }
+  for (const { file, line, what, how } of unfollowed) {
+    process.stdout.write(`${file}:${line}  ${what} — ${how}\n`)
+  }
+  if (unfollowed.length > 0) {
+    process.stdout.write(
+      '\nA stylesheet this cannot follow answers neither question above: a class read\n' +
+        'that way could be missing, or be all that keeps a rule alive. Read the classes\n' +
+        'by name, or hand the stylesheet on as `styles`, where its reader is seen.\n',
+    )
+  }
   if (dead.length > 0) {
     process.stdout.write(
       '\nAn unreachable rule is shipped CSS that can never apply. Delete it, or\n' +
@@ -459,5 +646,5 @@ if (isProcessEntry(import.meta)) {
         'belongs at the rule, where the next reader of this file will see it.\n',
     )
   }
-  if (dead.length > 0 || missing.length > 0) process.exit(1)
+  if (dead.length > 0 || missing.length > 0 || unfollowed.length > 0) process.exit(1)
 }

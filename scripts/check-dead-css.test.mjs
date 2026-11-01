@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { deadClasses, undefinedClasses } from './check-dead-css.mjs'
+import { deadClasses, undefinedClasses, unfollowedStylesheets } from './check-dead-css.mjs'
 
 /**
  * `check-dead-css`: what counts as reaching a class, and what does not.
@@ -295,7 +295,7 @@ describe('the CLI', () => {
        counts are printed because a check reporting "0 unreachable" over 0
        modules looks exactly like one that worked. */
     const run = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' })
-    expect(run.stdout).toMatch(/check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined/)
+    expect(run.stdout).toMatch(/check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined, 0 unfollowed/)
     expect(run.status).toBe(0)
   })
 })
@@ -321,19 +321,31 @@ describe('which binding a read goes through', () => {
     expect(missing(over(IMPORT + body))).toEqual([])
   })
 
-  it('settles on a binding reassigned between stylesheets', () => {
+  /* It ends, though the two aliases feed each other, and the read goes against both. */
+  it('settles on a binding reassigned between stylesheets, and reads it against each', () => {
     const root = fixture({
       'src/A.module.css': '.live { color: red; }\n',
       'src/B.module.css': '.other { color: red; }\n',
       'src/A.tsx': "import a from './A.module.css'\nimport b from './B.module.css'\nlet s = a\ns = b\nlet t = s\ns = t\nexport const f = () => [s.live, b.other]\n",
     })
-    expect(missing(root)).toEqual([])
+    expect(missing(root)).toEqual(['live'])
+    expect(names(root)).toEqual([])
   })
 
-  it('names its limit on a namespace import read through default, loudly', () => {
-    const root = over("import * as css from './A.module.css'\nexport const f = () => css.default.live")
-    expect(missing(root)).toEqual(['default'])
-    expect(names(root)).toEqual(['live'])
+  it('reads a conditional between stylesheets against each, since nothing says which ran', () => {
+    const root = fixture({
+      'src/A.module.css': '.both { color: red; }\n.onlyA { color: red; }\n',
+      'src/B.module.css': '.both { color: red; }\n',
+      'src/A.tsx': "import a from './A.module.css'\nimport b from './B.module.css'\nexport const f = (x: boolean) => {\n  const s = x ? a : b\n  return [s.both, s.onlyA]\n}\n",
+    })
+    expect(missing(root)).toEqual(['onlyA'])
+    expect(names(root)).toEqual([])
+  })
+
+  it('reads a namespace import through default as the stylesheet it is', () => {
+    const root = over("import * as css from './A.module.css'\nexport const f = () => [css.default.live, css.default.gone]")
+    expect(missing(root)).toEqual(['gone'])
+    expect(names(root)).toEqual([])
   })
 
   it('takes nothing from a default that is not a stylesheet', () => {
@@ -371,6 +383,51 @@ describe('which binding a read goes through', () => {
     ['a nested default inside a pattern', `${IMPORT}export const f = (o: any) => { const { a: { s = styles } } = o; return s.gone }`],
     ['a default in a destructuring assignment', `${IMPORT}export const f = (o: any) => { let s: any; ({ s = styles } = o); return s.gone }`],
     ['a renamed default in a destructuring assignment', `${IMPORT}export const f = (o: any) => { let s: any; ({ x: s = styles } = o); return s.gone }`],
+    ['a conditional alias', `${IMPORT}export const f = (x: boolean, y: any) => { const s = x ? styles : y; return s.gone }`],
+    ['a fallback alias', `${IMPORT}export const f = (y: any) => { const s = y ?? styles; return s.gone }`],
+    ['a fallback assignment', `${IMPORT}export const f = (y: any) => { let s = y; s ??= styles; return s.gone }`],
+    ['an awaited alias', `${IMPORT}export const f = async () => { const s = await styles; return s.gone }`],
+    ['an element of an array', `${IMPORT}const all = [styles]\nexport const f = () => all[0].gone`],
+    ['an element at an index nobody can read', `${IMPORT}const all = [styles]\nexport const f = (i: number) => all[i].gone`],
+    ['an array pattern', `${IMPORT}const [s] = [styles]\nexport const f = () => s.gone`],
+    ['an array pattern over a named array', `${IMPORT}const all = [styles]\nconst [s] = all\nexport const f = () => s.gone`],
+    ['an array assignment pattern', `${IMPORT}export const f = () => { let s: any; [s] = [styles]; return s.gone }`],
+    ['the rest of an array pattern', `${IMPORT}const [...all] = [styles]\nexport const f = () => all[0].gone`],
+    ['a loop over an array', `${IMPORT}export const f = () => { for (const s of [styles]) return s.gone }`],
+    ['a loop over a named array', `${IMPORT}const all = [styles]\nexport const f = () => { for (const s of all) return s.gone }`],
+    ['a loop assigning a name', `${IMPORT}export const f = () => { let s: any; for (s of [styles]) return s.gone }`],
+    ['a callback of an array method', `${IMPORT}export const f = () => [styles].map((s) => s.gone)`],
+    ['a callback named in the file', `${IMPORT}const read = (s: any) => s.gone\nexport const f = () => [styles].map(read)`],
+    ['a spread array', `${IMPORT}const all = [styles]\nconst more = [...all]\nexport const f = () => more[0].gone`],
+    ['a slice of an array', `${IMPORT}const all = [styles]\nexport const f = () => all.slice(0)[0].gone`],
+    ['a key of an object', `${IMPORT}const o = { s: styles }\nexport const f = () => o.s.gone`],
+    ['a shorthand key of an object', `${IMPORT}const s = styles\nconst o = { s }\nexport const f = () => o.s.gone`],
+    ['a literal lookup on an object', `${IMPORT}const o = { s: styles }\nexport const f = () => o['s'].gone`],
+    ['a key of an object in an object', `${IMPORT}const o = { a: { s: styles } }\nexport const f = () => o.a.s.gone`],
+    ['a spread into an object', `${IMPORT}const o = { ...styles }\nexport const f = () => o.gone`],
+    ['a pattern over an object', `${IMPORT}const o = { s: styles }\nconst { s } = o\nexport const f = () => s.gone`],
+    ['what an arrow returns', `${IMPORT}const get = () => styles\nexport const f = () => get().gone`],
+    ['what a function returns', `${IMPORT}function get() { return styles }\nexport const f = () => get().gone`],
+    ['what a function returns of what it was handed', `${IMPORT}const id = (s: any) => s\nexport const f = () => id(styles).gone`],
+    ['an argument of a function in the file', `${IMPORT}const read = (s: any) => s.gone\nexport const f = () => read(styles)`],
+    ['an argument of a function declared later', `${IMPORT}export const f = () => read(styles)\nfunction read(s: any) { return s.gone }`],
+    ['a rest parameter', `${IMPORT}const read = (...all: any[]) => all[0].gone\nexport const f = () => read(styles)`],
+    ['a namespace pattern', "import * as css from './A.module.css'\nconst { default: s } = css\nexport const f = () => s.gone"],
+    ['a dynamic import', "export const f = async () => (await import('./A.module.css')).default.gone"],
+    ['a dynamic import, destructured', "export const f = async () => { const { default: s } = await import('./A.module.css'); return s.gone }"],
+    ['a dynamic import, then', "export const f = () => import('./A.module.css').then((m) => m.default.gone)"],
+    ['a dynamic import of a joined constant', "const at = './A.module' + '.css'\nexport const f = async () => (await import(at)).default.gone"],
+    ['a dynamic import, read as a namespace', "export const f = async () => (await import('./A.module.css')).gone"],
+    ['a require', "export const f = () => require('./A.module.css').default.gone"],
+    ['a reflective read', `${IMPORT}export const f = () => Reflect.get(styles, 'gone')`],
+    ['an own-key test', `${IMPORT}export const f = () => Object.hasOwn(styles, 'gone')`],
+    ['an in test', `${IMPORT}export const f = () => 'gone' in styles`],
+    ['a constant key', `${IMPORT}const k = 'gone'\nexport const f = () => styles[k]`],
+    ['a joined key', `${IMPORT}export const f = () => styles['go' + 'ne']`],
+    ['a template key over a constant', `${IMPORT}const k = 'go'\nexport const f = () => styles[\`\${k}ne\`]`],
+    ['a key of a constant object', `${IMPORT}const K = { a: 'gone' }\nexport const f = () => styles[K.a]`],
+    ['a key from a list', `${IMPORT}export const f = () => { for (const k of ['gone']) return styles[k] }`],
+    ['a constant key in a pattern', `${IMPORT}const k = 'gone'\nconst { [k]: g } = styles\nexport const f = () => g`],
   ])('reports a missing class through %s', (_what, source) => {
     expect(missing(over(source))).toEqual(['gone'])
   })
@@ -398,6 +455,185 @@ describe('which binding a read goes through', () => {
       'src/C.tsx': "import styles from './A.module.css'\nexport const C = () => styles.other\n",
     })
     expect(names(root)).toEqual([])
+  })
+})
+
+/*
+ * A STYLESHEET CROSSES A FILE as well as a binding. Each row reaches the class from
+ * `src/use.tsx` through `src/re.ts`, which the gate can see the other side of.
+ */
+describe('a stylesheet that crosses a file', () => {
+  const crossing = (re, use, extra = {}) =>
+    fixture({ 'src/A.module.css': '.target { color: red; }\n', 'src/re.ts': `${re}\n`, 'src/use.tsx': `${use}\n`, ...extra })
+  const IMPORT = "import styles from './A.module.css'\n"
+
+  it.each([
+    ['a re-export of the default', "export { default as s } from './A.module.css'", "import { s } from './re'\nexport const f = () => s.NAME"],
+    ['a re-export as the default', "export { default } from './A.module.css'", "import s from './re'\nexport const f = () => s.NAME"],
+    ['a re-exported namespace', "export * as css from './A.module.css'", "import { css } from './re'\nexport const f = () => css.default.NAME"],
+    ['an exported binding, by list', `${IMPORT}export { styles }`, "import { styles as s } from './re'\nexport const f = () => s.NAME"],
+    ['an exported binding, renamed', `${IMPORT}export { styles as s }`, "import { s } from './re'\nexport const f = () => s.NAME"],
+    ['an exported alias', `${IMPORT}export const s = styles`, "import { s } from './re'\nexport const f = () => s.NAME"],
+    ['a default export', `${IMPORT}export default styles`, "import s from './re'\nexport const f = () => s.NAME"],
+    ['a default export of a conditional', `${IMPORT}export default (globalThis as any).x ?? styles`, "import s from './re'\nexport const f = () => s.NAME"],
+    ['an exported function that returns one', `${IMPORT}export const get = () => styles`, "import { get } from './re'\nexport const f = () => get().NAME"],
+    ['an exported declaration that returns one', `${IMPORT}export function get() { return styles }`, "import { get } from './re'\nexport const f = () => get().NAME"],
+    ['a default function that returns one', `${IMPORT}export default function get() { return styles }`, "import get from './re'\nexport const f = () => get().NAME"],
+    ['a namespace of a source', `${IMPORT}export const s = styles`, "import * as re from './re'\nexport const f = () => re.s.NAME"],
+    ['a pattern over a namespace of a source', `${IMPORT}export const s = styles`, "import * as re from './re'\nconst { s } = re\nexport const f = () => s.NAME"],
+    ['a function off a namespace of a source', `${IMPORT}export const get = () => styles`, "import * as re from './re'\nexport const f = () => re.get().NAME"],
+    ['a dynamic import of a source', `${IMPORT}export const s = styles`, "export const f = async () => (await import('./re')).s.NAME"],
+    ['a read in the file handed it', "export const read = (s: any) => s.NAME", `import styles from './A.module.css'\nimport { read } from './re'\nexport const f = () => read(styles)`],
+    ['a read in a function declaration handed it', "export function read(s: any) { return s.NAME }", `import styles from './A.module.css'\nimport { read } from './re'\nexport const f = () => read(styles)`],
+    ['a read in a rest parameter handed it', "export const read = (...all: any[]) => all[0].NAME", `import styles from './A.module.css'\nimport { read } from './re'\nexport const f = () => read(styles)`],
+    ['a function off a namespace handed it', "export const read = (s: any) => s.NAME", `import styles from './A.module.css'\nimport * as re from './re'\nexport const f = () => re.read(styles)`],
+    ['what comes back from the file it was handed to', 'export const id = (s: any) => s', `import styles from './A.module.css'\nimport { id } from './re'\nexport const f = () => id(styles).NAME`],
+  ])('follows %s', (_what, re, use) => {
+    const named = (name) => crossing(re.replace('NAME', name), use.replace('NAME', name))
+    expect(names(named('target'))).toEqual([])
+    expect(undefinedClasses(named('gone')).map((u) => u.name)).toEqual(['gone'])
+    expect(names(named('gone'))).toEqual(['target'])
+    expect(unfollowedStylesheets(named('target'))).toEqual([])
+  })
+
+  it.each([
+    ['a re-export of a re-export', "export { s } from './re'"],
+    ['a renaming re-export of a re-export', "export { s as t, s } from './re'"],
+    ['a re-export of everything', "export * from './re'"],
+  ])('follows %s, a round later', (_what, middle) => {
+    const root = crossing("export { default as s } from './A.module.css'", "import { s } from './middle'\nexport const f = () => s.gone", { 'src/middle.ts': `${middle}\n` })
+    expect(undefinedClasses(root).map((u) => u.name)).toEqual(['gone'])
+  })
+
+  it('reads a class named in a re-export of the stylesheet', () => {
+    const root = crossing("export { target, gone } from './A.module.css'", 'export {}')
+    expect(undefinedClasses(root).map((u) => u.name)).toEqual(['gone'])
+    expect(names(root)).toEqual([])
+  })
+
+  it('takes everything in a stylesheet re-exported whole as read', () => {
+    expect(names(crossing("export * from './A.module.css'", 'export {}'))).toEqual([])
+  })
+
+  it('takes no default through a re-export of everything, as the language does not', () => {
+    const root = crossing("export { default } from './A.module.css'", "import s from './middle'\nexport const f = () => s.target", { 'src/middle.ts': "export * from './re'\n" })
+    expect(names(root)).toEqual(['target'])
+  })
+
+  it('reads a function handed a stylesheet against that stylesheet only', () => {
+    const root = fixture({
+      'src/A.module.css': '.target { color: red; }\n',
+      'src/B.module.css': '.other { color: red; }\n',
+      'src/re.ts': 'export const read = (s: any) => s.target\n',
+      'src/use.tsx': "import a from './A.module.css'\nimport b from './B.module.css'\nimport { read } from './re'\nexport const f = () => [read(a), b.other]\n",
+    })
+    expect(undefinedClasses(root)).toEqual([])
+    expect(names(root)).toEqual([])
+  })
+})
+
+describe('a stylesheet read whole', () => {
+  it.each([
+    ['Object.keys', 'export const f = () => Object.keys(styles)'],
+    ['Object.values', 'export const f = () => Object.values(styles)'],
+    ['Object.entries', 'export const f = () => Object.entries(styles)'],
+    ['a loop over its keys', 'export const f = () => { for (const k in styles) return k }'],
+    ['an alias', 'const s = styles\nexport const f = () => Object.keys(s)'],
+  ])('keeps every class alive through %s', (_what, line) => {
+    const root = fixture({ 'src/A.module.css': '.one { color: red; }\n.two { color: red; }\n', 'src/A.tsx': `import styles from './A.module.css'\n${line}\n` })
+    expect(names(root)).toEqual([])
+    expect(unfollowedStylesheets(root)).toEqual([])
+  })
+
+  it('keeps alive only the stylesheet it read', () => {
+    const root = fixture({
+      'src/A.module.css': '.one { color: red; }\n',
+      'src/B.module.css': '.other { color: red; }\n',
+      'src/A.tsx': "import styles from './A.module.css'\nexport const f = () => Object.keys(styles)\n",
+    })
+    expect(names(root)).toEqual(['other'])
+  })
+})
+
+/*
+ * WHAT CANNOT BE FOLLOWED IS REFUSED, BY FILE AND LINE. Reporting nothing here is the
+ * failure this gate exists to stop: a class read that way could be missing, or be all
+ * that keeps a rule alive, and a clean run would say neither.
+ */
+describe('what the gate refuses to guess at', () => {
+  const IMPORT = "import styles from './A.module.css'\nimport { g } from 'somewhere'\n"
+  const refused = (source, extra = {}) =>
+    unfollowedStylesheets(fixture({ 'src/A.module.css': '.live { color: red; }\n', 'src/A.tsx': `${source}\n`, ...extra }))
+
+  it.each([
+    ['a computed key', `${IMPORT}export const f = (k: string) => styles[k]`, 'a key this cannot read: name the class'],
+    ['a key that is only partly known', `${IMPORT}export const f = (k: string) => styles[\`a\${k}\`]`, 'a key this cannot read: name the class'],
+    ['one branch of a key that cannot be read', `${IMPORT}export const f = (k: string, x: boolean) => styles[x ? 'live' : k]`, 'a key this cannot read: name the class'],
+    ['a computed pattern key', `${IMPORT}export const f = (k: string) => { const { [k]: v } = styles; return v }`, 'a key this cannot read: name the class'],
+    ['a computed read of what was handed in', 'export const f = (styles: any, k: string) => styles[k]', 'a key this cannot read: name the class'],
+    ['a call nothing here can see into', `${IMPORT}export const f = () => g(styles)`, 'handed to a call'],
+    ['a constructor', `${IMPORT}export const f = () => new (g as any)(styles)`, 'handed to a call'],
+    ['a call on an alias', `${IMPORT}const s = styles\nexport const f = () => g(s)`, 'handed to a call'],
+    ['a prop under another name', `${IMPORT}export const F = (X: any) => <X s={styles} />`, 'handed as a prop'],
+    ['a spread into props', `${IMPORT}export const F = (X: any) => <X {...styles} />`, 'spread into props'],
+    ['a spread into a call', `${IMPORT}const all = [styles]\nexport const f = () => g(...all)`, 'handed on in an array or object'],
+    ['a member assigned', `${IMPORT}export const f = (o: any) => { o.s = styles }`, 'assigned to a member'],
+    ['a class member', `${IMPORT}export class C { s = styles }`, 'used'],
+    ['a method returning one', `${IMPORT}export class C { get() { return styles } }`, 'returned'],
+    ['an object method returning one', `${IMPORT}export const o = { get() { return styles } }`, 'returned'],
+    ['a callback returning one', `${IMPORT}export const f = () => g(() => styles)`, 'returned'],
+    ['an anonymous default function returning one', `${IMPORT}export default () => styles`, 'returned'],
+    ['a function that returns one, handed on', `${IMPORT}const get = () => styles\nexport const f = () => g(get)`, 'a function that returns it, handed on'],
+    ['a function that returns one, renamed', `${IMPORT}const get = () => styles\nconst other = get\nexport const f = () => other().live`, 'a function that returns it, handed on'],
+    ['an array returned', `${IMPORT}export const f = () => [styles]`, 'held by an array'],
+    ['an object returned', `${IMPORT}export const f = () => ({ s: styles })`, 'held by an object'],
+    ['an object handed to a call', `${IMPORT}export const f = () => g({ s: styles })`, 'held by an object'],
+    ['an object exported', `${IMPORT}export const o = { s: styles }`, 'held by an object'],
+    ['an array exported', `${IMPORT}export const all = [styles]`, 'held by an array'],
+    ['a name holding an object, handed on', `${IMPORT}const o = { s: styles }\nexport const f = () => g(o)`, 'handed on in an array or object'],
+    ['a name holding an array, handed on', `${IMPORT}const all = [styles]\nexport const f = () => g(all)`, 'handed on in an array or object'],
+    ['a name holding an object, returned', `${IMPORT}const o = { s: styles }\nexport const f = () => o`, 'handed on in an array or object'],
+    ['a name holding an array, exported by list', `${IMPORT}const all = [styles]\nexport { all }`, 'exported in an array or object'],
+    ['a key nobody can read holding one', `${IMPORT}export const f = (k: string) => { const o = { [k]: styles }; return o[k] }`, 'held under a key this cannot read'],
+    ['an object read by a key nobody can read', `${IMPORT}const o = { s: styles }\nexport const f = (k: string) => o[k]`, 'read by a key this cannot read'],
+    ['a stylesheet written into a string', `${IMPORT}export const f = () => \`\${styles}\``, 'written into a string'],
+    ['a stylesheet chosen at run time', 'export const f = (x: string) => import(`./${x}.module.css`)', 'a stylesheet chosen at run time'],
+    ['every key of one handed in', 'export const f = (styles: any) => Object.keys(styles)', 'every key of a stylesheet handed in, whose module is not known'],
+  ])('refuses %s', (_what, source, how) => {
+    expect(refused(source).map((one) => one.how)).toContain(how)
+  })
+
+  it('refuses a module of a source read by a key nobody can read, when that module holds one', () => {
+    const found = refused("import * as re from './re'\nexport const f = (k: string) => re[k]", { 'src/re.ts': "export { default as s } from './A.module.css'\n" })
+    expect(found.map((one) => one.how)).toEqual(['a module read by a key this cannot read'])
+  })
+
+  it('refuses a function taken off a module without being called', () => {
+    const found = refused("import * as re from './re'\nexport const f = () => { const { get } = re; return get().live }", { 'src/re.ts': "import styles from './A.module.css'\nexport const get = () => styles\n" })
+    expect(found.map((one) => one.how)).toEqual(['a function that returns it, handed on'])
+  })
+
+  it('names the file and the line', () => {
+    expect(refused(`${IMPORT}export const a = 1\nexport const f = () => g(styles)`)).toEqual([
+      { file: 'src/A.tsx', line: 4, what: 'styles', how: 'handed to a call' },
+    ])
+  })
+
+  it.each([
+    ['a stylesheet handed on as styles, in JSX', `${IMPORT}export const F = (X: any) => <X styles={styles} />`],
+    ['a stylesheet handed on as styles, in an object', `${IMPORT}export const f = () => g({ styles })`],
+    ['a stylesheet in a named array', `${IMPORT}const all = [styles]\nexport const f = () => all[0].live`],
+    ['a local of that name made from something else', "import { g } from 'somewhere'\nexport const f = (el: any, k: string) => { const styles = g(el); g(styles); return [styles[k], Object.keys(styles)] }"],
+    ['a function that returns one, called', `${IMPORT}const get = () => styles\nexport const f = () => get().live`],
+    ['a test of whether it is there', `${IMPORT}export const f = () => (styles ? 1 : 2)`],
+    ['a comparison', `${IMPORT}export const f = (x: any) => styles === x`],
+  ])('does not refuse %s', (_what, source) => {
+    expect(refused(source)).toEqual([])
+  })
+
+  it('fails the command, with the place named', () => {
+    const root = fixture({ 'src/A.module.css': '.live { color: red; }\n', 'src/A.tsx': `${IMPORT}export const a = styles.live\nexport const f = () => g(styles)\n` })
+    expect(unfollowedStylesheets(root)).toHaveLength(1)
   })
 })
 
