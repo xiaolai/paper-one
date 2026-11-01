@@ -251,6 +251,91 @@ describe('every mark, for something that is about to write a file', () => {
         await expect(answer).resolves.toHaveLength(1)
         await panel
       })
+
+      /* A SCAN THAT FAILS OUTRIGHT EMPTIES THE SHARED LIST AND RAISES THE SHARED FLAG,
+         and the window where that hurts is a few ticks wide: after one scan's result
+         lands, before its caller resumes. Nothing outside can stand in it, so the
+         second result is let go one tick later on each pass. The orders asserted at
+         the two ends are what say the walk crossed the whole window, however many
+         ticks a later change makes of it. */
+      const WALK = 60
+      const crossing = async (ticks: number, failing: 'export' | 'panel') => {
+        const fs = shelf()
+        const writer = createMarkStore({ fs, queue: writeQueue() })
+        await writer.open(BOOK)
+        await writer.addMany(BOOK, [createMark(highlight())])
+        let letRead = () => {}
+        let letFail = () => {}
+        const reading = new Promise<void>((resolve) => (letRead = resolve))
+        const refusing = new Promise<void>((resolve) => (letFail = resolve))
+        let listings = 0
+        let reads = 0
+        const store = createMarkStore({
+          fs: {
+            ...fs,
+            readDir: async (path: string) => {
+              listings += 1
+              if (listings === (failing === 'export' ? 1 : 2)) {
+                await refusing
+                throw new Error('the shelf will not read')
+              }
+              return fs.readDir(path)
+            },
+            readFile: async (path: string) => {
+              if (path === marksPathIn(BOOK)) {
+                reads += 1
+                await reading
+              }
+              return fs.readFile(path)
+            },
+          },
+          queue: writeQueue(),
+        })
+        const order: string[] = []
+        const once = (event: string) => {
+          if (!order.includes(event)) order.push(event)
+        }
+        store.subscribe(() => {
+          const { all, scanFailed } = store.getSnapshot()
+          if (scanFailed) once('failed')
+          else if (all.length > 0) once('landed')
+        })
+        const answer = store.loadAllNow().finally(() => order.push('answered'))
+        while (listings === 0) await Promise.resolve()
+        const panel = store.loadAll()
+        while (listings < 2 || reads === 0) await Promise.resolve()
+        letRead()
+        for (let tick = 0; tick < ticks; tick++) await Promise.resolve()
+        letFail()
+        const settled = await answer.then(
+          (rows) => ({ rows: rows.length }),
+          (cause: unknown) => ({ refused: cause }),
+        )
+        await panel
+        return { settled, order }
+      }
+
+      it('answers with its own rows when the panel scan fails outright, wherever that lands', async () => {
+        const orders: string[][] = []
+        for (let ticks = 0; ticks < WALK; ticks++) {
+          const { settled, order } = await crossing(ticks, 'panel')
+          expect(settled, `the panel's failure, ${ticks} ticks after the export's read`).toEqual({ rows: 1 })
+          orders.push(order)
+        }
+        expect(orders.at(0), 'the walk starts too late to cross the window').toEqual(['failed', 'landed', 'answered'])
+        expect(orders.at(-1), 'the walk ends too soon to cross the window').toEqual(['landed', 'answered', 'failed'])
+      })
+
+      it('refuses on its own failure when the panel scan lands, wherever that lands', async () => {
+        const orders: string[][] = []
+        for (let ticks = 0; ticks < WALK; ticks++) {
+          const { settled, order } = await crossing(ticks, 'export')
+          expect(settled, `the export's failure, ${ticks} ticks after the panel's read`).toEqual({ refused: new MarksScanFailed() })
+          orders.push(order)
+        }
+        expect(orders.at(0)?.[0], 'the walk starts too late to cross the window').toBe('failed')
+        expect(orders.at(-1), 'the walk ends too soon to cross the window').toEqual(['landed', 'failed', 'answered'])
+      })
     })
 
     /* A mark is on the screen the moment it is made and on the disk some time
