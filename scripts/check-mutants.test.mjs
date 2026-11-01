@@ -70,6 +70,12 @@ import {
 } from './check-mutants.mjs'
 import { DELETED_ENV } from './verify-without.mjs'
 
+/* THE PROJECT'S 60s READS THE LOAD HERE, NOT A HANG. These cases run the real
+   instrumenter over real worktrees: measured 2026-11-01 on a shared machine, a
+   dozen of them read 25s to 60s, and they failed verify in turn as the load moved,
+   one case at a time. So the bound is the one the heaviest cases already declared. */
+vi.setConfig({ testTimeout: 300_000 })
+
 /** A scratch directory, removed after `act` whatever `act` does — after the
  *  promise settles when `act` returns one, since a sweep is asynchronous and a
  *  directory removed under it would fail it for a reason of the test's own.
