@@ -661,12 +661,14 @@ function subscription<T>(registrations: Registrations, event: string, fn: (paylo
   }
 }
 
-/** The plugin's `SwitchAnswer`: two facts, because neither implies the other. */
+/** The plugin's `SwitchAnswer`: three facts, because none implies another. */
 export interface P2pAnswer {
   /** This run refuses transport work from now on, and its close is under way. */
   readonly closed: boolean
   /** Why the choice was not recorded, or null when it is durable. */
   readonly recordError: unknown
+  /** What the switch's file reads now, or null when nothing could be read from it. A failed record can have landed. */
+  readonly fileSaysOn: boolean | null
 }
 
 /** The real wire: every method one `invoke`, every listener one `listen`. */

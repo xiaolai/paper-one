@@ -48,7 +48,7 @@ import {
 function P2pSwitchRow({ p2p }: { readonly p2p: P2pSwitch }) {
   const chosen = useSyncExternalStore(p2p.subscribe, p2p.chosen)
   const writing = useSyncExternalStore(p2p.subscribeWriting, p2p.writing)
-  const [failure, setFailure] = useState<string | null>(null)
+  const [failure, setFailure] = useState<{ readonly why: string; readonly landed: boolean } | null>(null)
   return (
     <>
       <div className={ui.row}>
@@ -63,7 +63,8 @@ function P2pSwitchRow({ p2p }: { readonly p2p: P2pSwitch }) {
           onClick={() => {
             const next = !chosen
             setFailure(null)
-            p2p.set(next).catch((cause: unknown) => setFailure(messageOf(cause)))
+            /* Asked of the switch: the write can fail with the word already in the file. */
+            p2p.set(next).catch((cause: unknown) => setFailure({ why: messageOf(cause), landed: p2p.chosen() === next }))
           }}
         >
           {chosen ? 'On' : 'Off'}
@@ -74,7 +75,11 @@ function P2pSwitchRow({ p2p }: { readonly p2p: P2pSwitch }) {
         connections, and your pairings and what friends shared stay on this device.
       </div>
       {p2p.needsReopen() && <div className={ui.hint}>Quit and reopen Paper to finish turning this {chosen ? 'on' : 'off'}.</div>}
-      {failure !== null && <div className={ui.hint}>Could not change this: {failure}</div>}
+      {failure !== null && (
+        <div className={ui.hint}>
+          {failure.landed ? `This changed, but it may not survive a power cut: ${failure.why}` : `Could not change this: ${failure.why}`}
+        </div>
+      )}
     </>
   )
 }

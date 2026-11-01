@@ -79,11 +79,55 @@ fn word(on: bool) -> &'static [u8] {
 
 /// Record the reader's choice. It is durable when this returns.
 pub fn set(root: &Path, on: bool) -> Result<()> {
+    set_by(root, on, write_atomic)
+}
+
+/// [`set`], apart from how the word reaches the file.
+fn set_by(root: &Path, on: bool, install: impl FnOnce(&Path, &[u8]) -> Result<()>) -> Result<()> {
     let path = switch_path(root);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    write_atomic(&path, word(on))
+    install(&path, word(on))
+}
+
+/// What a [`set`] left behind: two facts, because a failure does not say the second.
+#[derive(Debug)]
+pub struct Recorded {
+    /// Why the choice is not durable, or `None` when it is.
+    pub error: Option<Error>,
+    /// What the file reads now, which is what the transport doors obey and what the
+    /// next launch reads. `None` when nothing could be read from it.
+    pub file_says_on: Option<bool>,
+}
+
+/// [`set`], saying what the file reads when it is over.
+///
+/// ⚠️ **A FAILED WRITE CAN HAVE LANDED.** `write_atomic` renames, then syncs the
+/// directory, and that sync can fail with the rename done. The file then says the new
+/// word to every reader in this run, and to the next launch unless the power goes
+/// first. Whether it would survive that cannot be known once the sync has failed, so
+/// what is reported is the word the file reads: the failure says it may not last.
+pub fn record(root: &Path, on: bool) -> Recorded {
+    record_by(root, on, write_atomic)
+}
+
+/// [`record`], apart from how the word reaches the file.
+fn record_by(root: &Path, on: bool, install: impl FnOnce(&Path, &[u8]) -> Result<()>) -> Recorded {
+    match set_by(root, on, install) {
+        Ok(()) => Recorded {
+            error: None,
+            file_says_on: Some(on),
+        },
+        Err(error) => Recorded {
+            error: Some(error),
+            /* Read as it is and decided by nothing: `is_on` would write an answer into
+            an empty place, and this is the path where writing has just failed. */
+            file_says_on: std::fs::read_to_string(switch_path(root))
+                .ok()
+                .map(|text| says_on(&text)),
+        },
+    }
 }
 
 /// `Ok` when P2P is on; the refusal an endpoint start returns when it is not.
@@ -101,6 +145,55 @@ mod tests {
     use crate::peers::PeerRecord;
     use crate::role::Role;
     use crate::testutil::ScratchDir;
+
+    fn refused() -> Error {
+        Error::Identity("could not persist the directory entry".into())
+    }
+
+    #[test]
+    fn a_failure_after_the_rename_reads_back_the_word_that_landed() {
+        let scratch = ScratchDir::new("p2p-record-sync-fails");
+        set(scratch.path(), true).unwrap();
+        let recorded = record_by(scratch.path(), false, |path, bytes| {
+            write_atomic(path, bytes)?;
+            Err(refused())
+        });
+        assert!(recorded.error.is_some(), "the failure still has to be said");
+        assert_eq!(recorded.file_says_on, Some(false));
+        assert!(!is_on(scratch.path()).unwrap(), "what the doors obey agrees");
+    }
+
+    #[test]
+    fn a_failure_before_the_rename_reads_back_the_word_that_stayed() {
+        let scratch = ScratchDir::new("p2p-record-stage-fails");
+        set(scratch.path(), true).unwrap();
+        let recorded = record_by(scratch.path(), false, |_, _| Err(refused()));
+        assert!(recorded.error.is_some());
+        assert_eq!(recorded.file_says_on, Some(true));
+    }
+
+    #[test]
+    fn a_failure_with_no_file_says_nothing_of_it_and_decides_nothing() {
+        let scratch = ScratchDir::new("p2p-record-no-file");
+        let recorded = record_by(scratch.path(), true, |_, _| Err(refused()));
+        assert!(recorded.error.is_some());
+        assert_eq!(recorded.file_says_on, None);
+        assert!(
+            !switch_path(scratch.path()).exists(),
+            "reading back must not write the first answer"
+        );
+    }
+
+    #[test]
+    fn a_landed_record_says_the_word_it_wrote() {
+        let scratch = ScratchDir::new("p2p-record-lands");
+        for on in [true, false] {
+            let recorded = record(scratch.path(), on);
+            assert!(recorded.error.is_none());
+            assert_eq!(recorded.file_says_on, Some(on));
+            assert_eq!(is_on(scratch.path()).unwrap(), on);
+        }
+    }
 
     fn write_peer_file(root: &Path, name: &str, bytes: &str) {
         let dir = root.join(PEER_DIR);

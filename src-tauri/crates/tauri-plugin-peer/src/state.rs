@@ -73,7 +73,7 @@ pub struct PeerState {
     closing: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// What setting the P2P switch did: two facts, because neither implies the other.
+/// What setting the P2P switch did: three facts, because none implies another.
 ///
 /// ⚠️ **THE WEBVIEW USED TO INFER THE FIRST FROM THE SECOND.** A rejected command
 /// was read as a closed transport, and a rejection can happen before any of this
@@ -88,6 +88,9 @@ pub struct SwitchAnswer {
     pub closed: bool,
     /// Why the choice was not recorded, or `None` when it is durable.
     pub record_error: Option<crate::error::Error>,
+    /// What the switch's file reads now, or `None` when nothing could be read from
+    /// it. A failed record can have landed: see [`crate::p2p::record`].
+    pub file_says_on: Option<bool>,
 }
 
 impl std::fmt::Debug for PeerState {
@@ -162,9 +165,17 @@ impl PeerState {
     /// back apart: see [`SwitchAnswer`].
     pub async fn apply_switch(&self, root: Result<PathBuf>, on: bool) -> SwitchAnswer {
         self.switch_recording(on, async move {
+            let refused = |error| crate::p2p::Recorded {
+                error: Some(error),
+                file_says_on: None,
+            };
             match root {
-                Ok(root) => crate::commands::off_thread(move || crate::p2p::set(&root, on)).await,
-                Err(unresolved) => Err(unresolved),
+                Ok(root) => {
+                    crate::commands::off_thread(move || Ok(crate::p2p::record(&root, on)))
+                        .await
+                        .unwrap_or_else(refused)
+                }
+                Err(unresolved) => refused(unresolved),
             }
         })
         .await
@@ -179,7 +190,7 @@ impl PeerState {
     async fn switch_recording(
         &self,
         on: bool,
-        record: impl Future<Output = Result<()>>,
+        record: impl Future<Output = crate::p2p::Recorded>,
     ) -> SwitchAnswer {
         let closing = (!on).then(|| self.begin_close());
         let close = async {
@@ -192,7 +203,8 @@ impl PeerState {
         let ((), recorded) = tokio::join!(biased; close, record);
         SwitchAnswer {
             closed: self.transport_closed().await,
-            record_error: recorded.err(),
+            record_error: recorded.error,
+            file_says_on: recorded.file_says_on,
         }
     }
 
@@ -586,6 +598,7 @@ mod tests {
                 answer.record_error.is_some(),
                 "the failed record has to reach the reader"
             );
+            assert_eq!(answer.file_says_on, None, "no file could be read there");
             assert!(answer.closed);
             assert!(running.node.endpoint().is_closed());
         }
@@ -596,28 +609,59 @@ mod tests {
             let state = PeerState::default();
             state.node.set(running.node.clone()).ok().unwrap();
             let answer = state.apply_switch(Err(Error::P2pOff), false).await;
+            assert_eq!(answer.file_says_on, None);
             assert_eq!(answer.record_error.unwrap().kind(), "p2pOff");
             assert!(answer.closed);
             assert!(running.node.endpoint().is_closed());
         }
 
         #[test]
-        fn the_answer_says_both_facts_under_the_names_the_webview_reads() {
+        fn the_answer_says_each_fact_under_the_name_the_webview_reads() {
             let recorded = SwitchAnswer {
                 closed: true,
                 record_error: None,
+                file_says_on: Some(false),
             };
             assert_eq!(
                 serde_json::to_value(&recorded).unwrap(),
-                serde_json::json!({ "closed": true, "recordError": null }),
+                serde_json::json!({ "closed": true, "recordError": null, "fileSaysOn": false }),
             );
             let refused = SwitchAnswer {
                 closed: false,
                 record_error: Some(Error::P2pOff),
+                file_says_on: None,
             };
             let answer = serde_json::to_value(&refused).unwrap();
             assert_eq!(answer["closed"], false);
             assert_eq!(answer["recordError"]["kind"], "p2pOff");
+            assert_eq!(answer["fileSaysOn"], serde_json::Value::Null);
+        }
+
+        /// The record failed and the word landed: the answer carries both.
+        #[tokio::test]
+        async fn a_record_that_failed_and_landed_says_both() {
+            let state = PeerState::default();
+            let answer = state
+                .switch_recording(true, async {
+                    crate::p2p::Recorded {
+                        error: Some(Error::P2pOff),
+                        file_says_on: Some(true),
+                    }
+                })
+                .await;
+            assert!(answer.record_error.is_some());
+            assert_eq!(answer.file_says_on, Some(true));
+        }
+
+        #[tokio::test]
+        async fn a_landed_switch_says_the_word_it_wrote() {
+            let scratch = off("state-switch-word");
+            let state = PeerState::default();
+            let answer = state
+                .apply_switch(Ok(scratch.path().to_path_buf()), true)
+                .await
+                .unwrap();
+            assert_eq!(answer.file_says_on, Some(true));
         }
 
         #[tokio::test]
@@ -811,7 +855,10 @@ mod tests {
                     state
                         .switch_recording(false, async move {
                             let _ = stall.await;
-                            Ok(())
+                            crate::p2p::Recorded {
+                                error: None,
+                                file_says_on: Some(false),
+                            }
                         })
                         .await
                 })

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createP2pSwitch } from './p2pSwitch'
 import type { P2pAnswer } from './wire'
 
-const write = async (on: boolean) => ({ closed: !on, recordError: null })
+const write = async (on: boolean) => ({ closed: !on, recordError: null, fileSaysOn: on })
 
 describe('the P2P switch across one run', () => {
   it('needs nothing until the answer changes', () => {
@@ -51,7 +51,7 @@ describe('the P2P switch across one run', () => {
       const started: { on: boolean; land: () => void; refuse: () => void }[] = []
       const write = (on: boolean) =>
         new Promise<P2pAnswer>((resolve, reject) => {
-          started.push({ on, land: () => resolve({ closed: !on, recordError: null }), refuse: () => reject(new Error('disk full')) })
+          started.push({ on, land: () => resolve({ closed: !on, recordError: null, fileSaysOn: on }), refuse: () => reject(new Error('disk full')) })
         })
       return { started, write }
     }
@@ -85,7 +85,7 @@ describe('the P2P switch across one run', () => {
     })
 
     it('needs a launch when the plugin says an Off closed the transport without recording it', async () => {
-      const p2p = createP2pSwitch(true, async () => ({ closed: true, recordError: new Error('disk full') }))
+      const p2p = createP2pSwitch(true, async () => ({ closed: true, recordError: new Error('disk full'), fileSaysOn: null }))
       await expect(p2p.set(false)).rejects.toThrow('disk full')
       expect(p2p.chosen()).toBe(true)
       expect(p2p.needsReopen()).toBe(true)
@@ -103,7 +103,7 @@ describe('the P2P switch across one run', () => {
     /* Whatever is still running on that transport has to hear, or it goes on
        retrying a connection that is gone, with controls drawn that cannot work. */
     it('tells subscribers once when an Off closes the transport without being recorded', async () => {
-      const p2p = createP2pSwitch(true, async () => ({ closed: true, recordError: new Error('disk full') }))
+      const p2p = createP2pSwitch(true, async () => ({ closed: true, recordError: new Error('disk full'), fileSaysOn: null }))
       const heard: boolean[] = []
       p2p.subscribe(() => heard.push(p2p.needsReopen()))
       await expect(p2p.set(false)).rejects.toThrow('disk full')
@@ -112,8 +112,47 @@ describe('the P2P switch across one run', () => {
       expect(heard, 'nothing changed the second time').toEqual([true])
     })
 
+    /* THE WRITE FAILED AFTER ITS RENAME, while syncing the directory: every reader of
+       the file gets the new word, the doors included, and the row used to go on
+       reading the old one until the pane was reopened. */
+    describe('and the file reads otherwise after a refused write', () => {
+      const landedThenRefused = async (on: boolean) => ({ closed: !on, recordError: new Error('could not persist'), fileSaysOn: on })
+
+      it('reads what the file reads, and still rejects, because it may not last', async () => {
+        const p2p = createP2pSwitch(true, landedThenRefused)
+        await expect(p2p.set(false)).rejects.toThrow('could not persist')
+        expect(p2p.chosen()).toBe(false)
+        expect(p2p.needsReopen()).toBe(true)
+      })
+
+      it('reads the same for an On, in a run that started off', async () => {
+        const p2p = createP2pSwitch(false, landedThenRefused)
+        await expect(p2p.set(true)).rejects.toThrow('could not persist')
+        expect(p2p.chosen()).toBe(true)
+        expect(p2p.needsReopen()).toBe(true)
+      })
+
+      it('tells a subscriber once, with the transport closing or not', async () => {
+        const p2p = createP2pSwitch(false, landedThenRefused)
+        const heard: boolean[] = []
+        p2p.subscribe(() => heard.push(p2p.chosen()))
+        await expect(p2p.set(true)).rejects.toThrow('could not persist')
+        await expect(p2p.set(true)).rejects.toThrow('could not persist')
+        expect(heard).toEqual([true])
+      })
+
+      it('stays where it was when the file still says the old word', async () => {
+        const p2p = createP2pSwitch(true, async () => ({ closed: false, recordError: new Error('disk full'), fileSaysOn: true }))
+        const heard: boolean[] = []
+        p2p.subscribe(() => heard.push(p2p.chosen()))
+        await expect(p2p.set(false)).rejects.toThrow('disk full')
+        expect(p2p.chosen()).toBe(true)
+        expect(heard).toEqual([])
+      })
+    })
+
     it('tells nobody when a refused write closed nothing', async () => {
-      const p2p = createP2pSwitch(true, async () => ({ closed: false, recordError: new Error('disk full') }))
+      const p2p = createP2pSwitch(true, async () => ({ closed: false, recordError: new Error('disk full'), fileSaysOn: null }))
       const heard: boolean[] = []
       p2p.subscribe(() => heard.push(p2p.needsReopen()))
       await expect(p2p.set(false)).rejects.toThrow('disk full')
@@ -121,7 +160,7 @@ describe('the P2P switch across one run', () => {
     })
 
     it('tells nobody of a close in a run that never had the transport', async () => {
-      const p2p = createP2pSwitch(false, async () => ({ closed: true, recordError: new Error('disk full') }))
+      const p2p = createP2pSwitch(false, async () => ({ closed: true, recordError: new Error('disk full'), fileSaysOn: null }))
       const heard: boolean[] = []
       p2p.subscribe(() => heard.push(p2p.needsReopen()))
       await expect(p2p.set(false)).rejects.toThrow('disk full')
@@ -129,13 +168,13 @@ describe('the P2P switch across one run', () => {
     })
 
     it('claims no close when the plugin says it did not, whatever the answer asked for', async () => {
-      const p2p = createP2pSwitch(true, async () => ({ closed: false, recordError: new Error('disk full') }))
+      const p2p = createP2pSwitch(true, async () => ({ closed: false, recordError: new Error('disk full'), fileSaysOn: null }))
       await expect(p2p.set(false)).rejects.toThrow('disk full')
       expect(p2p.needsReopen()).toBe(false)
     })
 
     it('needs no launch when a refused On closed nothing', async () => {
-      const p2p = createP2pSwitch(false, async () => ({ closed: false, recordError: new Error('disk full') }))
+      const p2p = createP2pSwitch(false, async () => ({ closed: false, recordError: new Error('disk full'), fileSaysOn: null }))
       await expect(p2p.set(true)).rejects.toThrow('disk full')
       expect(p2p.chosen()).toBe(false)
       expect(p2p.needsReopen()).toBe(false)

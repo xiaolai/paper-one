@@ -38,9 +38,9 @@ describe('the fake wire and the P2P switch', () => {
 
   it('answers what it did to the transport, and going on again does not undo the close', async () => {
     const { satchel } = linkedWires()
-    await expect(satchel.setP2p(true)).resolves.toEqual({ closed: false, recordError: null })
-    await expect(satchel.setP2p(false)).resolves.toEqual({ closed: true, recordError: null })
-    await expect(satchel.setP2p(true)).resolves.toEqual({ closed: true, recordError: null })
+    await expect(satchel.setP2p(true)).resolves.toEqual({ closed: false, recordError: null, fileSaysOn: true })
+    await expect(satchel.setP2p(false)).resolves.toEqual({ closed: true, recordError: null, fileSaysOn: false })
+    await expect(satchel.setP2p(true)).resolves.toEqual({ closed: true, recordError: null, fileSaysOn: true })
   })
 
   it('comes back at the next launch if the switch says on', async () => {

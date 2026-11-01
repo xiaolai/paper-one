@@ -20,7 +20,10 @@ vi.mock('./lib/wire', async (original) => {
       const answered = fake.setP2p.bind(fake)
       return Object.assign(fake, {
         p2pOn: wire.on,
-        setP2p: async (on: boolean) => ({ ...(await answered(on)), recordError: wire.recordError }),
+        setP2p: async (on: boolean) => {
+          const answer = await answered(on)
+          return wire.recordError === null ? answer : { ...answer, recordError: wire.recordError, fileSaysOn: !on }
+        },
       })
     },
   }

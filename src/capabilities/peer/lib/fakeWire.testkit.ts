@@ -237,7 +237,7 @@ class FakeWireImpl implements FakeWire {
       this.pending = null
       for (const session of this.sessions.values()) this.closeSession(session, 'closed')
     }
-    return { closed: this.closedThisRun, recordError: null }
+    return { closed: this.closedThisRun, recordError: null, fileSaysOn: on }
   }
 
   /** `PeerState::node_at`'s gates, in its order. Every command that needs the node passes them. */

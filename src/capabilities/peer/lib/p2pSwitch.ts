@@ -17,7 +17,7 @@ export const P2P_SWITCH_TITLE = 'Peer-to-peer'
 export interface P2pSwitch {
   /** The answer this run composed around; the screens follow it until a relaunch. */
   readonly launchedOn: boolean
-  /** The current answer, including a change made in this run. */
+  /** The current answer, including a change made in this run: what the switch's file reads, once a write has been asked. */
   readonly chosen: () => boolean
   /** Whether what this run is doing still differs from the answer. Settled when `writing` ends. */
   readonly needsReopen: () => boolean
@@ -60,9 +60,17 @@ export function createP2pSwitch(launchedOn: boolean, write: (on: boolean) => Pro
         const justClosed = launchedOn && answer.closed && !closed
         if (justClosed) closed = true
         if (answer.recordError !== null) {
-          /* The choice did not change, and the transport did: what runs on it
+          /* A FAILED WRITE CAN HAVE LANDED: the sync after the rename is what failed,
+             and the file says the new word to the doors now and to the next launch
+             unless the power goes first. Whether it would survive that cannot be known,
+             so the row reads what the file reads and the rejection says it may not last.
+             Nothing read from the file, nothing is known, and the row stays.
+
+             And the transport can have closed whatever the record did: what runs on it
              has to stop whatever the disk said. */
-          if (justClosed) notifyAll(listeners, 'P2P switch')
+          const moved = answer.fileSaysOn !== null && answer.fileSaysOn !== chosen
+          if (answer.fileSaysOn !== null) chosen = answer.fileSaysOn
+          if (justClosed || moved) notifyAll(listeners, 'P2P switch')
           throw answer.recordError
         }
         chosen = on

@@ -58,7 +58,7 @@ function fakeModel(over: Partial<DevicesSnapshot> = {}): DevicesModel {
   }
 }
 
-const landed = async (on: boolean): Promise<P2pAnswer> => ({ closed: !on, recordError: null })
+const landed = async (on: boolean): Promise<P2pAnswer> => ({ closed: !on, recordError: null, fileSaysOn: on })
 
 describe('the P2P switch', () => {
   const toggle = () => screen.getByRole('switch', { name: 'Peer-to-peer' })
@@ -138,7 +138,7 @@ describe('the P2P switch', () => {
 
   it('follows a write that lands after Settings closed and reopened', async () => {
     let land = () => {}
-    const p2p = createP2pSwitch(true, () => new Promise<P2pAnswer>((resolve) => (land = () => resolve({ closed: true, recordError: null }))))
+    const p2p = createP2pSwitch(true, () => new Promise<P2pAnswer>((resolve) => (land = () => resolve({ closed: true, recordError: null, fileSaysOn: false }))))
     const first = render(<DevicesPane model={fakeModel()} syncNow={null} p2p={p2p} />)
     fireEvent.click(toggle())
     first.unmount()
@@ -151,7 +151,7 @@ describe('the P2P switch', () => {
 
   it('stays disabled through a write that outlives the pane that asked, until it lands', async () => {
     let land = () => {}
-    const p2p = createP2pSwitch(true, () => new Promise<P2pAnswer>((resolve) => (land = () => resolve({ closed: true, recordError: null }))))
+    const p2p = createP2pSwitch(true, () => new Promise<P2pAnswer>((resolve) => (land = () => resolve({ closed: true, recordError: null, fileSaysOn: false }))))
     const first = render(<DevicesPane model={fakeModel()} syncNow={null} p2p={p2p} />)
     fireEvent.click(toggle())
     first.unmount()
@@ -175,7 +175,7 @@ describe('the P2P switch', () => {
   })
 
   it('stays where it was and says why when turning on is not recorded', async () => {
-    const set = async () => ({ closed: false, recordError: new Error('disk full') })
+    const set = async () => ({ closed: false, recordError: new Error('disk full'), fileSaysOn: null })
     render(<DevicesPane model={fakeModel()} syncNow={null} p2p={createP2pSwitch(false, set)} />)
     fireEvent.click(toggle())
     await screen.findByText('Could not change this: disk full')
@@ -183,10 +183,21 @@ describe('the P2P switch', () => {
     expect(screen.queryByText(/Quit and reopen/)).toBeNull()
   })
 
+  /* The sync after the rename failed: the file says the new word, and so does the row. */
+  it('reads what the file reads when the write failed after landing, and says it may not last', async () => {
+    const set = async () => ({ closed: true, recordError: new Error('could not persist'), fileSaysOn: false })
+    render(<DevicesPane model={fakeModel()} syncNow={null} p2p={createP2pSwitch(true, set)} />)
+    fireEvent.click(toggle())
+    await screen.findByText('This changed, but it may not survive a power cut: could not persist')
+    expect(toggle().getAttribute('aria-checked')).toBe('false')
+    expect(screen.queryByText(/Could not change this/)).toBeNull()
+    screen.getByText('Quit and reopen Paper to finish turning this off.')
+  })
+
   /* The plugin closes on an Off whether or not the record landed, and says so,
      so the device controls would all be refused. */
   it('says why and asks for a launch when an Off closed the transport without being recorded', async () => {
-    const set = async () => ({ closed: true, recordError: new Error('disk full') })
+    const set = async () => ({ closed: true, recordError: new Error('disk full'), fileSaysOn: null })
     render(<DevicesPane model={fakeModel()} syncNow={() => {}} p2p={createP2pSwitch(true, set)} />)
     fireEvent.click(toggle())
     await screen.findByText('Could not change this: disk full')
