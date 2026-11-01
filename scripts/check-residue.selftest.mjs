@@ -50,6 +50,10 @@ const PLANTED = [
   naming('passages', 'a planted promise of services, then', `${TYPE}export const f = (p: Promise<KernelServices>) => p.then((s) => s.passages)`),
   naming('passages', 'a planted cast to services', `${TYPE}export const f = (x: unknown) => (x as KernelServices).passages`),
   naming('passages', 'a planted local of a type picked from an alias', `${TYPE}type S = KernelServices\nexport const f = (s: Pick<S, 'passages'>) => s.passages`),
+  // A cast says what one read is, of a name that holds nothing else.
+  refusal('a planted computed read of a local cast to services', `${TYPE}export const f = (k: string) => { const x: any = 1; return (x as KernelServices)[k] }`),
+  // A key tested on something that holds no services names none.
+  quiet('a planted key tested on something else', "export const f = (x: any, services: any) => { g(services.y); return 'passages' in x }"),
   // In an array, and what the type says of one.
   naming('passages', 'a planted element of an array type', `${TYPE}export const f = (all: KernelServices[]) => all[0].passages`),
   naming('passages', 'a planted element of an Array', `${TYPE}export const f = (all: Array<KernelServices>) => all[0].passages`),

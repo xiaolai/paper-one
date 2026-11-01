@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { deadClasses, undefinedClasses, unfollowedStylesheets } from './check-dead-css.mjs'
+import { deadClasses, scanSources, undefinedClasses, unfollowedStylesheets } from './check-dead-css.mjs'
 
 /**
  * `check-dead-css`: what counts as reaching a class, and what does not.
@@ -423,6 +423,10 @@ describe('which binding a read goes through', () => {
     ['a require', "export const f = () => require('./A.module.css').default.gone"],
     ['a reflective read', `${IMPORT}export const f = () => Reflect.get(styles, 'gone')`],
     ['an own-key test', `${IMPORT}export const f = () => Object.hasOwn(styles, 'gone')`],
+    ['a reflective test', `${IMPORT}export const f = () => Reflect.has(styles, 'gone')`],
+    ['a descriptor', `${IMPORT}export const f = () => Object.getOwnPropertyDescriptor(styles, 'gone')`],
+    ['a reflective descriptor', `${IMPORT}export const f = () => Reflect.getOwnPropertyDescriptor(styles, 'gone')`],
+    ['an inherited own-key test', `${IMPORT}export const f = () => Object.hasOwnProperty(styles, 'gone')`],
     ['an in test', `${IMPORT}export const f = () => 'gone' in styles`],
     ['a constant key', `${IMPORT}const k = 'gone'\nexport const f = () => styles[k]`],
     ['a joined key', `${IMPORT}export const f = () => styles['go' + 'ne']`],
@@ -539,6 +543,9 @@ describe('a stylesheet read whole', () => {
     ['Object.keys', 'export const f = () => Object.keys(styles)'],
     ['Object.values', 'export const f = () => Object.values(styles)'],
     ['Object.entries', 'export const f = () => Object.entries(styles)'],
+    ['Object.getOwnPropertyNames', 'export const f = () => Object.getOwnPropertyNames(styles)'],
+    ['Object.getOwnPropertyDescriptors', 'export const f = () => Object.getOwnPropertyDescriptors(styles)'],
+    ['Reflect.ownKeys', 'export const f = () => Reflect.ownKeys(styles)'],
     ['a loop over its keys', 'export const f = () => { for (const k in styles) return k }'],
     ['an alias', 'const s = styles\nexport const f = () => Object.keys(s)'],
   ])('keeps every class alive through %s', (_what, line) => {
@@ -634,6 +641,10 @@ describe('what the gate refuses to guess at', () => {
     ['a stylesheet as a default in a pattern', `${IMPORT}export const f = (o: any) => { let s: any; ({ s = styles } = o); return s.live }`],
     ['a dependency list', `${IMPORT}import { useMemo } from 'react'\nexport const f = () => useMemo(() => styles.live, [styles])`],
     ['a dependency list, by namespace', `${IMPORT}import * as React from 'react'\nexport const f = () => React.useEffect(() => {}, [styles])`],
+    ['a layout effect\'s dependency list', `${IMPORT}export const f = (h: any) => useLayoutEffect(h, [styles])`],
+    ['an insertion effect\'s dependency list', `${IMPORT}export const f = (h: any) => useInsertionEffect(h, [styles])`],
+    ['a callback\'s dependency list', `${IMPORT}export const f = (h: any) => useCallback(h, [styles])`],
+    ['an imperative handle\'s dependency list, which comes third', `${IMPORT}export const f = (r: any, h: any) => useImperativeHandle(r, h, [styles])`],
   ])('does not refuse %s', (_what, source) => {
     expect(refused(source)).toEqual([])
   })
@@ -641,6 +652,247 @@ describe('what the gate refuses to guess at', () => {
   it('fails the command, with the place named', () => {
     const root = fixture({ 'src/A.module.css': '.live { color: red; }\n', 'src/A.tsx': `${IMPORT}export const a = styles.live\nexport const f = () => g(styles)\n` })
     expect(unfollowedStylesheets(root)).toHaveLength(1)
+  })
+})
+
+/*
+ * WHAT `lib/holders.mjs` FOLLOWS HAS TWO SIDES, and each row here is the far side of
+ * one of its forms: the near neighbour that must not be taken for it, or the same
+ * form asked for exactly what it says and nothing more. `toContain` cannot tell a
+ * right refusal from a right refusal with a wrong one beside it, so each row states
+ * the whole answer: what is missing, what stays dead, and every refusal.
+ */
+describe('the whole answer for each form a holder takes', () => {
+  const IMPORT = "import styles from './A.module.css'\nimport { g } from 'somewhere'\n"
+  const KEY = 'a key this cannot read: name the class'
+  const OBJECT = 'held by an object'
+  const ARRAY = 'held by an array'
+  const HANDED_ON = 'handed on in an array or object'
+  const TO_A_CALL = 'handed to a call'
+
+  const answer = (source) => {
+    const root = fixture({ 'src/A.module.css': '.unread { color: red; }\n', 'src/A.tsx': `${source}\n` })
+    const scanned = scanSources(root)
+    return {
+      missing: undefinedClasses(root, undefined, scanned).map((u) => u.name).sort(),
+      dead: deadClasses(root, undefined, scanned).dead.map((d) => d.name).sort(),
+      refused: unfollowedStylesheets(root, undefined, scanned).map((one) => one.how).sort(),
+    }
+  }
+  const expectAnswer = (source, expected) => expect(answer(source)).toEqual({ missing: [], dead: ['unread'], refused: [], ...expected })
+
+  /* A key is read only when it can be nothing else. */
+  it.each([
+    ['a let, which can change', `${IMPORT}let k = 'gone'\nexport const f = () => styles[k]`, { refused: [KEY] }],
+    ['two strings joined by anything but a plus', `${IMPORT}export const f = () => styles['go' - 'ne']`, { refused: [KEY] }],
+    ['an unknown on the left of a join', `${IMPORT}export const f = (k: string) => styles[k + 'gone']`, { refused: [KEY] }],
+    ['an unknown on the right of a join', `${IMPORT}export const f = (k: string) => styles['gone' + k]`, { refused: [KEY] }],
+    ['a name nothing declares', `${IMPORT}export const f = () => styles[nowhere]`, { refused: [KEY] }],
+    ['a constant defined by itself', `${IMPORT}const k: any = k\nexport const f = () => styles[k]`, { refused: [KEY] }],
+    ['the member asked for, not the first', `${IMPORT}const K = { a: 'unread', b: 'gone' }\nexport const f = () => styles[K.b]`, { missing: ['gone'] }],
+    ['a member a constant object does not have', `${IMPORT}const K = { a: 'gone' }\nexport const f = () => styles[K.b]`, { refused: [KEY] }],
+    ['a member reaching a loop variable, which is not the variable', "function f(styles: any) { return styles[globalThis.k] }\nfor (var k of ['unread']) { f(k) }", { refused: [KEY] }],
+  ])('a key from %s', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+
+  /* A pattern takes keys out of a value, and an object beside one is only a value. */
+  it.each([
+    ['a sum is no target', `${IMPORT}let a: any\n;[a + 1] = [styles]\nexport const f = () => a.gone`, {}],
+    ['a parenthesised pattern is one', 'export const f = (p: any) => { let s: any; ({ styles: s }) = p; return s.unread }', { dead: [] }],
+    ['an object assigned from is a value', 'export const f = () => { let a: any; let o: any; o = { styles: a }; return [o, a.unread] }', {}],
+    ['an object added to is a value', 'export const f = () => { let a: any; ({ styles: a } + 1); return a.unread }', {}],
+    ['a loop over a pattern takes from each', 'export const f = (p: any) => { let s: any; for ({ styles: s } of p) return s.unread }', { dead: [] }],
+    ['an object looped over is a value', `${IMPORT}export const f = () => { let a: any; for (const x of { styles: a }) g(x); return a.unread }`, {}],
+    ['a pattern in an array pattern is one', 'export const f = (p: any) => { let s: any; [{ styles: s }] = p; return s.unread }', { dead: [] }],
+    ['an object in an object is a value', 'export const f = () => { let a: any; const o = { k: { styles: a } }; return [o, a.unread] }', {}],
+    ['a pattern over a named object', `${IMPORT}const o = { s: styles }\nexport const f = () => { let s: any; ({ s } = o); return s.gone }`, { missing: ['gone'] }],
+    ['a renaming pattern over a named object', `${IMPORT}const o = { s: styles }\nexport const f = () => { let t: any; ({ s: t } = o); return t.gone }`, { missing: ['gone'] }],
+    ['the rest of a pattern over a named object holds no key', `${IMPORT}const o = { r: styles }\nexport const f = () => { let r: any; ({ ...r } = o); return r.gone }`, {}],
+    ['a rest binding named like a key is not that key', `${IMPORT}const o = { rest: styles, s: 1 }\nconst { ...rest } = o\nexport const f = () => rest.gone`, {}],
+  ])('%s', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+
+  /* A method keeps the elements, or calls back with one, only if it is on the list. */
+  it.each(['filter', 'concat', 'reverse', 'sort', 'toSorted', 'toReversed'])('`%s` keeps the elements it was called on', (method) => {
+    expectAnswer(`${IMPORT}const all = [styles]\nexport const f = () => all.${method}()[0].gone`, { missing: ['gone'] })
+  })
+  it.each(['flatMap', 'forEach', 'filter', 'find', 'findLast', 'some', 'every', 'sort', 'toSorted'])('`%s` calls back with an element', (method) => {
+    expectAnswer(`${IMPORT}const all = [styles]\nexport const f = () => all.${method}((s: any) => s.gone)`, { missing: ['gone'] })
+  })
+  it('a method of no known shape calls back with nothing', () => {
+    expectAnswer(`${IMPORT}const all = [styles]\nexport const f = () => all.other((s: any) => s.gone)`, {})
+  })
+  it.each(['catch', 'finally'])('`.%s` on an `import()` waits for the module, and reads nothing', (method) => {
+    expectAnswer(`${IMPORT}export const f = () => import('./A.module.css').${method}(g)`, {})
+  })
+
+  /* An array can be reached through whatever an array can be chosen by. */
+  it.each([
+    ['a conditional', `${IMPORT}export const f = (x: boolean) => { const all = x ? [styles] : []; return all[0].gone }`],
+    ['a fallback', `${IMPORT}export const f = (x: any) => { const all = x ?? [styles]; return all[0].gone }`],
+    ['an await', `${IMPORT}export const f = async () => { const all = await [styles]; return all[0].gone }`],
+  ])('an array chosen by %s is read, and held by no name while it is chosen', (_what, source) => {
+    expectAnswer(source, { missing: ['gone'], refused: [ARRAY] })
+  })
+
+  /* What a name nothing declares is assigned is held by no symbol, so by no other such name. */
+  it.each([
+    ['a value', `${IMPORT}nowhere = styles\nexport const f = () => other.gone`],
+    ['an array', `${IMPORT}nowhere = [styles]\nexport const f = () => other[0].gone`],
+  ])('%s assigned to an undeclared name reaches no other undeclared name', (_what, source) => {
+    expectAnswer(source, {})
+  })
+
+  /* AN ALIAS CAN BE WRITTEN ABOVE WHAT IT COPIES, and what it copies can be settled last
+     in a round, so each of these needs the round after the one that settled it. */
+  it.each([
+    ['a key of an object', `${IMPORT}const p = (x: any) => { const o = { s: x }; const t = o.s; return t.gone }\nexport const f = () => p(styles)`],
+    ['a key under the root\'s own name, which no name binds', `${IMPORT}const p = (x: any) => { const o = { styles: x }; const t = o.styles; return t.gone }\nexport const f = () => p(styles)`],
+    ['an element of an array', `${IMPORT}const p = (x: any) => { let list: any[] = []; const t = list[0]; list = [x]; return t.gone }\nexport const f = () => p(styles)`],
+    ['what a function returns', `${IMPORT}const p = (x: any) => { const get = () => x; const t = get(); return t.gone }\nexport const f = () => p(styles)`],
+  ])('another round follows %s settled late', (_what, source) => {
+    expectAnswer(source, { missing: ['gone'] })
+  })
+
+  /* A member with the name of a holder holds nothing unless it is that holder. */
+  it.each([
+    ['a member of an object that holds none, under a key another does', `${IMPORT}const other = { s: 1 as any }\nconst o = { s: styles }\nexport const f = () => [other.s.gone, o.s.unread]`, { dead: [] }],
+    ['a key nobody can read, of a type that names it', `${IMPORT}declare const k: 'a'\nconst a = styles\nconst o = { [k]: styles }\nexport const f = () => o.a.gone`, { refused: ['held under a key this cannot read'] }],
+    ['a member of a namespace, which is the binding', `${IMPORT}namespace N { export const s = styles }\nexport const f = () => N.s.gone`, { missing: ['gone'] }],
+  ])('%s', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+
+  /* What a function's parameters are handed. */
+  it.each([
+    ['a rest parameter takes from its own place on', `${IMPORT}const read = (a: any, ...rest: any[]) => rest[0].gone\nexport const f = () => read(styles, 1)`, {}],
+    ['a parameter takes the elements of an array', `${IMPORT}const read = (all: any[]) => all[0].gone\nexport const f = () => read([styles])`, { missing: ['gone'], refused: [ARRAY] }],
+  ])('%s', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+
+  /* A function bound to a name can be called. Any other, what it returns has left. */
+  it.each([
+    ['a return with no function round it', `${IMPORT}return styles`, { refused: ['returned'] }],
+    ['a default function with no name', `${IMPORT}export default function () { return styles }`, { refused: ['returned'] }],
+    ['an arrow under a key', `${IMPORT}export const o = { get: () => styles }`, { refused: ['returned'] }],
+    ['a parenthesised arrow, which is still bound', `${IMPORT}const get = (() => styles)\nexport const f = () => get().gone`, { missing: ['gone'] }],
+    ['a member of a function that returns one', `${IMPORT}const get = () => styles\nexport const f = () => get.call(null).gone`, { refused: ['a function that returns it, handed on'] }],
+    ['a cast of one, called', `${IMPORT}const get = () => styles\nexport const f = () => (get as any)().gone`, { missing: ['gone'] }],
+  ])('%s', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+
+  /* A name is what a thing is called, and a use is where a value goes. */
+  it.each([
+    ['a method called what being handed one looks like', `${IMPORT}export const o = { styles() { return 1 } }`, {}],
+    ['a key taken from a namespace by a pattern', `${IMPORT}namespace N { export const get = () => styles }\nconst { get: h } = N\nexport const f = () => h`, {}],
+    ['a shorthand key, which is a read of the name', `${IMPORT}const s = styles\nexport const f = () => g({ s })`, { refused: [OBJECT] }],
+  ])('%s', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+
+  /* Which part of an expression the value stands in decides whether it goes on. */
+  it.each([
+    ['a key', `${IMPORT}export const f = (o: any) => o[styles]`, {}],
+    ['a condition', `${IMPORT}export const f = () => g(styles ? 1 : 2)`, {}],
+    ['a branch', `${IMPORT}export const f = (x: boolean) => g(x ? styles : 1)`, { refused: [TO_A_CALL] }],
+    ['a fallback', `${IMPORT}export const f = (y: any) => g(y ?? styles)`, { refused: [TO_A_CALL] }],
+    ['the last of a comma', `${IMPORT}export const f = () => g((1, styles))`, { refused: [TO_A_CALL] }],
+    ['the first of a comma', `${IMPORT}export const f = () => g((styles, 1))`, {}],
+    ['the left of an assignment to a member', `${IMPORT}const o = { s: styles }\nexport const f = () => { o.s = 1 }`, {}],
+    ['a pattern assigned to', `${IMPORT}let s = styles\n;({ a: s } = g)`, {}],
+    ['a spread into a call', `${IMPORT}export const f = () => g(...styles)`, { refused: ['spread into a call'] }],
+    ['a spread into an object', `${IMPORT}export const f = () => g({ ...styles })`, { refused: ['spread into an object'] }],
+    ['a spread into an array, returned', `${IMPORT}export const f = () => [...styles]`, { refused: ['spread into an array'] }],
+    ['a spread into a named array', `${IMPORT}const all = [...styles]\nexport const f = () => all[0].gone`, {}],
+    ['the callee', `${IMPORT}export const f = () => styles()`, {}],
+  ])('a stylesheet as %s', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+  it.each([
+    ['if', 'if (styles) g()'],
+    ['while', 'while (styles) g()'],
+    ['a negation', '!styles'],
+    ['typeof', 'typeof styles'],
+    ['a statement', 'styles'],
+    ['delete', 'delete styles'],
+    ['void', 'void styles'],
+  ])('a stylesheet under %s goes nowhere', (_what, statement) => {
+    expectAnswer(`${IMPORT}export const f = () => { ${statement} }`, {})
+  })
+
+  /* A container held by a name is followed. Anywhere else, what is in it has left. */
+  it.each([
+    ['the right of a fallback', `${IMPORT}export const f = (x: any) => x ?? [styles]`, { refused: [ARRAY] }],
+    ['assigned to a member', `${IMPORT}export const f = (x: any) => { x.y = [styles] }`, { refused: [ARRAY] }],
+    ['the left of a logical assignment', `${IMPORT}export const f = () => { [styles] ||= g }`, { refused: [ARRAY] }],
+    ['looped over', `${IMPORT}export const f = () => { for (const s of [styles]) return s.gone }`, { missing: ['gone'] }],
+    ['called', `${IMPORT}export const f = () => ([styles] as any)()`, { refused: [ARRAY] }],
+    ['a key', `${IMPORT}export const f = (o: any) => o[[styles]]`, { refused: [ARRAY] }],
+    ['in an object bound under a key nobody can read', `${IMPORT}export const f = (k: string) => { const o = { [k]: { s: styles } }; return 1 }`, { refused: [OBJECT] }],
+    ['parenthesised, bound to a name, handed on', `${IMPORT}const o = ({ s: styles })\nexport const f = () => g(o)`, { refused: [HANDED_ON] }],
+    ['in an object bound to a name, handed on', `${IMPORT}const o = { a: { s: styles } }\nexport const f = () => g(o)`, { refused: [HANDED_ON] }],
+    ['spread into an object bound to a name, handed on', `${IMPORT}const o = { ...{ s: styles } }\nexport const f = () => g(o)`, { refused: [HANDED_ON, OBJECT] }],
+    ['handed to a call, beside a name nothing declares', `${IMPORT}g({ s: styles })\nexport const f = () => nowhere`, { refused: [OBJECT] }],
+    ['taken apart by a pattern, beside a name nothing declares', `${IMPORT}const { a } = { s: styles }\nexport const f = () => nowhere`, {}],
+  ])('a container %s', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+
+  /* What becomes of the name holding one. */
+  it.each([
+    ['a key', `${IMPORT}const o = { s: styles }\nexport const f = (x: any) => x[o]`, { refused: [HANDED_ON] }],
+    ['an element of an array, which is read', `${IMPORT}const x = [styles]\nexport const f = () => [x]`, { refused: [HANDED_ON] }],
+    ['a term of a sum in an array pattern, which is read', `${IMPORT}const x = [styles]\nexport const f = () => { [x + 1] = g }`, { refused: [HANDED_ON] }],
+    ['a member of a namespace, which is only a name', `${IMPORT}namespace N { export const all = [styles] }\nexport const f = () => N.all[0].gone`, { refused: [ARRAY] }],
+    ['a value of an object, which is read', `${IMPORT}const x = [styles]\nexport const f = () => ({ a: x })`, { refused: [HANDED_ON] }],
+    ['a shorthand of an object, which is read', `${IMPORT}const x = [styles]\nexport const f = () => ({ x })`, { refused: [HANDED_ON] }],
+    ['spread into an object, which is read', `${IMPORT}const x = [styles]\nexport const f = () => ({ ...x })`, { refused: [HANDED_ON] }],
+    ['the value of an export', `${IMPORT}const o = { s: styles }\nexport const p = o`, { refused: ['exported in an array or object'] }],
+    ['assigned to a name', `${IMPORT}const all = [styles]\nexport const f = () => { let t: any; t = all; return 1 }`, {}],
+    ['assigned to a member', `${IMPORT}const all = [styles]\nexport const f = (x: any) => { x.y = all }`, { refused: ['assigned to a member'] }],
+    ['spread into a named array', `${IMPORT}const all = [styles]\nconst more = [...all]\nexport const f = () => more[0].gone`, { missing: ['gone'] }],
+    ['spread into an array handed on', `${IMPORT}const all = [styles]\nexport const f = () => g([...all])`, { refused: ['spread into an array'] }],
+    ['asked for its keys by Reflect', `${IMPORT}const o = { s: styles }\nexport const f = () => Reflect.ownKeys(o)`, {}],
+    ['handed to a method of Object that reads no key', `${IMPORT}const o = { s: styles }\nexport const f = () => Object.freeze(o)`, { refused: [HANDED_ON] }],
+  ])('a name holding a container as %s', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+
+  /* Only a call is known to reach a function in this file, and only the two reflections read. */
+  it.each([
+    ['a constructor in the file', `${IMPORT}const F = function (s: any) { }\nexport const f = () => new F(styles)`, { refused: [TO_A_CALL] }],
+    ['a method of Object that reads no key', `${IMPORT}export const f = () => Object.freeze(styles)`, { refused: [TO_A_CALL] }],
+    ['a method like a reflection, on something else', `${IMPORT}export const f = (x: any) => x.keys(styles)`, { refused: [TO_A_CALL] }],
+    ['a reflective read with no key', `${IMPORT}export const f = () => Reflect.get(styles)`, {}],
+    ['a reflection with nothing to read', `${IMPORT}export const f = () => Object.keys()`, {}],
+  ])('handed to %s', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+
+  /* A local called what being handed one looks like is quiet only when it is made from something else. */
+  it.each([
+    ['a member of a namespace, which is no local', `${IMPORT}namespace N { export const styles = {} as any }\nexport const f = (k: string) => N.styles[k]`, { refused: [KEY] }],
+    ['a local holding the import', "import a from './A.module.css'\nconst styles = a\nexport const f = (k: string) => styles[k]", { refused: [KEY] }],
+    ['a local with nothing in it yet', 'export const f = (k: string) => { let styles: any; return styles[k] }', { refused: [KEY] }],
+    ['a local read by a key that can be read', "import { g } from 'somewhere'\nconst styles = g(1)\nexport const f = () => styles['unread']", { dead: [] }],
+  ])('a computed read of %s', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+
+  /* A way through is not a read of the key it goes through. */
+  it.each([
+    ['`default`, by a literal', "import * as css from './A.module.css'\nexport const f = () => css['default'].gone", { missing: ['gone'] }],
+    ['its own name', `${IMPORT}export const f = () => styles.styles.unread`, { dead: [] }],
+  ])('%s is no class', (_what, source, expected) => {
+    expectAnswer(source, expected)
+  })
+
+  it('a re-export of a name is said once, where the name holds it', () => {
+    expectAnswer(`${IMPORT}export const all = [styles]\nexport { all as b } from './A'`, { refused: [ARRAY] })
   })
 })
 
