@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, configure, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { useEffect, useLayoutEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { Capability, ReaderContext } from '../core/capability'
 import type { IndexFs, IndexedBook } from '../core/bookIndex'
 import type { BookMeta, ReaderPosition } from '../core/bookMeta'
 import type { MutationRecorder } from '../core/ports'
@@ -86,6 +88,8 @@ const reader = vi.hoisted(() => ({
   refuse: 0,
   /** Whether the session can pin down where the reader is — `ReaderSession.placeHere` answers null when it cannot. */
   pinned: true,
+  /** What the session derives the book's own turning from. Null is a book with no pace, as a PDF is. */
+  pace: null as null | { bookWords: number; sectionBytes: number; spineBytes: number; steps: number },
 }))
 
 /* THE PARSER IS FOLIATE'S TOO — the background pass reads a book with it, and
@@ -227,6 +231,7 @@ vi.mock('./reader/session', async (importActual) => {
       deselect: () => {},
       closeFootnote: () => {},
       setFootnoteMount: () => {},
+      pace: () => reader.pace,
       next: () => this.own.turns.push('next'),
       prev: () => this.own.turns.push('prev'),
       goLeft: () => this.own.turns.push('goLeft'),
@@ -367,6 +372,7 @@ afterEach(() => {
   reader.cover = null
   reader.refuse = 0
   reader.pinned = true
+  reader.pace = null
   parses.names.length = 0
   release(parses)
   disk.read.length = 0
@@ -2084,5 +2090,181 @@ describe('the audiobook export', () => {
     reader.prose = null
     await opening()
     expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'a book with no document yet').toBe(false)
+  })
+})
+
+/**
+ * WHAT A CAPABILITY ADDS AROUND THE READER, THROUGH THE WHOLE WINDOW.
+ *
+ * The registry and the two components have cases of their own; what only this can
+ * see is the wiring in `App`: that a host is mounted where the screens cannot take
+ * it down, that a control is handed to the title bar, and that a hold reaches the
+ * palette's row.
+ */
+describe('what a capability adds around the reader', () => {
+  const PACE = { bookWords: 60_000, sectionBytes: 1, spineBytes: 10, steps: 20 }
+  const offersTurning = () => paletteOffers('Turn the pages', 'Turn the pages for me')
+
+  /** A capability whose host hands the test the context it was last rendered with. */
+  function reaching() {
+    const seen: { context: ReaderContext | null } = { context: null }
+    const capability: Capability = {
+      id: 'narration',
+      windowHosts: [
+        {
+          id: 'narration:host',
+          render: (context) => {
+            seen.context = context
+            return null
+          },
+        },
+      ],
+    }
+    return { seen, capability }
+  }
+
+  it('keeps a window host mounted across every screen, from before the first book', async () => {
+    const lives = { mounted: 0, unmounted: 0 }
+    function Host() {
+      useEffect(() => {
+        lives.mounted += 1
+        return () => {
+          lives.unmounted += 1
+        }
+      }, [])
+      return null
+    }
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [
+      { id: 'narration', windowHosts: [{ id: 'narration:host', render: () => <Host /> }] },
+    ])
+    expect(lives, 'on the shelf, with no book').toEqual({ mounted: 1, unmounted: 0 })
+    await open('Moby-Dick')
+    expect(lives, 'onto the reader').toEqual({ mounted: 1, unmounted: 0 })
+    fireEvent.click(screen.getByTitle(/^Library · /u))
+    await settle()
+    expect(screen.getByTitle('Open Moby-Dick'), 'back on the shelf').toBeTruthy()
+    expect(lives, 'off the reader').toEqual({ mounted: 1, unmounted: 0 })
+  })
+
+  it('hands a host the document on screen as the section, and a surface over the open book', async () => {
+    reader.prose = 'Call me Ishmael.'
+    const { seen, capability } = reaching()
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [capability])
+    expect(seen.context?.sectionKey, 'no book, no section').toBeNull()
+    expect(seen.context?.surface.speakable({ notes: false }), 'no book, nothing to say').toBeNull()
+    await open('Moby-Dick')
+    const section = seen.context?.surface.speakable({ notes: false })
+    expect(section?.text).toContain('Call me Ishmael.')
+    expect(seen.context?.sectionKey, 'the document itself, so a new one is a new key').toBeInstanceOf(Document)
+    expect(seen.context?.surface.book()?.title).toBeTruthy()
+  })
+
+  it('draws a reader control in the title bar, on the reader and nowhere else', async () => {
+    reader.prose = 'Call me Ishmael.'
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [
+      {
+        id: 'narration',
+        readerControls: [
+          {
+            id: 'narration:control',
+            render: ({ sectionKey }) => <button type="button">{sectionKey === null ? 'no section' : 'a section'}</button>,
+          },
+        ],
+      },
+    ])
+    expect(screen.queryByText('a section'), 'on the shelf').toBeNull()
+    expect(screen.queryByText('no section'), 'on the shelf').toBeNull()
+    await open('Moby-Dick')
+    expect(screen.getByText('a section')).toBeTruthy()
+    fireEvent.click(screen.getByTitle(/^Library · /u))
+    await settle()
+    expect(screen.queryByText('a section'), 'off the reader').toBeNull()
+  })
+
+  it('takes the book’s own turning off the palette for as long as a host holds the pace', async () => {
+    reader.pace = PACE
+    const { seen, capability } = reaching()
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [capability])
+    await open('Moby-Dick')
+    expect(await offersTurning(), 'with nothing holding the pace').toBe(true)
+    let release = () => {}
+    act(() => {
+      release = seen.context!.surface.holdPace()
+    })
+    expect(await offersTurning(), 'held').toBe(false)
+    act(() => release())
+    expect(await offersTurning(), 'released').toBe(true)
+  })
+
+  it('stops a book that is turning itself when a host takes the pace', async () => {
+    reader.pace = PACE
+    const { seen, capability } = reaching()
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [capability])
+    await open('Moby-Dick')
+    await runCommand('Turn the pages', 'Turn the pages for me')
+    expect(await paletteOffers('turning the pages', 'Stop turning the pages'), 'it started').toBe(true)
+    let release = () => {}
+    act(() => {
+      release = seen.context!.surface.holdPace()
+    })
+    await settle()
+    expect(await paletteOffers('turning the pages', 'Stop turning the pages'), 'it stopped').toBe(false)
+    act(() => release())
+    expect(await offersTurning(), 'offered again, and not begun again').toBe(true)
+  })
+
+  it('commits a host before a control, so what a host publishes is there for the control to read', async () => {
+    /* The first commit cannot show this, because the title bar waits for the
+       kernel's own host to publish. A later one can. */
+    const order: string[] = []
+    const Note = ({ name }: { readonly name: string }) => {
+      useLayoutEffect(() => {
+        order.push(name)
+      })
+      return null
+    }
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [
+      {
+        id: 'narration',
+        windowHosts: [{ id: 'narration:host', render: () => <Note name="host" /> }],
+        readerControls: [{ id: 'narration:control', render: () => <Note name="control" /> }],
+      },
+    ])
+    await open('Moby-Dick')
+    order.length = 0
+    await act(async () => reader.live!.relocate(THERE))
+    await settle()
+    expect(order.slice(0, 2)).toEqual(['host', 'control'])
+  })
+
+  it('leaves the window standing when a host falls over', async () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const moby = await shelved(BYTES, 'Moby-Dick')
+      await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [
+        {
+          id: 'narration',
+          windowHosts: [
+            {
+              id: 'narration:host',
+              render: () => {
+                throw new Error('gone')
+              },
+            },
+          ],
+        },
+      ])
+      await open('Moby-Dick')
+      expect(reader.live, 'the book opened anyway').not.toBeNull()
+      expect(said).toHaveBeenCalledWith('Paper: narration:host failed to draw', expect.any(Error))
+    } finally {
+      said.mockRestore()
+    }
   })
 })

@@ -25,7 +25,7 @@ import styles from './screens/ContributedScreen.module.css'
  * falls back to the label for a caller with nothing better.
  */
 export class ContributionBoundary extends Component<
-  { readonly label: string; readonly id?: string; readonly children: ReactNode; readonly resetKey?: string },
+  { readonly label: string; readonly id?: string; readonly children: ReactNode; readonly resetKey?: string; readonly silent?: boolean },
   { readonly failed: boolean }
 > {
   // Stryker disable next-line ObjectLiteral: an absent `failed` reads as not failed, which is the same start.
@@ -61,6 +61,8 @@ export class ContributionBoundary extends Component<
 
   override render() {
     if (!this.state.failed) return this.props.children
+    /* For what has no place in the window to say it: see `WindowHosts`. */
+    if (this.props.silent) return null
     return <p className={styles.failure}>{this.props.label} could not be drawn. Everything else still works.</p>
   }
 }

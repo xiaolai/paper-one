@@ -7,13 +7,13 @@ import {
   stepSentence as sentenceStep,
   type ReadingPlan,
 } from './readingCursor'
+import type { ReaderContext } from '../../core/capability'
 import { EngineSpeaker } from './engineSpeaker'
 import type { AudioHost } from './enginePlayer'
 import { engineVoiceFor } from './engineVoice'
 import { routedSpeaker, speakerFor, type SeekingSpeaker } from './speakerRouting'
 import type {
   ClipKey,
-  ReadingSurface,
   SpeechRequest,
   SpeechSkipPrefs,
   SpokenAudio,
@@ -54,18 +54,8 @@ export interface ReadingEngine {
   readonly host: () => AudioHost | null
 }
 
-/**
- * The reader, as a reading is given it.
- *
- * `sectionKey` is what says the section changed, by render, so the change lands
- * in one commit with everything else. Everything else a reading wants to know is
- * `surface`'s to answer, as of the moment it is asked: see `ReadingSurface` for
- * what makes that safe from a child of the component that commits it.
- */
-export interface ReadingContext {
-  readonly sectionKey: unknown
-  readonly surface: ReadingSurface
-}
+/** The reader, as a reading is given it: what any contribution around it is given. */
+export type ReadingContext = ReaderContext
 
 export interface Speech {
   readonly available: boolean
