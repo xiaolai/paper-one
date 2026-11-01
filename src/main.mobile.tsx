@@ -13,7 +13,7 @@ import '@fontsource/ibm-plex-mono/400.css'
 /* THE DESIGN SYSTEM'S VALUES, taken directly rather than through a UI barrel.
  * `kernel/ui/index.ts` imports these three as a side effect so a DESKTOP root's
  * reader arrives dressed; this root may not import that barrel at all (it names
- * `App`), so it takes the stylesheets itself — exactly as `main.web.tsx` does,
+ * `App`), so it takes the stylesheets itself — exactly as `app/web/client.tsx` does,
  * and for the same reason the browser client does not take them through
  * `ui/browser.ts`: a side-effect import inside a door would make the order of
  * two stylesheet systems depend on which module was reached first. */
@@ -31,12 +31,19 @@ import './kernel/ui/styles/capability.css'
  * this root may not name the desktop barrel, which would bring the whole pane
  * tree, titlebar and palette into a bundle that draws none of them.
  * `.dependency-cruiser.cjs` refuses it
- * (`only-a-desktop-root-takes-the-desktop-ui-entry`). */
+ * (`only-a-desktop-root-takes-the-desktop-ui-entry`).
+ *
+ * THE COMPOSITION IS IMPORTED HERE AND HANDED IN, rather than by `bootApp`, which
+ * no import graph could then be followed through: see
+ * `dev-docs/decisions/2026-11-02-composition-route.md`. It means a test of this
+ * file is on a route the mutation gate cannot see down, so anything that can
+ * live in `bootApp.ts` or `MobileApp` belongs there. */
 import { installFatalHandlers } from './kernel/ui/boot'
 import { applyMetrics } from './kernel/core/metrics'
 import { resolvePlatform } from './kernel/ui/mobile'
 import { bootApp, reportFirstFrame } from './app/bootApp'
 import { MobileApp } from './app/mobile/MobileApp'
+import { capabilities } from 'virtual:paper-composition'
 
 installFatalHandlers()
 
@@ -59,7 +66,7 @@ applyMetrics(document.documentElement, resolvePlatform())
  * that supports it, and raising the target for the whole bundle to avoid four
  * lines here would be the wrong trade. */
 async function main(root: HTMLElement): Promise<void> {
-  const booted = await bootApp()
+  const booted = await bootApp(capabilities)
 
   createRoot(root).render(
     <StrictMode>

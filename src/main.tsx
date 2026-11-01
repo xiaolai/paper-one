@@ -26,9 +26,16 @@ import '@fontsource/ibm-plex-mono/500.css'
  * `./kernel/ui` is the UI entry only a composition root may import (it brings
  * the stylesheets with it). `bootApp` reaches the kernel through the narrower
  * `./kernel/ui/boot`, so the mobile root can share it without also loading
- * `App`. `.dependency-cruiser.cjs` holds this file to exactly these imports. */
+ * `App`. `.dependency-cruiser.cjs` holds this file to exactly these imports.
+ *
+ * THE COMPOSITION IS IMPORTED HERE AND HANDED IN, rather than by `bootApp`, which
+ * no import graph could then be followed through: see
+ * `dev-docs/decisions/2026-11-02-composition-route.md`. It means a test of this
+ * file is on a route the mutation gate cannot see down, so anything that can
+ * live in `bootApp.ts` or `kernel/ui` belongs there. */
 import { App, installFatalHandlers } from './kernel/ui'
 import { bootApp, reportFirstFrame } from './app/bootApp'
+import { capabilities } from 'virtual:paper-composition'
 
 installFatalHandlers()
 
@@ -39,7 +46,7 @@ if (!host) throw new Error('#root is missing from index.html')
  * that supports it, and raising the target for the whole bundle to avoid four
  * lines here would be the wrong trade. */
 async function main(root: HTMLElement): Promise<void> {
-  const booted = await bootApp()
+  const booted = await bootApp(capabilities)
 
   createRoot(root).render(
     <StrictMode>
