@@ -99,7 +99,7 @@ export function staticKeys(node, checker) {
   /* `for (const k of ['a', 'b'])`: the variable has no initializer, and the list says what it is. */
   if (ts.isIdentifier(inner)) {
     const declaration = checker.getSymbolAtLocation(inner)?.valueDeclaration
-    const loop = declaration !== undefined && ts.isVariableDeclaration(declaration) ? declaration.parent?.parent : undefined
+    const loop = declaration !== undefined && ts.isVariableDeclaration(declaration) ? declaration.parent.parent : undefined
     if (loop !== undefined && ts.isForOfStatement(loop) && ts.isArrayLiteralExpression(unwrapped(loop.expression))) {
       return unwrapped(loop.expression).elements.flatMap((element) => staticKeys(element, checker))
     }
@@ -127,7 +127,7 @@ export function isDestructuringTarget(literal) {
   if (ts.isBinaryExpression(parent)) return parent.left === node && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
   if (ts.isForOfStatement(parent) || ts.isForInStatement(parent)) return parent.initializer === node
   if (ts.isArrayLiteralExpression(parent)) return isDestructuringTarget(parent)
-  return ts.isPropertyAssignment(parent) && parent.initializer === node && isDestructuringTarget(parent.parent)
+  return ts.isPropertyAssignment(parent) && isDestructuringTarget(parent.parent)
 }
 
 const isWrapper = (node) => ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node)
@@ -152,7 +152,7 @@ const DEPENDENCY_LISTS = new Map([['useEffect', 1], ['useLayoutEffect', 1], ['us
 const isDependencyList = (call, argument) => {
   const callee = unwrapped(call.expression)
   const called = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : null
-  return called !== null && DEPENDENCY_LISTS.get(called) === call.arguments.indexOf(argument)
+  return DEPENDENCY_LISTS.get(called) === call.arguments.indexOf(argument)
 }
 
 const isFunctionLike = (node) => ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)
@@ -205,9 +205,9 @@ export function followHolders({
   rootName,
   rootOrigin,
   rootOf,
-  seeds = [],
-  elementSeeds = [],
-  returning = [],
+  seeds,
+  elementSeeds,
+  returning,
   through = () => [],
   read,
   enumerated,
@@ -228,7 +228,7 @@ export function followHolders({
   /* A member's symbol asks the checker for the type of what it is read from, and that
      is the slow question, so it is asked only of names something here could answer. */
   const heldKeys = new Set()
-  let changed = false
+  let changed
 
   /* In `{ s }` the name's own symbol is the key; the variable is what it means. */
   const symbolOf = (identifier) =>
@@ -257,16 +257,15 @@ export function followHolders({
 
   /* An object literal's type has its own symbol for each key, made when the type is
      asked for, so the key's declaration is what they share. */
-  const heldBySymbol = (symbol) =>
-    symbol === undefined ? [] : [...(direct.get(symbol) ?? []), ...(symbol.declarations ?? []).flatMap((at) => [...(keyed.get(at) ?? [])])]
-  const memberOfType = (expression, key) => (key !== null && heldKeys.has(key) ? heldBySymbol(checker.getPropertyOfType(checker.getTypeAtLocation(expression), key)) : [])
+  const keyedAt = (at) => [...(keyed.get(at) ?? [])]
+  const declarationsOf = (symbol) =>
+    // Stryker disable next-line ArrayDeclaration: what this list holds is looked up in `keyed`, whose keys are all nodes, so a string in it finds nothing, as an empty list does
+    symbol.declarations ?? []
+  const heldBySymbol = (symbol) => (symbol === undefined ? [] : [...(direct.get(symbol) ?? []), ...declarationsOf(symbol).flatMap(keyedAt)])
+  const memberOfType = (expression, key) => (heldKeys.has(key) ? heldBySymbol(checker.getPropertyOfType(checker.getTypeAtLocation(expression), key)) : [])
 
   /** What a member of an object holds, when the checker can say which object. */
-  const heldMember = (access, keys) => {
-    if (heldKeys.size === 0) return []
-    if (ts.isPropertyAccessExpression(access)) return heldKeys.has(access.name.text) ? heldBySymbol(checker.getSymbolAtLocation(access.name)) : []
-    return keys.flatMap((key) => memberOfType(access.expression, key))
-  }
+  const heldMember = (access, keys) => keys.flatMap((key) => memberOfType(access.expression, key))
 
   /** The origins an expression holds. */
   const originsOf = (node) => {
@@ -298,8 +297,7 @@ export function followHolders({
       return inner.properties.flatMap((member) => (ts.isSpreadAssignment(member) ? originsOf(member.expression) : []))
     }
     if (ts.isCallExpression(inner)) {
-      const fn = calleeSymbol(inner.expression)
-      const held = fn === undefined ? undefined : returns.get(fn)
+      const held = returns.get(calleeSymbol(inner.expression))
       return held === undefined ? [] : [...held]
     }
     return []
@@ -321,9 +319,11 @@ export function followHolders({
 
   const hold = (identifier, origins) => {
     const symbol = symbolOf(identifier)
-    /* A member typed as the value, read later as `x.s`. */
-    if (origins.length > 0) heldKeys.add(identifier.text)
-    if (symbol !== undefined && add(direct, symbol, origins)) changed = true
+    if (symbol !== undefined && add(direct, symbol, origins)) {
+      /* A member typed as the value, read later as `x.s`. */
+      heldKeys.add(identifier.text)
+      changed = true
+    }
   }
   const holdElements = (identifier, origins) => {
     const symbol = symbolOf(identifier)
@@ -331,16 +331,13 @@ export function followHolders({
   }
   /** One key of a pattern over a holder: a way through, or a read. */
   const patternKey = (at, key, origins, target) => {
-    const via = key === null ? [] : through(origins, [key])
+    const via = through(origins, [key])
     if (via.length > 0) fill(target, via)
-    else if (add(patternReads, at, origins)) {
-      patternKeys.set(at, key)
-      changed = true
-    }
+    /* Nothing in the settling reads what a pattern read, so this asks for no other round. */
+    else if (add(patternReads, at, origins)) patternKeys.set(at, key)
   }
   /** A declaration's name, or an assignment's target, taking these origins. */
   const fill = (target, origins) => {
-    if (origins.length === 0) return
     if (ts.isIdentifier(target)) hold(target, origins)
     else if (ts.isObjectBindingPattern(target)) {
       for (const element of target.elements) {
@@ -356,7 +353,6 @@ export function followHolders({
   }
   /** A pattern over an object that holds one under a key: `const { s } = o`. */
   const fillFromKeys = (target, from) => {
-    if (heldKeys.size === 0) return
     if (ts.isObjectBindingPattern(target)) {
       for (const element of target.elements) {
         if (!element.dotDotDotToken) fill(element.name, memberOfType(from, keyText(element.propertyName ?? element.name, checker)))
@@ -368,7 +364,6 @@ export function followHolders({
     }
   }
   const fillElements = (target, origins) => {
-    if (origins.length === 0) return
     if (ts.isIdentifier(target)) holdElements(target, origins)
     else if (ts.isArrayBindingPattern(target)) {
       for (const element of target.elements) {
@@ -384,7 +379,9 @@ export function followHolders({
     }
   }
 
+  // Stryker disable next-line ArrayDeclaration: a string in this list unpacks to two letters, every `ts.is…` is false of a letter, so `fill` and `originsOf` do nothing with them
   const flows = []
+  // Stryker disable next-line ArrayDeclaration: a string in this list unpacks to two letters, every `ts.is…` is false of a letter, so `fill` and `elementsOf` do nothing with them
   const fromElements = []
   const returned = []
   const calls = []
@@ -429,7 +426,7 @@ export function followHolders({
       const parent = here.parent
       if (ts.isPropertyAssignment(parent) && !isDestructuringTarget(parent.parent)) here = parent.parent
       else if (ts.isSpreadAssignment(parent) && !isDestructuringTarget(parent.parent)) here = parent.parent
-      else return ts.isVariableDeclaration(parent) && parent.initializer === here && ts.isIdentifier(parent.name) ? parent.name : null
+      else return ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name) ? parent.name : null
     }
   }
 
@@ -445,18 +442,17 @@ export function followHolders({
     for (const [target, from] of fromElements) fill(target, elementsOf(from))
     for (const [name, from] of values) {
       const origins = originsOf(from)
-      if (origins.length === 0) continue
       const key = keyText(name, checker)
-      if (key !== null) heldKeys.add(key)
-      if (key !== null && add(keyed, name.parent, origins)) changed = true
+      if (key !== null && add(keyed, name.parent, origins)) {
+        heldKeys.add(key)
+        changed = true
+      }
       /* Under the root's own name, whoever gets the object can read it back by that name. */
       const bound = key === rootName ? null : nameBinding(name.parent.parent)
       if (bound !== null && add(objects, checker.getSymbolAtLocation(bound), origins)) changed = true
     }
-    for (const [fn, from] of returned) {
-      const symbol = symbolOfFn(fn)
-      if (symbol !== null && symbol !== undefined && add(returns, symbol, originsOf(from))) changed = true
-    }
+    /* A function with no name files under null, and every lookup here is by a symbol. */
+    for (const [fn, from] of returned) if (add(returns, symbolOfFn(fn), originsOf(from))) changed = true
     for (const call of calls) {
       const callee = unwrapped(call.expression)
       const fn = fnOfSymbol(calleeSymbol(callee))
@@ -513,8 +509,7 @@ export function followHolders({
     let here = node
     while (isWrapper(here.parent) || ts.isAwaitExpression(here.parent)) here = here.parent
     const parent = here.parent
-    if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === here) return null
-    if (ts.isElementAccessExpression(parent)) return null
+    if (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) return null
     if (ts.isConditionalExpression(parent)) return parent.condition === here ? null : useOf(parent)
     if (ts.isBinaryExpression(parent)) {
       const operator = parent.operatorToken.kind
@@ -542,10 +537,10 @@ export function followHolders({
     if (ts.isVariableDeclaration(parent) || ts.isParameter(parent) || ts.isBindingElement(parent)) return null
     if (ts.isForOfStatement(parent) || ts.isForInStatement(parent)) return null
     if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) return parent.expression === here ? null : argumentUse(parent, here)
-    if (ts.isReturnStatement(parent) || (ts.isArrowFunction(parent) && parent.body === here)) {
+    if (ts.isReturnStatement(parent) || ts.isArrowFunction(parent)) {
       const fn = ts.isArrowFunction(parent) ? parent : enclosingFunction(parent)
       const symbol = fn === null ? null : symbolOfFn(fn)
-      return symbol === null || symbol === undefined ? 'returned' : null
+      return symbol === null ? 'returned' : null
     }
     /* An export is the gate's to follow: it can see the other side of one. */
     if (ts.isExportAssignment(parent)) return null
@@ -574,9 +569,9 @@ export function followHolders({
     let here = container
     while (isWrapper(here.parent)) here = here.parent
     const parent = here.parent
-    if (ts.isVariableDeclaration(parent) && parent.initializer === here) return isExportedDeclaration(parent) ? how : null
+    if (ts.isVariableDeclaration(parent)) return isExportedDeclaration(parent) ? how : null
     if (ts.isBinaryExpression(parent) && ASSIGNMENTS.has(parent.operatorToken.kind) && parent.right === here) return assignedUse(parent) === null ? null : how
-    if (ts.isForOfStatement(parent) && parent.expression === here) return null
+    if (ts.isForOfStatement(parent)) return null
     if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === here) return null
     if (ts.isCallExpression(parent) && isDependencyList(parent, here)) return null
     if (ts.isObjectLiteralExpression(container) && ts.isPropertyAssignment(parent) && !isDestructuringTarget(parent.parent) && keyText(parent.name, checker) !== null) return namedOrOut(parent.parent, how)
@@ -590,8 +585,8 @@ export function followHolders({
     if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === here) return null
     if (ts.isForOfStatement(parent) && parent.expression === here) return null
     if (ts.isForInStatement(parent)) return null
-    if (ts.isVariableDeclaration(parent) && parent.initializer === here) return isExportedDeclaration(parent) ? 'exported in an array or object' : null
-    if (ts.isBinaryExpression(parent) && ASSIGNMENTS.has(parent.operatorToken.kind)) return parent.left === here || assignedUse(parent) === null ? null : 'assigned to a member'
+    if (ts.isVariableDeclaration(parent)) return isExportedDeclaration(parent) ? 'exported in an array or object' : null
+    if (ts.isBinaryExpression(parent) && ASSIGNMENTS.has(parent.operatorToken.kind)) return assignedUse(parent) === null ? null : 'assigned to a member'
     if (ts.isSpreadElement(parent) && ts.isArrayLiteralExpression(parent.parent)) return namedOrOut(parent.parent, 'spread into an array')
     if (ts.isCallExpression(parent) && ts.isPropertyAccessExpression(unwrapped(parent.expression)) && ts.isIdentifier(unwrapped(parent.expression).expression) && ['Object', 'Reflect'].includes(unwrapped(parent.expression).expression.text)) {
       const name = unwrapped(parent.expression).name.text
@@ -672,7 +667,7 @@ export function followHolders({
         if (how !== null) escaped(inside, node, how)
       }
       const made = returns.get(symbol)
-      if (made !== undefined && made.size > 0 && !isCallee(node) && !ts.isExportAssignment(node.parent)) escaped([...made], node, 'a function that returns it, handed on')
+      if (made !== undefined && !isCallee(node) && !ts.isExportAssignment(node.parent)) escaped([...made], node, 'a function that returns it, handed on')
     }
     if (isOccurrence) {
       const origins = originsOf(node)
