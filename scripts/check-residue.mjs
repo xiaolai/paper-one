@@ -46,20 +46,19 @@ import { followHolders, isDestructuringTarget, keyText, staticText, unwrapped } 
  * a reason like any other: a key nothing can read (`services[key]`), every key at once
  * (`Object.keys(services)`), the services returned from a method or a callback,
  * assigned to a member, or inside an object or array that goes on from where it was
- * made, and a type that holds them in a way this cannot see through (`Box<KernelServices>`
- * for a box with a `value`, `Map<string, KernelServices>`). The services may cross a
+ * made, a type that holds them in a way this cannot see through (`Box<KernelServices>`
+ * for a box with a `value`, `Map<string, KernelServices>`), and the services handed to a
+ * call or a prop whose far side does not take them where this reads them. A hand-on is
+ * followed when it calls a function the kernel declares, by the name it was imported
+ * under, and that function's parameter there is called `services` or typed
+ * `KernelServices`; every declaration of that name must agree. `{ circle: X }` as the
+ * parameter is what this refusal is for. The services may cross a
  * file only under a name that says so, because that is all the far side can be read
  * by: `services`, a function ending in `Services`, or `KernelServices`. So a member
  * typed as them, an export or an import that renames them, is refused too.
  *
  * WHAT IT CANNOT SEE, each because nothing here could decide it:
  *
- *   - the services handed to a call or as a prop (`f(services)`), where the far side
- *     declares its parameter as a structural type of its own, `{ circle: X }`. Only
- *     resolving types across files could connect the two. Handing them on is how the
- *     kernel is written, so refusing each one would refuse the kernel, and the far side
- *     is read in every other form: a parameter called `services` or typed
- *     `KernelServices`;
  *   - a key or a name built from what is not a constant, on an object that is not the
  *     services: `{ [k]: v }`, `'cir' + x`. Any object can be built that way, and nothing
  *     says which of them matter;
@@ -205,7 +204,7 @@ function typeReader(checker, sources) {
     const args = type.typeArguments ?? []
     if (bound.has(called)) return bound.get(called)
     if (called === 'KernelServices') return MEMBERS
-    if (called === 'ReturnType') return args[0] !== undefined && ts.isTypeQueryNode(args[0]) && ENDS_IN_SERVICES.test(lastName(args[0].exprName) ?? '') ? MEMBERS : null
+    if (called === 'ReturnType') return args[0] !== undefined && ts.isTypeQueryNode(args[0]) && returnsServices(lastName(args[0].exprName) ?? '') ? MEMBERS : null
     if (MEMBER_KEEPING.has(called)) return args[0] === undefined ? null : classify(args[0], bound, seen)
     if (ELEMENT_KEEPING.has(called)) return args[0] === undefined ? null : holding(classify(args[0], bound, seen))
     const here = (checker.getSymbolAtLocation(name)?.declarations ?? [])
@@ -233,31 +232,46 @@ function typeReader(checker, sources) {
     return null
   }
 
+  /* A FUNCTION THE KERNEL DECLARES says for itself what it takes and what it returns, and
+     across a file its name is what connects a call to it. */
+  const functions = new Map()
+  for (const source of sources) {
+    for (const statement of source.statements) {
+      const named = ts.isFunctionDeclaration(statement) && statement.name
+        ? [[statement.name.text, statement]]
+        : ts.isVariableStatement(statement)
+          ? statement.declarationList.declarations
+              .filter((one) => ts.isIdentifier(one.name) && one.initializer !== undefined && isFunctionLike(unwrapped(one.initializer)))
+              .map((one) => [one.name.text, unwrapped(one.initializer)])
+          : []
+      for (const [name, fn] of named) functions.set(name, [...(functions.get(name) ?? []), fn])
+    }
+  }
+  /* `readServices()` is a list of descriptors, whatever its name suggests. A declared type
+     with nothing of the services in it outranks the name; no type leaves the name to speak. */
+  const returnsServices = (name) => {
+    if (!ENDS_IN_SERVICES.test(name)) return false
+    const declaredFns = functions.get(name) ?? []
+    return declaredFns.length === 0 || !declaredFns.every((fn) => fn.type !== undefined && classify(fn.type) === null)
+  }
+  const takesServices = (name, index) => {
+    const declaredFns = functions.get(name) ?? []
+    return declaredFns.length > 0 && declaredFns.every((fn) => {
+      const parameter = fn.parameters[index]
+      if (parameter === undefined || parameter.dotDotDotToken !== undefined) return false
+      return (ts.isIdentifier(parameter.name) && parameter.name.text === 'services') || (parameter.type !== undefined && classify(parameter.type) === MEMBERS)
+    })
+  }
   /* A file with no word for them holds them only under an alias the kernel declares. */
   const aliases = [...declared.entries()].filter(([, declarations]) => strongest(declarations.map((one) => ofDeclaration(one, [], new Map(), new Set()))) !== null).map(([name]) => name)
   const names = [...aliases, ...[...renamed.keys()].filter((name) => ['KernelServices', ...aliases].includes(throughRenames(name)))]
   const mentions = names.length === 0 ? /services/i : new RegExp(`services|\\b(?:${names.map((name) => name.replace(/\$/g, '\\$')).join('|')})\\b`, 'i')
-  return { classify, mightHold: (text) => mentions.test(text) }
+  return { classify, returnsServices, takesServices, mightHold: (text) => mentions.test(text) }
 }
 
-/* ESCAPES THAT ARE REFUSED, and the ones that are not: handing the services on is how the
-   kernel is written, and the far side is read where it reads them. */
-const REFUSED = new Set([
-  'returned',
-  'used',
-  'assigned to a member',
-  'held under a key this cannot read',
-  'read by a key this cannot read',
-  'held by an object',
-  'held by an array',
-  'spread into an object',
-  'spread into an array',
-  'spread into a call',
-  'spread into props',
-  'exported in an array or object',
-  'handed on in an array or object',
-  'a function that returns it, handed on',
-])
+/* EVERY ESCAPE IS REFUSED BUT THESE, so one the engine learns later is loud by default.
+   Rendering them or writing them into a string reads no member, so nothing is named. */
+const READS_NOTHING = new Set(['rendered', 'written into a string'])
 
 const SERVICES = Object.freeze({ kind: 'services' })
 const isWrapperNode = (node) => ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node)
@@ -353,7 +367,18 @@ function namingsIn(source, checker, ids, types) {
 
 /** What `namingsIn` says of the services themselves. */
 function followServices(source, checker, known, types, found, say) {
-  const { classify } = types
+  const { classify, returnsServices, takesServices } = types
+  /* Only a bare name is the function the kernel declares: `other.readServices()` may be
+     anything, so the name speaks for it. */
+  const namedForServices = (expression) => (ts.isIdentifier(expression) ? returnsServices(expression.text) : ENDS_IN_SERVICES.test(lastName(expression) ?? ''))
+  const importedName = (callee) => {
+    if (ts.isIdentifier(callee)) {
+      const imported = checker.getSymbolAtLocation(callee)?.declarations?.find(ts.isImportSpecifier)
+      return imported === undefined ? null : (imported.propertyName ?? imported.name).text
+    }
+    if (!ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.expression)) return null
+    return checker.getSymbolAtLocation(callee.expression)?.declarations?.some(ts.isNamespaceImport) ? callee.name.text : null
+  }
   const seeds = []
   const elementSeeds = []
   const returning = []
@@ -377,7 +402,7 @@ function followServices(source, checker, known, types, found, say) {
     if (ts.isVariableDeclaration(node) && node.initializer && ts.isIdentifier(node.name) && !ENDS_IN_SERVICES.test(node.name.text)) {
       const value = unwrapped(node.initializer)
       const called = ts.isIdentifier(value) || ts.isPropertyAccessExpression(value) ? lastName(value) : null
-      if (called !== null && called !== 'services' && ENDS_IN_SERVICES.test(called)) returningSymbol(checker.getSymbolAtLocation(node.name))
+      if (called !== null && called !== 'services' && namedForServices(value)) returningSymbol(checker.getSymbolAtLocation(node.name))
     }
     if (isFunctionLike(node) && node.type && classify(node.type) === MEMBERS) returningSymbol(symbolOfFunction(node))
     if ((ts.isPropertySignature(node) || ts.isPropertyDeclaration(node) || (ts.isParameter(node) && ts.isParameterPropertyDeclaration(node, node.parent))) && node.type) {
@@ -409,8 +434,7 @@ function followServices(source, checker, known, types, found, say) {
       }
       if (!ts.isCallExpression(inner)) return []
       const callee = unwrapped(inner.expression)
-      const called = ts.isIdentifier(callee) || ts.isPropertyAccessExpression(callee) ? lastName(callee) : null
-      return called !== null && ENDS_IN_SERVICES.test(called) ? [SERVICES] : []
+      return (ts.isIdentifier(callee) || ts.isPropertyAccessExpression(callee)) && namedForServices(callee) ? [SERVICES] : []
     },
     seeds,
     elementSeeds,
@@ -421,8 +445,9 @@ function followServices(source, checker, known, types, found, say) {
     },
     enumerated: (_origins, at) => say(at, 'every key of the services'),
     escaped: (_origins, at, how) => {
-      if (REFUSED.has(how)) say(at, how)
+      if (!READS_NOTHING.has(how)) say(at, how)
     },
+    handedOn: (callee, index) => index >= 0 && takesServices(importedName(callee), index),
   })
 
   /* WHAT LEAVES THE FILE leaves by name, and the far side has only that to go on. */
