@@ -6,7 +6,7 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it, onTestFinished } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import {
   REPORT,
   hangsUnanswered,
@@ -25,6 +25,12 @@ import {
   survivorsIn,
   unseenAtBase,
 } from './check-mutants.mjs'
+
+/* THE PROJECT'S 60s READS THE LOAD HERE, NOT A HANG. These cases run the real
+   instrumenter over real worktrees: measured 2026-11-01 on a shared machine, a
+   dozen of them read 25s to 60s, and they failed verify in turn as the load moved,
+   one case at a time. So the bound is the one the heaviest cases already declared. */
+vi.setConfig({ testTimeout: 300_000 })
 
 /**
  * What the gate measures AT THE MERGE BASE, and what it refuses to measure.
