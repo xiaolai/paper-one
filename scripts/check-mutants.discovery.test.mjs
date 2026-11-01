@@ -132,6 +132,41 @@ describe('what a sweep takes for a subject', () => {
       expect(changedFiles('main', false, root).sort()).toEqual(['src/a.ts', 'src/b.test.ts.mjs', 'src/c.d.ts.mjs'])
     })
   })
+
+  /* A selftest holds the cases its test runs: `NOT_A_SUBJECT` says why sweeping one
+     could only fail. It stays a module a test can reach something through. */
+  it('takes a changed selftest for a test to mutate nothing in, though a test can still reach through it', () => {
+    inScratch('mutants-subjects-', (root) => {
+      gitIn(root)('init', '-q', '-b', 'main')
+      plant(root, {
+        'scripts/a.mjs': 'export const a = 1\n',
+        'scripts/a.selftest.mjs': 'export const cases = []\n',
+        'scripts/a.selftest.mjs.bak': 'export const cases = []\n',
+        'scripts/b.selftest.ts': 'export const cases = []\n',
+      })
+
+      expect(changedFiles('main', false, root).sort()).toEqual(['scripts/a.mjs'])
+      expect(allSourceFiles(['scripts/a.selftest.mjs'])).toEqual(['scripts/a.selftest.mjs'])
+    })
+  })
+
+  /* What makes that rule true of this tree rather than of a name: nothing but a test
+     imports a selftest. A module production code imported would be code, and leaving
+     it out of the sweep would be hiding it. */
+  it('finds every selftest in this tree imported by tests alone, so that none is code a sweep leaves out', () => {
+    const repository = fileURLToPath(new URL('..', import.meta.url))
+    const sources = ['scripts', 'src'].flatMap((top) =>
+      readdirSync(path.join(repository, top), { recursive: true, encoding: 'utf8' })
+        .filter((name) => /\.(ts|tsx|mjs)$/u.test(name))
+        .map((name) => path.join(top, name)),
+    )
+    const selftests = sources.filter((name) => name.endsWith('.selftest.mjs'))
+    const importers = sources.filter((name) => /(from|import)\s*\(?['"][^'"]*\.selftest\.mjs['"]/u.test(readFileSync(path.join(repository, name), 'utf8')))
+
+    expect(selftests.length).toBeGreaterThan(0)
+    expect(importers.length).toBeGreaterThan(0)
+    expect(importers.filter((name) => !name.endsWith('.test.mjs') && !name.endsWith('.test.ts'))).toEqual([])
+  })
 })
 
 describe('what git is asked for, and what its answer carries', () => {

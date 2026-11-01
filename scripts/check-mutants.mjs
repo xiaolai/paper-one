@@ -126,7 +126,24 @@ import { hiddenLoads, runtimeSpecifiers } from './lib/specifiers.mjs'
  * here. `s` makes `.` mean any character, which is what this always meant.
  */
 const SRC = /^(src|scripts)\/.+\.(ts|tsx|mjs)$/su
-const NOT_A_SUBJECT = /\.(test|testkit|contract\.test)\.(ts|tsx|mjs)$|\.d\.ts$/u
+/**
+ * What is never mutated, however it is named by `SRC`.
+ *
+ * ⚠️ **A `.selftest.mjs` IS A TEST THAT `A_TEST` DOES NOT RECOGNISE, AND SWEEPING
+ * ONE COULD ONLY EVER FAIL.** `check-boundaries.selftest.mjs` is the cases its
+ * `.test.mjs` runs: only tests import it, and the code those cases are about,
+ * `check-boundaries.mjs`, stays a subject. Mutating the cases asks whether a test
+ * notices a change to itself. Measured on PR run 41227478169 it also could not
+ * answer: 708 of its 790 mutants were static, each one re-runs a test file that
+ * takes 19 s, 17.6 s of it set-up that Stryker's net time leaves out of the
+ * deadline, and 676 came back wall-clock timeouts, 674 of them twice. A repeat
+ * fails the gate, so no test anyone wrote could have turned it green, and it cost
+ * 128 + 171 minutes before its merge base used up the rest of a 345-minute step.
+ * A test in `check-mutants.discovery.test.mjs` holds every selftest in the tree to
+ * being imported by tests alone: one that production code imported would be a
+ * subject again, and that test is what says so.
+ */
+const NOT_A_SUBJECT = /\.(test|testkit|selftest|contract\.test)\.(ts|tsx|mjs)$|\.d\.ts$/u
 
 /**
  * The branch's own changes: committed since the base, plus what is uncommitted.
