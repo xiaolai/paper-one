@@ -832,6 +832,8 @@ const EMPTY_MARK_CONTROLS: readonly MarkControl[] = Object.freeze([])
 const EMPTY_READER_CONTRIBUTIONS: readonly ReaderContribution[] = Object.freeze([])
 const EMPTY_CLIENTS: readonly ClientContribution[] = Object.freeze([])
 const EMPTY_SERVICES: ReadonlyMap<string, ServiceContribution> = new Map()
+/* Stryker disable next-line ArrayDeclaration: never read — `capServices` holds a
+   row for every capability, so the `??` that names this has nothing to catch. */
 const EMPTY_SERVICE_ROWS: readonly ServiceContribution[] = Object.freeze([])
 
 /** Copied and bound, for the overlay's reason below; named field by named field, for a mark control's. */

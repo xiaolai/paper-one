@@ -176,6 +176,26 @@ describe('the reviewed shapes, edge by edge', () => {
     expect(fs.writeAtomic).not.toHaveBeenCalled()
   })
 
+  it('refuses a folder with anything before or after the reviewed shape', async () => {
+    const circleFs = rawFs()
+    const circle = scopeFs(circleFs, 'circle')!
+    for (const path of ['x/books/b', 'x/books/b/circle', 'books/b/circle/x']) {
+      await expect(circle.mkdir(path)).rejects.toThrow(/may only mkdir/u)
+    }
+    expect(circleFs.mkdir).not.toHaveBeenCalled()
+    const publicFs = rawFs()
+    await expect(scopeFs(publicFs, 'public')!.mkdir('x/books/b')).rejects.toThrow(/may only mkdir/u)
+    expect(publicFs.mkdir).not.toHaveBeenCalled()
+  })
+
+  it('refuses the public store with anything after its name', async () => {
+    const fs = rawFs()
+    await expect(scopeFs(fs, 'public')!.writeAtomic!('books/b/public.jsonl.bak', bytes, 'full')).rejects.toThrow(
+      /may only writeAtomic/u,
+    )
+    expect(fs.writeAtomic).not.toHaveBeenCalled()
+  })
+
   it('guards appendFile exactly as it guards the rest, and offers it only when the platform has it', async () => {
     const appendFile = vi.fn(async () => {})
     const fs = { ...rawFs(), appendFile } as unknown as NonNullable<KernelServices['fs']> & { appendFile: typeof appendFile }

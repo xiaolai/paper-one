@@ -187,6 +187,16 @@ describe('every contribution, checked and then bound', () => {
   })
 })
 
+describe('a status, once the composition is gone', () => {
+  it('is no longer offered', async () => {
+    const bookStatuses = [{ id: 'circle:status', subscribe: () => () => {}, of: () => ({ label: 'reading' }) }] as const
+    const composition = await composeCapabilities([{ id: 'circle', bookStatuses }], api(), signal())
+    expect(composition.bookStatuses).toHaveLength(1)
+    composition.dispose()
+    expect(composition.bookStatuses).toEqual([])
+  })
+})
+
 describe('what a capability is handed, and what is said when one fails', () => {
   const api = () => kernelApi(createKernelServices({ fs: null, storage: null }))
   const signal = () => new AbortController().signal
