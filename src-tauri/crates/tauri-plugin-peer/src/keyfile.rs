@@ -81,7 +81,7 @@ pub fn load(path: &Path, len: u64) -> Result<SecretKey> {
 
 /// Write a key WITHOUT clobbering one already at that name.
 ///
-/// ⚠️ **`hard_link`, NOT `rename`: EXCLUSIVE on POSIX and NTFS**, so a second
+/// ⚠️ **[`crate::store::place_new`], NOT A PLAIN `rename`: EXCLUSIVE**, so a second
 /// writer discovers it lost rather than replacing a key that is already loaded
 /// and in use. `identity.rs` carries the incident that taught this.
 ///
@@ -94,6 +94,15 @@ pub fn load(path: &Path, len: u64) -> Result<SecretKey> {
 /// would follow a stale symlink and reuse a stale file's looser mode, since
 /// `mode(0o600)` applies only to a file the open itself creates.
 pub fn install_new(path: &Path, key: &SecretKey) -> Result<Installed> {
+    install_new_by(path, key, crate::store::place_new)
+}
+
+/// [`install_new`], apart from how the name is taken.
+fn install_new_by(
+    path: &Path,
+    key: &SecretKey,
+    place: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<Installed> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -133,7 +142,7 @@ pub fn install_new(path: &Path, key: &SecretKey) -> Result<Installed> {
         remove_secret(&tmp);
         return Err(err);
     }
-    let installed = std::fs::hard_link(&tmp, path);
+    let installed = place(&tmp, path);
     /* The name is published (or somebody else's is); either way this writer's
      * temp — key material — goes. */
     remove_secret(&tmp);
@@ -234,9 +243,9 @@ mod tests {
         assert_eq!(back.public(), key.public());
     }
 
-    /// ⚠️ **THE LOSER TAKES THE WINNER'S KEY.** Installing by `hard_link` is
-    /// what makes a name that is already published un-overwritable — `rename`
-    /// would change the identity under a key already loaded and in use.
+    /// ⚠️ **THE LOSER TAKES THE WINNER'S KEY.** Installing through `place_new` is
+    /// what makes a name that is already published un-overwritable — a plain
+    /// `rename` would change the identity under a key already loaded and in use.
     #[test]
     fn a_key_already_at_the_name_is_taken_rather_than_overwritten() {
         let dir = crate::testutil::scratch("keyfile-loser");
@@ -251,6 +260,55 @@ mod tests {
             first.public(),
             "the second writer replaced a key that was already published"
         );
+    }
+
+    /// What an Android install runs, which no machine running this suite would reach.
+    #[test]
+    fn the_look_and_rename_installs_a_key_as_the_hard_link_does() {
+        let dir = crate::testutil::scratch("keyfile-rename-new");
+        let path = dir.join("some.key");
+        let first = SecretKey::generate();
+        let by_rename = crate::store::rename_new;
+        assert_eq!(install_new_by(&path, &first, by_rename).unwrap(), Installed::Ours);
+        let second = SecretKey::generate();
+        assert_eq!(install_new_by(&path, &second, by_rename).unwrap(), Installed::Theirs);
+        let back = load(&path, std::fs::metadata(&path).unwrap().len()).unwrap();
+        assert_eq!(back.public(), first.public());
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+            .filter(|n| n != "some.key")
+            .collect();
+        assert!(left.is_empty(), "key material was left behind: {left:?}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "a private key is readable by others");
+        }
+    }
+
+    /// Every writer in a race ends on one key, the winner's.
+    #[test]
+    fn the_look_and_rename_gives_one_key_to_every_writer_in_a_race() {
+        let dir = crate::testutil::scratch("keyfile-rename-race");
+        let path = dir.join("some.key");
+        let outcomes: Vec<_> = std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..16)
+                .map(|_| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        let key = SecretKey::generate();
+                        (install_new_by(path, &key, crate::store::rename_new).unwrap(), key.public())
+                    })
+                })
+                .collect();
+            writers.into_iter().map(|w| w.join().unwrap()).collect()
+        });
+        let winners: Vec<_> = outcomes.iter().filter(|(won, _)| *won == Installed::Ours).collect();
+        assert_eq!(winners.len(), 1);
+        let back = load(&path, std::fs::metadata(&path).unwrap().len()).unwrap();
+        assert_eq!(back.public(), winners[0].1);
     }
 
     #[test]

@@ -563,7 +563,7 @@ pub fn rotate(root: &Path, until: i64) -> Result<VoiceStatus> {
      * one atomic rename over it; a crash before it leaves the OLD key in place
      * and a crash after leaves the new one, and neither leaves nothing.
      *
-     * `rename`, not the non-clobbering `hard_link` install: replacing is
+     * `rename`, not the non-clobbering `place_new` install: replacing is
      * exactly what is wanted here, and the retention above has already made the
      * old key durable under its retired name. */
     let fresh = SecretKey::generate();

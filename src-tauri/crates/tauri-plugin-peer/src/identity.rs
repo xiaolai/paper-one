@@ -269,9 +269,9 @@ use crate::keyfile::Installed;
 /// Unix — overwrite an identity that was already loaded and in use. Two
 /// processes, two keys, and the endpoint id every paired device knows
 /// changing underneath them. So: a temp name private to this writer, and
-/// `hard_link` to install, which is atomic and EXCLUSIVE on POSIX and NTFS
-/// (the library lock publishes the same way, `src/lock.rs`). A loser
-/// discovers it lost instead of overwriting a winner.
+/// `store::place_new` to install, which is atomic and EXCLUSIVE (the library
+/// lock publishes the same way, `src/lock.rs`). A loser discovers it lost
+/// instead of overwriting a winner.
 /* ⚠️ **THE INSTALLER LIVES IN `keyfile.rs` NOW.** `share/voice.rs` had grown a
  * near-copy of this function that was missing the directory sync below — the
  * drift this module's own header warns about, arriving exactly as predicted.
@@ -312,7 +312,7 @@ mod tests {
         );
     }
 
-    /// THE LOSER OF A RACE TAKES THE WINNER'S KEY. Installing by `hard_link`
+    /// THE LOSER OF A RACE TAKES THE WINNER'S KEY. Installing by `place_new`
     /// means a second writer that reaches `write_new` with a key already
     /// published cannot overwrite it — which is what `rename` did, changing
     /// the endpoint id under a peer that had already loaded and used it.
