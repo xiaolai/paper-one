@@ -204,7 +204,7 @@ export function followHolders({
   checker,
   rootName,
   rootOrigin,
-  rootOf = () => [],
+  rootOf,
   seeds = [],
   elementSeeds = [],
   returning = [],
@@ -212,7 +212,7 @@ export function followHolders({
   read,
   enumerated,
   escaped,
-  handedOn = () => false,
+  handedOn,
 }) {
   const direct = new Map()
   const elements = new Map()
