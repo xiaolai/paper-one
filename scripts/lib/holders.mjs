@@ -146,6 +146,15 @@ const ENUMERATES = new Set(['keys', 'values', 'entries', 'getOwnPropertyNames', 
 /** The calls that read one key, named by their second argument. */
 const READS_KEY = new Set(['get', 'has', 'getOwnPropertyDescriptor', 'hasOwn', 'hasOwnProperty'])
 
+/* REACT'S OWN HOOKS compare a dependency list and read nothing out of it, so a value in
+   one has not gone anywhere. A hook of anybody else's might do anything with an array. */
+const DEPENDENCY_LISTS = new Map([['useEffect', 1], ['useLayoutEffect', 1], ['useInsertionEffect', 1], ['useMemo', 1], ['useCallback', 1], ['useImperativeHandle', 2]])
+const isDependencyList = (call, argument) => {
+  const callee = unwrapped(call.expression)
+  const called = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : null
+  return called !== null && DEPENDENCY_LISTS.get(called) === call.arguments.indexOf(argument)
+}
+
 const isFunctionLike = (node) => ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)
 
 const enclosingFunction = (node) => {
@@ -440,7 +449,8 @@ export function followHolders({
       const key = keyText(name, checker)
       if (key !== null) heldKeys.add(key)
       if (key !== null && add(keyed, name.parent, origins)) changed = true
-      const bound = nameBinding(name.parent.parent)
+      /* Under the root's own name, whoever gets the object can read it back by that name. */
+      const bound = key === rootName ? null : nameBinding(name.parent.parent)
       if (bound !== null && add(objects, checker.getSymbolAtLocation(bound), origins)) changed = true
     }
     for (const [fn, from] of returned) {
@@ -519,7 +529,10 @@ export function followHolders({
       if (key === null) return 'held under a key this cannot read'
       return key === rootName ? null : namedOrOut(parent.parent, 'held by an object')
     }
-    if (ts.isShorthandPropertyAssignment(parent)) return parent.name.text === rootName ? null : namedOrOut(parent.parent, 'held by an object')
+    if (ts.isShorthandPropertyAssignment(parent)) {
+      if (parent.objectAssignmentInitializer === here) return null
+      return parent.name.text === rootName ? null : namedOrOut(parent.parent, 'held by an object')
+    }
     if (ts.isSpreadAssignment(parent)) return isDestructuringTarget(parent.parent) ? null : namedOrOut(parent.parent, 'spread into an object')
     if (ts.isSpreadElement(parent)) {
       if (!ts.isArrayLiteralExpression(parent.parent)) return 'spread into a call'
@@ -565,6 +578,7 @@ export function followHolders({
     if (ts.isBinaryExpression(parent) && ASSIGNMENTS.has(parent.operatorToken.kind) && parent.right === here) return assignedUse(parent) === null ? null : how
     if (ts.isForOfStatement(parent) && parent.expression === here) return null
     if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === here) return null
+    if (ts.isCallExpression(parent) && isDependencyList(parent, here)) return null
     if (ts.isObjectLiteralExpression(container) && ts.isPropertyAssignment(parent) && !isDestructuringTarget(parent.parent) && keyText(parent.name, checker) !== null) return namedOrOut(parent.parent, how)
     return how
   }

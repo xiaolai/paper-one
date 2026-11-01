@@ -24,6 +24,27 @@
     },
     {
       "id": "circle",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "circle/${…}",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves circle's namespace under the data root for what is held about a person; on-disk paths may not change"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "circle/lists",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves circle's namespace under the data root for the reader's own published lists; on-disk paths may not change"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "circle/lists/${…}.json",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves circle's namespace under the data root for the reader's own published lists; on-disk paths may not change"
+    },
+    {
+      "id": "circle",
       "file": "src/kernel/core/foreignAnnotation.ts",
       "match": "circle: an annotation with no publication cannot be keyed",
       "count": 1,

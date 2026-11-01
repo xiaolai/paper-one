@@ -596,6 +596,7 @@ describe('what the gate refuses to guess at', () => {
     ['a name holding an array, exported by list', `${IMPORT}const all = [styles]\nexport { all }`, 'exported in an array or object'],
     ['a key nobody can read holding one', `${IMPORT}export const f = (k: string) => { const o = { [k]: styles }; return o[k] }`, 'held under a key this cannot read'],
     ['an object read by a key nobody can read', `${IMPORT}const o = { s: styles }\nexport const f = (k: string) => o[k]`, 'read by a key this cannot read'],
+    ['an array handed to a hook of somebody else', `${IMPORT}export const f = () => (g as any)(() => 1, [styles])`, 'held by an array'],
     ['a stylesheet written into a string', `${IMPORT}export const f = () => \`\${styles}\``, 'written into a string'],
     ['a stylesheet chosen at run time', 'export const f = (x: string) => import(`./${x}.module.css`)', 'a stylesheet chosen at run time'],
     ['every key of one handed in', 'export const f = (styles: any) => Object.keys(styles)', 'every key of a stylesheet handed in, whose module is not known'],
@@ -627,6 +628,10 @@ describe('what the gate refuses to guess at', () => {
     ['a function that returns one, called', `${IMPORT}const get = () => styles\nexport const f = () => get().live`],
     ['a test of whether it is there', `${IMPORT}export const f = () => (styles ? 1 : 2)`],
     ['a comparison', `${IMPORT}export const f = (x: any) => styles === x`],
+    ['a named object holding it as styles, handed on', `${IMPORT}const o = { styles }\nexport const f = () => g(o)`],
+    ['a stylesheet as a default in a pattern', `${IMPORT}export const f = (o: any) => { let s: any; ({ s = styles } = o); return s.live }`],
+    ['a dependency list', `${IMPORT}import { useMemo } from 'react'\nexport const f = () => useMemo(() => styles.live, [styles])`],
+    ['a dependency list, by namespace', `${IMPORT}import * as React from 'react'\nexport const f = () => React.useEffect(() => {}, [styles])`],
   ])('does not refuse %s', (_what, source) => {
     expect(refused(source)).toEqual([])
   })
