@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  appendFileSync,
   closeSync,
   constants,
   existsSync,
@@ -6428,6 +6429,46 @@ function sharedProblem(record) {
 /** Each mode a command line can name, by name; a plain sweep names none. */
 const MODES = { plan: planSweep, shard: shardSweep, aggregate: aggregateSweep, measure: measureSweep }
 
+/** What a shard's step summary may hold, in bytes: GitHub's limit is 1 048 576, and the notice of what was cut has to fit too. */
+const SUMMARY_LIMIT = 1_000_000
+
+/**
+ * What one Stryker run wrote for the step summary, added to the real one for as
+ * long as there is room, and a notice of what was cut where there no longer is.
+ *
+ * ⚠️ **PAST 1024k GITHUB KEEPS NONE OF IT, AND THE GATE NEVER WROTE A BYTE.** On PR
+ * run 41227478169 shard 1 wrote 4612k and shard 6 3457k, and each upload aborted.
+ * Vitest's `github-actions` reporter appends to the file this variable names, and
+ * Stryker's runs inherit the variable, so every failing test run of a mutant, which
+ * is what a mutant being killed looks like, added its report. So `strykerRun`
+ * gives a run a file of its own, and this is the one way into the real file. It
+ * keeps nothing between calls, because a merge-base measurement is another
+ * process writing to the same summary: what is already in the real file is the
+ * whole of its state, and the notice is always last, so it says when to stop.
+ *
+ * Cut at a line feed, which never falls inside a UTF-8 character or a Markdown
+ * row. What goes is reports of killed mutants: each mutant's result is in the
+ * shard's artifact, and the gate's verdict never read this file.
+ */
+export function foldSummary(written, into, limit = SUMMARY_LIMIT) {
+  if (!existsSync(written)) return
+  const closing = 'Every mutant’s result is in this shard’s `mutants-shard-*` artifact.\n'
+  const text = readFileSync(written)
+  const held = existsSync(into) ? readFileSync(into) : Buffer.alloc(0)
+  if (held.toString().endsWith(closing)) return
+  const room = limit - held.length
+  if (text.length <= room) {
+    appendFileSync(into, text)
+    return
+  }
+  /* Not `lastIndexOf` from a position below zero: it would count back from the end. */
+  const kept = room > 0 ? text.subarray(0, text.lastIndexOf(0x0a, room - 1) + 1) : Buffer.alloc(0)
+  const notice =
+    `\n**check-mutants: this step summary stops here, to stay under GitHub’s 1024k limit.** ${text.length - kept.length} byte(s) of this run’s ` +
+    `test reports are cut, and everything a later run in this step writes. They are reports of test runs under a mutant, mostly of mutants being killed. ${closing}`
+  appendFileSync(into, Buffer.concat([kept, Buffer.from(notice)]))
+}
+
 // Stryker disable all: the two things a real sweep does that no test may — start Stryker, and take this checkout's own lock, which a live sweep holds while these very tests run in its sandbox. `run` takes both as parameters, and every decision about either is measured there.
 /**
  * Stryker, run over one generated config IN the checkout at `root`: `true` when
@@ -6467,18 +6508,22 @@ const MODES = { plan: planSweep, shard: shardSweep, aggregate: aggregateSweep, m
  * path a run's configs carry is relative to `root`, so the same directory under
  * its own name changes nothing else.
  */
-function strykerRun(config, root) {
+export function strykerRun(config, root) {
   const temp = mkdtempSync(path.join(tmpdir(), 'check-mutants-stryker-'))
+  /* What this run writes for the step summary waits here: see `foldSummary`. */
+  const summary = process.env.GITHUB_STEP_SUMMARY
+  const written = path.join(temp, 'step-summary.md')
   try {
     execFileSync(process.execPath, [strykerEntry(root), 'run', config], {
       cwd: realpathSync.native(path.resolve(root)),
       stdio: 'inherit',
-      env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp },
+      env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp, ...(summary ? { GITHUB_STEP_SUMMARY: written } : {}) },
     })
     return true
   } catch {
     return false
   } finally {
+    if (summary) foldSummary(written, summary)
     rmSync(temp, { recursive: true, force: true })
   }
 }

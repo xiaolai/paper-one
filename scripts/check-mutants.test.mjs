@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { loadConfigFromFile } from 'vite'
-import { describe, expect, it, onTestFinished } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { resolveConfig } from 'vitest/node'
 import {
   FIRST_RUN,
@@ -38,6 +38,7 @@ import {
   codeOf,
   commitsOf,
   coveringTests,
+  foldSummary,
   importsOf,
   loadTestConfig,
   loadViteTestBlock,
@@ -57,6 +58,7 @@ import {
   settledVerdict,
   sourceReaders,
   strykerConfig,
+  strykerRun,
   symlinksIn,
   testsCovering,
   timeoutKindOf,
@@ -7899,6 +7901,151 @@ describe('the workflow sweeps in isolated shards of one frozen plan, reconciled 
   })
 })
 
+/**
+ * ⚠️ **PAST 1024k GITHUB KEEPS NONE OF A STEP'S SUMMARY** — PR run 41227478169, where
+ * shard 1 wrote 4612k and shard 6 3457k, nearly all of it Vitest's reports of the test
+ * runs that killed mutants. `foldSummary` says why it is shaped as it is.
+ */
+describe('what a shard leaves in its step summary', () => {
+  const ENDING = 'Every mutant’s result is in this shard’s `mutants-shard-*` artifact.\n'
+  const noticeOf = (dropped) =>
+    `\n**check-mutants: this step summary stops here, to stay under GitHub’s 1024k limit.** ${dropped} byte(s) of this run’s test reports are cut, ` +
+    `and everything a later run in this step writes. They are reports of test runs under a mutant, mostly of mutants being killed. ${ENDING}`
+  /** A run's summary, the real one (holding `held`, if anything), and the two after folding. */
+  const folded = (root, text, limit, held) => {
+    const written = path.join(root, 'written.md')
+    const into = path.join(root, 'summary.md')
+    if (text !== null) writeFileSync(written, text)
+    if (held !== undefined) writeFileSync(into, held)
+    foldSummary(written, into, limit)
+    return { into, summary: existsSync(into) ? readFileSync(into, 'utf8') : null }
+  }
+
+  it('writes nothing, and no file, for a run that wrote no summary', () => {
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, null, 100).summary).toBe(null)
+      expect(folded(root, null, 100, 'kept\n').summary).toBe('kept\n')
+    })
+  })
+
+  it('adds all of what fits to what is there, up to the last byte of the limit', () => {
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'aaa\nbbb\n', 8).summary).toBe('aaa\nbbb\n')
+    })
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'bbb\n', 8, 'aaa\n').summary).toBe('aaa\nbbb\n')
+    })
+  })
+
+  it('cuts at the last line feed inside the room, and says how much it cut', () => {
+    inScratch('mutants-summary-', (root) => {
+      /* The room is 8: the line feed at byte 8 is the first byte past it. */
+      expect(folded(root, 'aaa\nbbbb\ncc\n', 8).summary).toBe(`aaa\n${noticeOf(8)}`)
+    })
+    inScratch('mutants-summary-', (root) => {
+      /* And a line feed on the last byte of the room is inside it. */
+      expect(folded(root, 'aaa\nbbb\ncc\n', 8).summary).toBe(`aaa\nbbb\n${noticeOf(3)}`)
+    })
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'bbb\ncc\n', 8, 'aaa\n').summary).toBe(`aaa\nbbb\n${noticeOf(3)}`)
+    })
+  })
+
+  it('keeps none of a run whose first line does not fit, and none of one with no room at all', () => {
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'a'.repeat(9), 8).summary).toBe(noticeOf(9))
+    })
+    /* No room is not a position to search back from: a negative one counts from the end. */
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'bbb\n', 8, 'aaaaaaaa').summary).toBe(`aaaaaaaa${noticeOf(4)}`)
+    })
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'bbb\n', 8, 'aaaaaaaaa').summary).toBe(`aaaaaaaaa${noticeOf(4)}`)
+    })
+  })
+
+  it('counts bytes and never splits a character', () => {
+    inScratch('mutants-summary-', (root) => {
+      /* Three bytes each, so eight bytes end inside the third. */
+      expect(folded(root, '中\n中中\n中\n', 8).summary).toBe(`中\n${noticeOf(11)}`)
+    })
+  })
+
+  it('adds nothing after the notice, for this run or for any other process', () => {
+    inScratch('mutants-summary-', (root) => {
+      const { summary: first } = folded(root, 'a'.repeat(9), 8)
+      const { summary: second } = folded(root, 'b\n', 8)
+      const { summary: third } = folded(root, 'c'.repeat(9), 1_000_000)
+
+      expect(second).toBe(first)
+      expect(third).toBe(first)
+    })
+  })
+
+  /* A report may mention the notice's words; only the notice ends in them. */
+  it('goes on after a run that merely quoted the notice', () => {
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'more\n', 1000, `${ENDING}and went on\n`).summary).toBe(`${ENDING}and went on\nmore\n`)
+    })
+  })
+
+  describe('through a real run', () => {
+    /** A Stryker stand-in at `root` that writes this much to the summary it is given, and says which file that was. */
+    const standIn = (root, bytes) =>
+      plant(root, {
+        'node_modules/@stryker-mutator/core/package.json': JSON.stringify({ bin: './stand-in.mjs' }),
+        'node_modules/@stryker-mutator/core/stand-in.mjs':
+          "import { appendFileSync, writeFileSync } from 'node:fs'\n" +
+          "writeFileSync('told.txt', String(process.env.GITHUB_STEP_SUMMARY))\n" +
+          `if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, 'a report of a test run under a mutant\\n'.repeat(${Math.ceil(bytes / 37)}))\n`,
+      })
+    const summaryAt = (root, at) => {
+      vi.stubEnv('GITHUB_STEP_SUMMARY', at)
+      onTestFinished(() => vi.unstubAllEnvs())
+      return path.join(root, 'told.txt')
+    }
+
+    it('keeps two runs that wrote what shard 1 wrote under GitHub’s limit, saying so once at the end', () => {
+      inScratch('mutants-summary-', (root) => {
+        standIn(root, 4612 * 1024)
+        const summary = path.join(root, 'summary.md')
+        const told = summaryAt(root, summary)
+
+        expect(strykerRun('config.json', root)).toBe(true)
+        expect(readFileSync(told, 'utf8')).not.toBe(summary)
+        expect(strykerRun('config.json', root)).toBe(true)
+
+        const left = readFileSync(summary)
+        const text = left.toString()
+        expect(left.length).toBeLessThan(1024 * 1024)
+        expect(left.length).toBeGreaterThan(990_000)
+        expect(text.split('stops here').length).toBe(2)
+        expect(text.endsWith(ENDING)).toBe(true)
+      })
+    })
+
+    it('passes on all of a run that fits', () => {
+      inScratch('mutants-summary-', (root) => {
+        standIn(root, 370)
+        const summary = path.join(root, 'summary.md')
+        summaryAt(root, summary)
+
+        expect(strykerRun('config.json', root)).toBe(true)
+
+        expect(readFileSync(summary, 'utf8')).toBe('a report of a test run under a mutant\n'.repeat(10))
+      })
+    })
+
+    it('touches nothing outside a step, where the variable is not set', () => {
+      inScratch('mutants-summary-', (root) => {
+        standIn(root, 370)
+        const told = summaryAt(root, undefined)
+
+        expect(strykerRun('config.json', root)).toBe(true)
+
+        expect(readFileSync(told, 'utf8')).toBe('undefined')
+      })
+    })
   })
 })
 
