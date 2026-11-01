@@ -2,14 +2,14 @@
  *
  * FOUR PROPERTIES USED TO BE DECLARED HERE, mirroring `metrics.ts`'s constants
  * because `applyMetrics` was unreachable from a browser. They are gone:
- * `Platform` has a `web` member now and `main.web.tsx` makes the same call
+ * `Platform` has a `web` member now and `client.tsx` makes the same call
  * `App.tsx` does, so the client resolves the real geometry rather than a copy
  * of it. Anything tempted to declare a constant here should ask why the design
  * system does not already have it.
  */
 
 /* NO `body` RULE HERE. `global.css` sets the typeface, the size and the ink,
- * and it is imported by `main.web.tsx` — an earlier draft of this file restated
+ * and it is imported by `client.tsx` — an earlier draft of this file restated
  * all three and got the face wrong. */
 
 .gate {

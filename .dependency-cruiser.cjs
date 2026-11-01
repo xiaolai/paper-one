@@ -600,22 +600,20 @@ module.exports = {
         'capability-requires-declared judges only direct capability-to-capability edges. And the rule ' +
         'covers every module, not just capabilities, so a capability cannot launder the edge through ' +
         'a shared intermediary either — and one PLATFORM root cannot import another, which would ' +
-        'braid two platforms\' capability graphs. Only the modules that CHOOSE a root — ' +
-        'src/app/bootApp.ts for the native shells, src/main.web.tsx for the browser one — and tests ' +
-        'are exempt. src/main.tsx stays exempt as well, though it no longer imports a composition at ' +
-        'all: the choosing moved to bootApp.ts with the rest of the launch sequence.',
+        'braid two platforms\' capability graphs. Only the modules that CHOOSE a root — the three ' +
+        'entries, src/main.tsx, src/main.mobile.tsx and src/main.web.tsx — and tests are exempt. ' +
+        'src/app/bootApp.ts chose for both native shells until 2026-11-02 and is not exempt any more: ' +
+        'it is handed its composition, because a test loading it must not reach virtual:paper-composition ' +
+        '(dev-docs/decisions/2026-11-02-composition-route.md). This rule is what stops the import coming back.',
       from: {
         path: '^src/',
         /* The choosers, and none of them may be reached FROM a root.
          *
-         * `bootApp.ts` is where `virtual:paper-composition` is imported now —
-         * the native shells share one launch sequence, so the choice moved
-         * there with it. `main.web.tsx` is the browser client's chooser, exempt
-         * for exactly the reason the native one is. `main.tsx` keeps its
-         * exemption because it remains an ENTRY the rule's target names; it
-         * simply has no composition edge left to exempt. */
+         * Each entry imports `virtual:paper-composition` for its own build and
+         * hands the list on, so each is exempt for the same reason. Nothing
+         * else is: `bootApp.ts` and `app/web/client.tsx` take it as an argument.
+         * */
         pathNot: [
-          '^src/app/bootApp\\.ts$',
           '^src/main\\.tsx$',
           '^src/main\\.mobile\\.tsx$',
           '^src/main\\.web\\.tsx$',
@@ -628,11 +626,12 @@ module.exports = {
        * composition through either entry, which is the same exposure by a
        * different path. `main.web.tsx` is the browser client's and carries the
        * same weight. */
-      /* EVERY root, derived — including the shared sequence, which imports each
-         composed capability's index through the virtual specifier exactly as a
-         root does. Left out, it would be the laundering intermediary this
-         rule's comment describes: reachable by anything under src/, and handing
-         on the whole composition. This list was typed out by hand and could
+      /* EVERY root, derived — including the shared sequence, which holds the whole
+         composition once an entry hands it in, and for a long time imported it
+         through the virtual specifier exactly as a root does. Left out, it could
+         become the laundering intermediary this rule's comment describes:
+         reachable by anything under src/, and handing on the whole composition.
+         This list was typed out by hand and could
          therefore fall behind `COMPOSITION_ROOTS` without either looking
          wrong. */
       to: { path: COMPOSITION_ROOTS },

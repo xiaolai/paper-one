@@ -15,13 +15,13 @@ import { webhost } from '../capabilities/webhost'
  * STATIC, and its own list: this file imports exactly the capabilities whose
  * manifest `platforms` name `desktop`; there is no runtime filtering of a
  * longer one. `.ios.ts` and `.android.ts` sit beside it with their own lists.
- * ⚠️ **`app/bootApp.ts` IS WHAT IMPORTS IT, NOT AN ENTRY** (2026-09-19 audit;
- * this said `src/main.tsx`, and `vite.config.ts` said the same). There are
- * THREE entries — `main.tsx` (desktop), `main.mobile.tsx` (phones) and
- * `main.web.tsx` (browser) — and the first two reach a composition only through
- * `bootApp()`, which holds the one `virtual:paper-composition` import between
- * them. `main.web.tsx` imports it directly, because the browser client boots
- * without `bootApp`. Naming one entry made the sentence wrong for the other two.
+ * ⚠️ **EACH OF THE THREE ENTRIES IMPORTS IT** — `main.tsx` (desktop),
+ * `main.mobile.tsx` (phones) and `main.web.tsx` (browser) — as
+ * `virtual:paper-composition`, and hands it on: the first two to `bootApp()`, the
+ * third to `mountWebClient()`. This said `app/bootApp.ts` imported it, which was
+ * true from the 2026-09-19 audit until 2026-11-02, when the import left every
+ * module a test can load but the entries
+ * (`dev-docs/decisions/2026-11-02-composition-route.md`).
  *
  * `vite.config.ts` resolves that module from `TAURI_ENV_PLATFORM` at build time
  * (unset, `darwin`, `windows`, `linux` → this file); the other compositions are

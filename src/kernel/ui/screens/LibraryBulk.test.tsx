@@ -579,7 +579,7 @@ describe('marking a selection finished', () => {
  * mean something. What goes is the three controls behind it.
  */
 describe('a read-only host', () => {
-  /** Every write callback withheld, exactly as `main.web.tsx` mounts it. */
+  /** Every write callback withheld, exactly as `app/web/client.tsx` mounts it. */
   const readOnly = () => {
     const {
       onRemove: _r,

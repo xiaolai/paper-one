@@ -44,7 +44,7 @@
  *
  * `ui/index.ts` pulls `tokens.css`, `global.css` and `capability.css` in as a
  * side effect so a root's reader "arrives dressed". This entry deliberately
- * does not: the browser client imports those itself, in `main.web.tsx`, beside
+ * does not: the browser client imports those itself, in `app/web/client.tsx`, beside
  * its own `applyMetrics` call — and a side-effect import here would make the
  * order of two stylesheet systems depend on which module was reached first.
  */

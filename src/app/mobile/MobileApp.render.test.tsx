@@ -72,7 +72,7 @@ describe('the phone shell', () => {
    * ⚠️ **THIS ASSERTED `['Library', 'Reading', 'Cards', 'Settings']`**, and
    * `cards` is in `UNFINISHED_PANE_IDS` — the list the desktop's rail, palette
    * and digit accelerators all read to keep that deck away from a reader. The
-   * bar is mounted by this shell and by `main.web.tsx`, neither of which names
+   * bar is mounted by this shell and by `app/web/client.tsx`, neither of which names
    * `paneOffered`, so the test was pinning the defect: an unfinished panel as a
    * permanent top-level tab on every phone and in every browser, with no chord
    * anywhere to hide it.
