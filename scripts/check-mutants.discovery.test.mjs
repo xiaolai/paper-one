@@ -1192,6 +1192,29 @@ describe('what makes a survivor here the same survivor as one at the merge base'
     expect(flagged.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 2/2 in bus.on(true)']])
   })
 
+  /* Told apart from `true`, and not lost: the keyword is half of what the filter
+     keeps and the other half of what the name says. */
+  it('takes false as false, as a call’s literal', async () => {
+    const flagged = await byMutator('export function f(bus) {\n  bus.on(false, () => "b")\n}\n', 'StringLiteral')
+
+    expect(flagged.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 2/2 in bus.on(false)']])
+  })
+
+  it('parts a call’s literals, and takes no more than forty characters of one', async () => {
+    const parted = await byMutator('export function f(bus) {\n  bus.on(1, 2, () => "c")\n}\n', 'StringLiteral')
+    const long = await byMutator(`export function f(bus) {\n  bus.on("${'x'.repeat(41)}", () => "d")\n}\n`, 'StringLiteral')
+
+    expect(parted.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 3/3 in bus.on(1, 2)']])
+    expect(long.map((one) => one.scope)).toEqual([['f'], ['f', `ArrowFunction 2/2 in bus.on("${'x'.repeat(40)}")`]])
+  })
+
+  /* It is the call's callee, so it sits at no position in the call's arguments. */
+  it('names a function called where it stands by no position, because no argument list holds it', async () => {
+    const called = await byMutator('export function f() {\n  return function () {\n    return "e"\n  }()\n}\n', 'StringLiteral')
+
+    expect(called.map((one) => one.scope)).toEqual([['f', 'FunctionExpression in FunctionExpression()']])
+  })
+
   it('counts a top-level statement as sitting in no declaration at all', async () => {
     const [top] = await byMutator('export const greeting = "top"\n', 'StringLiteral')
 

@@ -607,6 +607,72 @@ describe('one sweep per checkout', () => {
     })
   })
 
+  /* What the real signals below cannot say, because the child that receives them is
+     not a process a mutant is measured in: which handlers a lock adds to the process
+     holding it, what each one does, and that they all come off again. */
+  describe('the handlers a lock leaves on the process holding it', () => {
+    const WAYS_OUT = ['SIGINT', 'SIGTERM', 'SIGHUP', 'exit']
+    const listening = () => Object.fromEntries(WAYS_OUT.map((way) => [way, process.listeners(way)]))
+    const addedSince = (before) => Object.fromEntries(WAYS_OUT.map((way) => [way, process.listeners(way).filter((one) => !before[way].includes(one))]))
+    /** The lock, the handlers it added, and its release, which runs however the case ends. */
+    const holding = (root, ...how) => {
+      const before = listening()
+      const lock = path.join(root, 'check-mutants.lock')
+      const release = acquireLock(lock, ...how)
+      onTestFinished(release)
+      return { lock, release, added: addedSince(before), before }
+    }
+
+    it('adds one handler for each way out, and takes them all off with the lock', () => {
+      inScratch('mutants-lock-', (root) => {
+        const { lock, release, added, before } = holding(root)
+
+        expect(WAYS_OUT.map((way) => added[way].length)).toEqual([1, 1, 1, 1])
+
+        release()
+        expect(WAYS_OUT.map((way) => addedSince(before)[way].length)).toEqual([0, 0, 0, 0])
+        expect(existsSync(lock)).toBe(false)
+      })
+    })
+
+    it('adds none for a pid that is not this process', () => {
+      inScratch('mutants-lock-', (root) => {
+        const { added } = holding(root, process.pid + 1)
+
+        expect(WAYS_OUT.map((way) => added[way].length)).toEqual([0, 0, 0, 0])
+      })
+    })
+
+    for (const [signal, expected] of [
+      ['SIGINT', 130],
+      ['SIGTERM', 143],
+      ['SIGHUP', 129],
+    ]) {
+      it(`lets go on ${signal} and exits ${expected}`, () => {
+        inScratch('mutants-lock-', (root) => {
+          const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined)
+          onTestFinished(() => exit.mockRestore())
+          const { lock, added } = holding(root)
+
+          added[signal][0]()
+
+          expect(existsSync(lock)).toBe(false)
+          expect(exit.mock.calls).toEqual([[expected]])
+        })
+      })
+    }
+
+    it('lets go on the way out of a process that is exiting anyway', () => {
+      inScratch('mutants-lock-', (root) => {
+        const { lock, added } = holding(root)
+
+        added.exit[0]()
+
+        expect(existsSync(lock)).toBe(false)
+      })
+    })
+  })
+
   /**
    * ⚠️ **A SWEEP IS INTERRUPTED FAR MORE OFTEN THAN IT CRASHES, AND `finally`
    * NEVER SEES A SIGNAL.** The sweep's own `finally` covers a normal end and a
@@ -4884,7 +4950,30 @@ describe('a survivor measured against the merge base', () => {
 
     expect(result.code).toBe(1)
     expect(result.stdout).toContain('it could not be measured (reading-changed)')
-    expect(result.stdout).toContain("check-mutants: src/reads.test.mjs reads src/a.ts's own source, so neither sweep could run it — and it is gone")
+    expect(result.stdout).toContain(
+      "check-mutants: src/reads.test.mjs reads src/a.ts's own source, so neither sweep could run it — and it is gone since the merge base, " +
+        'which is evidence this comparison cannot weigh. Nothing in this file is authorised by a base whose excluded test is not the one here: ' +
+        'kill the mutants it used to, or restore it.',
+    )
+    /* And that is all it is: a base that was not measured leaves the survivor, and no
+       hang nobody met is reported beside it. */
+    expect(result.stderr).not.toContain('wall-clock')
+  })
+
+  /* A refusal travels and the reason does not, so the refusal says where the reason
+     is — and a shard's aggregate has no stdout of that run anywhere near it. */
+  it('says where a merge base’s own reason is, when what its run wrote cannot be read', async () => {
+    const result = await sweeping({
+      measure: async (named, _commit, asked) => ({ ...(await measuredAt(asked.root, named)), first: null }),
+    })
+
+    expect(result.code).toBe(1)
+    expect(result.stdout).toContain('it could not be measured (did-not-run)')
+    expect(result.stdout).toContain(
+      'check-mutants: the merge base’s run of src/a.ts says survived and carries no run at all, and a run nobody has is not a survivor that was already there. ' +
+        'Its own output is above in a plain sweep, and in the log of the shard that ran it in a sharded one — read that before reading any test, ' +
+        'because a run that scored nothing failed for a reason of its own',
+    )
   })
 
   /* And the other half, which is what stops the rule above from billing every
@@ -5137,6 +5226,175 @@ describe('a survivor measured against the merge base', () => {
       expect(result.stdout).toContain('can only ever bill MORE than the wider set would')
     }))
 
+  /* What the file's own sweep cost is both of its runs, so a settle run is what can
+     carry it over the budget, and the sentence says how long it really took. */
+  it('counts the settle run in what the file’s own sweep cost', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\nexport const b = 'b'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const source = readFileSync(mutated, 'utf8')
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived', { status: 'Timeout' }) },
+        settled: { [mutated]: await plantedReport(mutated, 'Survived', 'Killed') },
+        exits: { [mutated]: false },
+        settleExits: { [mutated]: false },
+      })
+      let runs = 0
+      let now = 0
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker: (config) => {
+          runs += 1
+          return stryker(config)
+        },
+        clock: () => (now += 35 * 60_000),
+        mergeBase: () => BASE,
+        origins: (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: hashOf(source) }])),
+        measure: async (named, _commit, asked) => ({
+          install: 'linked',
+          outcome: 'killed',
+          durationMs: 900,
+          sha256: hashOf(source),
+          source,
+          first: { exitedCleanly: true, durationMs: 900, report: await reportOfSource(path.join(asked.root, named), source, 'Killed') },
+          settle: null,
+        }),
+      })
+
+      /* The narrow sweep and its settle run, and no second sweep. */
+      expect(runs).toBe(2)
+      expect(result.stdout).toContain(
+        'check-mutants: src/a.ts took 70 minute(s) to sweep here, past the 60 this gate will spend again to check a bill against the merge base\'s own wider set of tests. ' +
+          'What it owes below is measured against the nearest tests alone, which can only ever bill MORE than the wider set would: ' +
+          're-run this file by itself — node scripts/check-mutants.mjs --only src/a.ts — before taking it as owed.\n',
+      )
+    }))
+
+  /* What may take a charge away is a kill, so the second sweep is not asked about what
+     the merge base could not decide: that is not a charge a wider set can discharge,
+     because this sweep is not what it is waiting on. */
+  it('spends no second sweep on a mutant the merge base could not decide', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived') },
+        exits: { [mutated]: false },
+      })
+      let runs = 0
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker: (config) => {
+          runs += 1
+          return stryker(config)
+        },
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        measure: async (named, _commit, asked) => {
+          const measured = await measuredAt(asked.root, named)
+          const [entry] = Object.values(measured.first.report.files)
+          entry.mutants[0].static = true
+          return measured
+        },
+      })
+
+      expect(runs).toBe(1)
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('  undecided: src/a.ts:1:18')
+    }))
+
+  /* A second sweep that breaks for a reason of its own is a defect, and a defect is
+     never the narrow bill standing: nothing but a refusal may answer that way. */
+  it('lets a defect in the second sweep through, rather than reading it as a sweep that could not be made', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived') },
+        exits: { [mutated]: false },
+      })
+      let runs = 0
+
+      await expect(
+        sweep(root, {
+          subjects: ['src/a.ts'],
+          tree: ['src/a.ts', 'src/a.test.mjs'],
+          stryker: (config) => {
+            runs += 1
+            if (runs === 2) throw new Error('a defect in the second sweep')
+            return stryker(config)
+          },
+          mergeBase: () => BASE,
+          origins: itsOwn,
+          measure: (named, _commit, asked) => killedAt(asked.root, named),
+        }),
+      ).rejects.toThrow('a defect in the second sweep')
+    }))
+
+  /* A file with no mutant left has no second run to read: it changed under the sweep,
+     and the narrow bill is what stands. */
+  it('leaves the narrow bill standing when the file has no mutant left to sweep a second time', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived') },
+        exits: { [mutated]: false },
+      })
+      const source = readFileSync(mutated, 'utf8')
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker: async (config) => {
+          const answer = await stryker(config)
+          writeFileSync(mutated, 'export {}\n')
+          return answer
+        },
+        mergeBase: () => BASE,
+        origins: (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: hashOf(source) }])),
+        measure: async (named, _commit, asked) => ({
+          install: 'linked',
+          outcome: 'killed',
+          durationMs: 900,
+          sha256: hashOf(source),
+          source,
+          first: { exitedCleanly: true, durationMs: 900, report: await reportOfSource(path.join(asked.root, named), source, 'Killed') },
+          settle: null,
+        }),
+      })
+
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('  added: src/a.ts:1:18')
+    }))
+
+  /* What decides a mutant is the status, and the reason only says which kind of
+     timeout one was: a reason on anything else decides nothing. */
+  it('takes a charge away for no status but a kill, whatever reason sits beside it', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const narrow = await plantedReport(mutated, 'Survived')
+      const wide = await plantedReport(mutated, { status: 'Survived', statusReason: 'Hit limit reached (330901/330900)' })
+      let runs = 0
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker: async () => {
+          writeFileSync(path.join(root, REPORT), JSON.stringify(runs++ === 0 ? narrow : wide))
+          return false
+        },
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        measure: (named, _commit, asked) => killedAt(asked.root, named),
+      })
+
+      expect(runs).toBe(2)
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('  added: src/a.ts:1:18')
+    }))
+
   /* ⚠️ **AND THE BUDGET WAS BILLING WHAT THE WIDER SET KILLS** (PR run 41201387001,
      2026-10-31). `registry.ts` swept in 44 minutes against a 20-minute budget, so
      239 mutants its 5 nearest tests miss stayed charged though the 122 tests that
@@ -5168,6 +5426,84 @@ describe('a survivor measured against the merge base', () => {
       expect(runs).toBe(2)
       expect(result.stdout).not.toContain('this gate will spend again')
       expect(result.code).toBe(1)
+    }))
+
+  /* The two sentences a reader acts on differently, in one sweep, so that each holds
+     only its own class and every line of it. */
+  it('keeps what the change added apart from what the merge base could not decide, one line each', async () =>
+    inScratch('mutants-owed-', async (root) => {
+      const source = "export const a = 'a'\nexport const b = 'b'\nexport const c = 'c'\n"
+      const at = checkout(root, { 'src/a.ts': source, 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived', 'Survived', 'Survived') },
+        exits: { [mutated]: false },
+      })
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker,
+        mergeBase: () => BASE,
+        origins: (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: hashOf(source) }])),
+        measure: async (named, _commit, asked) => {
+          const report = await reportOfSource(path.join(asked.root, named), source, 'Survived')
+          const [entry] = Object.values(report.files)
+          entry.mutants[0].static = true
+          entry.mutants[1].static = true
+          entry.mutants[2].status = 'Killed'
+          return { install: 'linked', outcome: 'survived', durationMs: 900, sha256: hashOf(source), source, first: { exitedCleanly: false, durationMs: 900, report }, settle: null }
+        },
+      })
+      const why =
+        'the merge base’s report marks it static, and a static mutant that throws while the module is imported is reported Survived by Stryker’s vitest runner ' +
+        'because the suite fails to load — so whether it survived there or never ran is not something that report can say'
+
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain(
+        '  added: src/a.ts:3:18 — StringLiteral replacing "\'c\'" with "\\"\\"" in the file itself — the merge base has no survivor with this identity in src/a.ts\n',
+      )
+      expect(result.stderr).not.toContain('  added: src/a.ts:1:18')
+      expect(result.stderr).toContain(
+        'check-mutants: the merge base could not decide 2 mutant(s) that survived here',
+      )
+      expect(result.stderr).toContain(
+        `  undecided: src/a.ts:1:18 — StringLiteral replacing "'a'" with "\\"\\"" in the file itself — the merge base could not decide this mutant in src/a.ts: ${why}\n` +
+          `  undecided: src/a.ts:2:18 — StringLiteral replacing "'b'" with "\\"\\"" in the file itself — the merge base could not decide this mutant in src/a.ts: ${why}\n` +
+          '  Settle one by killing it here',
+      )
+      expect(result.stderr).not.toContain('  undecided: src/a.ts:3:18')
+    }))
+
+  /* A settle run that scored nothing, across two files: how many mutants that is,
+     which files, and every place in each. */
+  it('names every mutant a settle run reached no verdict for, file by file', async () =>
+    inScratch('mutants-owed-', async (root) => {
+      const at = checkout(root, {
+        'src/a.ts': "export const a = 'a'\nexport const b = 'b'\n",
+        'src/a.test.mjs': "import './a'\n",
+        'src/b.ts': "export const c = 'c'\n",
+        'src/b.test.mjs': "import './b'\n",
+      })
+      const [a, b] = [at['src/a.ts'], at['src/b.ts']]
+      const timeout = { status: 'Timeout' }
+      const crashed = { status: 'RuntimeError' }
+      const { stryker } = strykerStandIn(root, {
+        reports: { [a]: await plantedReport(a, timeout, timeout), [b]: await plantedReport(b, timeout) },
+        settled: { [a]: await plantedReport(a, crashed, crashed), [b]: await plantedReport(b, crashed) },
+        exits: { [a]: true, [b]: true },
+        settleExits: { [a]: true, [b]: true },
+      })
+
+      const result = await sweep(root, { subjects: ['src/a.ts', 'src/b.ts'], tree: Object.keys(at), stryker })
+
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('check-mutants: the settle run reached no verdict for 3 mutant(s) in 2 file(s)')
+      expect(result.stderr).toContain(`  ${a}\n  ${b}\n  Re-run the file alone`)
+      expect(result.stderr).toContain(
+        `  unresolved: ${a}:1:18 — the settle run answered "RuntimeError", which is no verdict\n` +
+          `  unresolved: ${a}:2:18 — the settle run answered "RuntimeError", which is no verdict\n` +
+          `  unresolved: ${b}:1:18 — the settle run answered "RuntimeError", which is no verdict\n`,
+      )
     }))
 
   it('fails a survivor the merge base did not owe, naming what was mutated and why nothing there answers for it', async () => {
