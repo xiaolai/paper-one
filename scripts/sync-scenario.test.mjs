@@ -113,9 +113,15 @@ function validateOnly(args) {
    *
    * And the temporary directory is removed when the case finishes: moving
    * the litter out of the tree had left one behind in the system temp
-   * directory for every accepted-argument case, on every run. */
+   * directory for every accepted-argument case, on every run.
+   *
+   * Retried, because the kill below reaches only the script's own process. A
+   * `tee -a` of its `log`, or a subshell it forked, outlives that and can add
+   * the transcript while the removal is walking the directory: ENOTEMPTY, seen
+   * once at a load of 200 on ten cores. Such a process has one write left, and
+   * has nowhere to make it once the directory is gone. */
   const dir = mkdtempSync(path.join(tmpdir(), 'paper-scenario-'))
-  onTestFinished(() => rmSync(dir, { recursive: true, force: true }))
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5 }))
   const out = path.join(dir, 'transcript.md')
   const result = spawnSync('bash', [SCRIPT, ...args, '--out', out], {
     cwd: REPO_ROOT,
