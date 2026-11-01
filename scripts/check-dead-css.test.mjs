@@ -710,6 +710,7 @@ describe('the whole answer for each form a holder takes', () => {
     ['a renaming pattern over a named object', `${IMPORT}const o = { s: styles }\nexport const f = () => { let t: any; ({ s: t } = o); return t.gone }`, { missing: ['gone'] }],
     ['the rest of a pattern over a named object holds no key', `${IMPORT}const o = { r: styles }\nexport const f = () => { let r: any; ({ ...r } = o); return r.gone }`, {}],
     ['a rest binding named like a key is not that key', `${IMPORT}const o = { rest: styles, s: 1 }\nconst { ...rest } = o\nexport const f = () => rest.gone`, {}],
+    ['the rest of an array pattern assigned', `${IMPORT}export const f = () => { let r: any; [...r] = [styles]; return r[0].gone }`, { missing: ['gone'] }],
   ])('%s', (_what, source, expected) => {
     expectAnswer(source, expected)
   })
@@ -845,6 +846,12 @@ describe('the whole answer for each form a holder takes', () => {
   /* What becomes of the name holding one. */
   it.each([
     ['a key', `${IMPORT}const o = { s: styles }\nexport const f = (x: any) => x[o]`, { refused: [HANDED_ON] }],
+    ['the target of a loop, which is written', `${IMPORT}let x = [styles]\nexport const f = () => { for (x of g) g() }`, {}],
+    ['the target of an array pattern, which is written', `${IMPORT}let x = [styles]\nexport const f = () => { [x] = g }`, {}],
+    ['the rest of an array pattern, which is written', `${IMPORT}let x = [styles]\nexport const f = () => { [...x] = g }`, {}],
+    ['a value of an object pattern, which is written', `${IMPORT}let x = [styles]\nexport const f = () => { ({ a: x } = g) }`, {}],
+    ['a shorthand of an object pattern, which is written', `${IMPORT}let x = [styles]\nexport const f = () => { ({ x } = g) }`, {}],
+    ['the rest of an object pattern, which is written', `${IMPORT}let x = [styles]\nexport const f = () => { ({ ...x } = g) }`, {}],
     ['an element of an array, which is read', `${IMPORT}const x = [styles]\nexport const f = () => [x]`, { refused: [HANDED_ON] }],
     ['a term of a sum in an array pattern, which is read', `${IMPORT}const x = [styles]\nexport const f = () => { [x + 1] = g }`, { refused: [HANDED_ON] }],
     ['a member of a namespace, which is only a name', `${IMPORT}namespace N { export const all = [styles] }\nexport const f = () => N.all[0].gone`, { refused: [ARRAY] }],

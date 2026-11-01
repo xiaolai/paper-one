@@ -130,6 +130,12 @@ export function isDestructuringTarget(literal) {
   return ts.isPropertyAssignment(parent) && isDestructuringTarget(parent.parent)
 }
 
+/** Whether a name standing in this parent is written by a pattern, as in `[x] = y`, `[...x] = y`, `({ a: x } = y)`, `({ x } = y)`, `({ ...x } = y)`. */
+const isPatternSlot = (parent) => {
+  if (ts.isArrayLiteralExpression(parent)) return isDestructuringTarget(parent)
+  return (ts.isSpreadElement(parent) || ts.isSpreadAssignment(parent) || ts.isPropertyAssignment(parent) || ts.isShorthandPropertyAssignment(parent)) && isDestructuringTarget(parent.parent)
+}
+
 const isWrapper = (node) => ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node)
 
 const isExportedDeclaration = (declaration) => (ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Export) !== 0
@@ -583,8 +589,8 @@ export function followHolders({
     while (isWrapper(here.parent) || ts.isAwaitExpression(here.parent)) here = here.parent
     const parent = here.parent
     if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === here) return null
-    if (ts.isForOfStatement(parent) && parent.expression === here) return null
-    if (ts.isForInStatement(parent)) return null
+    if (ts.isForOfStatement(parent) || ts.isForInStatement(parent)) return null
+    if (isPatternSlot(parent)) return null
     if (ts.isVariableDeclaration(parent)) return isExportedDeclaration(parent) ? 'exported in an array or object' : null
     if (ts.isBinaryExpression(parent) && ASSIGNMENTS.has(parent.operatorToken.kind)) return assignedUse(parent) === null ? null : 'assigned to a member'
     if (ts.isSpreadElement(parent) && ts.isArrayLiteralExpression(parent.parent)) return namedOrOut(parent.parent, 'spread into an array')
