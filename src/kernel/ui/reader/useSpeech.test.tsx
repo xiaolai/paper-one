@@ -3352,3 +3352,251 @@ describe('the surface it is given', () => {
     b.remove()
   })
 })
+
+describe('the reading volume, on every road to an utterance', () => {
+  /**
+   * ⚠️ **ONE CONSTRUCTOR, BUT THE VOLUME HAS TO ARRIVE BY EVERY CALLER.** All of
+   * these reach `Speaker.speak` by a different road through the hook: starting,
+   * the next sentence, a step, a press at a dead end, and the turn into a new
+   * section. Written as the roads rather than as one case so that a road that
+   * grows its own `speak` with its own prefs is caught here.
+   */
+  const VOLUME = { volume: 0.4 }
+
+  it('on starting', () => {
+    const a = section('One here. Two there.')
+    const { speech } = mount(a.doc, { prefs: VOLUME })
+    act(() => speech().start())
+    expect(synth.queued.map((u) => u.volume)).toEqual([0.4])
+    a.remove()
+  })
+
+  it('on the next sentence, and that is where a change lands', () => {
+    const a = section('One here. Two there. Three anywhere.')
+    const { speech, setPrefs } = mount(a.doc, { prefs: VOLUME })
+    act(() => speech().start())
+    ends()
+    expect(synth.queued.at(-1)?.volume).toBe(0.4)
+    setPrefs({ volume: 0.7 })
+    expect(synth.queued, 'a change does not re-read the sentence').toHaveLength(2)
+    ends()
+    expect(synth.queued.at(-1)?.volume).toBe(0.7)
+    a.remove()
+  })
+
+  it('on a sentence step and a paragraph step, which are this speaker’s seek', () => {
+    const a = section(['One here. Two there.', 'Three anywhere.'])
+    const { speech } = mount(a.doc, { prefs: VOLUME })
+    act(() => speech().start())
+    act(() => speech().stepSentence(1))
+    expect(synth.queued.at(-1)?.text).toContain('Two')
+    expect(synth.queued.at(-1)?.volume).toBe(0.4)
+    act(() => speech().stepParagraph(1))
+    expect(synth.queued.at(-1)?.text).toContain('Three')
+    expect(synth.queued.at(-1)?.volume).toBe(0.4)
+    a.remove()
+  })
+
+  it('on a pause and resume across a gap', () => {
+    const a = section('One here. Two there.')
+    const { speech } = mount(a.doc, { prefs: { ...VOLUME, sentenceGapMs: 300 } })
+    act(() => speech().start())
+    ends()
+    act(() => speech().pause())
+    act(() => speech().resume())
+    expect(synth.queued.at(-1)?.text).toContain('Two')
+    expect(synth.queued.at(-1)?.volume).toBe(0.4)
+    a.remove()
+  })
+
+  it('on the turn into the next section, at the volume as it now stands', () => {
+    const a = section('First chapter.')
+    const b = section('Second chapter.')
+    const { speech, show, setPrefs } = mount(a.doc, { prefs: VOLUME })
+    act(() => speech().start())
+    setPrefs({ volume: 0.7 })
+    ends()
+    show(b.doc)
+    expect(synth.queued.at(-1)?.text).toBe('Second chapter.')
+    expect(synth.queued.at(-1)?.volume).toBe(0.7)
+    a.remove()
+    b.remove()
+  })
+
+  it('on a chapter the reader asked for', () => {
+    const a = section('First chapter.')
+    const b = section('Second chapter.')
+    const { speech, show } = mount(a.doc, { prefs: VOLUME, chapters: true })
+    act(() => speech().start())
+    act(() => speech().stepChapter(1))
+    show(b.doc)
+    expect(synth.queued.at(-1)?.text).toBe('Second chapter.')
+    expect(synth.queued.at(-1)?.volume).toBe(0.4)
+    a.remove()
+    b.remove()
+  })
+
+  it('reads exactly the same at 0 as at full, section turn and band included', () => {
+    /* ⚠️ **SILENCE IS NOT STOPPING: THE DECISION'S OWN SENTENCE.** The same
+       script at two volumes, comparing everything a reader would see move. */
+    const script = (volume: number) => {
+      const a = section('One here. Two there.')
+      const b = section('Second chapter.')
+      const { speech, next, show, paceHeld } = mount(a.doc, { prefs: { volume } })
+      const seen: unknown[] = []
+      const see = () =>
+        seen.push({
+          said: synth.queued.map((u) => u.text),
+          speaking: speech().speaking,
+          paused: speech().paused,
+          follows: speech().followsWords,
+          held: paceHeld(),
+          turns: next.mock.calls.length,
+          band: a.doc.getElementById('paper-spoken-word') !== null,
+        })
+      act(() => speech().start())
+      see()
+      boundary(0, 3)
+      see()
+      act(() => speech().pause())
+      see()
+      act(() => speech().resume())
+      see()
+      ends()
+      see()
+      ends()
+      see()
+      show(b.doc)
+      see()
+      ends()
+      see()
+      a.remove()
+      b.remove()
+      synth.queued.length = 0
+      cleanup()
+      return seen
+    }
+    expect(script(0)).toEqual(script(1))
+  })
+})
+
+describe('the reading volume on the downloaded voices', () => {
+  const ENGLISH: VoicePack = {
+    id: 'english-kokoro',
+    name: 'English',
+    summary: '',
+    family: 'kokoro',
+    languages: ['en'],
+    bytes: 1,
+    minimumMemoryGb: 4,
+    voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+    installed: true,
+  }
+
+  function downloaded() {
+    const host = new FakeAudioHost()
+    const requests: SpeechRequest[] = []
+    const engine: ReadingEngine = {
+      packs: () => [ENGLISH],
+      host: () => host,
+      render: async (request) => {
+        requests.push(request)
+        return {
+          pcm: pcmOf(2_400),
+          sampleRate: 24_000,
+          words: [],
+          skipped: [],
+          evicted: { clips: 0, bytes: 0 },
+          clipPath: '/tmp/audio/clips/x.wav',
+        }
+      },
+    }
+    return { engine, requests, host }
+  }
+  const landed = () =>
+    act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+  it('starts at the reader’s volume, and a change is heard at once', async () => {
+    const { engine, requests, host } = downloaded()
+    const page = section('Hello there.', 'en')
+    const { speech, setPrefs, unmount } = mount(page.doc, { engine, prefs: { volume: 0.4 } })
+    act(() => speech().start())
+    await landed()
+    expect(host.latestGain.gain.value).toBe(0.4)
+
+    /* No seek and no re-render: the same source, playing on. */
+    setPrefs({ volume: 0.7 })
+    expect(host.latestGain.gain.value).toBe(0.7)
+    expect(host.sources).toHaveLength(1)
+    expect(host.latest.stops).toBe(0)
+    expect(requests).toHaveLength(1)
+    unmount()
+    page.remove()
+  })
+
+  it('takes a change to nothing at all as a change, and plays on', async () => {
+    /* Zero is a volume, not an absent one: `||` in place of `??` would have
+       turned it up to full. */
+    const { engine, host } = downloaded()
+    const page = section('Hello there.', 'en')
+    const { speech, setPrefs, unmount } = mount(page.doc, { engine, prefs: { volume: 0.4 } })
+    act(() => speech().start())
+    await landed()
+
+    setPrefs({ volume: 0 })
+    expect(host.latestGain.gain.value).toBe(0)
+    expect(host.sources).toHaveLength(1)
+    expect(host.latest.stops).toBe(0)
+    unmount()
+    page.remove()
+  })
+
+  it('leaves the gain alone when some other preference changes', async () => {
+    /* The change is what is forwarded, not every render: a gain written again
+       and again is harmless to hear and a lie about what the effect is for. */
+    const { engine, host } = downloaded()
+    const page = section('Hello there.', 'en')
+    const { speech, setPrefs, unmount } = mount(page.doc, { engine, prefs: { volume: 0.4 } })
+    act(() => speech().start())
+    await landed()
+    host.latestGain.gain.value = 0.9
+    setPrefs({ volume: 0.4, rate: 1.25 })
+    expect(host.latestGain.gain.value, 'a change of speed wrote the volume').toBe(0.9)
+    unmount()
+    page.remove()
+  })
+
+  it('keeps the volume across a seek', async () => {
+    const { engine, host } = downloaded()
+    const page = section('Hello there.', 'en')
+    const { speech, setPrefs, unmount } = mount(page.doc, { engine, prefs: { volume: 0.4 } })
+    act(() => speech().start())
+    await landed()
+    setPrefs({ volume: 0.7 })
+    expect(speech().seekToFraction(0.5)).toBe(true)
+    expect(host.latest.connections).toEqual([host.latestGain])
+    expect(host.latestGain.gain.value).toBe(0.7)
+    unmount()
+    page.remove()
+  })
+
+  it('asks the engine for the same clip at any volume', async () => {
+    const asked = async (volume: number) => {
+      const { engine, requests } = downloaded()
+      const page = section('Hello there.', 'en')
+      const { speech, unmount } = mount(page.doc, { engine, prefs: { volume } })
+      act(() => speech().start())
+      await landed()
+      unmount()
+      page.remove()
+      return requests
+    }
+    const whole = await asked(1)
+    expect(whole).toHaveLength(1)
+    expect(await asked(0)).toEqual(whole)
+  })
+})
+

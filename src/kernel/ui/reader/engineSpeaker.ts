@@ -210,6 +210,13 @@ export class EngineSpeaker {
      reading either way. Hand-applied 2026-09-24: the whole suite passes with
      `true` here, which is what an unobservable initial value looks like. */
   #paused = false
+  /**
+   * How loud, as of the last word on it: from `speak`, then from `setVolume`.
+   *
+   * Kept rather than handed to the player, because a render can take minutes and
+   * there is no player until it lands. Not on the request: see `SpeakPrefs.volume`.
+   */
+  #volume = 1
   constructor(callbacks: SpeakerCallbacks, deps: EngineSpeakerDeps) {
     this.#cb = callbacks
     this.#deps = deps
@@ -223,6 +230,7 @@ export class EngineSpeaker {
   speak(text: string, lang: string | null, prefs: SpeakPrefs = {}): boolean {
     this.stop()
     const token = (this.#current = {})
+    this.#volume = prefs.volume ?? 1
     if (!text.trim()) {
       this.#cb.onDone('empty')
       return false
@@ -477,6 +485,12 @@ export class EngineSpeaker {
   }
 
   /** Play a render, if it is still the one the reader is waiting for. */
+  /** Change how loud this reading is, at once. See `Playing.setVolume`. */
+  setVolume(volume: number): void {
+    this.#volume = volume
+    this.#reading?.playing.setVolume(volume)
+  }
+
   #play(token: object, audio: SpokenAudio): void {
     if (token !== this.#current) return
     const host = this.#deps.host()
@@ -496,9 +510,16 @@ export class EngineSpeaker {
       return
     }
 
-    const playing = playPcm(host, audio.pcm, audio.sampleRate, () => {
-      this.#ended(token, 'ended')
-    })
+    const playing = playPcm(
+      host,
+      audio.pcm,
+      audio.sampleRate,
+      () => {
+        this.#ended(token, 'ended')
+      },
+      1,
+      this.#volume,
+    )
     this.#reading = { playing, words: audio.words, said: 0 }
     /* ⚠️ **A RENDER THAT LANDS DURING A PAUSE MUST NOT SPEAK.** The reader
      * pressed Pause while this was still rendering; there was no player then to

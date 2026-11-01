@@ -62,6 +62,7 @@ import { OverlaySheet } from './overlays/OverlaySheet'
 import { listTrash, type TrashedBook } from '../core/bookTrash'
 import { TrashSheet } from './overlays/TrashSheet'
 import { WindowShell } from './shell/WindowShell'
+import { READING_VOLUME_MAX } from '../core/settings'
 import { Library } from './screens/Library'
 import { Reader } from './screens/Reader'
 import { TagEditor } from './screens/TagEditor'
@@ -322,6 +323,7 @@ export function App({
     () => ({
       voices: state.readingVoice,
       rate: state.readingRate,
+      volume: state.readingVolume / READING_VOLUME_MAX,
       sentenceGapMs: state.sentenceGapMs,
       paragraphGapMs: state.paragraphGapMs,
       notesAloud: state.readingNotesAloud,
@@ -329,6 +331,7 @@ export function App({
     [
       state.readingVoice,
       state.readingRate,
+      state.readingVolume,
       state.sentenceGapMs,
       state.paragraphGapMs,
       state.readingNotesAloud,

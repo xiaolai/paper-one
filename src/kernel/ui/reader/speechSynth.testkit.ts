@@ -31,6 +31,7 @@ export class FakeUtterance extends EventTarget {
    */
   declare voice?: VoiceFacts
   declare rate?: number
+  declare volume?: number
 
   constructor(readonly text: string) {
     super()

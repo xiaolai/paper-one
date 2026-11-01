@@ -2013,6 +2013,34 @@ describe('the reading transport over a real book', () => {
     expect(synth.queued.at(-1)?.text.trim()).toBe('Some years ago.')
     expect(synth.queued.at(-1)?.rate, 'the next sentence was read at the old speed').toBe(1.75)
   })
+
+  it('reaches the voice as a fraction of what is stored', async () => {
+    /* ⚠️ **THE ONE DIVISION.** The setting is in percent and both speakers take 0
+       to 1, and 40 handed to `utterance.volume` is a voice at full. */
+    const synth = engine()
+    reader.prose = '<p>Call me Ishmael.</p>'
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    const storage = new Map<string, string>([
+      [SETTINGS_STORAGE_KEY, JSON.stringify({ version: SETTINGS_VERSION, values: { 'kernel.readingVolume': 40 } })],
+    ])
+    const services = createKernelServices({
+      fs: fakeFs(moby.files) as unknown as IndexFs,
+      storage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => void storage.set(key, value),
+      },
+      initialBooks: [moby.row],
+    })
+    const composition = await composeCapabilities([], kernelApi(services), new AbortController().signal)
+    render(<App services={services} fs={fakeFs(moby.files) as unknown as IndexFs} composition={composition} />)
+    await settle()
+    await open('Moby-Dick')
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')!.click()
+    })
+    await settled()
+    expect(synth.queued.at(0)?.volume, 'the stored volume did not reach the engine').toBe(0.4)
+  })
 })
 
 /**

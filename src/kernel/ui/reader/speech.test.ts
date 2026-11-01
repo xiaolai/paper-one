@@ -163,6 +163,36 @@ describe('Speaker', () => {
     })
   })
 
+  describe('the reading volume', () => {
+    it('sets the volume it was given', () => {
+      const { speaker } = make()
+      speaker.speak('hello', null, { volume: 0.4 })
+      expect(synth.queued[0]?.volume).toBe(0.4)
+    })
+
+    it('sets 0 as 0, rather than taking it for nothing chosen', () => {
+      const { speaker } = make()
+      speaker.speak('hello', null, { volume: 0 })
+      expect(synth.queued[0]?.volume).toBe(0)
+    })
+
+    it('sets the platform default of 1 where nothing was chosen', () => {
+      const { speaker } = make()
+      speaker.speak('hello', null)
+      expect(synth.queued[0]?.volume).toBe(1)
+    })
+
+    it('reads the same at 0: the utterance still goes to the engine and still ends', () => {
+      /* ⚠️ **NO "MUTED SO SKIP" BRANCH.** A reading depends on the utterance's
+         own events for its pace, so 0 must queue one exactly as 1 does. */
+      const { speaker, onDone } = make()
+      expect(speaker.speak('hello', null, { volume: 0 })).toBe(true)
+      expect(synth.queued).toHaveLength(1)
+      synth.queued[0]?.dispatchEvent(new Event('end'))
+      expect(onDone).toHaveBeenCalledWith('ended')
+    })
+  })
+
   describe('the reading rate', () => {
     it('applies a rate the reader chose', () => {
       const { speaker } = make()

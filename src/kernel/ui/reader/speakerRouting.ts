@@ -59,6 +59,13 @@ export interface SpeakerLike {
    * had before this existed.
    */
   spokenOffset?(): number | null
+  /**
+   * Change how loud the sound already playing is, from 0 to 1.
+   *
+   * Absent on Web Speech, which fixes an utterance's volume when it starts: there
+   * the next sentence carries the change, through `SpeakPrefs`.
+   */
+  setVolume?(volume: number): void
 }
 
 /** Where a passage in this language should be read. */
@@ -97,7 +104,7 @@ export function speakerFor(
  * four call sites, all of them the type being vaguer than the value.
  */
 export type SeekingSpeaker = SpeakerLike &
-  Required<Pick<SpeakerLike, 'at' | 'seekToMs' | 'seekToOffset' | 'seekToFraction' | 'spokenOffset'>>
+  Required<Pick<SpeakerLike, 'at' | 'seekToMs' | 'seekToOffset' | 'seekToFraction' | 'spokenOffset' | 'setVolume'>>
 
 export function routedSpeaker(
   engine: SpeakerLike,
@@ -159,6 +166,11 @@ export function routedSpeaker(
     },
     spokenOffset() {
       return current?.spokenOffset?.() ?? null
+    },
+    /* To `current` for the same reason as the seeks: between readings there is no
+       sound to change, and the next `speak` carries the volume as it then stands. */
+    setVolume(volume) {
+      current?.setVolume?.(volume)
     },
   }
 }
