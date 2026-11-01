@@ -132,6 +132,41 @@ describe('what a sweep takes for a subject', () => {
       expect(changedFiles('main', false, root).sort()).toEqual(['src/a.ts', 'src/b.test.ts.mjs', 'src/c.d.ts.mjs'])
     })
   })
+
+  /* A selftest holds the cases its test runs: `NOT_A_SUBJECT` says why sweeping one
+     could only fail. It stays a module a test can reach something through. */
+  it('takes a changed selftest for a test to mutate nothing in, though a test can still reach through it', () => {
+    inScratch('mutants-subjects-', (root) => {
+      gitIn(root)('init', '-q', '-b', 'main')
+      plant(root, {
+        'scripts/a.mjs': 'export const a = 1\n',
+        'scripts/a.selftest.mjs': 'export const cases = []\n',
+        'scripts/a.selftest.mjs.bak': 'export const cases = []\n',
+        'scripts/b.selftest.ts': 'export const cases = []\n',
+      })
+
+      expect(changedFiles('main', false, root).sort()).toEqual(['scripts/a.mjs'])
+      expect(allSourceFiles(['scripts/a.selftest.mjs'])).toEqual(['scripts/a.selftest.mjs'])
+    })
+  })
+
+  /* What makes that rule true of this tree rather than of a name: nothing but a test
+     imports a selftest. A module production code imported would be code, and leaving
+     it out of the sweep would be hiding it. */
+  it('finds every selftest in this tree imported by tests alone, so that none is code a sweep leaves out', () => {
+    const repository = fileURLToPath(new URL('..', import.meta.url))
+    const sources = ['scripts', 'src'].flatMap((top) =>
+      readdirSync(path.join(repository, top), { recursive: true, encoding: 'utf8' })
+        .filter((name) => /\.(ts|tsx|mjs)$/u.test(name))
+        .map((name) => path.join(top, name)),
+    )
+    const selftests = sources.filter((name) => name.endsWith('.selftest.mjs'))
+    const importers = sources.filter((name) => /(from|import)\s*\(?['"][^'"]*\.selftest\.mjs['"]/u.test(readFileSync(path.join(repository, name), 'utf8')))
+
+    expect(selftests.length).toBeGreaterThan(0)
+    expect(importers.length).toBeGreaterThan(0)
+    expect(importers.filter((name) => !name.endsWith('.test.mjs') && !name.endsWith('.test.ts'))).toEqual([])
+  })
 })
 
 describe('what git is asked for, and what its answer carries', () => {
@@ -1155,6 +1190,29 @@ describe('what makes a survivor here the same survivor as one at the merge base'
 
     expect(numbered.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 2/2 in bus.on(404)']])
     expect(flagged.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 2/2 in bus.on(true)']])
+  })
+
+  /* Told apart from `true`, and not lost: the keyword is half of what the filter
+     keeps and the other half of what the name says. */
+  it('takes false as false, as a call’s literal', async () => {
+    const flagged = await byMutator('export function f(bus) {\n  bus.on(false, () => "b")\n}\n', 'StringLiteral')
+
+    expect(flagged.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 2/2 in bus.on(false)']])
+  })
+
+  it('parts a call’s literals, and takes no more than forty characters of one', async () => {
+    const parted = await byMutator('export function f(bus) {\n  bus.on(1, 2, () => "c")\n}\n', 'StringLiteral')
+    const long = await byMutator(`export function f(bus) {\n  bus.on("${'x'.repeat(41)}", () => "d")\n}\n`, 'StringLiteral')
+
+    expect(parted.map((one) => one.scope)).toEqual([['f', 'ArrowFunction 3/3 in bus.on(1, 2)']])
+    expect(long.map((one) => one.scope)).toEqual([['f'], ['f', `ArrowFunction 2/2 in bus.on("${'x'.repeat(40)}")`]])
+  })
+
+  /* It is the call's callee, so it sits at no position in the call's arguments. */
+  it('names a function called where it stands by no position, because no argument list holds it', async () => {
+    const called = await byMutator('export function f() {\n  return function () {\n    return "e"\n  }()\n}\n', 'StringLiteral')
+
+    expect(called.map((one) => one.scope)).toEqual([['f', 'FunctionExpression in FunctionExpression()']])
   })
 
   it('counts a top-level statement as sitting in no declaration at all', async () => {

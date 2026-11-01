@@ -1098,6 +1098,30 @@ describe('the dependencies the merge base’s own tests are run with', () => {
     })
   })
 
+  /* At the very moment the time is spent, as for the measurement itself. */
+  it('refuses an install whose time is exactly spent', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      const { at, git } = repository(root)
+      plant(root, { 'pnpm-lock.yaml': "lockfileVersion: '9.0'\nimporters: {}\n" })
+      git('add', '-A')
+      git('commit', '-qm', 'head')
+      let readings = 0
+      /* The start, and then exactly the ten minutes an install is allowed. */
+      const clock = () => ((readings += 1) === 1 ? 0 : 10 * 60_000)
+
+      const refusal = await refusedBy(() =>
+        measure(root, 'src/a.ts', at, {
+          clock,
+          install: () => {
+            throw new Error('an install with no time left is never started')
+          },
+        }),
+      )
+
+      expect(refusal.reason).toBe('expired')
+    })
+  })
+
   /* ⚠️ **AN INSTALL THAT CANNOT RUN IS EVIDENCE THE GATE DOES NOT HAVE.** It is
      never this checkout's install instead: the base's tests are the base's, and
      running them against another dependency tree measures neither commit. */
@@ -1317,6 +1341,48 @@ describe('what the merge base’s run amounts to', () => {
     })
   })
 
+  /* Each reason is a word a refusal is reported and read back under, so a record
+     that hashed to the wrong thing and one that contradicts itself are not one
+     failure, and the sentence is the whole of what a reader is told. */
+  it('names the reason for a record that is not of what the merge base holds, or that contradicts itself', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      repository(root)
+      const { record } = await measuring(root, 'src/a.ts', { stryker: strykerReporting({ survived: [BIG] }).stryker })
+      const at = path.join(root, 'src/a.ts')
+      const held = 'f'.repeat(64)
+      const count = (await mutantIdentitiesIn(at)).length
+
+      expect((await survivorsAtBase(record, { at, named: 'src/a.ts', frozen: held })).problem).toEqual({
+        reason: 'content',
+        why: `measured content hashing to ${JSON.stringify(record.sha256)}, and the merge base holds ${JSON.stringify(held)} at src/a.ts`,
+      })
+      expect((await derived(root, { ...record, outcome: 'no-mutants' })).problem).toEqual({
+        reason: 'mismatched',
+        why: `says it had nothing to mutate, and this gate makes ${count} mutant(s) in what it carries`,
+      })
+      expect((await derived(root, { ...record, outcome: 'killed' })).problem).toEqual({
+        reason: 'mismatched',
+        why: 'says killed, and its own report says survived',
+      })
+    })
+  })
+
+  /* Nothing to mutate is nothing to run, and one shape for everything that reads it:
+     a record that says otherwise is not one this gate wrote. */
+  it('answers empty pools for a file with nothing to mutate, and refuses one that carries a run of it', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      repository(root)
+      const source = 'export {}\n'
+      const nothing = { outcome: 'no-mutants', sha256: digestOf(source), source, first: null, settle: null }
+
+      expect(await derived(root, nothing)).toEqual({ survivors: [], undecided: [], repeats: [] })
+      expect((await derived(root, { ...nothing, first: { exitedCleanly: true, durationMs: 1, report: null } })).problem).toEqual({
+        reason: 'mismatched',
+        why: 'says it had nothing to mutate and carries a run of it',
+      })
+    })
+  })
+
   /* A first run that reported on nothing, beside a settle run that found a
      survivor: the verdict would rest on the second run alone. */
   it('refuses a first run that reported on no file, though its settle run reported a survivor', async () => {
@@ -1368,6 +1434,27 @@ describe('what the merge base’s run amounts to', () => {
       /* Named for what its two runs said, which is the reason found first. */
       expect(undecided.map((one) => [one.identity.original, one.why])).toEqual([
         ["'big'", `its two runs answered for the mutant at ${undecided[0]?.at} with Survived and then with Killed`],
+      ])
+    })
+  })
+
+  /* Why a report's word is no evidence for a static mutant, which is the sentence
+     that decides whether a reader believes the mutant is theirs to look at. */
+  it('says why a static survivor at the merge base is undecided', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      repository(root)
+      const { record } = await measuring(root, 'src/a.ts', { stryker: strykerReporting({ survived: [BIG], statics: [BIG], exit: false }).stryker })
+
+      const { survivors, undecided } = await derived(root, record)
+
+      expect(survivors).toEqual([])
+      expect(undecided.map((one) => [one.identity.original, one.why])).toEqual([
+        [
+          "'big'",
+          'the merge base’s report marks it static, and a static mutant that throws while the module is imported is reported ' +
+            'Survived by Stryker’s vitest runner because the suite fails to load — so whether it survived there or never ran is ' +
+            'not something that report can say',
+        ],
       ])
     })
   })
@@ -1812,6 +1899,51 @@ describe('what the merge base’s run amounts to', () => {
     })
   })
 
+  /* And of the settle run: `survivorsAtBase` says the same thing in other words, so
+     the words are what tell which of the two refused it. This is the one that holds
+     the run to what the sweep counted before anything is read back. */
+  it('refuses a settle run’s report that is not of what the base holds, naming the settle run', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      repository(root)
+      const reporting = strykerReporting({ timedOut: [0] })
+      let runs = 0
+
+      const { code, record } = await measuring(root, 'src/a.ts', {
+        stryker: async (config, at) => {
+          runs += 1
+          if (runs === 1) return reporting.stryker(config, at)
+          const [subject] = JSON.parse(await readFile(config, 'utf8')).mutate
+          await writeFile(path.join(path.dirname(config), REPORT), JSON.stringify({ files: { [subject]: { source: 'export const grade = 1\n', mutants: [] } } }))
+          return true
+        },
+      })
+
+      expect(runs).toBe(2)
+      expect(code).toBe(2)
+      expect(record.refusal).toEqual({
+        reason: 'mismatched',
+        message:
+          "check-mutants: the merge base’s run of src/a.ts did not report on what it swept — the settle run's report: " +
+          'its source of src/a.ts is not the content the merge base hashed',
+      })
+    })
+  })
+
+  /* A test that reads the subject's source is left out of the run, and what it was
+     is carried by content: this is what `judgedAtBase` holds a change to. */
+  it('carries each test it left out for reading the subject, by path and by content', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      const reader = "import { readFileSync } from 'node:fs'\nimport './a'\nreadFileSync(new URL('./a.ts', import.meta.url), 'utf8')\n"
+      repository(root, { 'src/reads.test.ts': reader })
+
+      const { code, record, stderr } = await measuring(root, 'src/a.ts')
+
+      expect(stderr).toBe('')
+      expect(code).toBe(0)
+      expect(record.excluded).toEqual([{ path: 'src/reads.test.ts', sha256: digestOf(reader) }])
+    })
+  })
+
   /* The instrumenter is what says how many mutants a file holds, and a file it
      cannot read is a file this gate cannot count — which is not a file that owed
      nothing. It is a plain refusal rather than one of the named ones, and it is
@@ -2232,6 +2364,17 @@ describe('the base file a subject’s survivors may answer to', () => {
 
       expect(renamesAtBase(at, root).get('src/notes.ts')).toEqual({ path: 'notes.md', how: 'renamed' })
       expect(originAtBase('src/notes.ts', at, root, renamesAtBase(at, root))).toBe(null)
+    })
+  })
+
+  /* A candidate with nothing frozen would be a base measurement nothing could be
+     held to, so a path the commit will not hand over is no origin at all. */
+  it('names nothing where the commit will not hand over what the file was traced to', async () => {
+    await inScratch('mutants-origin-', (root) => {
+      const { at } = repository(root)
+      const traced = new Map([['src/moved.ts', { path: 'src/gone.ts', how: 'renamed' }]])
+
+      expect(originAtBase('src/moved.ts', at, root, traced)).toBe(null)
     })
   })
 })

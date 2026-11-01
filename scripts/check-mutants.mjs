@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  appendFileSync,
   closeSync,
   constants,
   existsSync,
@@ -126,7 +127,24 @@ import { hiddenLoads, runtimeSpecifiers } from './lib/specifiers.mjs'
  * here. `s` makes `.` mean any character, which is what this always meant.
  */
 const SRC = /^(src|scripts)\/.+\.(ts|tsx|mjs)$/su
-const NOT_A_SUBJECT = /\.(test|testkit|contract\.test)\.(ts|tsx|mjs)$|\.d\.ts$/u
+/**
+ * What is never mutated, however it is named by `SRC`.
+ *
+ * ⚠️ **A `.selftest.mjs` IS A TEST THAT `A_TEST` DOES NOT RECOGNISE, AND SWEEPING
+ * ONE COULD ONLY EVER FAIL.** `check-boundaries.selftest.mjs` is the cases its
+ * `.test.mjs` runs: only tests import it, and the code those cases are about,
+ * `check-boundaries.mjs`, stays a subject. Mutating the cases asks whether a test
+ * notices a change to itself. Measured on PR run 41227478169 it also could not
+ * answer: 708 of its 790 mutants were static, each one re-runs a test file that
+ * takes 19 s, 17.6 s of it set-up that Stryker's net time leaves out of the
+ * deadline, and 676 came back wall-clock timeouts, 674 of them twice. A repeat
+ * fails the gate, so no test anyone wrote could have turned it green, and it cost
+ * 128 + 171 minutes before its merge base used up the rest of a 345-minute step.
+ * A test in `check-mutants.discovery.test.mjs` holds every selftest in the tree to
+ * being imported by tests alone: one that production code imported would be a
+ * subject again, and that test is what says so.
+ */
+const NOT_A_SUBJECT = /\.(test|testkit|selftest|contract\.test)\.(ts|tsx|mjs)$|\.d\.ts$/u
 
 /**
  * The branch's own changes: committed since the base, plus what is uncommitted.
@@ -1659,6 +1677,7 @@ function anonymousName(node, parent) {
      callback sits in the argument list, which is what distinguishes `then`'s two
      roles, and the call's own LITERAL arguments, which is what distinguishes one
      registration from another. */
+  // Stryker disable next-line ArrayDeclaration: only `new Thing` with no parentheses has no list, and no entry shows: a plain string sits at no position, and `literalArguments` drops it because it has no `kind`
   const args = parent.arguments ?? []
   const at = args.indexOf(node)
   const where = at === -1 ? '' : ` ${at + 1}/${args.length}`
@@ -2218,7 +2237,7 @@ async function sweepChanges({ base, only, requireBase }, world) {
       return judgedAtBase(subject, named.get(subject), origins.get(named.get(subject)) ?? null, reports, { mergeBase, measure, world, spent })
     },
   })
-  return summarise({ ...swept, ...sweptTogether(swept, world.stdout), nothingToKill: [...nothingToKill, ...swept.nothingToKill], noTestFound }, world)
+  return summarise({ ...swept, ...sweptTogether(swept), nothingToKill: [...nothingToKill, ...swept.nothingToKill], noTestFound }, world)
 }
 
 /**
@@ -2231,9 +2250,11 @@ async function sweepChanges({ base, only, requireBase }, world) {
  * `strykerEach` decided per file is REPLACED rather than added to: a file it
  * passed on its own pool can be a file the sweep's one pool cannot pay for.
  */
-function sweptTogether(swept, stdout = null) {
-  const { byFile, contested, measurements } = matchedAcross(swept.paired)
-  if (stdout !== null) stdout.write(sayContested(contested, measurements))
+function sweptTogether(swept) {
+  /* Nothing here says what was contested, because nothing can be: a plain sweep
+     measures each base file once and hands every subject of it that one answer,
+     so two measurements to disagree exist only across shards. See `sayContested`. */
+  const { byFile } = matchedAcross(swept.paired)
   /* The subject as a sweep NAMES it against the subject as git names it, which
      is what the pairing answers under. Carried rather than computed back, because
      computing it back is `path.relative` and a separator this gate would then
@@ -2270,9 +2291,11 @@ function sweptTogether(swept, stdout = null) {
  * signal that the base's runs are not reproducible is otherwise invisible in
  * exactly the runs where it is still true and not yet expensive.
  */
-function sayContested(contested, measurements) {
+export function sayContested(contested, measurements) {
+  /* Contested needs two runs that differ, so a contested identity is always of a
+     file among `twice`, and only the empty list has nothing to say. */
+  if (contested.length === 0) return ''
   const twice = measurements.filter(([, runs]) => runs > 1)
-  if (contested.length === 0 || twice.length === 0) return ''
   const where = new Map()
   for (const one of contested) where.set(one.file, (where.get(one.file) ?? 0) + 1)
   return (
@@ -3397,10 +3420,10 @@ function isInstalled(specifier, root) {
  * ⚠️ **THE WIDENED SWEEP HAD NO BOUND, AND A CI STEP HAS ONE** (2026-09-17). It
  * costs a whole extra sweep of the file, plus that sweep's settle run: measured
  * on `session.ts`, 31 and 30 minutes against a 12-minute narrow run. On the
- * heaviest subject this gate has — itself, about 545 minutes for ONE
- * plain pass — starting a second one unbounded is how a 345-minute step ends
- * with no answer at all, which is worse than the wrong answer it was trying to
- * correct.
+ * heaviest subject this gate has — itself, 82 minutes for ONE plain pass and 337
+ * for the two runs here and the two at the merge base, on PR run 41227478169 —
+ * starting a second one unbounded is how a 345-minute step ends with no answer
+ * at all, which is worse than the wrong answer it was trying to correct.
  *
  * A file's own sweep is the honest estimate of what sweeping it again costs, so
  * that is what is spent against the budget. Refusing to widen leaves the NARROW
@@ -3445,9 +3468,10 @@ async function sweptWide(named, world) {
     if (!(cause instanceof BaseRefusal)) throw cause
     return null
   }
+  /* A first run that reported on no file does not get here: `measuredHere` holds
+     what it made to `survivorsAtBase`, which refuses that. No run at all does, when
+     the file has no mutant left to run: it changed under the sweep. */
   if (measured.first === null) return null
-  const at = path.join(world.root, named)
-  if (reportEntryOf(at, measured.first.report) === null) return null
   return { first: slimmedRun(measured.first), settle: measured.settle === null ? null : slimmedRun(measured.settle) }
 }
 
@@ -3554,7 +3578,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
      not: it is a killer this change removed. Nothing is authorised once one has
      moved, and the file is billed instead — the conservative way round, and the
      one a reader can act on, because the test is named. */
-  const moved = changedSinceBase(evidence.excluded ?? [], world.root)
+  const moved = changedSinceBase(evidence.excluded, world.root)
   if (moved !== null) {
     return refused(
       'reading-changed',
@@ -3640,7 +3664,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
      that list explains why a base mutant cannot authorise a survivor, and a
      repeat here is answered by a repeat there or by nothing. */
   const repeatsHere = repeatsFound(subject, named, origin.path, reports)
-  const hangs = matchedSurvivors(repeats ?? [], repeatsHere)
+  const hangs = matchedSurvivors(repeats, repeatsHere)
   const narrow = differenceAtBase(survivors, undecided, here)
   if (narrow.added.some((one) => one.class === 'added') && affordable(spent, origin.path, world.stdout)) {
     const wide = await sweptWide(named, world)
@@ -3667,7 +3691,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
            so the aggregate could only derive the narrow difference again, and
            refused every widened file with a kill in it as "mismatched": 13 of them. */
         evidence: { ...evidence, ...differenceAtBase(survivors, undecided, kept), ...repeatsJudged(hangs), wide },
-        paired: { at: subject, named, origin, here: kept, atBase: survivors, undecided, hereHangs: repeatsHere, baseHangs: repeats ?? [] },
+        paired: { at: subject, named, origin, here: kept, atBase: survivors, undecided, hereHangs: repeatsHere, baseHangs: repeats },
       }
     }
   }
@@ -3676,7 +3700,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
     /* What the sweep's own pairing needs, and what no record carries: both sides'
        survivors and the mutants the merge base could not decide, derived. A result
        carries the evidence they were derived FROM. */
-    paired: { at: subject, named, origin, here, atBase: survivors, undecided, hereHangs: repeatsHere, baseHangs: repeats ?? [] },
+    paired: { at: subject, named, origin, here, atBase: survivors, undecided, hereHangs: repeatsHere, baseHangs: repeats },
   }
 }
 
@@ -3777,7 +3801,7 @@ export async function survivorsAtBase(evidence, { at, named, frozen }) {
   if (outcome === 'no-mutants') {
     if (identities.length > 0) return { problem: { reason: 'mismatched', why: `says it had nothing to mutate, and this gate makes ${identities.length} mutant(s) in what it carries` } }
     if (first !== null) return { problem: { reason: 'mismatched', why: 'says it had nothing to mutate and carries a run of it' } }
-    return { survivors: [], undecided: [] }
+    return { survivors: [], undecided: [], repeats: [] }
   }
   if (first === null) return { problem: { reason: 'did-not-run', why: `says ${outcome} and carries no run at all, and a run nobody has is not a survivor that was already there` } }
   const against = { named, sha256, identities, whose: 'the merge base' }
@@ -3982,7 +4006,9 @@ function undecidedAtBase(first, settle) {
           ? `its run left a wall-clock timeout at ${placeOf(mutant)} that nothing settled`
           : `its settle run never answered for the mutant at ${placeOf(mutant)}`
       found.push({ mutant, why })
-    } else if (how === 'killed' && answer.status === 'Timeout') {
+    } else if (answer.status === 'Timeout') {
+      /* A kill, because nothing else left here can be a timeout: `settledEach` calls
+         a wall-clock one repeated and a survivor is not one. */
       found.push({ mutant, why: `its settle run answered the wall-clock timeout at ${placeOf(mutant)} by reaching the original’s hit limit, which is a bound and not a test` })
     }
   }
@@ -4604,7 +4630,17 @@ function tracedTo(subject, renames, hasItself) {
  */
 function blobAtBase(named, baseCommit, root) {
   try {
-    return execFileSync('git', ['cat-file', 'blob', `${baseCommit}:${named}`], { cwd: root, maxBuffer: Infinity, stdio: ['ignore', 'pipe', 'ignore'] })
+    return execFileSync('git', ['cat-file', 'blob', `${baseCommit}:${named}`], {
+      cwd: root,
+      maxBuffer: Infinity,
+      // Stryker disable next-line ArrayDeclaration: a short stdio list is padded with pipes, so an empty one differs only in the child's stdin, which `git cat-file` never reads, and in where a stderr nobody reads goes
+      stdio: [
+        'ignore',
+        'pipe',
+        // Stryker disable next-line StringLiteral: an entry Node does not know ends the list, leaving git no stderr, and git's stderr is thrown away here in any case; the bytes and the exit status are what is read, and both are the same (measured)
+        'ignore',
+      ],
+    })
   } catch {
     return null
   }
@@ -5067,7 +5103,7 @@ async function planSweep({ manifest, shards, isolate, base, only, requireBase },
         const toRun = mine.reduce((sum, subject) => sum + weightOf(subject), 0)
         return `  shard ${at + 1}/${shards} — ${mine.length} file(s), ${toRun} mutant(s) to run${at < alone ? ', a shard of its own' : ''}\n`
       }).join('') +
-      "  Mutant counts are an estimate of what a shard costs, not a measure of it: one mutant cost about fifteen times as much in one measured file as in another. Every result records the file's measured duration.\n",
+      "  Shards are balanced on mutants, weighed by what the files `costOf` names were measured to cost, and that is an estimate of what a shard costs, not a measure of it. Every result records the file's measured duration.\n",
   )
   return 0
 }
@@ -5270,21 +5306,49 @@ function weightOf(subject) {
 }
 
 /**
- * The shard, from 1, each of `subjects` is swept in: the `isolate` heaviest get a
- * shard of their own, and the rest go one at a time, heaviest first, to whichever
- * remaining shard is lightest — ties to the lowest shard, and equal weights in
- * path order, so the answer does not depend on the order `subjects` arrive in.
+ * What a subject costs a shard: its mutants, times how many ordinary mutants one
+ * of them was measured to cost. A file not named here costs what most do.
  *
- * ⚠️ **THE WEIGHT IS A MUTANT COUNT, AND A MUTANT COUNT IS AN ESTIMATE OF TIME.**
- * Measured 2026-09-14: `check-browser-safe.mjs`, 290 mutants, 17 s; and
- * `check-mutants.mjs`, 1 200 mutants, 18 min 5 s — about fifteen times the cost a
- * mutant. So the heaviest are isolated rather than trusted to balance, and every
- * result records its measured duration, which is what a better weight would be
- * built from. A file no Stryker run will try weighs nothing.
+ * ⚠️ **A MUTANT COUNT DOES NOT SAY WHAT A FILE COSTS, AND NEITHER DOES ITS
+ * DIRECTORY.** Across every pass of PR run 41201387001 a mutant cost 0.064 minutes
+ * on the whole, and 0.065 in `src/` against 0.059 in `scripts/`: no difference a
+ * weight could use. What differs is the file: `bookFolder.ts` has 798 mutants and
+ * cost 318 minutes, the 831 of `circle/lib/publish.ts` cost 2. By count those two
+ * are peers, and over the plan of PR run 41227478169 a count put 581 minutes on a
+ * shared shard of a 345-minute step. So each multiple here is that one file's
+ * measured minutes per mutant over the 0.064, rounded, for a file that cost 30
+ * minutes or more at twice that rate or more; whole numbers, so that every other
+ * file still ties with itself and path order still decides. Over that plan these
+ * six give a slowest shard of 337, and the test beside `SHARDS` replays it.
+ *
+ * Built where it is read so that none of it is a static mutant.
+ */
+export function costOf(subject) {
+  const measured = {
+    'scripts/verify.mjs': 2,
+    'src/kernel/core/bookFolder.ts': 6,
+    'src/kernel/core/libraryStore.ts': 2,
+    'src/kernel/core/registry.ts': 3,
+    'src/kernel/ui/App.tsx': 2,
+    'src/kernel/ui/pane/LibraryPanel.tsx': 2,
+  }
+  return weightOf(subject) * (measured[subject.path] ?? 1)
+}
+
+/**
+ * The shard, from 1, each of `subjects` is swept in: the `isolate` costliest get a
+ * shard of their own, and the rest go one at a time, costliest first, to whichever
+ * remaining shard is lightest — ties to the lowest shard, and equal costs in path
+ * order, so the answer does not depend on the order `subjects` arrive in.
+ *
+ * ⚠️ **THE WEIGHT IS `costOf`, AND THAT IS STILL AN ESTIMATE OF TIME.** So the
+ * costliest are isolated rather than trusted to balance, and every result records
+ * its measured duration, which is what the next correction to `costOf` is built
+ * from. A file no Stryker run will try weighs nothing.
  */
 export function assignShards(subjects, count, isolate = 0) {
   const order = subjects
-    .map((subject, at) => ({ at, weight: weightOf(subject), path: subject.path }))
+    .map((subject, at) => ({ at, weight: costOf(subject), path: subject.path }))
     .sort((a, b) => b.weight - a.weight || byName(a.path, b.path))
   const shards = []
   const load = Array.from({ length: count }, () => 0)
@@ -5927,7 +5991,7 @@ async function baseDisagreement(result, subject, root) {
      this refused outright: `circlePort.ts`, five hangs on each side. A `timed-out`
      with no evidence fails without being refused: `hangsUnanswered` bills every
      hang when no base was asked, which is the answer it has earned. */
-  if (result.outcome !== 'survived' && (result.outcome !== 'timed-out' || result.base === null)) return null
+  if (result.outcome !== 'survived' && result.base === null) return null
   if (result.base === null) {
     return { why: `it leaves the mutants that survived in it with no evidence at all, and the plan traced it to ${subject.origin.path}` }
   }
@@ -5947,7 +6011,7 @@ async function baseDisagreement(result, subject, root) {
   const discharged = result.base.wide === undefined ? new Set() : decidedWhenWidened(at, result.base.wide)
   const reports = [result.report, result.settle === null ? null : result.settle.report]
   const here = survivorsFound(at, subject.path, subject.origin.path, reports, discharged)
-  const { survivors, undecided, repeats = [], problem } = await survivorsAtBase(result.base, {
+  const { survivors, undecided, repeats, problem } = await survivorsAtBase(result.base, {
     at: path.join(root, subject.origin.path),
     named: subject.origin.path,
     frozen: subject.origin.sha256,
@@ -6383,6 +6447,46 @@ function sharedProblem(record) {
 /** Each mode a command line can name, by name; a plain sweep names none. */
 const MODES = { plan: planSweep, shard: shardSweep, aggregate: aggregateSweep, measure: measureSweep }
 
+/** What a shard's step summary may hold, in bytes: GitHub's limit is 1 048 576, and the notice of what was cut has to fit too. */
+const SUMMARY_LIMIT = 1_000_000
+
+/**
+ * What one Stryker run wrote for the step summary, added to the real one for as
+ * long as there is room, and a notice of what was cut where there no longer is.
+ *
+ * ⚠️ **PAST 1024k GITHUB KEEPS NONE OF IT, AND THE GATE NEVER WROTE A BYTE.** On PR
+ * run 41227478169 shard 1 wrote 4612k and shard 6 3457k, and each upload aborted.
+ * Vitest's `github-actions` reporter appends to the file this variable names, and
+ * Stryker's runs inherit the variable, so every failing test run of a mutant, which
+ * is what a mutant being killed looks like, added its report. So `strykerRun`
+ * gives a run a file of its own, and this is the one way into the real file. It
+ * keeps nothing between calls, because a merge-base measurement is another
+ * process writing to the same summary: what is already in the real file is the
+ * whole of its state, and the notice is always last, so it says when to stop.
+ *
+ * Cut at a line feed, which never falls inside a UTF-8 character or a Markdown
+ * row. What goes is reports of killed mutants: each mutant's result is in the
+ * shard's artifact, and the gate's verdict never read this file.
+ */
+export function foldSummary(written, into, limit = SUMMARY_LIMIT) {
+  if (!existsSync(written)) return
+  const closing = 'Every mutant’s result is in this shard’s `mutants-shard-*` artifact.\n'
+  const text = readFileSync(written)
+  const held = existsSync(into) ? readFileSync(into) : Buffer.alloc(0)
+  if (held.toString().endsWith(closing)) return
+  const room = limit - held.length
+  if (text.length <= room) {
+    appendFileSync(into, text)
+    return
+  }
+  /* Not `lastIndexOf` from a position below zero: it would count back from the end. */
+  const kept = room > 0 ? text.subarray(0, text.lastIndexOf(0x0a, room - 1) + 1) : Buffer.alloc(0)
+  const notice =
+    `\n**check-mutants: this step summary stops here, to stay under GitHub’s 1024k limit.** ${text.length - kept.length} byte(s) of this run’s ` +
+    `test reports are cut, and everything a later run in this step writes. They are reports of test runs under a mutant, mostly of mutants being killed. ${closing}`
+  appendFileSync(into, Buffer.concat([kept, Buffer.from(notice)]))
+}
+
 // Stryker disable all: the two things a real sweep does that no test may — start Stryker, and take this checkout's own lock, which a live sweep holds while these very tests run in its sandbox. `run` takes both as parameters, and every decision about either is measured there.
 /**
  * Stryker, run over one generated config IN the checkout at `root`: `true` when
@@ -6422,18 +6526,22 @@ const MODES = { plan: planSweep, shard: shardSweep, aggregate: aggregateSweep, m
  * path a run's configs carry is relative to `root`, so the same directory under
  * its own name changes nothing else.
  */
-function strykerRun(config, root) {
+export function strykerRun(config, root) {
   const temp = mkdtempSync(path.join(tmpdir(), 'check-mutants-stryker-'))
+  /* What this run writes for the step summary waits here: see `foldSummary`. */
+  const summary = process.env.GITHUB_STEP_SUMMARY
+  const written = path.join(temp, 'step-summary.md')
   try {
     execFileSync(process.execPath, [strykerEntry(root), 'run', config], {
       cwd: realpathSync.native(path.resolve(root)),
       stdio: 'inherit',
-      env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp },
+      env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp, ...(summary ? { GITHUB_STEP_SUMMARY: written } : {}) },
     })
     return true
   } catch {
     return false
   } finally {
+    if (summary) foldSummary(written, summary)
     rmSync(temp, { recursive: true, force: true })
   }
 }

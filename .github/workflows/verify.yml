@@ -344,26 +344,24 @@ jobs:
   # 345 (318 + 8.5 %) and the job at 355, inside GitHub's 360 for a hosted job, so a
   # step that times out still leaves the upload room to run.
   #
-  # Sharding splits the files, never the slowest file, and files are weighed by
-  # mutant count, not time: bookFolder.ts was fourth heaviest, at 798. `assignShards`
-  # over that run's plan, with those costs, gives a slowest shard of 386 at 6 shards
-  # with 2 alone, 458 at 6 with 3, 388 at 7 with 3, and 318 at 7 with 4 or 5. 7 and 5:
-  # a branch that also changes this gate, the heaviest of all, pushes bookFolder.ts down
-  # one, and 4 would then put it back on a shared shard.
+  # Sharding splits the files, never the slowest file, and a mutant count does not
+  # say what a file costs: bookFolder.ts, 798 mutants, costs 318 minutes, and another
+  # file of 831 costs 2. So `costOf` in scripts/check-mutants.mjs weighs each mutant by
+  # what the file was measured to cost. `assignShards` over the plan of PR run
+  # 41227478169, with those costs, gives a slowest shard of 337 at 7 shards with 5 alone,
+  # where a plain count gave 581. The test beside these numbers replays it. It is an
+  # estimate, with 26 of those 129 files projected, and 337 of 345 is not much room.
   #
   # ⚠️ THE BOUND IS FOR WHAT WAS MEASURED, NOT FOR THE LIMITS. A file at both limits
   # costs 60 + 180 + 180 = 420, past the step. It times out, leaves no receipt, and the
   # aggregate fails: a worse red than a named survivor, and still never a pass. The
   # same goes for a shard another branch's files fill differently.
   #
-  # ⚠️ AND `check-mutants.mjs` CANNOT FINISH A PASS INSIDE THIS STEP. A sample of it
-  # measured at acceptance (2026-11-01): 198 mutants in 20 min 57 s at concurrency 4,
-  # which is 25 runner-seconds a mutant, so its 5 148 mutants take 545 minutes for ONE
-  # pass on a hosted runner. Fitting 345 needs 16. A branch that changes this gate times
-  # out on that shard, leaves no receipt, and fails: red, never green. Where its own
-  # sweep should run is the owner's decision, and no number here answers it. Every OTHER
-  # subject fits: with that file in the plan, 7 shards with 5 alone give it one shard,
-  # `bookFolder.ts` its 318, and at most 255 to a shared one.
+  # ⚠️ AND `check-mutants.mjs` FITS THIS STEP ON A SHARD OF ITS OWN, BUT ONLY JUST. PR run
+  # 41227478169 measured its 5 253 mutants: 82 minutes here, 83 to settle, 85 at the
+  # merge base, 87 to settle that: 337. A branch with no survivor in it spends about
+  # 165 of those. If it costs more than the step allows, the shard times out, leaves no
+  # receipt, and fails: red, never green.
   #
   # ⚠️ 4 vCPUs is what an `ubuntu-24.04` runner gives a PUBLIC repository; a
   # private one's standard runner has 2, which doubles the arithmetic.

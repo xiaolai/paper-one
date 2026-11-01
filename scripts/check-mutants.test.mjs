@@ -38,6 +38,7 @@ import {
   codeOf,
   commitsOf,
   coveringTests,
+  foldSummary,
   importsOf,
   loadTestConfig,
   loadViteTestBlock,
@@ -57,6 +58,7 @@ import {
   settledVerdict,
   sourceReaders,
   strykerConfig,
+  strykerRun,
   symlinksIn,
   testsCovering,
   timeoutKindOf,
@@ -608,6 +610,72 @@ describe('one sweep per checkout', () => {
       expect(existsSync(lock)).toBe(false)
       acquireLock(lock)()
       expect(existsSync(lock)).toBe(false)
+    })
+  })
+
+  /* What the real signals below cannot say, because the child that receives them is
+     not a process a mutant is measured in: which handlers a lock adds to the process
+     holding it, what each one does, and that they all come off again. */
+  describe('the handlers a lock leaves on the process holding it', () => {
+    const WAYS_OUT = ['SIGINT', 'SIGTERM', 'SIGHUP', 'exit']
+    const listening = () => Object.fromEntries(WAYS_OUT.map((way) => [way, process.listeners(way)]))
+    const addedSince = (before) => Object.fromEntries(WAYS_OUT.map((way) => [way, process.listeners(way).filter((one) => !before[way].includes(one))]))
+    /** The lock, the handlers it added, and its release, which runs however the case ends. */
+    const holding = (root, ...how) => {
+      const before = listening()
+      const lock = path.join(root, 'check-mutants.lock')
+      const release = acquireLock(lock, ...how)
+      onTestFinished(release)
+      return { lock, release, added: addedSince(before), before }
+    }
+
+    it('adds one handler for each way out, and takes them all off with the lock', () => {
+      inScratch('mutants-lock-', (root) => {
+        const { lock, release, added, before } = holding(root)
+
+        expect(WAYS_OUT.map((way) => added[way].length)).toEqual([1, 1, 1, 1])
+
+        release()
+        expect(WAYS_OUT.map((way) => addedSince(before)[way].length)).toEqual([0, 0, 0, 0])
+        expect(existsSync(lock)).toBe(false)
+      })
+    })
+
+    it('adds none for a pid that is not this process', () => {
+      inScratch('mutants-lock-', (root) => {
+        const { added } = holding(root, process.pid + 1)
+
+        expect(WAYS_OUT.map((way) => added[way].length)).toEqual([0, 0, 0, 0])
+      })
+    })
+
+    for (const [signal, expected] of [
+      ['SIGINT', 130],
+      ['SIGTERM', 143],
+      ['SIGHUP', 129],
+    ]) {
+      it(`lets go on ${signal} and exits ${expected}`, () => {
+        inScratch('mutants-lock-', (root) => {
+          const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined)
+          onTestFinished(() => exit.mockRestore())
+          const { lock, added } = holding(root)
+
+          added[signal][0]()
+
+          expect(existsSync(lock)).toBe(false)
+          expect(exit.mock.calls).toEqual([[expected]])
+        })
+      })
+    }
+
+    it('lets go on the way out of a process that is exiting anyway', () => {
+      inScratch('mutants-lock-', (root) => {
+        const { lock, added } = holding(root)
+
+        added.exit[0]()
+
+        expect(existsSync(lock)).toBe(false)
+      })
     })
   })
 
@@ -4594,7 +4662,7 @@ const resultIn = (results, shard, subject) => path.join(results, `shard-${shard}
 const receiptIn = (results, shard) => path.join(results, `shard-${shard}`, 'receipt.json')
 
 const ESTIMATE =
-  "  Mutant counts are an estimate of what a shard costs, not a measure of it: one mutant cost about fifteen times as much in one measured file as in another. Every result records the file's measured duration.\n"
+  "  Shards are balanced on mutants, weighed by what the files `costOf` names were measured to cost, and that is an estimate of what a shard costs, not a measure of it. Every result records the file's measured duration.\n"
 const shardSays = (manifest, spec, files) =>
   `check-mutants: shard ${spec} of ${manifest} — ${files} file(s) are this shard's; whether the sweep passed is for --aggregate to say, over every shard\n`
 const emptyShardSays = (manifest, spec) =>
@@ -4888,7 +4956,30 @@ describe('a survivor measured against the merge base', () => {
 
     expect(result.code).toBe(1)
     expect(result.stdout).toContain('it could not be measured (reading-changed)')
-    expect(result.stdout).toContain("check-mutants: src/reads.test.mjs reads src/a.ts's own source, so neither sweep could run it — and it is gone")
+    expect(result.stdout).toContain(
+      "check-mutants: src/reads.test.mjs reads src/a.ts's own source, so neither sweep could run it — and it is gone since the merge base, " +
+        'which is evidence this comparison cannot weigh. Nothing in this file is authorised by a base whose excluded test is not the one here: ' +
+        'kill the mutants it used to, or restore it.',
+    )
+    /* And that is all it is: a base that was not measured leaves the survivor, and no
+       hang nobody met is reported beside it. */
+    expect(result.stderr).not.toContain('wall-clock')
+  })
+
+  /* A refusal travels and the reason does not, so the refusal says where the reason
+     is — and a shard's aggregate has no stdout of that run anywhere near it. */
+  it('says where a merge base’s own reason is, when what its run wrote cannot be read', async () => {
+    const result = await sweeping({
+      measure: async (named, _commit, asked) => ({ ...(await measuredAt(asked.root, named)), first: null }),
+    })
+
+    expect(result.code).toBe(1)
+    expect(result.stdout).toContain('it could not be measured (did-not-run)')
+    expect(result.stdout).toContain(
+      'check-mutants: the merge base’s run of src/a.ts says survived and carries no run at all, and a run nobody has is not a survivor that was already there. ' +
+        'Its own output is above in a plain sweep, and in the log of the shard that ran it in a sharded one — read that before reading any test, ' +
+        'because a run that scored nothing failed for a reason of its own',
+    )
   })
 
   /* And the other half, which is what stops the rule above from billing every
@@ -5103,10 +5194,10 @@ describe('a survivor measured against the merge base', () => {
 
   /* ⚠️ **AND A SECOND WIDE PASS IS NOT ALWAYS AFFORDABLE.** It costs a whole
      sweep of the file again: measured on `session.ts`, 31 minutes against a
-     12-minute narrow run. On this gate's own heaviest subject — itself, at an
-     about 545 minutes for one plain pass — starting a second one unbounded
-     is how a CI step ends with no answer at all, which is worse than
-     the answer it was trying to correct. The file's own sweep is what a second
+     12-minute narrow run. On this gate's own heaviest subject — itself, at 82
+     minutes for one plain pass and 337 for its four runs, measured on PR run
+     41227478169 — starting a second one unbounded is how a CI step ends with
+     no answer at all, which is worse than the answer it was trying to correct. The file's own sweep is what a second
      one would cost, so that is what is spent against the budget; refusing leaves
      the NARROW bill standing, which is the safe direction, and says so. */
   it('spends no second sweep on a file whose own sweep was already too long, and names the bill as the narrow one', async () =>
@@ -5141,6 +5232,175 @@ describe('a survivor measured against the merge base', () => {
       expect(result.stdout).toContain('can only ever bill MORE than the wider set would')
     }))
 
+  /* What the file's own sweep cost is both of its runs, so a settle run is what can
+     carry it over the budget, and the sentence says how long it really took. */
+  it('counts the settle run in what the file’s own sweep cost', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\nexport const b = 'b'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const source = readFileSync(mutated, 'utf8')
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived', { status: 'Timeout' }) },
+        settled: { [mutated]: await plantedReport(mutated, 'Survived', 'Killed') },
+        exits: { [mutated]: false },
+        settleExits: { [mutated]: false },
+      })
+      let runs = 0
+      let now = 0
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker: (config) => {
+          runs += 1
+          return stryker(config)
+        },
+        clock: () => (now += 35 * 60_000),
+        mergeBase: () => BASE,
+        origins: (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: hashOf(source) }])),
+        measure: async (named, _commit, asked) => ({
+          install: 'linked',
+          outcome: 'killed',
+          durationMs: 900,
+          sha256: hashOf(source),
+          source,
+          first: { exitedCleanly: true, durationMs: 900, report: await reportOfSource(path.join(asked.root, named), source, 'Killed') },
+          settle: null,
+        }),
+      })
+
+      /* The narrow sweep and its settle run, and no second sweep. */
+      expect(runs).toBe(2)
+      expect(result.stdout).toContain(
+        'check-mutants: src/a.ts took 70 minute(s) to sweep here, past the 60 this gate will spend again to check a bill against the merge base\'s own wider set of tests. ' +
+          'What it owes below is measured against the nearest tests alone, which can only ever bill MORE than the wider set would: ' +
+          're-run this file by itself — node scripts/check-mutants.mjs --only src/a.ts — before taking it as owed.\n',
+      )
+    }))
+
+  /* What may take a charge away is a kill, so the second sweep is not asked about what
+     the merge base could not decide: that is not a charge a wider set can discharge,
+     because this sweep is not what it is waiting on. */
+  it('spends no second sweep on a mutant the merge base could not decide', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived') },
+        exits: { [mutated]: false },
+      })
+      let runs = 0
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker: (config) => {
+          runs += 1
+          return stryker(config)
+        },
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        measure: async (named, _commit, asked) => {
+          const measured = await measuredAt(asked.root, named)
+          const [entry] = Object.values(measured.first.report.files)
+          entry.mutants[0].static = true
+          return measured
+        },
+      })
+
+      expect(runs).toBe(1)
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('  undecided: src/a.ts:1:18')
+    }))
+
+  /* A second sweep that breaks for a reason of its own is a defect, and a defect is
+     never the narrow bill standing: nothing but a refusal may answer that way. */
+  it('lets a defect in the second sweep through, rather than reading it as a sweep that could not be made', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived') },
+        exits: { [mutated]: false },
+      })
+      let runs = 0
+
+      await expect(
+        sweep(root, {
+          subjects: ['src/a.ts'],
+          tree: ['src/a.ts', 'src/a.test.mjs'],
+          stryker: (config) => {
+            runs += 1
+            if (runs === 2) throw new Error('a defect in the second sweep')
+            return stryker(config)
+          },
+          mergeBase: () => BASE,
+          origins: itsOwn,
+          measure: (named, _commit, asked) => killedAt(asked.root, named),
+        }),
+      ).rejects.toThrow('a defect in the second sweep')
+    }))
+
+  /* A file with no mutant left has no second run to read: it changed under the sweep,
+     and the narrow bill is what stands. */
+  it('leaves the narrow bill standing when the file has no mutant left to sweep a second time', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived') },
+        exits: { [mutated]: false },
+      })
+      const source = readFileSync(mutated, 'utf8')
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker: async (config) => {
+          const answer = await stryker(config)
+          writeFileSync(mutated, 'export {}\n')
+          return answer
+        },
+        mergeBase: () => BASE,
+        origins: (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: hashOf(source) }])),
+        measure: async (named, _commit, asked) => ({
+          install: 'linked',
+          outcome: 'killed',
+          durationMs: 900,
+          sha256: hashOf(source),
+          source,
+          first: { exitedCleanly: true, durationMs: 900, report: await reportOfSource(path.join(asked.root, named), source, 'Killed') },
+          settle: null,
+        }),
+      })
+
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('  added: src/a.ts:1:18')
+    }))
+
+  /* What decides a mutant is the status, and the reason only says which kind of
+     timeout one was: a reason on anything else decides nothing. */
+  it('takes a charge away for no status but a kill, whatever reason sits beside it', async () =>
+    inScratch('mutants-widened-', async (root) => {
+      const at = checkout(root, { 'src/a.ts': "export const a = 'a'\n", 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const narrow = await plantedReport(mutated, 'Survived')
+      const wide = await plantedReport(mutated, { status: 'Survived', statusReason: 'Hit limit reached (330901/330900)' })
+      let runs = 0
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker: async () => {
+          writeFileSync(path.join(root, REPORT), JSON.stringify(runs++ === 0 ? narrow : wide))
+          return false
+        },
+        mergeBase: () => BASE,
+        origins: itsOwn,
+        measure: (named, _commit, asked) => killedAt(asked.root, named),
+      })
+
+      expect(runs).toBe(2)
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('  added: src/a.ts:1:18')
+    }))
+
   /* ⚠️ **AND THE BUDGET WAS BILLING WHAT THE WIDER SET KILLS** (PR run 41201387001,
      2026-10-31). `registry.ts` swept in 44 minutes against a 20-minute budget, so
      239 mutants its 5 nearest tests miss stayed charged though the 122 tests that
@@ -5172,6 +5432,84 @@ describe('a survivor measured against the merge base', () => {
       expect(runs).toBe(2)
       expect(result.stdout).not.toContain('this gate will spend again')
       expect(result.code).toBe(1)
+    }))
+
+  /* The two sentences a reader acts on differently, in one sweep, so that each holds
+     only its own class and every line of it. */
+  it('keeps what the change added apart from what the merge base could not decide, one line each', async () =>
+    inScratch('mutants-owed-', async (root) => {
+      const source = "export const a = 'a'\nexport const b = 'b'\nexport const c = 'c'\n"
+      const at = checkout(root, { 'src/a.ts': source, 'src/a.test.mjs': "import './a'\n" })
+      const mutated = at['src/a.ts']
+      const { stryker } = strykerStandIn(root, {
+        reports: { [mutated]: await plantedReport(mutated, 'Survived', 'Survived', 'Survived') },
+        exits: { [mutated]: false },
+      })
+      const result = await sweep(root, {
+        subjects: ['src/a.ts'],
+        tree: ['src/a.ts', 'src/a.test.mjs'],
+        stryker,
+        mergeBase: () => BASE,
+        origins: (names) => new Map(names.map((name) => [name, { path: name, how: 'itself', sha256: hashOf(source) }])),
+        measure: async (named, _commit, asked) => {
+          const report = await reportOfSource(path.join(asked.root, named), source, 'Survived')
+          const [entry] = Object.values(report.files)
+          entry.mutants[0].static = true
+          entry.mutants[1].static = true
+          entry.mutants[2].status = 'Killed'
+          return { install: 'linked', outcome: 'survived', durationMs: 900, sha256: hashOf(source), source, first: { exitedCleanly: false, durationMs: 900, report }, settle: null }
+        },
+      })
+      const why =
+        'the merge base’s report marks it static, and a static mutant that throws while the module is imported is reported Survived by Stryker’s vitest runner ' +
+        'because the suite fails to load — so whether it survived there or never ran is not something that report can say'
+
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain(
+        '  added: src/a.ts:3:18 — StringLiteral replacing "\'c\'" with "\\"\\"" in the file itself — the merge base has no survivor with this identity in src/a.ts\n',
+      )
+      expect(result.stderr).not.toContain('  added: src/a.ts:1:18')
+      expect(result.stderr).toContain(
+        'check-mutants: the merge base could not decide 2 mutant(s) that survived here',
+      )
+      expect(result.stderr).toContain(
+        `  undecided: src/a.ts:1:18 — StringLiteral replacing "'a'" with "\\"\\"" in the file itself — the merge base could not decide this mutant in src/a.ts: ${why}\n` +
+          `  undecided: src/a.ts:2:18 — StringLiteral replacing "'b'" with "\\"\\"" in the file itself — the merge base could not decide this mutant in src/a.ts: ${why}\n` +
+          '  Settle one by killing it here',
+      )
+      expect(result.stderr).not.toContain('  undecided: src/a.ts:3:18')
+    }))
+
+  /* A settle run that scored nothing, across two files: how many mutants that is,
+     which files, and every place in each. */
+  it('names every mutant a settle run reached no verdict for, file by file', async () =>
+    inScratch('mutants-owed-', async (root) => {
+      const at = checkout(root, {
+        'src/a.ts': "export const a = 'a'\nexport const b = 'b'\n",
+        'src/a.test.mjs': "import './a'\n",
+        'src/b.ts': "export const c = 'c'\n",
+        'src/b.test.mjs': "import './b'\n",
+      })
+      const [a, b] = [at['src/a.ts'], at['src/b.ts']]
+      const timeout = { status: 'Timeout' }
+      const crashed = { status: 'RuntimeError' }
+      const { stryker } = strykerStandIn(root, {
+        reports: { [a]: await plantedReport(a, timeout, timeout), [b]: await plantedReport(b, timeout) },
+        settled: { [a]: await plantedReport(a, crashed, crashed), [b]: await plantedReport(b, crashed) },
+        exits: { [a]: true, [b]: true },
+        settleExits: { [a]: true, [b]: true },
+      })
+
+      const result = await sweep(root, { subjects: ['src/a.ts', 'src/b.ts'], tree: Object.keys(at), stryker })
+
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('check-mutants: the settle run reached no verdict for 3 mutant(s) in 2 file(s)')
+      expect(result.stderr).toContain(`  ${a}\n  ${b}\n  Re-run the file alone`)
+      expect(result.stderr).toContain(
+        `  unresolved: ${a}:1:18 — the settle run answered "RuntimeError", which is no verdict\n` +
+          `  unresolved: ${a}:2:18 — the settle run answered "RuntimeError", which is no verdict\n` +
+          `  unresolved: ${b}:1:18 — the settle run answered "RuntimeError", which is no verdict\n`,
+      )
     }))
 
   it('fails a survivor the merge base did not owe, naming what was mutated and why nothing there answers for it', async () => {
@@ -7717,100 +8055,151 @@ describe('the workflow sweeps in isolated shards of one frozen plan, reconciled 
     }
   })
 
-  /* (g) What one shard may be asked to do, replayed through the real `assignShards`
-     with what PR run 41201387001 measured: each planned file's mutants, and the minutes
-     it costs through head, merge base and widening. `bookFolder.ts` is projected, 21.1 +
-     148.3 + 148.3 = 318, because a 90-minute deadline killed its base settle run; a
-     settle run measured 0.94 to 1.03 of its first, and widening what the merge base cost.
+  /* (g) What one shard may be asked to do, replayed through the real `assignShards`:
+     the plan of PR run 41227478169, each file's mutants and the minutes it costs through
+     head, merge base and widening. 73 rows come from PR run 41201387001, which measured
+     those passes; `bookFolder.ts` is projected there, 21.1 + 148.3 + 148.3 = 318, because
+     a 90-minute deadline killed its base settle run. 29 are four times the first pass 41227478169
+     measured, since a settle run measured 0.94 to 1.03 of its first. 26 ran in neither,
+     and are projected at 0.0639 minutes a mutant, which is what those 73 cost on the
+     whole. So this is an estimate, and over its limits a shard times out, leaves no
+     receipt and fails: red, never green.
 
-     ⚠️ **THIS GATE'S OWN FILE DOES NOT FIT, AND NO BOUND HERE MAKES IT FIT.** A sample
-     of it measured at acceptance (2026-11-01): 198 mutants in 20 min 57 s at concurrency
-     4, which is 25 runner-seconds a mutant, so 5 148 mutants take 545 minutes for ONE
-     pass. Fitting 345 needs 16. A branch that changes `check-mutants.mjs` therefore times
-     out on that shard, leaves no receipt, and the aggregate fails it: red, never green.
-     Where it should run instead is the owner's decision. What this test pins is what is
-     true: that file does not fit, and every OTHER subject does, even on a shared shard
-     beside it. */
-  it('fits every subject but this gate inside a shard’s step on the measured replay, and pins that this gate does not', () => {
-    const GATE_MUTANTS = 5148
-    const SAMPLE = { mutants: 198, seconds: 20 * 60 + 57, runners: 4 }
-    const gatePass = ((SAMPLE.seconds * SAMPLE.runners) / SAMPLE.mutants) * GATE_MUTANTS / SAMPLE.runners / 60
+     This gate's own file is measured, and fits: the four runs of 41227478169, with one
+     pass at 82 minutes where a sample of 198 of its mutants had projected 545. */
+  it('fits every subject inside a shard’s step on the measured replay, and only because of what files were measured to cost', () => {
+    const GATE_MUTANTS = 5253
+    const GATE_RUNS = [81.6, 83.05, 85.2, 87]
+    const gateCost = GATE_RUNS.reduce((sum, minutes) => sum + minutes, 0)
     const MEASURED_RUN = [
       ['src/kernel/core/libraryStore.ts', 1223, 119.3],
-      ['src/kernel/core/registry.ts', 867, 196.8],
+      ['src/kernel/ui/reader/session.ts', 1205, 12.8],
+      ['src/kernel/core/registry.ts', 920, 196.8],
       ['src/capabilities/circle/lib/publish.ts', 831, 2.2],
+      ['src/kernel/ui/App.tsx', 812, 95.1],
       ['src/kernel/core/bookFolder.ts', 798, 317.7],
       ['src/capabilities/sync/index.ts', 692, 21.5],
+      ['src/capabilities/archives/lib/marksArchive.ts', 595, 7.3],
+      ['src/kernel/ui/pane/Marginalia.tsx', 489, 8],
       ['src/capabilities/circle/lib/fetch.ts', 486, 1.3],
-      ['src/kernel/ui/pane/Marginalia.tsx', 480, 8],
+      ['src/kernel/ui/reader/useSpeech.ts', 485, 12.4],
       ['src/capabilities/circle/lib/page.ts', 423, 1.2],
       ['src/capabilities/circle/lib/store.ts', 414, 1.6],
+      ['src/capabilities/voices/lib/rows.ts', 414, 26.4],
+      ['src/kernel/ui/state.ts', 403, 4.8],
       ['src/capabilities/public/lib/publicStore.ts', 396, 11.7],
+      ['src/kernel/ui/commands.ts', 385, 2.2],
       ['src/capabilities/public/lib/envelope.ts', 382, 1.2],
+      ['src/kernel/core/markStore.ts', 376, 24],
+      ['src/capabilities/archives/lib/archiveActions.ts', 372, 2.4],
       ['scripts/verify.mjs', 371, 56.4],
+      ['src/kernel/ui/pane/Settings.tsx', 363, 13.6],
       ['src/capabilities/circle/lib/protocol.ts', 360, 3.8],
+      ['src/app/web/books.ts', 353, 2],
       ['src/kernel/ui/pane/LibraryPanel.tsx', 326, 36.5],
+      ['src/main.web.tsx', 300, 19.2],
       ['src/kernel/core/services/book.ts', 297, 6.8],
       ['src/capabilities/peer/index.ts', 296, 19.3],
       ['scripts/verify-without.mjs', 292, 4.7],
       ['src/capabilities/circle/lib/workClaim.ts', 292, 9.4],
+      ['src/kernel/ui/shell/TitleBar.tsx', 283, 6.8],
+      ['src/kernel/core/settings.ts', 280, 17.9],
+      ['src/kernel/core/services.ts', 279, 3.8],
       ['src/capabilities/circle/lib/shelf.ts', 274, 2.5],
-      ['src/kernel/core/services.ts', 273, 3.8],
       ['src/capabilities/circle/lib/receive.ts', 272, 0.9],
+      ['src/kernel/ui/reader/speech.ts', 267, 17.1],
       ['src/capabilities/sync/lib/status.ts', 261, 11.8],
       ['scripts/check-residue.mjs', 241, 1],
+      ['src/kernel/ui/reader/voiceChoice.ts', 234, 2],
+      ['src/capabilities/passages/index.ts', 227, 3],
       ['src/capabilities/circle/lib/circlePort.ts', 211, 7.1],
+      ['src/kernel/ui/accel.ts', 211, 13.5],
       ['src/capabilities/circle/lib/circleView.ts', 209, 3.5],
+      ['src/kernel/ui/reader/engineSpeaker.ts', 207, 13.2],
       ['src/capabilities/peer/lib/wire.ts', 206, 5.6],
-      ['src/capabilities/circle/index.ts', 191, 2.3],
+      ['src/capabilities/circle/index.ts', 193, 2.3],
+      ['src/kernel/core/cards.ts', 188, 1.1],
       ['src/capabilities/peer/ui/DevicesPane.tsx', 187, 7.1],
       ['src/capabilities/circle/lib/exchange.ts', 186, 0.7],
+      ['src/kernel/ui/panes.ts', 186, 11.9],
       ['scripts/check-dead-css.mjs', 176, 1.7],
       ['src/capabilities/public/lib/publicPort.ts', 175, 1.4],
       ['src/capabilities/circle/lib/lists.ts', 173, 0.7],
-      ['src/kernel/ui/pane/SidePane.tsx', 168, 2.3],
-      ['src/capabilities/public/index.ts', 165, 1.8],
+      ['src/kernel/ui/pane/SidePane.tsx', 169, 2.3],
+      ['src/capabilities/public/index.ts', 167, 1.8],
       ['src/capabilities/public/lib/order.ts', 164, 11.7],
       ['src/capabilities/circle/lib/opinion.ts', 162, 1.4],
       ['src/capabilities/circle/lib/log.ts', 161, 0.7],
+      ['src/kernel/ui/reader/speaker.ts', 161, 10.3],
+      ['scripts/lib/surfaces.mjs', 152, 3.4],
       ['src/capabilities/circle/lib/relationships.ts', 144, 1.1],
       ['src/capabilities/public/lib/voicePort.ts', 144, 0.3],
       ['src/kernel/ui/reader/reanchorPass.ts', 144, 3.6],
-      ['scripts/check-residue.selftest.mjs', 143, 0.6],
+      ['src/kernel/ui/hooks/useAudiobook.ts', 139, 2.4],
       ['src/capabilities/public/lib/binding.ts', 134, 4.2],
       ['src/capabilities/public/lib/overlay.ts', 132, 1.2],
       ['src/kernel/ui/hooks/useOverlays.ts', 130, 10.5],
       ['src/capabilities/circle/lib/workKey.ts', 129, 11.8],
       ['src/capabilities/public/ui/VoiceDecisions.tsx', 125, 7.7],
-      ['src/kernel/ui/reader/engineVoice.ts', 115, 0.2],
+      ['src/capabilities/archives/lib/tagArchive.ts', 119, 1.3],
       ['src/capabilities/circle/lib/identity.ts', 110, 7.5],
+      ['src/app/bootApp.ts', 105, 6.7],
       ['src/capabilities/public/lib/bounds.ts', 104, 5.2],
       ['src/capabilities/circle/lib/relationshipState.ts', 100, 0.3],
+      ['src/capabilities/cards/ui/Deck.tsx', 93, 5.9],
       ['src/capabilities/public/ui/PublishControl.tsx', 93, 9.4],
+      ['src/kernel/ui/overlays/CommandPalette.tsx', 93, 5.9],
       ['src/kernel/ui/reader/markPaint.ts', 92, 0.2],
+      ['src/kernel/ui/reader/engineVoice.ts', 88, 0.2],
+      ['src/capabilities/voices/lib/port.ts', 87, 0.8],
       ['src/capabilities/circle/lib/sharing.ts', 83, 1],
-      ['src/kernel/ui/pane/Cards.tsx', 81, 3.6],
+      ['src/kernel/core/pickedFile.ts', 81, 0.5],
       ['src/kernel/core/serviceTable.ts', 79, 11.3],
       ['src/capabilities/circle/ui/ShareControl.tsx', 71, 2.7],
+      ['src/kernel/ui/reader/audiobook.ts', 71, 4.5],
       ['src/kernel/core/services/rows.ts', 68, 3.4],
+      ['src/kernel/ui/hooks/useMarks.ts', 68, 4.3],
+      ['src/kernel/ui/reader/speechSkip.ts', 66, 1.2],
       ['src/capabilities/circle/ui/PairingSection.tsx', 65, 2.7],
       ['src/capabilities/circle/lib/bound.ts', 64, 2.3],
       ['src/capabilities/circle/lib/foreign.ts', 63, 3.4],
       ['src/capabilities/public/lib/publicShare.ts', 63, 2.4],
       ['src/capabilities/public/lib/publishPort.ts', 62, 0.7],
+      ['src/kernel/core/uiTypes.ts', 60, 0.5],
       ['src/capabilities/circle/lib/list.ts', 49, 3.1],
       ['src/capabilities/public/lib/crypto.ts', 49, 0.5],
       ['src/capabilities/public/lib/presentation.ts', 48, 2.3],
       ['src/capabilities/circle/lib/crypto.ts', 45, 0.3],
+      ['src/kernel/ui/reader/speakerRouting.ts', 45, 2.9],
+      ['src/capabilities/archives/lib/marksFiles.ts', 42, 0.5],
       ['src/kernel/core/ports.ts', 40, 0.2],
+      ['src/capabilities/cards/index.ts', 39, 2.5],
+      ['src/capabilities/voices/lib/wire.ts', 38, 2.4],
+      ['src/capabilities/archives/index.ts', 35, 0.5],
       ['src/capabilities/public/lib/publish.ts', 28, 0.1],
+      ['src/kernel/core/packSize.ts', 27, 1.7],
+      ['src/capabilities/archives/lib/tagFiles.ts', 26, 0.5],
       ['src/kernel/core/bookAccent.ts', 26, 21.8],
-      ['src/capabilities/peer/lib/p2pSwitch.ts', 20, 0.5],
+      ['src/app/mobile/MobileApp.tsx', 25, 1.3],
+      ['src/app/shell/TabBar.tsx', 25, 1.6],
+      ['src/kernel/core/pluginSwitches.ts', 24, 0.9],
+      ['src/capabilities/peer/lib/p2pSwitch.ts', 21, 0.5],
+      ['src/kernel/ui/hooks/useVoices.ts', 21, 1.3],
+      ['src/capabilities/voices/index.ts', 19, 0.7],
+      ['src/app/web/useRemoteStores.ts', 16, 0.9],
+      ['src/kernel/ui/pickedFilesTauri.ts', 15, 1],
       ['src/kernel/core/foreignAnnotation.ts', 13, 3.2],
+      ['src/kernel/ui/pane/FilterChips.tsx', 12, 0.9],
       ['src/capabilities/circle/lib/listsPort.ts', 10, 0.8],
+      ['src/capabilities/cards/lib/cardFromMark.ts', 9, 0.6],
       ['src/capabilities/circle/lib/spendLedger.ts', 9, 0.5],
       ['src/capabilities/peer/lib/qrSvg.ts', 9, 1.9],
+      ['src/kernel/core/services/environment.ts', 9, 0.6],
+      ['src/kernel/ui/inTauri.ts', 8, 0.6],
       ['src/kernel/core/readingState.ts', 5, 0.1],
+      ['src/capabilities/cards/ui/MakeCard.tsx', 3, 0.2],
+      ['src/app/composition.desktop.ts', 1, 0.1],
+      ['src/kernel/ui/contributionIcon.ts', 1, 0.1],
     ]
     const shard = job('mutants-shard')
     const [sweep] = running(stepsOf(shard), SWEEPS)
@@ -7818,14 +8207,19 @@ describe('the workflow sweeps in isolated shards of one frozen plan, reconciled 
     const whole = Number(valueAt(shard, 4, 'timeout-minutes'))
     const env = blockOf(job('mutants-plan'), 4, 'env')
     const [shards, isolate] = [Number(valueAt(env, 6, 'SHARDS')), Number(valueAt(env, 6, 'ISOLATE'))]
-    /** What each shard costs when `costs`, as `[path, mutants, minutes]`, are planned over the workflow's own numbers. */
-    const loadsOver = (costs) => {
-      const load = Array.from({ length: shards }, () => 0)
-      const subjects = costs.map(([named, mutants]) => ({ path: named, class: 'mutated', mutants }))
-      assignShards(subjects, shards, isolate).forEach((one, at) => (load[one - 1] += costs[at][2]))
-      return load
+    /** What each shard costs and holds when `costs`, as `[path, mutants, minutes]`, are planned over the workflow's own numbers. */
+    const plannedOver = (costs, named = (at) => costs[at][0]) => {
+      const planned = Array.from({ length: shards }, () => ({ load: 0, holds: [] }))
+      const subjects = costs.map(([, mutants], at) => ({ path: named(at), class: 'mutated', mutants }))
+      assignShards(subjects, shards, isolate).forEach((one, at) => {
+        planned[one - 1].load += costs[at][2]
+        planned[one - 1].holds.push(costs[at][0])
+      })
+      return planned
     }
-    const [gateShard, ...rest] = loadsOver([['scripts/check-mutants.mjs', GATE_MUTANTS, gatePass], ...MEASURED_RUN])
+    const replay = [['scripts/check-mutants.mjs', GATE_MUTANTS, gateCost], ...MEASURED_RUN]
+    const planned = plannedOver(replay)
+    const heaviest = (shardsOf) => Math.max(...shardsOf.map((one) => one.load))
 
     expect(valueAt(shard, 4, 'runs-on')).toBe('ubuntu-24.04')
     /* Room after a step that timed out, for the upload that names what it finished,
@@ -7834,10 +8228,166 @@ describe('the workflow sweeps in isolated shards of one frozen plan, reconciled 
     expect(whole).toBeLessThanOrEqual(360)
     expect(shards).toBeGreaterThan(isolate)
 
-    expect(Math.max(...loadsOver(MEASURED_RUN))).toBeLessThanOrEqual(step)
-    expect(Math.round(gatePass)).toBe(545)
-    expect(gateShard).toBeGreaterThan(step)
-    expect(Math.max(...rest)).toBeLessThanOrEqual(step)
+    expect(Math.round(gateCost)).toBe(337)
+    expect(heaviest(planned)).toBeLessThanOrEqual(step)
+    /* The slow files have a shard apiece, the gate's first among them: nothing shares a step with what eats it. */
+    expect(planned.slice(0, isolate).map((one) => one.holds)).toEqual([
+      ['scripts/check-mutants.mjs'],
+      ['src/kernel/core/bookFolder.ts'],
+      ['src/kernel/core/registry.ts'],
+      ['src/kernel/core/libraryStore.ts'],
+      ['src/kernel/ui/App.tsx'],
+    ])
+    /* And the same files, costed by their mutant counts alone, do not fit: `costOf` is what makes this true. */
+    expect(heaviest(plannedOver(replay, (at) => `src/anonymous-${at}.ts`))).toBeGreaterThan(step)
+  })
+})
+
+/**
+ * ⚠️ **PAST 1024k GITHUB KEEPS NONE OF A STEP'S SUMMARY** — PR run 41227478169, where
+ * shard 1 wrote 4612k and shard 6 3457k, nearly all of it Vitest's reports of the test
+ * runs that killed mutants. `foldSummary` says why it is shaped as it is.
+ */
+describe('what a shard leaves in its step summary', () => {
+  const ENDING = 'Every mutant’s result is in this shard’s `mutants-shard-*` artifact.\n'
+  const noticeOf = (dropped) =>
+    `\n**check-mutants: this step summary stops here, to stay under GitHub’s 1024k limit.** ${dropped} byte(s) of this run’s test reports are cut, ` +
+    `and everything a later run in this step writes. They are reports of test runs under a mutant, mostly of mutants being killed. ${ENDING}`
+  /** A run's summary, the real one (holding `held`, if anything), and the two after folding. */
+  const folded = (root, text, limit, held) => {
+    const written = path.join(root, 'written.md')
+    const into = path.join(root, 'summary.md')
+    if (text !== null) writeFileSync(written, text)
+    if (held !== undefined) writeFileSync(into, held)
+    foldSummary(written, into, limit)
+    return { into, summary: existsSync(into) ? readFileSync(into, 'utf8') : null }
+  }
+
+  it('writes nothing, and no file, for a run that wrote no summary', () => {
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, null, 100).summary).toBe(null)
+      expect(folded(root, null, 100, 'kept\n').summary).toBe('kept\n')
+    })
+  })
+
+  it('adds all of what fits to what is there, up to the last byte of the limit', () => {
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'aaa\nbbb\n', 8).summary).toBe('aaa\nbbb\n')
+    })
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'bbb\n', 8, 'aaa\n').summary).toBe('aaa\nbbb\n')
+    })
+  })
+
+  it('cuts at the last line feed inside the room, and says how much it cut', () => {
+    inScratch('mutants-summary-', (root) => {
+      /* The room is 8: the line feed at byte 8 is the first byte past it. */
+      expect(folded(root, 'aaa\nbbbb\ncc\n', 8).summary).toBe(`aaa\n${noticeOf(8)}`)
+    })
+    inScratch('mutants-summary-', (root) => {
+      /* And a line feed on the last byte of the room is inside it. */
+      expect(folded(root, 'aaa\nbbb\ncc\n', 8).summary).toBe(`aaa\nbbb\n${noticeOf(3)}`)
+    })
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'bbb\ncc\n', 8, 'aaa\n').summary).toBe(`aaa\nbbb\n${noticeOf(3)}`)
+    })
+  })
+
+  it('keeps none of a run whose first line does not fit, and none of one with no room at all', () => {
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'a'.repeat(9), 8).summary).toBe(noticeOf(9))
+    })
+    /* No room is not a position to search back from: a negative one counts from the end. */
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'bbb\n', 8, 'aaaaaaaa').summary).toBe(`aaaaaaaa${noticeOf(4)}`)
+    })
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'bbb\n', 8, 'aaaaaaaaa').summary).toBe(`aaaaaaaaa${noticeOf(4)}`)
+    })
+  })
+
+  it('counts bytes and never splits a character', () => {
+    inScratch('mutants-summary-', (root) => {
+      /* Three bytes each, so eight bytes end inside the third. */
+      expect(folded(root, '中\n中中\n中\n', 8).summary).toBe(`中\n${noticeOf(11)}`)
+    })
+  })
+
+  it('adds nothing after the notice, for this run or for any other process', () => {
+    inScratch('mutants-summary-', (root) => {
+      const { summary: first } = folded(root, 'a'.repeat(9), 8)
+      const { summary: second } = folded(root, 'b\n', 8)
+      const { summary: third } = folded(root, 'c'.repeat(9), 1_000_000)
+
+      expect(second).toBe(first)
+      expect(third).toBe(first)
+    })
+  })
+
+  /* A report may mention the notice's words; only the notice ends in them. */
+  it('goes on after a run that merely quoted the notice', () => {
+    inScratch('mutants-summary-', (root) => {
+      expect(folded(root, 'more\n', 1000, `${ENDING}and went on\n`).summary).toBe(`${ENDING}and went on\nmore\n`)
+    })
+  })
+
+  describe('through a real run', () => {
+    /** A Stryker stand-in at `root` that writes this much to the summary it is given, and says which file that was. */
+    const standIn = (root, bytes) =>
+      plant(root, {
+        'node_modules/@stryker-mutator/core/package.json': JSON.stringify({ bin: './stand-in.mjs' }),
+        'node_modules/@stryker-mutator/core/stand-in.mjs':
+          "import { appendFileSync, writeFileSync } from 'node:fs'\n" +
+          "writeFileSync('told.txt', String(process.env.GITHUB_STEP_SUMMARY))\n" +
+          `if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, 'a report of a test run under a mutant\\n'.repeat(${Math.ceil(bytes / 37)}))\n`,
+      })
+    const summaryAt = (root, at) => {
+      vi.stubEnv('GITHUB_STEP_SUMMARY', at)
+      onTestFinished(() => vi.unstubAllEnvs())
+      return path.join(root, 'told.txt')
+    }
+
+    it('keeps two runs that wrote what shard 1 wrote under GitHub’s limit, saying so once at the end', () => {
+      inScratch('mutants-summary-', (root) => {
+        standIn(root, 4612 * 1024)
+        const summary = path.join(root, 'summary.md')
+        const told = summaryAt(root, summary)
+
+        expect(strykerRun('config.json', root)).toBe(true)
+        expect(readFileSync(told, 'utf8')).not.toBe(summary)
+        expect(strykerRun('config.json', root)).toBe(true)
+
+        const left = readFileSync(summary)
+        const text = left.toString()
+        expect(left.length).toBeLessThan(1024 * 1024)
+        expect(left.length).toBeGreaterThan(990_000)
+        expect(text.split('stops here').length).toBe(2)
+        expect(text.endsWith(ENDING)).toBe(true)
+      })
+    })
+
+    it('passes on all of a run that fits', () => {
+      inScratch('mutants-summary-', (root) => {
+        standIn(root, 370)
+        const summary = path.join(root, 'summary.md')
+        summaryAt(root, summary)
+
+        expect(strykerRun('config.json', root)).toBe(true)
+
+        expect(readFileSync(summary, 'utf8')).toBe('a report of a test run under a mutant\n'.repeat(10))
+      })
+    })
+
+    it('touches nothing outside a step, where the variable is not set', () => {
+      inScratch('mutants-summary-', (root) => {
+        standIn(root, 370)
+        const told = summaryAt(root, undefined)
+
+        expect(strykerRun('config.json', root)).toBe(true)
+
+        expect(readFileSync(told, 'utf8')).toBe('undefined')
+      })
+    })
   })
 })
 

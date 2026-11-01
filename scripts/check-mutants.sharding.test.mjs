@@ -8,6 +8,7 @@ import { describe, expect, it, onTestFinished } from 'vitest'
 import {
   REPORT,
   assignShards,
+  costOf,
   byName,
   carriedTestOptions,
   loadTestConfig,
@@ -15,7 +16,9 @@ import {
   measureAtBase,
   outcomeOf,
   resultFileFor,
+  matchedAcross,
   run,
+  sayContested,
   settledVerdict,
   sourceReaders,
   strykerConfig,
@@ -219,7 +222,7 @@ const resultIn = (results, shard, subject) => path.join(results, `shard-${shard}
 const receiptIn = (results, shard) => path.join(results, `shard-${shard}`, 'receipt.json')
 
 const ESTIMATE =
-  "  Mutant counts are an estimate of what a shard costs, not a measure of it: one mutant cost about fifteen times as much in one measured file as in another. Every result records the file's measured duration.\n"
+  "  Shards are balanced on mutants, weighed by what the files `costOf` names were measured to cost, and that is an estimate of what a shard costs, not a measure of it. Every result records the file's measured duration.\n"
 const reconcileFails = (manifest) =>
   `check-mutants: the shards do not account for every file in ${manifest} exactly once, so the sweep is not complete:\n`
 const reconciled = (manifest, shards) =>
@@ -373,6 +376,65 @@ describe('how a plan spreads its files over shards', () => {
     /* And with none isolated the scan starts at the first shard of all. */
     expect(assignShards(weighing(4, 3, 2), 3)).toEqual([1, 2, 3])
     expect(assignShards(weighing(4, 3, 2, 1), 3)).toEqual([1, 2, 3, 3])
+  })
+})
+
+/**
+ * ⚠️ **COST IS THE FILE'S, NOT ITS COUNT'S AND NOT ITS DIRECTORY'S.** `costOf` says
+ * why and from which runs. These hold each row to its number, and the plan to reading
+ * them; the replay of the plan they were measured against is in
+ * `check-mutants.test.mjs`, beside the step they have to fit.
+ */
+describe('what a file costs a shard', () => {
+  const file = (path, mutants = 100, kind = 'mutated') => ({ path, class: kind, mutants })
+
+  for (const [named, multiple] of [
+    ['scripts/verify.mjs', 2],
+    ['src/kernel/core/bookFolder.ts', 6],
+    ['src/kernel/core/libraryStore.ts', 2],
+    ['src/kernel/core/registry.ts', 3],
+    ['src/kernel/ui/App.tsx', 2],
+    ['src/kernel/ui/pane/LibraryPanel.tsx', 2],
+  ]) {
+    it(`costs ${named} ${multiple} times its mutants`, () => {
+      expect(costOf(file(named))).toBe(100 * multiple)
+    })
+  }
+
+  it('costs any other file its mutants, in either directory', () => {
+    expect(costOf(file('src/a.ts', 7))).toBe(7)
+    expect(costOf(file('scripts/a.mjs', 7))).toBe(7)
+  })
+
+  it('costs nothing for a file no run will try, whatever a mutant of it was measured to cost', () => {
+    expect(costOf(file('src/kernel/core/bookFolder.ts', 100, 'no-test-found'))).toBe(0)
+  })
+
+  it('isolates the file that costs most, not the file with most mutants', () => {
+    const subjects = [file('src/a.ts', 500), file('src/kernel/core/bookFolder.ts', 100)]
+
+    expect(assignShards(subjects, 2, 1)).toEqual([2, 1])
+  })
+
+  it('balances the rest on cost too', () => {
+    /* The two ordinary files beside it would each be lighter than it by count. */
+    const subjects = [file('src/a.ts', 100), file('src/b.ts', 100), file('src/kernel/core/registry.ts', 50)]
+
+    expect(assignShards(subjects, 2)).toEqual([2, 2, 1])
+  })
+
+  /* The plan says how many mutants a shard runs, and that is what it will run: the
+     multiple is only for placing them. */
+  it('still counts what a shard will run in mutants', async () => {
+    await inScratch('mutants-plan-', async (root) => {
+      const at = 'src/kernel/core/registry.ts'
+      const test = 'src/kernel/core/registry.test.ts'
+      checkout(root, { [at]: "export const a = 'a'\n", [test]: "import './registry'\n" })
+
+      const { stdout } = await planOver(root, { subjects: [at], tree: [at, test], shards: 2, isolate: 1 })
+
+      expect(stdout).toContain('  shard 1/2 — 1 file(s), 1 mutant(s) to run, a shard of its own\n')
+    })
   })
 })
 
@@ -1294,6 +1356,30 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
   const REPEATED = `its settle run met the same wall-clock timeout again at ${PLACE}`
   const UNDECIDED = `the merge base could not decide this mutant in src/a.ts: ${REPEATED}`
 
+  /* A record may reach here with a first report of no file beside a settle run that
+     found a survivor: a report of no file passes `reportMismatch`, and what it holds
+     is no timeout to have repeated. Without the guard this is a TypeError on the source
+     of nothing, where the record has a verdict to read. */
+  it('finds no repeat in a first run that reported on no file, and still reads the survivor its settle run found', async () => {
+    await inScratch('mutants-aggregate-', async (root) => {
+      const at = path.join(root, 'src/a.ts')
+
+      const { stderr, code } = await reconcile(root, planOf(), (digest) => ({
+        'shard-1/a.result.json': resultOf(digest, {
+          outcome: 'survived',
+          exitedCleanly: false,
+          report: null,
+          settle: { exitedCleanly: false, durationMs: 1, report: reportOf(at, [{ status: 'Survived' }]) },
+          base: owedAtBase(at),
+        }),
+        'shard-1/receipt.json': receiptOf(digest),
+      }))
+
+      expect(stderr).toBe('')
+      expect(code).toBe(0)
+    })
+  })
+
   it('bills a survivor the merge base could not decide as the reader’s to settle, in a sentence of its own', async () => {
     await inScratch('mutants-aggregate-', async (root) => {
       const at = path.join(root, 'src/a.ts')
@@ -1989,6 +2075,24 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
           'its base.added 1 is an object, which is not a survivor the merge base failed to answer for',
         ],
         [{ outcome: 'killed', base: owed({}) }, 'its base is an object, and killed is no survivor for the merge base to answer for'],
+        /* Each of these is a survivor that says why and which class it is, so what
+           refuses it is the one field it has wrong and nothing beside that field. */
+        ...[{ ...survivor, why: 5 }, { ...survivor, why: '' }].map((one) => [
+          { base: owed({ added: [{ ...one, at: '1:1', class: 'added' }] }) },
+          'its base.added 1 is an object, which is not a survivor the merge base failed to answer for',
+        ]),
+        [{ base: owed({ added: [null] }) }, 'its base.added 1 is null, which is not a survivor the merge base failed to answer for'],
+        ...[
+          { identity: survivor.identity },
+          { ...survivor, file: 5 },
+          { ...survivor, file: '' },
+          { ...survivor, identity: null },
+          { ...survivor, identity: { ...survivor.identity, scope: 5 } },
+          { ...survivor, identity: { ...survivor.identity, scope: [5] } },
+        ].map((one) => [
+          { base: owed({ added: [{ ...one, at: '1:1', why: 'x', class: 'added' }] }) },
+          'its base.added 1 is an object, which is not a survivor the merge base failed to answer for',
+        ]),
       ]
       let made = 0
       for (const [fields, why] of refusals) {
@@ -2044,6 +2148,7 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
         ['a settle run’s kill', [{ status: 'Timeout' }], [{ status: 'Killed' }], true],
         ['a settle run’s hit limit', [{ status: 'Timeout' }], [{ status: 'Timeout', statusReason: HIT }], true],
         ['a survivor', [{ status: 'Survived' }], null, false],
+        ['a survivor carrying a hit-limit reason', [{ status: 'Survived', statusReason: HIT }], null, false],
         ['a wall-clock timeout', [{ status: 'Timeout' }], null, false],
         ['a wall-clock timeout that repeated', [{ status: 'Timeout' }], [{ status: 'Timeout' }], false],
         ['no coverage', [{ status: 'NoCoverage' }], null, false],
@@ -2801,6 +2906,47 @@ describe('what an aggregate says of a sweep that failed', () => {
       )
       expect(code).toBe(1)
     })
+  })
+})
+
+/**
+ * ⚠️ **WHAT A SWEEP IS TOLD ABOUT MEASUREMENTS THAT DISAGREED.** The aggregate is
+ * the one place two measurements of one base file can meet, so this is asked
+ * directly as well as through it: a sweep gets there only with the base's runs
+ * already not reproducing each other.
+ */
+describe('what two measurements of one base file disagreed about', () => {
+  const CONTESTED =
+    "mutant(s) were contested between measurements of the same merge-base file — this does not change what any file owes, and it does say the base's runs did not reproduce each other:\n"
+
+  it('says nothing where they agreed, however many times the file was measured', () => {
+    expect(sayContested([], [['src/a.ts', 2]])).toBe('')
+  })
+
+  it('names every file measured more than once, with how many of its identities were contested, and no file measured once', () => {
+    const contested = [{ file: 'src/a.ts' }, { file: 'src/a.ts' }, { file: 'src/c.ts' }]
+    const measurements = [
+      ['src/a.ts', 2],
+      ['src/b.ts', 1],
+      ['src/c.ts', 3],
+      ['src/d.ts', 2],
+    ]
+
+    expect(sayContested(contested, measurements)).toBe(
+      `check-mutants: 3 ${CONTESTED}` +
+        '  src/a.ts — measured 2 time(s), 2 identity(ies) contested\n' +
+        '  src/c.ts — measured 3 time(s), 1 identity(ies) contested\n' +
+        '  src/d.ts — measured 2 time(s), 0 identity(ies) contested\n',
+    )
+  })
+
+  /* The pool's own arithmetic, in the shape the whole sweep reads it: what a hang
+     at the merge base answered for is counted up, and nothing is owed for it. */
+  it('counts a hang the merge base hung on too, and owes nothing for it', () => {
+    const hang = { file: 'src/a.ts', from: 'src/a.ts', at: '1:1', identity: { mutatorName: 'S', replacement: '""', original: "'a'", statement: "const a = 'a'", scope: [] } }
+    const entry = { at: '/abs/src/a.ts', named: 'src/a.ts', origin: { path: 'src/a.ts' }, here: [], atBase: [], undecided: [], hereHangs: [hang], baseHangs: [hang] }
+
+    expect(matchedAcross([entry]).byFile.get('src/a.ts')).toEqual({ authorised: 0, added: [], hangsAuthorised: 1, hangsAdded: [] })
   })
 })
 
