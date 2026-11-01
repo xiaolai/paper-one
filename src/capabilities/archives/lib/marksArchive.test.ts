@@ -1049,12 +1049,37 @@ describe('cards with no book on this shelf', () => {
     expect(parsed).toEqual({ version: 1, books: [] })
   })
 
-  it('counts each loose row against the archive row budget', () => {
+  /* AN OLDER ARCHIVE PAST THE BUDGET WAS READ AS FAR AS THE BUDGET, and reported as a
+     success without its last rows. Refused now, whichever row carries it past. */
+  describe('past the archive row budget', () => {
     const row = { bookId: 'x', kind: 'Idea', body: 'b', answer: '', source: '', createdAt: '2026-01-01T00:00:00.000Z', localAnchor: null }
-    const many = Array.from({ length: ARCHIVE_MAX_ROWS + 5 }, () => row)
-    expect(parseArchive(JSON.stringify({ version: 1, books: [], looseCards: many }))?.looseCards).toHaveLength(ARCHIVE_MAX_ROWS)
-    const full = Array.from({ length: ARCHIVE_MAX_ROWS - 2 }, () => ({ bookId: 'b', title: 't', marks: [], cards: [] }))
-    expect(parseArchive(JSON.stringify({ version: 1, books: [{ bookId: 'b', title: 't', cards: [row] }, ...full], looseCards: [row, row, row, row] })) ?? {}).not.toHaveProperty('looseCards')
+    const mark = { text: 'Call me', cfi: '', sectionIndex: 0, kind: 'highlight', createdAt: '2026-01-01T00:00:00.000Z' }
+    const emptyBook = { bookId: 'b', title: 't', marks: [], cards: [] }
+    const of = <T,>(length: number, one: T): T[] => Array.from({ length }, () => one)
+
+    it.each([
+      ['loose cards alone', { books: [], looseCards: of(ARCHIVE_MAX_ROWS + 1, row) }],
+      ['marks of one book', { books: [{ ...emptyBook, marks: of(ARCHIVE_MAX_ROWS, mark) }] }],
+      ['cards of one book', { books: [{ ...emptyBook, cards: of(ARCHIVE_MAX_ROWS, row) }] }],
+      ['books alone', { books: of(ARCHIVE_MAX_ROWS + 1, emptyBook) }],
+      ['books that are not objects', { books: of(ARCHIVE_MAX_ROWS + 1, 3) }],
+      ['rows that will not parse', { books: [{ ...emptyBook, marks: of(ARCHIVE_MAX_ROWS, null) }] }],
+      ['the loose cards after full books', { books: [{ ...emptyBook, cards: [row] }, ...of(ARCHIVE_MAX_ROWS - 3, emptyBook)], looseCards: of(2, row) }],
+    ])('refuses %s, rather than read as far as it reaches', (_name, body) => {
+      expect(() => parseArchive(JSON.stringify({ version: 1, ...body }))).toThrow(ArchiveOverLimit)
+    })
+
+    it('reads back one exactly at it, with nothing dropped', () => {
+      const looseCards = of(ARCHIVE_MAX_ROWS - 2, row)
+      const parsed = parseArchive(JSON.stringify({ version: 1, books: [{ ...emptyBook, cards: [row] }], looseCards }))
+      expect(parsed?.books[0]?.cards).toHaveLength(1)
+      expect(parsed?.looseCards).toHaveLength(ARCHIVE_MAX_ROWS - 2)
+    })
+
+    it('still reads a list that is not one as no rows at all', () => {
+      const parsed = parseArchive(JSON.stringify({ version: 1, books: [{ ...emptyBook, marks: 'nope', cards: { length: ARCHIVE_MAX_ROWS + 1 } }], looseCards: { length: ARCHIVE_MAX_ROWS + 1 } }))
+      expect(parsed).toEqual({ version: 1, books: [] })
+    })
   })
 
   it('caps a forged book id, as the row book id is capped', () => {
@@ -1128,7 +1153,7 @@ describe('cards with no book on this shelf', () => {
 })
 
 /*
- * WHAT IS EXPORTED MUST COME BACK. `parseArchive` stops at `ARCHIVE_MAX_ROWS` and
+ * WHAT IS EXPORTED MUST COME BACK. `parseArchive` refuses past `ARCHIVE_MAX_ROWS` and
  * the reader refuses a file over `ARCHIVE_MAX_BYTES`, and nothing on the way out
  * knew either number: a big enough library wrote a backup that lost its last rows
  * on import, without a word, and `looseCards` are the last rows.
@@ -1162,7 +1187,7 @@ describe('an export at the limits of what can be read back', () => {
   it('refuses one row over, rather than write a file that loses it on the way back', () => {
     const archive: MarksArchive = { version: 1, books: [], looseCards: Array.from({ length: ARCHIVE_MAX_ROWS + 1 }, () => looseRow) }
     expect(() => archiveText(archive)).toThrow(ArchiveOverLimit)
-    expect(parseArchive(JSON.stringify(archive))?.looseCards, 'what the refusal saves the reader from').toHaveLength(ARCHIVE_MAX_ROWS)
+    expect(() => parseArchive(JSON.stringify(archive)), 'what the refusal saves the reader from').toThrow(ArchiveOverLimit)
   })
 
   it('refuses a file the reader would refuse by size, and counts bytes rather than characters', () => {

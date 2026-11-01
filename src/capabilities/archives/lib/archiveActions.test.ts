@@ -227,6 +227,25 @@ describe('importing marginalia, and what actually landed', () => {
  * THE ASSERTION IS THAT NOTHING WAS WRITTEN, not that a sentence was said. A
  * notice beside a written archive is the same lost backup with an apology.
  */
+describe('an archive past what one file may hold', () => {
+  it('imports nothing, and does not call a good file unreadable', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(importMarksFromFile).mockRejectedValue(new ArchiveOverLimit('past the budget'))
+    const addMany = vi.fn(async () => {})
+    const marks = { loadAllNow: vi.fn(async () => []), addMany } as unknown as MarkStore
+    const cards = { getSnapshot: () => ({ all: [] }), addMany: vi.fn(async () => {}) } as unknown as Cards
+    const library = { getSnapshot: () => [] } as unknown as Library
+    const notice = vi.fn()
+
+    wired({ library, marks, cards, notice }).importMarks()
+    await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+
+    expect(addMany).not.toHaveBeenCalled()
+    expect(notice).toHaveBeenCalledWith('That file holds more marks and cards than Paper can read from one file — nothing was imported.')
+    logged.mockRestore()
+  })
+})
+
 describe('marginalia after a failed scan', () => {
   function mount(failure = new MarksScanFailed(), shelf: readonly { bookId: string; title: string }[] = []) {
     const loadAllNow = vi.fn(() => Promise.reject(failure))

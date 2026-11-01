@@ -480,7 +480,7 @@ export function exportMarks(
   return { version: 1, books: rows, ...(looseCards.length > 0 ? { looseCards } : {}) }
 }
 
-/** Refused on the way out: this file could not be read back whole. */
+/** Refused either way: on the way out this file could not be read back whole, and on the way in it would not be. */
 export class ArchiveOverLimit extends Error {
   override readonly name = 'ArchiveOverLimit'
 }
@@ -497,12 +497,11 @@ export function archiveRows(archive: MarksArchive): number {
  * The archive as the file it becomes, or a refusal.
  *
  * ⚠️ **BOTH OF THE READER'S LIMITS, ASKED BEFORE THERE IS A FILE.** `parseArchive`
- * stops at `ARCHIVE_MAX_ROWS` without a word and the importer refuses a file over
+ * refuses past `ARCHIVE_MAX_ROWS` and the importer refuses a file over
  * `ARCHIVE_MAX_BYTES`, so a library past either wrote a backup that reported a
- * success and could not be restored whole — with `looseCards`, the last rows read,
- * the first lost. Nothing in the stores bounds what a reader may accumulate, so
- * this cannot be argued away; refusing leaves any earlier backup standing and says
- * so, which a truncated file overwriting it would not.
+ * success and could not be restored at all. Nothing in the stores bounds what a
+ * reader may accumulate, so this cannot be argued away; refusing leaves any earlier
+ * backup standing and says so, which a file nobody can read back over it would not.
  *
  * JSON ONLY. Markdown is a reading copy and is never read back.
  */
@@ -654,6 +653,38 @@ function parseCard(raw: unknown): ArchivedCard | null {
 }
 
 /**
+ * How many rows of the budget this document asks for, the way `archiveRows` counts
+ * a finished archive, and asked of what the file says rather than what would parse.
+ *
+ * ⚠️ **A SMALL FILE CAN DESCRIBE A MILLION ROWS**, and only the BYTES were bounded —
+ * one caller up, and only recently. JSON is compact: a few megabytes of `{"id":"…"}`
+ * is hundreds of thousands of objects, and what costs is BUILDING them, not reading
+ * them. Counted across the whole archive rather than per book, because a hundred
+ * thousand books of one mark each is the same amount of work as one book of a
+ * hundred thousand.
+ *
+ * EVERY CANDIDATE COUNTS — each book object examined and each mark or card row handed
+ * to a parser, parsed or not. Counting only what PARSED let a compact archive of a
+ * million invalid rows, or a million empty book objects, cost a million iterations
+ * against a budget it never touched.
+ *
+ * STOPS AS SOON AS IT IS PAST, so even a forged list costs at most the budget once,
+ * in lengths read and nothing built.
+ */
+function rowsAsked(books: readonly unknown[], looseCards: unknown): number {
+  let rows = Array.isArray(looseCards) ? looseCards.length : 0
+  for (const one of books) {
+    if (rows > ARCHIVE_MAX_ROWS) break
+    rows += 1
+    if (typeof one !== 'object' || one === null) continue
+    const row = one as Record<string, unknown>
+    const [marks, cards] = [row['marks'], row['cards']]
+    rows += (Array.isArray(marks) ? marks.length : 0) + (Array.isArray(cards) ? cards.length : 0)
+  }
+  return rows
+}
+
+/**
  * Read an archive, keeping what survives and dropping what does not.
  *
  * Null ONLY when the document is not an archive at all — unparseable, or the
@@ -661,6 +692,13 @@ function parseCard(raw: unknown): ArchivedCard | null {
  * rest: this is a recovery path, and refusing the whole file over one bad row
  * is the behaviour that makes a backup worthless at the moment it is needed.
  * Same rule, same words, as `tagArchive.parseArchive`.
+ *
+ * ⚠️ **AND `ArchiveOverLimit` PAST THE ROW BUDGET, BEFORE ANY ROW IS BUILT.** This
+ * stopped at the budget and returned what it had read, so an older archive, written
+ * before `archiveText` refused one this size, imported as far as the budget and
+ * reported a success, without the last rows: `looseCards` first, and the reader not
+ * told. A broken row is noise this drops; a row past the budget is a good row this
+ * would not read, and that is said.
  */
 export function parseArchive(raw: string): MarksArchive | null {
   let parsed: unknown
@@ -672,28 +710,15 @@ export function parseArchive(raw: string): MarksArchive | null {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
   const doc = parsed as Record<string, unknown>
   if (doc['version'] !== 1 || !Array.isArray(doc['books'])) return null
+  const asked = rowsAsked(doc['books'], doc['looseCards'])
+  if (asked > ARCHIVE_MAX_ROWS) throw new ArchiveOverLimit(`past ${ARCHIVE_MAX_ROWS} rows`)
   const books: ArchivedMarkBook[] = []
-  /* ⚠️ **A SMALL FILE CAN DESCRIBE A MILLION ROWS**, and only the BYTES were
-   * bounded — one caller up, and only recently. JSON is compact: a few
-   * megabytes of `{"id":"…"}` is hundreds of thousands of objects, and what
-   * costs is BUILDING them, not reading them. Counted across the whole archive
-   * rather than per book, because a hundred thousand books of one mark each is
-   * the same amount of work as one book of a hundred thousand. */
-  /* EVERY CANDIDATE COUNTS — each book object examined and each mark or
-   * card row handed to a parser, parsed or not. Counting only what PARSED
-   * let a compact archive of a million invalid rows, or a million empty book
-   * objects, cost a million iterations against a budget it never touched. */
-  let rows = 0
   for (const one of doc['books']) {
-    if (rows >= ARCHIVE_MAX_ROWS) break
-    rows += 1
     if (typeof one !== 'object' || one === null) continue
     const row = one as Record<string, unknown>
-    const markRows = Array.isArray(row['marks']) ? row['marks'].slice(0, Math.max(0, ARCHIVE_MAX_ROWS - rows)) : []
-    rows += markRows.length
+    const markRows: readonly unknown[] = Array.isArray(row['marks']) ? row['marks'] : []
     const marks = markRows.map(parseMark).filter((mark): mark is ArchivedMark => mark !== null)
-    const cardRows = Array.isArray(row['cards']) ? row['cards'].slice(0, Math.max(0, ARCHIVE_MAX_ROWS - rows)) : []
-    rows += cardRows.length
+    const cardRows: readonly unknown[] = Array.isArray(row['cards']) ? row['cards'] : []
     const cards = cardRows.map(parseCard).filter((card): card is ArchivedCard => card !== null)
     if (marks.length === 0 && cards.length === 0) continue
     const bookId = str(row['bookId'], 200)
@@ -715,12 +740,9 @@ export function parseArchive(raw: string): MarksArchive | null {
       cards,
     })
   }
-  /* THE SAME BUDGET as the rows above, for the same reason: this list is as
-   * cheap to forge as they are. What is unreadable is dropped row by row, and a
-   * field that is not a list is no field — the books beside it are still good. */
-  const looseRows = Array.isArray(doc['looseCards'])
-    ? doc['looseCards'].slice(0, Math.max(0, ARCHIVE_MAX_ROWS - rows))
-    : []
+  /* What is unreadable is dropped row by row, and a field that is not a list is no
+     field — the books beside it are still good. */
+  const looseRows: readonly unknown[] = Array.isArray(doc['looseCards']) ? doc['looseCards'] : []
   const looseCards = looseRows.flatMap((raw): LooseCard[] => {
     const card = parseCard(raw)
     const bookId = card ? (raw as Record<string, unknown>)['bookId'] : null

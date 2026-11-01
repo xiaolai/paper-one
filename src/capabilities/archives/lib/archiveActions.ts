@@ -496,6 +496,14 @@ const importMarksNow = (): void => {
       notify(marksRefusal(cause, library.getSnapshot(), 'imported'))
       return
     }
+    /* THE FILE IS GOOD AND THE WHOLE OF IT WAS REFUSED, and "could not be read" would
+       send the reader looking for damage. An import is additive, so a file split by
+       hand comes in as two. */
+    if (cause instanceof ArchiveOverLimit) {
+      console.error('Paper: that marginalia is past what one archive can hold', cause)
+      notify('That file holds more marks and cards than Paper can read from one file — nothing was imported.')
+      return
+    }
     console.error('Paper: could not import that marginalia', cause)
     notify('That file could not be read.')
   })
