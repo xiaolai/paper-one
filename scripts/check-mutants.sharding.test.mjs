@@ -8,6 +8,7 @@ import { describe, expect, it, onTestFinished } from 'vitest'
 import {
   REPORT,
   assignShards,
+  costOf,
   byName,
   carriedTestOptions,
   loadTestConfig,
@@ -219,7 +220,7 @@ const resultIn = (results, shard, subject) => path.join(results, `shard-${shard}
 const receiptIn = (results, shard) => path.join(results, `shard-${shard}`, 'receipt.json')
 
 const ESTIMATE =
-  "  Mutant counts are an estimate of what a shard costs, not a measure of it: one mutant cost about fifteen times as much in one measured file as in another. Every result records the file's measured duration.\n"
+  "  Shards are balanced on mutants, weighed by what the files `costOf` names were measured to cost, and that is an estimate of what a shard costs, not a measure of it. Every result records the file's measured duration.\n"
 const reconcileFails = (manifest) =>
   `check-mutants: the shards do not account for every file in ${manifest} exactly once, so the sweep is not complete:\n`
 const reconciled = (manifest, shards) =>
@@ -373,6 +374,65 @@ describe('how a plan spreads its files over shards', () => {
     /* And with none isolated the scan starts at the first shard of all. */
     expect(assignShards(weighing(4, 3, 2), 3)).toEqual([1, 2, 3])
     expect(assignShards(weighing(4, 3, 2, 1), 3)).toEqual([1, 2, 3, 3])
+  })
+})
+
+/**
+ * ⚠️ **COST IS THE FILE'S, NOT ITS COUNT'S AND NOT ITS DIRECTORY'S.** `costOf` says
+ * why and from which runs. These hold each row to its number, and the plan to reading
+ * them; the replay of the plan they were measured against is in
+ * `check-mutants.test.mjs`, beside the step they have to fit.
+ */
+describe('what a file costs a shard', () => {
+  const file = (path, mutants = 100, kind = 'mutated') => ({ path, class: kind, mutants })
+
+  for (const [named, multiple] of [
+    ['scripts/verify.mjs', 2],
+    ['src/kernel/core/bookFolder.ts', 6],
+    ['src/kernel/core/libraryStore.ts', 2],
+    ['src/kernel/core/registry.ts', 3],
+    ['src/kernel/ui/App.tsx', 2],
+    ['src/kernel/ui/pane/LibraryPanel.tsx', 2],
+  ]) {
+    it(`costs ${named} ${multiple} times its mutants`, () => {
+      expect(costOf(file(named))).toBe(100 * multiple)
+    })
+  }
+
+  it('costs any other file its mutants, in either directory', () => {
+    expect(costOf(file('src/a.ts', 7))).toBe(7)
+    expect(costOf(file('scripts/a.mjs', 7))).toBe(7)
+  })
+
+  it('costs nothing for a file no run will try, whatever a mutant of it was measured to cost', () => {
+    expect(costOf(file('src/kernel/core/bookFolder.ts', 100, 'no-test-found'))).toBe(0)
+  })
+
+  it('isolates the file that costs most, not the file with most mutants', () => {
+    const subjects = [file('src/a.ts', 500), file('src/kernel/core/bookFolder.ts', 100)]
+
+    expect(assignShards(subjects, 2, 1)).toEqual([2, 1])
+  })
+
+  it('balances the rest on cost too', () => {
+    /* The two ordinary files beside it would each be lighter than it by count. */
+    const subjects = [file('src/a.ts', 100), file('src/b.ts', 100), file('src/kernel/core/registry.ts', 50)]
+
+    expect(assignShards(subjects, 2)).toEqual([2, 2, 1])
+  })
+
+  /* The plan says how many mutants a shard runs, and that is what it will run: the
+     multiple is only for placing them. */
+  it('still counts what a shard will run in mutants', async () => {
+    await inScratch('mutants-plan-', async (root) => {
+      const at = 'src/kernel/core/registry.ts'
+      const test = 'src/kernel/core/registry.test.ts'
+      checkout(root, { [at]: "export const a = 'a'\n", [test]: "import './registry'\n" })
+
+      const { stdout } = await planOver(root, { subjects: [at], tree: [at, test], shards: 2, isolate: 1 })
+
+      expect(stdout).toContain('  shard 1/2 — 1 file(s), 1 mutant(s) to run, a shard of its own\n')
+    })
   })
 })
 

@@ -3414,10 +3414,10 @@ function isInstalled(specifier, root) {
  * ⚠️ **THE WIDENED SWEEP HAD NO BOUND, AND A CI STEP HAS ONE** (2026-09-17). It
  * costs a whole extra sweep of the file, plus that sweep's settle run: measured
  * on `session.ts`, 31 and 30 minutes against a 12-minute narrow run. On the
- * heaviest subject this gate has — itself, about 545 minutes for ONE
- * plain pass — starting a second one unbounded is how a 345-minute step ends
- * with no answer at all, which is worse than the wrong answer it was trying to
- * correct.
+ * heaviest subject this gate has — itself, 82 minutes for ONE plain pass and 337
+ * for the two runs here and the two at the merge base, on PR run 41227478169 —
+ * starting a second one unbounded is how a 345-minute step ends with no answer
+ * at all, which is worse than the wrong answer it was trying to correct.
  *
  * A file's own sweep is the honest estimate of what sweeping it again costs, so
  * that is what is spent against the budget. Refusing to widen leaves the NARROW
@@ -5084,7 +5084,7 @@ async function planSweep({ manifest, shards, isolate, base, only, requireBase },
         const toRun = mine.reduce((sum, subject) => sum + weightOf(subject), 0)
         return `  shard ${at + 1}/${shards} — ${mine.length} file(s), ${toRun} mutant(s) to run${at < alone ? ', a shard of its own' : ''}\n`
       }).join('') +
-      "  Mutant counts are an estimate of what a shard costs, not a measure of it: one mutant cost about fifteen times as much in one measured file as in another. Every result records the file's measured duration.\n",
+      "  Shards are balanced on mutants, weighed by what the files `costOf` names were measured to cost, and that is an estimate of what a shard costs, not a measure of it. Every result records the file's measured duration.\n",
   )
   return 0
 }
@@ -5287,21 +5287,49 @@ function weightOf(subject) {
 }
 
 /**
- * The shard, from 1, each of `subjects` is swept in: the `isolate` heaviest get a
- * shard of their own, and the rest go one at a time, heaviest first, to whichever
- * remaining shard is lightest — ties to the lowest shard, and equal weights in
- * path order, so the answer does not depend on the order `subjects` arrive in.
+ * What a subject costs a shard: its mutants, times how many ordinary mutants one
+ * of them was measured to cost. A file not named here costs what most do.
  *
- * ⚠️ **THE WEIGHT IS A MUTANT COUNT, AND A MUTANT COUNT IS AN ESTIMATE OF TIME.**
- * Measured 2026-09-14: `check-browser-safe.mjs`, 290 mutants, 17 s; and
- * `check-mutants.mjs`, 1 200 mutants, 18 min 5 s — about fifteen times the cost a
- * mutant. So the heaviest are isolated rather than trusted to balance, and every
- * result records its measured duration, which is what a better weight would be
- * built from. A file no Stryker run will try weighs nothing.
+ * ⚠️ **A MUTANT COUNT DOES NOT SAY WHAT A FILE COSTS, AND NEITHER DOES ITS
+ * DIRECTORY.** Across every pass of PR run 41201387001 a mutant cost 0.064 minutes
+ * on the whole, and 0.065 in `src/` against 0.059 in `scripts/`: no difference a
+ * weight could use. What differs is the file: `bookFolder.ts` has 798 mutants and
+ * cost 318 minutes, the 831 of `circle/lib/publish.ts` cost 2. By count those two
+ * are peers, and over the plan of PR run 41227478169 a count put 581 minutes on a
+ * shared shard of a 345-minute step. So each multiple here is that one file's
+ * measured minutes per mutant over the 0.064, rounded, for a file that cost 30
+ * minutes or more at twice that rate or more; whole numbers, so that every other
+ * file still ties with itself and path order still decides. Over that plan these
+ * six give a slowest shard of 337, and the test beside `SHARDS` replays it.
+ *
+ * Built where it is read so that none of it is a static mutant.
+ */
+export function costOf(subject) {
+  const measured = {
+    'scripts/verify.mjs': 2,
+    'src/kernel/core/bookFolder.ts': 6,
+    'src/kernel/core/libraryStore.ts': 2,
+    'src/kernel/core/registry.ts': 3,
+    'src/kernel/ui/App.tsx': 2,
+    'src/kernel/ui/pane/LibraryPanel.tsx': 2,
+  }
+  return weightOf(subject) * (measured[subject.path] ?? 1)
+}
+
+/**
+ * The shard, from 1, each of `subjects` is swept in: the `isolate` costliest get a
+ * shard of their own, and the rest go one at a time, costliest first, to whichever
+ * remaining shard is lightest — ties to the lowest shard, and equal costs in path
+ * order, so the answer does not depend on the order `subjects` arrive in.
+ *
+ * ⚠️ **THE WEIGHT IS `costOf`, AND THAT IS STILL AN ESTIMATE OF TIME.** So the
+ * costliest are isolated rather than trusted to balance, and every result records
+ * its measured duration, which is what the next correction to `costOf` is built
+ * from. A file no Stryker run will try weighs nothing.
  */
 export function assignShards(subjects, count, isolate = 0) {
   const order = subjects
-    .map((subject, at) => ({ at, weight: weightOf(subject), path: subject.path }))
+    .map((subject, at) => ({ at, weight: costOf(subject), path: subject.path }))
     .sort((a, b) => b.weight - a.weight || byName(a.path, b.path))
   const shards = []
   const load = Array.from({ length: count }, () => 0)

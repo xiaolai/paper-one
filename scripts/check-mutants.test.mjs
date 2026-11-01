@@ -4588,7 +4588,7 @@ const resultIn = (results, shard, subject) => path.join(results, `shard-${shard}
 const receiptIn = (results, shard) => path.join(results, `shard-${shard}`, 'receipt.json')
 
 const ESTIMATE =
-  "  Mutant counts are an estimate of what a shard costs, not a measure of it: one mutant cost about fifteen times as much in one measured file as in another. Every result records the file's measured duration.\n"
+  "  Shards are balanced on mutants, weighed by what the files `costOf` names were measured to cost, and that is an estimate of what a shard costs, not a measure of it. Every result records the file's measured duration.\n"
 const shardSays = (manifest, spec, files) =>
   `check-mutants: shard ${spec} of ${manifest} — ${files} file(s) are this shard's; whether the sweep passed is for --aggregate to say, over every shard\n`
 const emptyShardSays = (manifest, spec) =>
@@ -5097,10 +5097,10 @@ describe('a survivor measured against the merge base', () => {
 
   /* ⚠️ **AND A SECOND WIDE PASS IS NOT ALWAYS AFFORDABLE.** It costs a whole
      sweep of the file again: measured on `session.ts`, 31 minutes against a
-     12-minute narrow run. On this gate's own heaviest subject — itself, at an
-     about 545 minutes for one plain pass — starting a second one unbounded
-     is how a CI step ends with no answer at all, which is worse than
-     the answer it was trying to correct. The file's own sweep is what a second
+     12-minute narrow run. On this gate's own heaviest subject — itself, at 82
+     minutes for one plain pass and 337 for its four runs, measured on PR run
+     41227478169 — starting a second one unbounded is how a CI step ends with
+     no answer at all, which is worse than the answer it was trying to correct. The file's own sweep is what a second
      one would cost, so that is what is spent against the budget; refusing leaves
      the NARROW bill standing, which is the safe direction, and says so. */
   it('spends no second sweep on a file whose own sweep was already too long, and names the bill as the narrow one', async () =>
@@ -7711,100 +7711,151 @@ describe('the workflow sweeps in isolated shards of one frozen plan, reconciled 
     }
   })
 
-  /* (g) What one shard may be asked to do, replayed through the real `assignShards`
-     with what PR run 41201387001 measured: each planned file's mutants, and the minutes
-     it costs through head, merge base and widening. `bookFolder.ts` is projected, 21.1 +
-     148.3 + 148.3 = 318, because a 90-minute deadline killed its base settle run; a
-     settle run measured 0.94 to 1.03 of its first, and widening what the merge base cost.
+  /* (g) What one shard may be asked to do, replayed through the real `assignShards`:
+     the plan of PR run 41227478169, each file's mutants and the minutes it costs through
+     head, merge base and widening. 73 rows come from PR run 41201387001, which measured
+     those passes; `bookFolder.ts` is projected there, 21.1 + 148.3 + 148.3 = 318, because
+     a 90-minute deadline killed its base settle run. 29 are four times the first pass 41227478169
+     measured, since a settle run measured 0.94 to 1.03 of its first. 26 ran in neither,
+     and are projected at 0.0639 minutes a mutant, which is what those 73 cost on the
+     whole. So this is an estimate, and over its limits a shard times out, leaves no
+     receipt and fails: red, never green.
 
-     ⚠️ **THIS GATE'S OWN FILE DOES NOT FIT, AND NO BOUND HERE MAKES IT FIT.** A sample
-     of it measured at acceptance (2026-11-01): 198 mutants in 20 min 57 s at concurrency
-     4, which is 25 runner-seconds a mutant, so 5 148 mutants take 545 minutes for ONE
-     pass. Fitting 345 needs 16. A branch that changes `check-mutants.mjs` therefore times
-     out on that shard, leaves no receipt, and the aggregate fails it: red, never green.
-     Where it should run instead is the owner's decision. What this test pins is what is
-     true: that file does not fit, and every OTHER subject does, even on a shared shard
-     beside it. */
-  it('fits every subject but this gate inside a shard’s step on the measured replay, and pins that this gate does not', () => {
-    const GATE_MUTANTS = 5148
-    const SAMPLE = { mutants: 198, seconds: 20 * 60 + 57, runners: 4 }
-    const gatePass = ((SAMPLE.seconds * SAMPLE.runners) / SAMPLE.mutants) * GATE_MUTANTS / SAMPLE.runners / 60
+     This gate's own file is measured, and fits: the four runs of 41227478169, with one
+     pass at 82 minutes where a sample of 198 of its mutants had projected 545. */
+  it('fits every subject inside a shard’s step on the measured replay, and only because of what files were measured to cost', () => {
+    const GATE_MUTANTS = 5253
+    const GATE_RUNS = [81.6, 83.05, 85.2, 87]
+    const gateCost = GATE_RUNS.reduce((sum, minutes) => sum + minutes, 0)
     const MEASURED_RUN = [
       ['src/kernel/core/libraryStore.ts', 1223, 119.3],
-      ['src/kernel/core/registry.ts', 867, 196.8],
+      ['src/kernel/ui/reader/session.ts', 1205, 12.8],
+      ['src/kernel/core/registry.ts', 920, 196.8],
       ['src/capabilities/circle/lib/publish.ts', 831, 2.2],
+      ['src/kernel/ui/App.tsx', 812, 95.1],
       ['src/kernel/core/bookFolder.ts', 798, 317.7],
       ['src/capabilities/sync/index.ts', 692, 21.5],
+      ['src/capabilities/archives/lib/marksArchive.ts', 595, 7.3],
+      ['src/kernel/ui/pane/Marginalia.tsx', 489, 8],
       ['src/capabilities/circle/lib/fetch.ts', 486, 1.3],
-      ['src/kernel/ui/pane/Marginalia.tsx', 480, 8],
+      ['src/kernel/ui/reader/useSpeech.ts', 485, 12.4],
       ['src/capabilities/circle/lib/page.ts', 423, 1.2],
       ['src/capabilities/circle/lib/store.ts', 414, 1.6],
+      ['src/capabilities/voices/lib/rows.ts', 414, 26.4],
+      ['src/kernel/ui/state.ts', 403, 4.8],
       ['src/capabilities/public/lib/publicStore.ts', 396, 11.7],
+      ['src/kernel/ui/commands.ts', 385, 2.2],
       ['src/capabilities/public/lib/envelope.ts', 382, 1.2],
+      ['src/kernel/core/markStore.ts', 376, 24],
+      ['src/capabilities/archives/lib/archiveActions.ts', 372, 2.4],
       ['scripts/verify.mjs', 371, 56.4],
+      ['src/kernel/ui/pane/Settings.tsx', 363, 13.6],
       ['src/capabilities/circle/lib/protocol.ts', 360, 3.8],
+      ['src/app/web/books.ts', 353, 2],
       ['src/kernel/ui/pane/LibraryPanel.tsx', 326, 36.5],
+      ['src/main.web.tsx', 300, 19.2],
       ['src/kernel/core/services/book.ts', 297, 6.8],
       ['src/capabilities/peer/index.ts', 296, 19.3],
       ['scripts/verify-without.mjs', 292, 4.7],
       ['src/capabilities/circle/lib/workClaim.ts', 292, 9.4],
+      ['src/kernel/ui/shell/TitleBar.tsx', 283, 6.8],
+      ['src/kernel/core/settings.ts', 280, 17.9],
+      ['src/kernel/core/services.ts', 279, 3.8],
       ['src/capabilities/circle/lib/shelf.ts', 274, 2.5],
-      ['src/kernel/core/services.ts', 273, 3.8],
       ['src/capabilities/circle/lib/receive.ts', 272, 0.9],
+      ['src/kernel/ui/reader/speech.ts', 267, 17.1],
       ['src/capabilities/sync/lib/status.ts', 261, 11.8],
       ['scripts/check-residue.mjs', 241, 1],
+      ['src/kernel/ui/reader/voiceChoice.ts', 234, 2],
+      ['src/capabilities/passages/index.ts', 227, 3],
       ['src/capabilities/circle/lib/circlePort.ts', 211, 7.1],
+      ['src/kernel/ui/accel.ts', 211, 13.5],
       ['src/capabilities/circle/lib/circleView.ts', 209, 3.5],
+      ['src/kernel/ui/reader/engineSpeaker.ts', 207, 13.2],
       ['src/capabilities/peer/lib/wire.ts', 206, 5.6],
-      ['src/capabilities/circle/index.ts', 191, 2.3],
+      ['src/capabilities/circle/index.ts', 193, 2.3],
+      ['src/kernel/core/cards.ts', 188, 1.1],
       ['src/capabilities/peer/ui/DevicesPane.tsx', 187, 7.1],
       ['src/capabilities/circle/lib/exchange.ts', 186, 0.7],
+      ['src/kernel/ui/panes.ts', 186, 11.9],
       ['scripts/check-dead-css.mjs', 176, 1.7],
       ['src/capabilities/public/lib/publicPort.ts', 175, 1.4],
       ['src/capabilities/circle/lib/lists.ts', 173, 0.7],
-      ['src/kernel/ui/pane/SidePane.tsx', 168, 2.3],
-      ['src/capabilities/public/index.ts', 165, 1.8],
+      ['src/kernel/ui/pane/SidePane.tsx', 169, 2.3],
+      ['src/capabilities/public/index.ts', 167, 1.8],
       ['src/capabilities/public/lib/order.ts', 164, 11.7],
       ['src/capabilities/circle/lib/opinion.ts', 162, 1.4],
       ['src/capabilities/circle/lib/log.ts', 161, 0.7],
+      ['src/kernel/ui/reader/speaker.ts', 161, 10.3],
+      ['scripts/lib/surfaces.mjs', 152, 3.4],
       ['src/capabilities/circle/lib/relationships.ts', 144, 1.1],
       ['src/capabilities/public/lib/voicePort.ts', 144, 0.3],
       ['src/kernel/ui/reader/reanchorPass.ts', 144, 3.6],
-      ['scripts/check-residue.selftest.mjs', 143, 0.6],
+      ['src/kernel/ui/hooks/useAudiobook.ts', 139, 2.4],
       ['src/capabilities/public/lib/binding.ts', 134, 4.2],
       ['src/capabilities/public/lib/overlay.ts', 132, 1.2],
       ['src/kernel/ui/hooks/useOverlays.ts', 130, 10.5],
       ['src/capabilities/circle/lib/workKey.ts', 129, 11.8],
       ['src/capabilities/public/ui/VoiceDecisions.tsx', 125, 7.7],
-      ['src/kernel/ui/reader/engineVoice.ts', 115, 0.2],
+      ['src/capabilities/archives/lib/tagArchive.ts', 119, 1.3],
       ['src/capabilities/circle/lib/identity.ts', 110, 7.5],
+      ['src/app/bootApp.ts', 105, 6.7],
       ['src/capabilities/public/lib/bounds.ts', 104, 5.2],
       ['src/capabilities/circle/lib/relationshipState.ts', 100, 0.3],
+      ['src/capabilities/cards/ui/Deck.tsx', 93, 5.9],
       ['src/capabilities/public/ui/PublishControl.tsx', 93, 9.4],
+      ['src/kernel/ui/overlays/CommandPalette.tsx', 93, 5.9],
       ['src/kernel/ui/reader/markPaint.ts', 92, 0.2],
+      ['src/kernel/ui/reader/engineVoice.ts', 88, 0.2],
+      ['src/capabilities/voices/lib/port.ts', 87, 0.8],
       ['src/capabilities/circle/lib/sharing.ts', 83, 1],
-      ['src/kernel/ui/pane/Cards.tsx', 81, 3.6],
+      ['src/kernel/core/pickedFile.ts', 81, 0.5],
       ['src/kernel/core/serviceTable.ts', 79, 11.3],
       ['src/capabilities/circle/ui/ShareControl.tsx', 71, 2.7],
+      ['src/kernel/ui/reader/audiobook.ts', 71, 4.5],
       ['src/kernel/core/services/rows.ts', 68, 3.4],
+      ['src/kernel/ui/hooks/useMarks.ts', 68, 4.3],
+      ['src/kernel/ui/reader/speechSkip.ts', 66, 1.2],
       ['src/capabilities/circle/ui/PairingSection.tsx', 65, 2.7],
       ['src/capabilities/circle/lib/bound.ts', 64, 2.3],
       ['src/capabilities/circle/lib/foreign.ts', 63, 3.4],
       ['src/capabilities/public/lib/publicShare.ts', 63, 2.4],
       ['src/capabilities/public/lib/publishPort.ts', 62, 0.7],
+      ['src/kernel/core/uiTypes.ts', 60, 0.5],
       ['src/capabilities/circle/lib/list.ts', 49, 3.1],
       ['src/capabilities/public/lib/crypto.ts', 49, 0.5],
       ['src/capabilities/public/lib/presentation.ts', 48, 2.3],
       ['src/capabilities/circle/lib/crypto.ts', 45, 0.3],
+      ['src/kernel/ui/reader/speakerRouting.ts', 45, 2.9],
+      ['src/capabilities/archives/lib/marksFiles.ts', 42, 0.5],
       ['src/kernel/core/ports.ts', 40, 0.2],
+      ['src/capabilities/cards/index.ts', 39, 2.5],
+      ['src/capabilities/voices/lib/wire.ts', 38, 2.4],
+      ['src/capabilities/archives/index.ts', 35, 0.5],
       ['src/capabilities/public/lib/publish.ts', 28, 0.1],
+      ['src/kernel/core/packSize.ts', 27, 1.7],
+      ['src/capabilities/archives/lib/tagFiles.ts', 26, 0.5],
       ['src/kernel/core/bookAccent.ts', 26, 21.8],
-      ['src/capabilities/peer/lib/p2pSwitch.ts', 20, 0.5],
+      ['src/app/mobile/MobileApp.tsx', 25, 1.3],
+      ['src/app/shell/TabBar.tsx', 25, 1.6],
+      ['src/kernel/core/pluginSwitches.ts', 24, 0.9],
+      ['src/capabilities/peer/lib/p2pSwitch.ts', 21, 0.5],
+      ['src/kernel/ui/hooks/useVoices.ts', 21, 1.3],
+      ['src/capabilities/voices/index.ts', 19, 0.7],
+      ['src/app/web/useRemoteStores.ts', 16, 0.9],
+      ['src/kernel/ui/pickedFilesTauri.ts', 15, 1],
       ['src/kernel/core/foreignAnnotation.ts', 13, 3.2],
+      ['src/kernel/ui/pane/FilterChips.tsx', 12, 0.9],
       ['src/capabilities/circle/lib/listsPort.ts', 10, 0.8],
+      ['src/capabilities/cards/lib/cardFromMark.ts', 9, 0.6],
       ['src/capabilities/circle/lib/spendLedger.ts', 9, 0.5],
       ['src/capabilities/peer/lib/qrSvg.ts', 9, 1.9],
+      ['src/kernel/core/services/environment.ts', 9, 0.6],
+      ['src/kernel/ui/inTauri.ts', 8, 0.6],
       ['src/kernel/core/readingState.ts', 5, 0.1],
+      ['src/capabilities/cards/ui/MakeCard.tsx', 3, 0.2],
+      ['src/app/composition.desktop.ts', 1, 0.1],
+      ['src/kernel/ui/contributionIcon.ts', 1, 0.1],
     ]
     const shard = job('mutants-shard')
     const [sweep] = running(stepsOf(shard), SWEEPS)
@@ -7812,14 +7863,19 @@ describe('the workflow sweeps in isolated shards of one frozen plan, reconciled 
     const whole = Number(valueAt(shard, 4, 'timeout-minutes'))
     const env = blockOf(job('mutants-plan'), 4, 'env')
     const [shards, isolate] = [Number(valueAt(env, 6, 'SHARDS')), Number(valueAt(env, 6, 'ISOLATE'))]
-    /** What each shard costs when `costs`, as `[path, mutants, minutes]`, are planned over the workflow's own numbers. */
-    const loadsOver = (costs) => {
-      const load = Array.from({ length: shards }, () => 0)
-      const subjects = costs.map(([named, mutants]) => ({ path: named, class: 'mutated', mutants }))
-      assignShards(subjects, shards, isolate).forEach((one, at) => (load[one - 1] += costs[at][2]))
-      return load
+    /** What each shard costs and holds when `costs`, as `[path, mutants, minutes]`, are planned over the workflow's own numbers. */
+    const plannedOver = (costs, named = (at) => costs[at][0]) => {
+      const planned = Array.from({ length: shards }, () => ({ load: 0, holds: [] }))
+      const subjects = costs.map(([, mutants], at) => ({ path: named(at), class: 'mutated', mutants }))
+      assignShards(subjects, shards, isolate).forEach((one, at) => {
+        planned[one - 1].load += costs[at][2]
+        planned[one - 1].holds.push(costs[at][0])
+      })
+      return planned
     }
-    const [gateShard, ...rest] = loadsOver([['scripts/check-mutants.mjs', GATE_MUTANTS, gatePass], ...MEASURED_RUN])
+    const replay = [['scripts/check-mutants.mjs', GATE_MUTANTS, gateCost], ...MEASURED_RUN]
+    const planned = plannedOver(replay)
+    const heaviest = (shardsOf) => Math.max(...shardsOf.map((one) => one.load))
 
     expect(valueAt(shard, 4, 'runs-on')).toBe('ubuntu-24.04')
     /* Room after a step that timed out, for the upload that names what it finished,
@@ -7828,10 +7884,21 @@ describe('the workflow sweeps in isolated shards of one frozen plan, reconciled 
     expect(whole).toBeLessThanOrEqual(360)
     expect(shards).toBeGreaterThan(isolate)
 
-    expect(Math.max(...loadsOver(MEASURED_RUN))).toBeLessThanOrEqual(step)
-    expect(Math.round(gatePass)).toBe(545)
-    expect(gateShard).toBeGreaterThan(step)
-    expect(Math.max(...rest)).toBeLessThanOrEqual(step)
+    expect(Math.round(gateCost)).toBe(337)
+    expect(heaviest(planned)).toBeLessThanOrEqual(step)
+    /* The slow files have a shard apiece, the gate's first among them: nothing shares a step with what eats it. */
+    expect(planned.slice(0, isolate).map((one) => one.holds)).toEqual([
+      ['scripts/check-mutants.mjs'],
+      ['src/kernel/core/bookFolder.ts'],
+      ['src/kernel/core/registry.ts'],
+      ['src/kernel/core/libraryStore.ts'],
+      ['src/kernel/ui/App.tsx'],
+    ])
+    /* And the same files, costed by their mutant counts alone, do not fit: `costOf` is what makes this true. */
+    expect(heaviest(plannedOver(replay, (at) => `src/anonymous-${at}.ts`))).toBeGreaterThan(step)
+  })
+})
+
   })
 })
 
