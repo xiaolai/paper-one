@@ -98,6 +98,18 @@ const place = (): NewMark =>
     chapter: 'Ch. 1',
   })
 
+/** What `loadAllNow` refused with: the test fails if it answered instead. */
+const refusal = (store: MarkStore): Promise<MarksScanFailed> =>
+  store.loadAllNow().then(
+    () => {
+      throw new Error('it answered')
+    },
+    (cause: unknown) => {
+      if (cause instanceof MarksScanFailed) return cause
+      throw cause
+    },
+  )
+
 describe('every mark, for something that is about to write a file', () => {
   it('refuses to answer at all when the scan failed', async () => {
     const store = createMarkStore({ fs: unlistableShelf(), queue: writeQueue() })
@@ -159,7 +171,10 @@ describe('every mark, for something that is about to write a file', () => {
       const { result } = renderHook(() => useMarks(store, BOOK))
 
       await act(async () => {
-        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+        const cause = await refusal(store)
+        /* Named, or the reader has a refusal and nothing to act on. */
+        expect(cause.damaged).toEqual([folderOf(OTHER)])
+        expect(cause.unsaved).toEqual([])
       })
       /* The panel's reading of the same scan is untouched: the book that did
          read is drawn, and the shelf is not said to have failed. */
@@ -178,6 +193,8 @@ describe('every mark, for something that is about to write a file', () => {
       const { result } = renderHook(() => useMarks(store, BOOK))
 
       await act(async () => {
+        /* The row may name no book at all: it is the folder it was in that is said. */
+        expect((await refusal(store)).damaged).toEqual([folderOf(OTHER)])
         await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
       })
       expect(result.current.scanFailed).toBe(false)
@@ -277,6 +294,9 @@ describe('every mark, for something that is about to write a file', () => {
         open(new Error('disk full'))
         await expect(saving).rejects.toThrow('disk full')
         await expect(answer).rejects.toBeInstanceOf(MarksScanFailed)
+        /* Its file is healthy, so this one is not called damaged: removing a book
+           whose only trouble is one lost edit would cost the reader all the rest. */
+        expect(await refusal(store)).toMatchObject({ damaged: [], unsaved: [folderOf(BOOK)] })
         expect(store.getSnapshot().persistent).toBe(false)
       })
 
@@ -329,7 +349,8 @@ describe('every mark, for something that is about to write a file', () => {
         const { store } = await losing()
         await store.open(OTHER)
         await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
-        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+        /* Not the flag, cleared by opening OTHER, and it still names the right book. */
+        expect(await refusal(store)).toMatchObject({ damaged: [], unsaved: [folderOf(BOOK)] })
       })
 
       it('answers once that book reads back, when the screen agrees with the disk', async () => {
@@ -378,7 +399,28 @@ describe('every mark, for something that is about to write a file', () => {
         },
         queue: writeQueue(),
       })
-      await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+      expect((await refusal(store)).damaged).toEqual([folder])
+    })
+
+    it('names every book it left out, and only those', async () => {
+      const THIRD = 'book:third'
+      const store = await damaged((fs) => {
+        fs.store.set(recordPath(THIRD), new TextEncoder().encode('{}'))
+        fs.store.set(marksPathIn(THIRD), new TextEncoder().encode('not json'))
+        fs.store.set(marksPathIn(OTHER), new TextEncoder().encode('not json'))
+        return fs
+      })
+      expect([...(await refusal(store)).damaged].sort()).toEqual([folderOf(OTHER), folderOf(THIRD)].sort())
+    })
+
+    it('still folds an id two books share, read as one library', async () => {
+      const fs = shelf()
+      const mark = createMark(highlight())
+      fs.store.set(recordPath(OTHER), new TextEncoder().encode('{}'))
+      fs.store.set(marksPathIn(BOOK), new TextEncoder().encode(JSON.stringify([mark])))
+      fs.store.set(marksPathIn(OTHER), new TextEncoder().encode(JSON.stringify([mark])))
+      const store = createMarkStore({ fs, queue: writeQueue() })
+      await expect(store.loadAllNow()).resolves.toHaveLength(1)
     })
 
     it('answers again once the file reads', async () => {
@@ -527,6 +569,8 @@ describe('every mark, for something that is about to write a file', () => {
     expect(cause).toBeInstanceOf(MarksScanFailed)
     expect((cause as Error).name).toBe('MarksScanFailed')
     expect((cause as Error).message).toBe("the library's marks could not be read")
+    /* No book is to blame when the library will not list, and none may be named. */
+    expect(cause).toMatchObject({ damaged: [], unsaved: [] })
   })
 
   /* WHAT `unsaved` HOLDS WHILE A RETRY IS OUT. Only an ANSWER moves it: a write

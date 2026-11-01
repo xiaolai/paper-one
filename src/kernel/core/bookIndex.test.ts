@@ -846,7 +846,10 @@ describe('scanAllMarks', () => {
       [`${BOOKS_DIR}/book_b/marks.json`]: 'not json',
       [`${BOOKS_DIR}/book_c/marks.json`]: JSON.stringify([2, 3]),
     })
-    expect(await scanAllMarks(fs)).toEqual([1, 2, 3])
+    expect(await scanAllMarks(fs)).toEqual([
+      { folder: 'book_a', rows: [1] },
+      { folder: 'book_c', rows: [2, 3] },
+    ])
   })
 
   it('names the folders it skipped because a file there would not read, and not the ones with no file', async () => {
@@ -857,7 +860,7 @@ describe('scanAllMarks', () => {
       [`${BOOKS_DIR}/book_d/marks.json`]: '{}',
     })
     const unreadable: string[] = []
-    expect(await scanAllMarks(fs, (folder) => unreadable.push(folder))).toEqual([1])
+    expect(await scanAllMarks(fs, (folder) => unreadable.push(folder))).toEqual([{ folder: 'book_a', rows: [1] }])
     expect(unreadable.sort()).toEqual(['book_b', 'book_d'])
   })
 

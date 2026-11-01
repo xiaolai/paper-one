@@ -1,6 +1,6 @@
 import { notifyAll } from './notify'
 import { canonicalJson } from './canonicalJson'
-import { folderOf, marksPathIn, readMarks, trashOf, writeMarks } from './bookFolder'
+import { BOOKS_DIR, folderOf, marksPathIn, readMarks, trashOf, writeMarks } from './bookFolder'
 import type { ResolvedCfi } from './resolvedCfi'
 import { scanAllMarks, type IndexFs } from './bookIndex'
 import { hlcOf, type Hlc } from './hlc'
@@ -202,12 +202,27 @@ export interface MarkSnapshot {
  * is what decides the shape.
  */
 export class MarksScanFailed extends Error {
-  constructor() {
-    /* NO `cause` TO CARRY, and no parameter pretending there might be:
-       `MarkStore.loadAll` catches the scan's failure and does not keep it.
-       This says which failure it is, which is what the callers branch on. */
+  /**
+   * The book folders (as `folderOf` spells them) that were left out: a marks file
+   * there would not read, held a row this build refuses, or moved under the scan.
+   * Both lists empty means the library itself would not list, so no book is to blame.
+   */
+  readonly damaged: readonly string[]
+  /** The book folders whose marks memory holds and the disk does not: a write failed. */
+  readonly unsaved: readonly string[]
+
+  /* APART, because what the reader can do differs. The first needs its file back or
+     the book gone; the second has a healthy file and only needs reading again, and
+     telling them to remove that book would cost them the rest of its marks.
+
+     NO `cause` TO CARRY, and no parameter pretending there might be: `MarkStore.loadAll`
+     catches the scan's failure and does not keep it. This says which failure it is,
+     which is what the callers branch on. */
+  constructor(books: { readonly damaged?: readonly string[]; readonly unsaved?: readonly string[] } = {}) {
     super("the library's marks could not be read")
     this.name = 'MarksScanFailed'
+    this.damaged = books.damaged ?? []
+    this.unsaved = books.unsaved ?? []
   }
 }
 
@@ -363,6 +378,9 @@ export interface MarkStoreOptions {
 }
 
 /** Two lists say the same marks in the same order. Serialised, because that is what is stored. */
+/** One entry per folder: `book:abc` and `book_abc` are one book. */
+const foldersOf = (bookIds: readonly string[]): readonly string[] => [...new Set(bookIds.map(folderOf))]
+
 function sameMarks(a: readonly Mark[], b: readonly Mark[]): boolean {
   if (a === b) return true
   if (a.length !== b.length) return false
@@ -396,8 +414,8 @@ export function createMarkStore({
   let openId: string | null = null
   let all: readonly Mark[] = []
   let persistent = true
-  /** Whether a write has failed since the last successful load — see `applyElsewhere`. */
-  let failed = false
+  /** The books a write has failed for since the last successful load — see `applyElsewhere`. */
+  const failedWrites = new Set<string>()
   /** The book whose marks file was there and would not read — see `MarkSnapshot.unreadable`. */
   let unreadableId: string | null = null
   /** See `MarkSnapshot.scanFailed`. */
@@ -676,14 +694,14 @@ export function createMarkStore({
          * the loss behind the very thing that caused it. `open` is what clears
          * this, because that is the point at which what is on screen agrees
          * with what is on disk. */
-        if (!failed && !persistent) {
+        if (failedWrites.size === 0 && !persistent) {
           persistent = true
           changed = true
         }
         if (changed) publish()
       })
       .catch((cause: unknown) => {
-        failed = true
+        failedWrites.add(targetId)
         persistent = false
         publish()
         throw cause
@@ -751,7 +769,7 @@ export function createMarkStore({
       return Promise.resolve()
     }
     const target = fs
-    failed = false
+    failedWrites.clear()
     publish()
     return queue
       /* THE FOLDER IS THE KEY, exactly as the library keys its writes — the
@@ -775,7 +793,7 @@ export function createMarkStore({
          * the point the failure note in `applyElsewhere` names as what
          * clears the flag; it cleared `failed` and left `persistent` false
          * until the next write happened to succeed. */
-        if (!failed) persistent = true
+        if (failedWrites.size === 0) persistent = true
         publish()
       })
       .catch(() => {
@@ -811,21 +829,27 @@ export function createMarkStore({
     return marks
   }
 
-  /* Resolves with this scan's own rows, and whether they are everything that is
-     there. Together and its own, because scans overlap: the shared lists can
-     hold another scan's result by the time the caller of this one resumes. */
-  const scan = (): Promise<{ readonly rows: readonly Mark[]; readonly complete: boolean }> => {
-    if (!fs) return Promise.resolve({ rows: all, complete: true })
-    let complete = true
+  /* Resolves with this scan's own rows, and the book folders they leave out: none
+     when they are everything that is there, null when the library would not list.
+     Together and its own, because scans overlap: the shared lists can hold another
+     scan's result by the time the caller of this one resumes. */
+  const scan = (): Promise<{ readonly rows: readonly Mark[]; readonly leftOut: readonly string[] | null }> => {
+    if (!fs) return Promise.resolve({ rows: all, leftOut: [] })
+    const damaged = new Set<string>()
     /* WHERE EVERY BOOK STOOD WHEN THE SCAN STARTED — see `writeGen`. Anything
        that moves between here and the result landing is newer than the scan. */
     const before = new Map(writeGen)
-    return scanAllMarks(fs, () => {
-      complete = false
-    })
-      .then((raw) => {
-        const read = readStoredMarks(raw)
+    return scanAllMarks(fs, (folder) => damaged.add(folder))
+      .then((found) => {
+        /* THE LIBRARY AS ONE LIST, or an id two books share stops being folded. */
+        const read = readStoredMarks(found.flatMap(({ rows }) => rows))
         keptAside('the library', read.refused)
+        /* A row that would not validate is kept aside for the panel, and is still a
+           mark that a backup would leave out. Only a library holding one pays for
+           asking which book it is in. */
+        if (read.refused.length > 0) {
+          for (const { folder, rows } of found) if (readStoredMarks(rows).refused.length > 0) damaged.add(folder)
+        }
         const scanned = read.marks
         const stale = new Set(
           [...writeGen.keys()].filter((bookId) => writeGen.get(bookId) !== before.get(bookId)),
@@ -841,9 +865,7 @@ export function createMarkStore({
               ]
         scanFailed = false
         publish()
-        /* A row that would not validate is kept aside for the panel, and is
-           still a mark that a backup would leave out. */
-        return { rows: all, complete: complete && read.refused.length === 0 }
+        return { rows: all, leftOut: [...damaged].map((folder) => `${BOOKS_DIR}/${folder}`) }
       })
       .catch(() => {
         // A failed scan has not established that there is nothing; it has
@@ -851,7 +873,7 @@ export function createMarkStore({
         all = []
         scanFailed = true
         publish()
-        return { rows: EMPTY, complete: false }
+        return { rows: EMPTY, leftOut: null }
       })
   }
 
@@ -910,7 +932,7 @@ export function createMarkStore({
      * export, and `writeGen` keeps that book's rows from memory. */
     await queue.idle()
     const held = [...loaded.marks, ...all]
-    const { rows, complete } = await scan()
+    const { rows, leftOut } = await scan()
     /* ⚠️ A FAILED SCAN STILL RESOLVES, so this is the only thing that tells it
      * from an empty library — see `MarksScanFailed`. `loadAll` catches the
      * scan's failure and installs `[]` on purpose, for the panel that has to
@@ -930,12 +952,15 @@ export function createMarkStore({
      * what is unsaved goes back into the list the scan just replaced, or asking a
      * second time would find nothing held and answer. A row no longer in memory
      * cannot be known about. */
-    if (!complete || failed) throw new MarksScanFailed()
+    if (leftOut === null) throw new MarksScanFailed()
+    if (leftOut.length > 0 || failedWrites.size > 0) {
+      throw new MarksScanFailed({ damaged: leftOut, unsaved: foldersOf([...failedWrites]) })
+    }
     const unsaved = await unsavedAmong(held, rows)
     if (unsaved.length > 0) {
       all = mergeMarks(all, unsaved)
       publish()
-      throw new MarksScanFailed()
+      throw new MarksScanFailed({ unsaved: foldersOf(unsaved.map((mark) => mark.bookId)) })
     }
     const fresh = project(rows, null, (live) => live.filter(isBookmark))
     /* ⚠️ ALL THREE CLASSES. They share a file and a store and are split at the

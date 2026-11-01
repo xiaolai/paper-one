@@ -2,6 +2,7 @@ import {
   MarksScanFailed,
   createCard,
   createMark,
+  folderOf,
   type KernelServices,
   type MarkStore,
   type NewMark,
@@ -45,6 +46,49 @@ export interface Archives {
    is no longer a component, so there is no render for a snapshot to be stale
    behind, and the palette holds nothing that needs rebuilding when one changes. */
 export type ArchiveServices = Pick<KernelServices, 'library' | 'marks' | 'cards' | 'files' | 'notify'>
+
+/*
+ * NAMED, NOT COUNTED. An archive from another library matches nothing here, and an
+ * import that reports only its successes leaves the reader believing it worked; a
+ * refusal that names no book leaves them nothing to act on. Three titles fit in a
+ * sentence; past that the count carries the rest.
+ */
+const nameThem = (books: readonly { readonly title: string }[]): string => {
+  const named = books.slice(0, 3).map((one) => one.title || 'an untitled book').join(', ')
+  return `${named}${books.length > 3 ? ` and ${books.length - 3} more` : ''}`
+}
+
+/**
+ * The sentence for marks that would not read, ending in what the reader can do.
+ *
+ * THE ROUTE IS THE READER'S OWN, and there is no repair control on purpose: a
+ * damaged file may still hold what they want, and only they know whether a copy
+ * exists. A folder with no shelf row has no title, and its name is still somewhere
+ * to look. No folders at all means the library would not list, and no book can be
+ * blamed for that.
+ */
+function marksRefusal(cause: MarksScanFailed, shelf: readonly { readonly bookId: string; readonly title: string }[], undone: string): string {
+  const titled = (folder: string) => {
+    const book = shelf.find((one) => folderOf(one.bookId) === folder)
+    return book ?? { title: `the folder ${folder.slice(folder.lastIndexOf('/') + 1)}` }
+  }
+  const { damaged, unsaved } = cause
+  if (damaged.length === 0 && unsaved.length === 0) return `Your marks could not be read — nothing was ${undone}.`
+  const facts: string[] = []
+  const steps: string[] = []
+  if (damaged.length > 0) {
+    facts.push(`the marks for ${nameThem(damaged.map(titled))} could not be read`)
+    steps.push(damaged.length === 1 ? 'Restore that marks file or remove the book' : 'Restore those marks files or remove the books')
+  }
+  if (unsaved.length > 0) {
+    const one = unsaved.length === 1
+    facts.push(`${one ? 'a change' : 'changes'} to the marks for ${nameThem(unsaved.map(titled))} ${one ? 'was' : 'were'} not saved`)
+    steps.push(one ? 'open the book with the unsaved change again' : 'open the books with unsaved changes again')
+  }
+  const said = facts.join(' and ')
+  const step = steps.join(', and ')
+  return `${said[0]?.toUpperCase()}${said.slice(1)} — nothing was ${undone}. ${step[0]?.toUpperCase()}${step.slice(1)}, then try again.`
+}
 
 /**
  * Mint and write several marks for ONE book, in one store write.
@@ -209,7 +253,7 @@ const exportMarksNow = (): void => {
        which is the fact they most need. */
     if (cause instanceof MarksScanFailed) {
       console.error('Paper: could not read your marginalia to export it', cause)
-      notify('Your marks could not be read — nothing was exported.')
+      notify(marksRefusal(cause, library.getSnapshot(), 'exported'))
       return
     }
     /* NOT THE DISK'S FAULT, and retrying will not help. Said so the reader knows
@@ -377,14 +421,7 @@ const importMarksNow = (): void => {
             .filter(Boolean)
             .join(' and ')} could not be saved.`
         : ''
-    /* THE BOOKS THAT MATCHED NOTHING ARE NAMED, not counted. An archive from
-       another library matches nothing here, and an import that reports only
-       its successes leaves the reader believing it worked. Three titles fit
-       in a sentence; past that the count carries the rest. */
-    const nameThem = (books: readonly { readonly title: string }[]): string => {
-      const named = books.slice(0, 3).map((one) => one.title || 'an untitled book').join(', ')
-      return `${named}${books.length > 3 ? ` and ${books.length - 3} more` : ''}`
-    }
+    /* THE BOOKS THAT MATCHED NOTHING ARE NAMED — see `nameThem`. */
     const missing = plan.unmatched
     const missed = missing.length > 0 ? ` Not on this shelf: ${nameThem(missing)}.` : ''
     /* ⚠️ **A DIFFERENT SENTENCE FROM "not on this shelf" (WI-21.2).** These
@@ -456,7 +493,7 @@ const importMarksNow = (): void => {
      * sends them to replace an archive that is perfectly good. */
     if (cause instanceof MarksScanFailed) {
       console.error('Paper: could not read your marginalia to import against it', cause)
-      notify('Your marks could not be read — nothing was imported.')
+      notify(marksRefusal(cause, library.getSnapshot(), 'imported'))
       return
     }
     console.error('Paper: could not import that marginalia', cause)

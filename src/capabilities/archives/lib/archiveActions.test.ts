@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   MarksScanFailed,
   createMarkStore,
+  folderOf,
   recordPath,
   writeQueue,
   type FilePicker,
@@ -227,13 +228,13 @@ describe('importing marginalia, and what actually landed', () => {
  * notice beside a written archive is the same lost backup with an apology.
  */
 describe('marginalia after a failed scan', () => {
-  function mount() {
-    const loadAllNow = vi.fn(() => Promise.reject(new MarksScanFailed()))
+  function mount(failure = new MarksScanFailed(), shelf: readonly { bookId: string; title: string }[] = []) {
+    const loadAllNow = vi.fn(() => Promise.reject(failure))
     const addMany = vi.fn(async () => {})
     const makeMany = vi.fn(async () => {})
     const marks = { loadAllNow, addMany } as unknown as MarkStore
     const cards = { getSnapshot: () => ({ all: [] }), addMany: makeMany } as unknown as Cards
-    const library = { getSnapshot: () => [] } as unknown as Library
+    const library = { getSnapshot: () => shelf } as unknown as Library
     const notice = vi.fn()
     const archives = wired({ library, marks, cards, notice })
     return { addMany, makeMany, notice, archives }
@@ -270,6 +271,86 @@ describe('marginalia after a failed scan', () => {
     expect(makeMany).not.toHaveBeenCalled()
     expect(notice).toHaveBeenCalledWith('Your marks could not be read — nothing was imported.')
     logged.mockRestore()
+  })
+
+  /* A REFUSAL THAT NAMES NO BOOK LEAVES THE READER NOTHING TO DO. One damaged file
+     blocks both directions, for a whole library, so which one it is is the fact the
+     sentence exists to carry. */
+  describe('names the book that stopped it', () => {
+    const shelf = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'].map((title) => ({ bookId: `book:${title}`, title }))
+    const folders = (count: number) => shelf.slice(0, count).map((book) => folderOf(book.bookId))
+    const exported = async (failure: MarksScanFailed, books: readonly { bookId: string; title: string }[] = shelf) => {
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const { notice, archives } = mount(failure, books)
+      archives.exportMarks()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      logged.mockRestore()
+      expect(vi.mocked(exportMarksToFile), 'an archive was written anyway').not.toHaveBeenCalled()
+      return notice.mock.calls[0]?.[0]
+    }
+
+    it.each([
+      [
+        'one damaged file',
+        { damaged: folders(1) },
+        'The marks for Alpha could not be read — nothing was exported. Restore that marks file or remove the book, then try again.',
+      ],
+      [
+        'two damaged files',
+        { damaged: folders(2) },
+        'The marks for Alpha, Beta could not be read — nothing was exported. Restore those marks files or remove the books, then try again.',
+      ],
+      [
+        'more damaged files than a sentence holds',
+        { damaged: folders(5) },
+        'The marks for Alpha, Beta, Gamma and 2 more could not be read — nothing was exported. Restore those marks files or remove the books, then try again.',
+      ],
+      [
+        'one unsaved book, which is not told to remove it',
+        { unsaved: folders(1) },
+        'A change to the marks for Alpha was not saved — nothing was exported. Open the book with the unsaved change again, then try again.',
+      ],
+      [
+        'two unsaved books',
+        { unsaved: folders(2) },
+        'Changes to the marks for Alpha, Beta were not saved — nothing was exported. Open the books with unsaved changes again, then try again.',
+      ],
+      [
+        'one of each',
+        { damaged: folders(1), unsaved: folders(2).slice(1) },
+        'The marks for Alpha could not be read and a change to the marks for Beta was not saved — nothing was exported. Restore that marks file or remove the book, and open the book with the unsaved change again, then try again.',
+      ],
+    ])('for %s', async (_name, books, sentence) => {
+      expect(await exported(new MarksScanFailed(books))).toBe(sentence)
+    })
+
+    it('by its folder when the shelf has no row for it, which is still somewhere to look', async () => {
+      expect(await exported(new MarksScanFailed({ damaged: ['books/book_gone'] }))).toBe(
+        'The marks for the folder book_gone could not be read — nothing was exported. Restore that marks file or remove the book, then try again.',
+      )
+    })
+
+    it('as an untitled book when its row has no title', async () => {
+      const untitled = [{ bookId: 'book:x', title: '' }]
+      expect(await exported(new MarksScanFailed({ damaged: [folderOf('book:x')] }), untitled)).toContain('The marks for an untitled book could not')
+    })
+
+    it('when importing as well', async () => {
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+      vi.mocked(importMarksFromFile).mockResolvedValue({
+        archive: { version: 1, books: [] },
+      } as unknown as Awaited<ReturnType<typeof importMarksFromFile>>)
+      const { addMany, notice, archives } = mount(new MarksScanFailed({ damaged: folders(1) }), shelf)
+
+      archives.importMarks()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+
+      expect(addMany).not.toHaveBeenCalled()
+      expect(notice).toHaveBeenCalledWith(
+        'The marks for Alpha could not be read — nothing was imported. Restore that marks file or remove the book, then try again.',
+      )
+      logged.mockRestore()
+    })
   })
 })
 

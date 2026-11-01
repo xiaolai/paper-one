@@ -758,10 +758,16 @@ export async function writeIndex(
  * read. A book with no marks file is not one; an `exists` that fails proves
  * nothing, so it counts as there.
  *
+ * EACH BOOK'S ROWS WITH ITS FOLDER, because a row that will not validate is found
+ * after this returns, and what was left out has to be said by book.
+ *
  * This is the shape a SQLite index would eventually replace — and replacing it
  * would change nothing above, because the folders stay the truth either way.
  */
-export async function scanAllMarks(fs: IndexFs, onUnreadable?: (folder: string) => void): Promise<unknown[]> {
+export async function scanAllMarks(
+  fs: IndexFs,
+  onUnreadable?: (folder: string) => void,
+): Promise<readonly { readonly folder: string; readonly rows: readonly unknown[] }[]> {
   /* ABSENT AND UNREADABLE, distinguished — `listBooksDir` is that rule, held
    * in common with the shelf scan and the trust check. Resolving with `[]` for
    * both used to mean this function could not fail, so the caller's `.catch`
@@ -780,7 +786,7 @@ export async function scanAllMarks(fs: IndexFs, onUnreadable?: (folder: string) 
       try {
         const bytes = await fs.readFile(path)
         const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes))
-        if (Array.isArray(parsed)) return parsed
+        if (Array.isArray(parsed)) return { folder: entry.name, rows: parsed as unknown[] }
       } catch {
         const absent = await fs.exists(path).then((there) => !there, () => false)
         /* THE FOLDER GONE TOO MEANS IT MOVED OR WENT AFTER THE LISTING, not that
@@ -792,5 +798,5 @@ export async function scanAllMarks(fs: IndexFs, onUnreadable?: (folder: string) 
       return null
     },
   )
-  return marks.flatMap((one) => one ?? [])
+  return marks.filter((one) => one !== null)
 }
