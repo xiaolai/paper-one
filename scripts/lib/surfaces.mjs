@@ -208,10 +208,15 @@ const INCLUDED = Object.freeze([
 ])
 
 const EXCLUDED = Object.freeze({
+  // Stryker disable next-line StringLiteral: a reason for the reader; `namesOf` reads only the key
   readingSteps: 'fourteen integers; a document containing "15" proves nothing about whether the size ladder is described',
+  // Stryker disable next-line StringLiteral: a reason for the reader; `namesOf` reads only the key
   paneShortcuts: 'carries a ⌘ glyph and a pane id already covered by `panes`',
+  // Stryker disable next-line StringLiteral: a reason for the reader; `namesOf` reads only the key
   readerStyles: 'a subset of `markStyles`',
+  // Stryker disable next-line StringLiteral: a reason for the reader; `namesOf` reads only the key
   allFaces: 'a superset of `bundledFaces` whose extra members are probed at runtime and may legitimately never be described',
+  // Stryker disable next-line StringLiteral: a reason for the reader; `namesOf` reads only the key
   capabilities: 'walked separately below, seam by seam',
 })
 

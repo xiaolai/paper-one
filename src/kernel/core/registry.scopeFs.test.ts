@@ -188,11 +188,12 @@ describe('the reviewed shapes, edge by edge', () => {
     expect(publicFs.mkdir).not.toHaveBeenCalled()
   })
 
-  it('refuses the public store with anything after its name', async () => {
+  it('refuses the public store with anything before or after its name', async () => {
     const fs = rawFs()
-    await expect(scopeFs(fs, 'public')!.writeAtomic!('books/b/public.jsonl.bak', bytes, 'full')).rejects.toThrow(
-      /may only writeAtomic/u,
-    )
+    const scoped = scopeFs(fs, 'public')!
+    for (const path of ['x/books/b/public.jsonl', 'books/b/public.jsonl.bak']) {
+      await expect(scoped.writeAtomic!(path, bytes, 'full')).rejects.toThrow(/may only writeAtomic/u)
+    }
     expect(fs.writeAtomic).not.toHaveBeenCalled()
   })
 
