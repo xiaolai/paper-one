@@ -254,7 +254,8 @@ mod tests {
     use super::*;
 
     /// The two ways of taking a name, and the contract the callers' match arms hold them to.
-    const PLACERS: [(&str, fn(&Path, &Path) -> std::io::Result<()>); 2] = [
+    type Placer = fn(&Path, &Path) -> std::io::Result<()>;
+    const PLACERS: [(&str, Placer); 2] = [
         ("a hard link", |tmp, path| std::fs::hard_link(tmp, path)),
         ("the look and rename", rename_new),
     ];
@@ -275,7 +276,11 @@ mod tests {
             assert!(write_new_by(&path, b"first", place).unwrap(), "{name}");
             assert!(!write_new_by(&path, b"second", place).unwrap(), "{name}");
             assert_eq!(std::fs::read(&path).unwrap(), b"first", "{name}");
-            assert_eq!(temps_in(path.parent().unwrap()), Vec::<String>::new(), "{name}");
+            assert_eq!(
+                temps_in(path.parent().unwrap()),
+                Vec::<String>::new(),
+                "{name}"
+            );
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -309,7 +314,13 @@ mod tests {
             std::os::unix::fs::symlink(dir.join("nowhere"), &path).unwrap();
             let kind = place(&tmp, &path).unwrap_err().kind();
             assert_eq!(kind, std::io::ErrorKind::AlreadyExists, "{name}");
-            assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink(), "{name}");
+            assert!(
+                std::fs::symlink_metadata(&path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{name}"
+            );
         }
     }
 
@@ -329,10 +340,16 @@ mod tests {
                     })
                 })
                 .collect();
-            writers.into_iter().filter_map(|w| w.join().unwrap()).collect()
+            writers
+                .into_iter()
+                .filter_map(|w| w.join().unwrap())
+                .collect()
         });
         assert_eq!(winners.len(), 1, "winners: {winners:?}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), winners[0].to_string());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            winners[0].to_string()
+        );
         assert_eq!(temps_in(&dir), Vec::<String>::new());
     }
 
@@ -355,7 +372,13 @@ mod tests {
                 }));
                 let _ = wait.recv_timeout(std::time::Duration::from_millis(300));
             });
-            (placed, running.expect("the look found the place empty").join().unwrap())
+            (
+                placed,
+                running
+                    .expect("the look found the place empty")
+                    .join()
+                    .unwrap(),
+            )
         })
     }
 
@@ -416,7 +439,12 @@ mod tests {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         sources(&src, &mut files);
-        assert!(files.len() > 10, "found {} sources under {}", files.len(), src.display());
+        assert!(
+            files.len() > 10,
+            "found {} sources under {}",
+            files.len(),
+            src.display()
+        );
         let this = src.join("store.rs");
         let call = ["hard", "_link("].concat();
         let others: Vec<_> = files

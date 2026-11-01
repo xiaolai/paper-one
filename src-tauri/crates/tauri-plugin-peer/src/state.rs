@@ -170,11 +170,9 @@ impl PeerState {
                 file_says_on: None,
             };
             match root {
-                Ok(root) => {
-                    crate::commands::off_thread(move || Ok(crate::p2p::record(&root, on)))
-                        .await
-                        .unwrap_or_else(refused)
-                }
+                Ok(root) => crate::commands::off_thread(move || Ok(crate::p2p::record(&root, on)))
+                    .await
+                    .unwrap_or_else(refused),
                 Err(unresolved) => refused(unresolved),
             }
         })

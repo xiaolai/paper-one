@@ -77,12 +77,13 @@ fn word(on: bool) -> &'static [u8] {
     }
 }
 
-/// Record the reader's choice. It is durable when this returns.
+/// [`record`], for a test that only needs the choice made.
+#[cfg(test)]
 pub fn set(root: &Path, on: bool) -> Result<()> {
     set_by(root, on, write_atomic)
 }
 
-/// [`set`], apart from how the word reaches the file.
+/// Record the reader's choice. It is durable when this returns `Ok`.
 fn set_by(root: &Path, on: bool, install: impl FnOnce(&Path, &[u8]) -> Result<()>) -> Result<()> {
     let path = switch_path(root);
     if let Some(dir) = path.parent() {
@@ -91,7 +92,7 @@ fn set_by(root: &Path, on: bool, install: impl FnOnce(&Path, &[u8]) -> Result<()
     install(&path, word(on))
 }
 
-/// What a [`set`] left behind: two facts, because a failure does not say the second.
+/// What recording a choice left behind: two facts, because a failure does not say the second.
 #[derive(Debug)]
 pub struct Recorded {
     /// Why the choice is not durable, or `None` when it is.
@@ -101,7 +102,7 @@ pub struct Recorded {
     pub file_says_on: Option<bool>,
 }
 
-/// [`set`], saying what the file reads when it is over.
+/// Record the reader's choice, saying what the file reads when it is over.
 ///
 /// ⚠️ **A FAILED WRITE CAN HAVE LANDED.** `write_atomic` renames, then syncs the
 /// directory, and that sync can fail with the rename done. The file then says the new
@@ -160,7 +161,10 @@ mod tests {
         });
         assert!(recorded.error.is_some(), "the failure still has to be said");
         assert_eq!(recorded.file_says_on, Some(false));
-        assert!(!is_on(scratch.path()).unwrap(), "what the doors obey agrees");
+        assert!(
+            !is_on(scratch.path()).unwrap(),
+            "what the doors obey agrees"
+        );
     }
 
     #[test]

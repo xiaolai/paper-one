@@ -269,9 +269,15 @@ mod tests {
         let path = dir.join("some.key");
         let first = SecretKey::generate();
         let by_rename = crate::store::rename_new;
-        assert_eq!(install_new_by(&path, &first, by_rename).unwrap(), Installed::Ours);
+        assert_eq!(
+            install_new_by(&path, &first, by_rename).unwrap(),
+            Installed::Ours
+        );
         let second = SecretKey::generate();
-        assert_eq!(install_new_by(&path, &second, by_rename).unwrap(), Installed::Theirs);
+        assert_eq!(
+            install_new_by(&path, &second, by_rename).unwrap(),
+            Installed::Theirs
+        );
         let back = load(&path, std::fs::metadata(&path).unwrap().len()).unwrap();
         assert_eq!(back.public(), first.public());
         let left: Vec<_> = std::fs::read_dir(&dir)
@@ -299,13 +305,19 @@ mod tests {
                     let path = &path;
                     scope.spawn(move || {
                         let key = SecretKey::generate();
-                        (install_new_by(path, &key, crate::store::rename_new).unwrap(), key.public())
+                        (
+                            install_new_by(path, &key, crate::store::rename_new).unwrap(),
+                            key.public(),
+                        )
                     })
                 })
                 .collect();
             writers.into_iter().map(|w| w.join().unwrap()).collect()
         });
-        let winners: Vec<_> = outcomes.iter().filter(|(won, _)| *won == Installed::Ours).collect();
+        let winners: Vec<_> = outcomes
+            .iter()
+            .filter(|(won, _)| *won == Installed::Ours)
+            .collect();
         assert_eq!(winners.len(), 1);
         let back = load(&path, std::fs::metadata(&path).unwrap().len()).unwrap();
         assert_eq!(back.public(), winners[0].1);
