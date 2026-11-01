@@ -188,8 +188,17 @@ describe('a crate does no work in Rust setup', () => {
 
   const crates = readdirSync(CRATES).filter((name) => existsSync(path.join(CRATES, name, 'src')))
 
+  /* Removing a capability deletes its crate and its manifest entry together, so the
+     manifest says which of these must still be here: a crate gone while still
+     declared fails, and `verify:without webhost` passes. */
   it('finds the crates', () => {
-    expect(crates).toEqual(expect.arrayContaining([...WORKS_IN_SETUP]))
+    const manifest = JSON.parse(readFileSync(path.join(ROOT, 'capabilities.manifest.json'), 'utf8')) as {
+      readonly capabilities: readonly { readonly crate?: string }[]
+    }
+    const declared = new Set(manifest.capabilities.map((one) => one.crate))
+    const expected = [...WORKS_IN_SETUP].filter((name) => declared.has(name))
+    expect(expected).toContain('tauri-plugin-peer')
+    expect(crates).toEqual(expect.arrayContaining(expected))
   })
 
   it.each(crates.filter((name) => !WORKS_IN_SETUP.has(name)))('%s', (name) => {
