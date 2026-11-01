@@ -1677,6 +1677,7 @@ function anonymousName(node, parent) {
      callback sits in the argument list, which is what distinguishes `then`'s two
      roles, and the call's own LITERAL arguments, which is what distinguishes one
      registration from another. */
+  // Stryker disable next-line ArrayDeclaration: only `new Thing` with no parentheses has no list, and no entry shows: a plain string sits at no position, and `literalArguments` drops it because it has no `kind`
   const args = parent.arguments ?? []
   const at = args.indexOf(node)
   const where = at === -1 ? '' : ` ${at + 1}/${args.length}`
@@ -2236,7 +2237,7 @@ async function sweepChanges({ base, only, requireBase }, world) {
       return judgedAtBase(subject, named.get(subject), origins.get(named.get(subject)) ?? null, reports, { mergeBase, measure, world, spent })
     },
   })
-  return summarise({ ...swept, ...sweptTogether(swept, world.stdout), nothingToKill: [...nothingToKill, ...swept.nothingToKill], noTestFound }, world)
+  return summarise({ ...swept, ...sweptTogether(swept), nothingToKill: [...nothingToKill, ...swept.nothingToKill], noTestFound }, world)
 }
 
 /**
@@ -2249,9 +2250,11 @@ async function sweepChanges({ base, only, requireBase }, world) {
  * `strykerEach` decided per file is REPLACED rather than added to: a file it
  * passed on its own pool can be a file the sweep's one pool cannot pay for.
  */
-function sweptTogether(swept, stdout = null) {
-  const { byFile, contested, measurements } = matchedAcross(swept.paired)
-  if (stdout !== null) stdout.write(sayContested(contested, measurements))
+function sweptTogether(swept) {
+  /* Nothing here says what was contested, because nothing can be: a plain sweep
+     measures each base file once and hands every subject of it that one answer,
+     so two measurements to disagree exist only across shards. See `sayContested`. */
+  const { byFile } = matchedAcross(swept.paired)
   /* The subject as a sweep NAMES it against the subject as git names it, which
      is what the pairing answers under. Carried rather than computed back, because
      computing it back is `path.relative` and a separator this gate would then
@@ -2288,9 +2291,11 @@ function sweptTogether(swept, stdout = null) {
  * signal that the base's runs are not reproducible is otherwise invisible in
  * exactly the runs where it is still true and not yet expensive.
  */
-function sayContested(contested, measurements) {
+export function sayContested(contested, measurements) {
+  /* Contested needs two runs that differ, so a contested identity is always of a
+     file among `twice`, and only the empty list has nothing to say. */
+  if (contested.length === 0) return ''
   const twice = measurements.filter(([, runs]) => runs > 1)
-  if (contested.length === 0 || twice.length === 0) return ''
   const where = new Map()
   for (const one of contested) where.set(one.file, (where.get(one.file) ?? 0) + 1)
   return (
@@ -3463,9 +3468,10 @@ async function sweptWide(named, world) {
     if (!(cause instanceof BaseRefusal)) throw cause
     return null
   }
+  /* A first run that reported on no file does not get here: `measuredHere` holds
+     what it made to `survivorsAtBase`, which refuses that. No run at all does, when
+     the file has no mutant left to run: it changed under the sweep. */
   if (measured.first === null) return null
-  const at = path.join(world.root, named)
-  if (reportEntryOf(at, measured.first.report) === null) return null
   return { first: slimmedRun(measured.first), settle: measured.settle === null ? null : slimmedRun(measured.settle) }
 }
 
@@ -3572,7 +3578,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
      not: it is a killer this change removed. Nothing is authorised once one has
      moved, and the file is billed instead — the conservative way round, and the
      one a reader can act on, because the test is named. */
-  const moved = changedSinceBase(evidence.excluded ?? [], world.root)
+  const moved = changedSinceBase(evidence.excluded, world.root)
   if (moved !== null) {
     return refused(
       'reading-changed',
@@ -3658,7 +3664,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
      that list explains why a base mutant cannot authorise a survivor, and a
      repeat here is answered by a repeat there or by nothing. */
   const repeatsHere = repeatsFound(subject, named, origin.path, reports)
-  const hangs = matchedSurvivors(repeats ?? [], repeatsHere)
+  const hangs = matchedSurvivors(repeats, repeatsHere)
   const narrow = differenceAtBase(survivors, undecided, here)
   if (narrow.added.some((one) => one.class === 'added') && affordable(spent, origin.path, world.stdout)) {
     const wide = await sweptWide(named, world)
@@ -3685,7 +3691,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
            so the aggregate could only derive the narrow difference again, and
            refused every widened file with a kill in it as "mismatched": 13 of them. */
         evidence: { ...evidence, ...differenceAtBase(survivors, undecided, kept), ...repeatsJudged(hangs), wide },
-        paired: { at: subject, named, origin, here: kept, atBase: survivors, undecided, hereHangs: repeatsHere, baseHangs: repeats ?? [] },
+        paired: { at: subject, named, origin, here: kept, atBase: survivors, undecided, hereHangs: repeatsHere, baseHangs: repeats },
       }
     }
   }
@@ -3694,7 +3700,7 @@ async function judgedAtBase(subject, named, origin, reports, { mergeBase, measur
     /* What the sweep's own pairing needs, and what no record carries: both sides'
        survivors and the mutants the merge base could not decide, derived. A result
        carries the evidence they were derived FROM. */
-    paired: { at: subject, named, origin, here, atBase: survivors, undecided, hereHangs: repeatsHere, baseHangs: repeats ?? [] },
+    paired: { at: subject, named, origin, here, atBase: survivors, undecided, hereHangs: repeatsHere, baseHangs: repeats },
   }
 }
 
@@ -3795,7 +3801,7 @@ export async function survivorsAtBase(evidence, { at, named, frozen }) {
   if (outcome === 'no-mutants') {
     if (identities.length > 0) return { problem: { reason: 'mismatched', why: `says it had nothing to mutate, and this gate makes ${identities.length} mutant(s) in what it carries` } }
     if (first !== null) return { problem: { reason: 'mismatched', why: 'says it had nothing to mutate and carries a run of it' } }
-    return { survivors: [], undecided: [] }
+    return { survivors: [], undecided: [], repeats: [] }
   }
   if (first === null) return { problem: { reason: 'did-not-run', why: `says ${outcome} and carries no run at all, and a run nobody has is not a survivor that was already there` } }
   const against = { named, sha256, identities, whose: 'the merge base' }
@@ -4000,7 +4006,9 @@ function undecidedAtBase(first, settle) {
           ? `its run left a wall-clock timeout at ${placeOf(mutant)} that nothing settled`
           : `its settle run never answered for the mutant at ${placeOf(mutant)}`
       found.push({ mutant, why })
-    } else if (how === 'killed' && answer.status === 'Timeout') {
+    } else if (answer.status === 'Timeout') {
+      /* A kill, because nothing else left here can be a timeout: `settledEach` calls
+         a wall-clock one repeated and a survivor is not one. */
       found.push({ mutant, why: `its settle run answered the wall-clock timeout at ${placeOf(mutant)} by reaching the original’s hit limit, which is a bound and not a test` })
     }
   }
@@ -4622,7 +4630,17 @@ function tracedTo(subject, renames, hasItself) {
  */
 function blobAtBase(named, baseCommit, root) {
   try {
-    return execFileSync('git', ['cat-file', 'blob', `${baseCommit}:${named}`], { cwd: root, maxBuffer: Infinity, stdio: ['ignore', 'pipe', 'ignore'] })
+    return execFileSync('git', ['cat-file', 'blob', `${baseCommit}:${named}`], {
+      cwd: root,
+      maxBuffer: Infinity,
+      // Stryker disable next-line ArrayDeclaration: a short stdio list is padded with pipes, so an empty one differs only in the child's stdin, which `git cat-file` never reads, and in where a stderr nobody reads goes
+      stdio: [
+        'ignore',
+        'pipe',
+        // Stryker disable next-line StringLiteral: an entry Node does not know ends the list, leaving git no stderr, and git's stderr is thrown away here in any case; the bytes and the exit status are what is read, and both are the same (measured)
+        'ignore',
+      ],
+    })
   } catch {
     return null
   }
@@ -5973,7 +5991,7 @@ async function baseDisagreement(result, subject, root) {
      this refused outright: `circlePort.ts`, five hangs on each side. A `timed-out`
      with no evidence fails without being refused: `hangsUnanswered` bills every
      hang when no base was asked, which is the answer it has earned. */
-  if (result.outcome !== 'survived' && (result.outcome !== 'timed-out' || result.base === null)) return null
+  if (result.outcome !== 'survived' && result.base === null) return null
   if (result.base === null) {
     return { why: `it leaves the mutants that survived in it with no evidence at all, and the plan traced it to ${subject.origin.path}` }
   }
@@ -5993,7 +6011,7 @@ async function baseDisagreement(result, subject, root) {
   const discharged = result.base.wide === undefined ? new Set() : decidedWhenWidened(at, result.base.wide)
   const reports = [result.report, result.settle === null ? null : result.settle.report]
   const here = survivorsFound(at, subject.path, subject.origin.path, reports, discharged)
-  const { survivors, undecided, repeats = [], problem } = await survivorsAtBase(result.base, {
+  const { survivors, undecided, repeats, problem } = await survivorsAtBase(result.base, {
     at: path.join(root, subject.origin.path),
     named: subject.origin.path,
     frozen: subject.origin.sha256,
