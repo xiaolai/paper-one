@@ -21,9 +21,11 @@ import { deadClasses, undefinedClasses, unfollowedStylesheets } from './check-de
 const SCRIPT = fileURLToPath(new URL('./check-dead-css.mjs', import.meta.url))
 
 const roots = []
+/* One synchronous delete of every fixture tree: 3 s for the whole file alone, past
+   the hook's default 10 s during a full `test:coverage` on a loaded machine. */
 afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true })
-})
+}, 60_000)
 
 /** A tree holding `files` (path → content), rooted where the gate expects. */
 function fixture(files) {
