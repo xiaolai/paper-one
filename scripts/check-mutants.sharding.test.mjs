@@ -2148,6 +2148,7 @@ describe('the merge base, measured in a shard and reconciled by an aggregate', (
         ['a settle run’s kill', [{ status: 'Timeout' }], [{ status: 'Killed' }], true],
         ['a settle run’s hit limit', [{ status: 'Timeout' }], [{ status: 'Timeout', statusReason: HIT }], true],
         ['a survivor', [{ status: 'Survived' }], null, false],
+        ['a survivor carrying a hit-limit reason', [{ status: 'Survived', statusReason: HIT }], null, false],
         ['a wall-clock timeout', [{ status: 'Timeout' }], null, false],
         ['a wall-clock timeout that repeated', [{ status: 'Timeout' }], [{ status: 'Timeout' }], false],
         ['no coverage', [{ status: 'NoCoverage' }], null, false],
