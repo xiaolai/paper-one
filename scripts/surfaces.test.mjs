@@ -84,16 +84,19 @@ describe('the registries it evaluates', () => {
        `sentenceGapMs` and `paragraphGapMs` (2026-09-20); 23 since a listener
        could ask for footnote BODIES to be read — `readingNotesAloud`
        (2026-09-21), which EPUB Media Overlays calls skippable content and this
-       app had been dropping with no way to ask for it.
+       app had been dropping with no way to ask for it; 24 since the reader could
+       set how loud Paper reads, apart from the system's — `readingVolume`
+       (2026-11-01).
 
        ⚠️ **THE NAMES ARE ASSERTED BESIDE THE COUNT, BECAUSE A COUNT ALONE CANNOT
        SAY WHICH.** Two preferences added and two removed leaves this number
        unchanged, and the point of the row is that a change to the persisted
        surface is a deliberate act with a note beside it. */
-    expect(surfaces.kernelSettings).toHaveLength(23)
+    expect(surfaces.kernelSettings).toHaveLength(24)
     expect(surfaces.kernelSettings).not.toContain('lookUpLanguage')
     expect(surfaces.kernelSettings).toContain('readingVoice')
     expect(surfaces.kernelSettings).toContain('readingRate')
+    expect(surfaces.kernelSettings).toContain('readingVolume')
     expect(surfaces.kernelSettings).toContain('sentenceGapMs')
     expect(surfaces.kernelSettings).toContain('paragraphGapMs')
     expect(surfaces.kernelSettings).toContain('readingNotesAloud')

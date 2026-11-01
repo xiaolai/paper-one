@@ -648,6 +648,16 @@ const withinRange =
 const rate = withinRange(READING_RATE_MIN, READING_RATE_MAX)
 
 /**
+ * How loud Paper reads aloud, in percent of what the voice produces.
+ *
+ * ONE SCALE FROM THE DISK TO THE CONTROL, and a fraction only at the speakers:
+ * both Web Audio and Web Speech take 0 to 1, and `App` makes that one division.
+ * The system volume is never read or changed; this sits underneath it.
+ */
+export const READING_VOLUME_MIN = 0
+export const READING_VOLUME_MAX = 100
+
+/**
  * The voice the reader chose, per primary language subtag — `{ en: '…', zh: '…' }`.
  *
  * ONE VOICE PER LANGUAGE, not one for the app: a single stored voice is the
@@ -854,6 +864,13 @@ export const KERNEL_SETTINGS = {
      most compressed one installed. See `ui/reader/voiceChoice.ts`. */
   readingVoice: defineSetting<Readonly<Record<string, string>>>('kernel.readingVoice', {}, voiceChoices),
   readingRate: defineSetting<number>('kernel.readingRate', 1, rate),
+  /* A `kernel.reading*` KEY ON PURPOSE, so that step 5.5's import carries it to
+     `narration.*` with the rest. See `dev-docs/decisions/2026-11-01-reading-volume.md`. */
+  readingVolume: defineSetting<number>(
+    'kernel.readingVolume',
+    READING_VOLUME_MAX,
+    withinRange(READING_VOLUME_MIN, READING_VOLUME_MAX),
+  ),
   /* WHETHER A NOTE'S BODY IS READ. Off, which is the quieter of the two: most
      note bodies are hidden and never reach the voice, and the ones that are not
      are a print-style block at the foot of a section — so on by default means a
@@ -996,6 +1013,7 @@ export function readKernelPreferences(store: SettingsStore): KernelPreferences {
     readingStyle: store.get(KERNEL_SETTINGS.readingStyle),
     readingVoice: store.get(KERNEL_SETTINGS.readingVoice),
     readingRate: store.get(KERNEL_SETTINGS.readingRate),
+    readingVolume: store.get(KERNEL_SETTINGS.readingVolume),
     readingNotesAloud: store.get(KERNEL_SETTINGS.readingNotesAloud),
     sentenceGapMs: store.get(KERNEL_SETTINGS.sentenceGapMs),
     paragraphGapMs: store.get(KERNEL_SETTINGS.paragraphGapMs),

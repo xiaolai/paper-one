@@ -1335,6 +1335,37 @@ describe('the range read aloud may be stored in', () => {
   })
 })
 
+describe('the reading volume', () => {
+  it('is stored under the key the narration import looks for, at full volume by default', () => {
+    /* ⚠️ **THE KEY IS THE DECISION'S.** Step 5.5 carries `kernel.reading*` to
+       `narration.*`, so a name outside that prefix is a setting the import
+       silently drops. The default is what makes this change inaudible. */
+    expect(KERNEL_SETTINGS.readingVolume.key).toBe('kernel.readingVolume')
+    expect(KERNEL_SETTINGS.readingVolume.fallback).toBe(100)
+    expect(readingBack(envelope({})).readingVolume).toBe(100)
+  })
+
+  it('reads back what is in range, both ends included', () => {
+    /* 0 is the end that matters: a falsy value lost on the way back from disk
+       is the reading run playing aloud. */
+    for (const stored of [0, 37, 100]) {
+      expect(readingBack(envelope({ 'kernel.readingVolume': stored })).readingVolume).toBe(stored)
+    }
+  })
+
+  it('clamps a stored number to the ends, as the speed does', () => {
+    expect(readingBack(envelope({ 'kernel.readingVolume': 150 })).readingVolume).toBe(100)
+    expect(readingBack(envelope({ 'kernel.readingVolume': -5 })).readingVolume).toBe(0)
+  })
+
+  it('refuses what is not a finite number, and the default stands', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, '40', null, {}, true]) {
+      expect(readingBack(envelope({ 'kernel.readingVolume': bad })).readingVolume).toBe(100)
+      expect(KERNEL_SETTINGS.readingVolume.parse(bad), `${String(bad)} was taken as a volume`).toBeUndefined()
+    }
+  })
+})
+
 describe('the voice a reader chose, per language', () => {
   /**
    * ONE VOICE PER LANGUAGE, and a bad entry costs itself. A junk value for one
