@@ -1,5 +1,4 @@
 import { Component, Suspense, type ReactNode } from 'react'
-import type { PaneContext, PaneRenderer } from '../core/capability'
 import { renderContribution } from './panes'
 import styles from './screens/ContributedScreen.module.css'
 
@@ -81,6 +80,6 @@ export class ContributionBoundary extends Component<
  * has not said it is loading, and inventing a loading state on its behalf would
  * be the kernel drawing a claim the capability never made.
  */
-export function ContributionBody({ id, render, context }: { readonly id: string; readonly render: PaneRenderer; readonly context: PaneContext }) {
+export function ContributionBody<Context>({ id, render, context }: { readonly id: string; readonly render: (context: Context) => unknown; readonly context: Context }) {
   return <Suspense fallback={null}>{renderContribution(id, render, context)}</Suspense>
 }
