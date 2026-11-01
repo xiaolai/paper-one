@@ -171,6 +171,16 @@ describe('the capability contributions it reads', () => {
 })
 
 describe('contributionsIn, against known positives', () => {
+  it('reads what a capability contributes around the reader', () => {
+    const source = [
+      'export const cap = {',
+      "  windowHosts: [{ id: 'x:host', render: () => null }],",
+      "  readerControls: [{ id: 'x:control', render: () => null }],",
+      '}',
+    ].join('\n')
+    expect(contributionsIn(source)).toEqual({ windowHosts: ['x:host'], readerControls: ['x:control'] })
+  })
+
   it('finds ids at the top level of a seam', () => {
     const source = ['export const cap = {', "  panes: [", "    { id: 'x:one' },", "    { id: 'x:two' },", '  ],', '}'].join('\n')
     expect(contributionsIn(source)).toEqual({ panes: ['x:one', 'x:two'] })

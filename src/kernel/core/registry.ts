@@ -10,6 +10,7 @@ import type {
   Disposable,
   KernelApi,
   MarkControl,
+  ReaderContribution,
   OverlayContribution,
   PaneContribution,
   ScreenContribution,
@@ -96,6 +97,10 @@ export interface Contributions {
   readonly bookStatuses: readonly BookStatus[]
   /** A control on each of the reader's own marks — see `Capability.markControls`. */
   readonly markControls: readonly MarkControl[]
+  /** What runs for as long as the window does — see `Capability.windowHosts`. */
+  readonly windowHosts: readonly ReaderContribution[]
+  /** What the title bar draws beside the reading controls — see `Capability.readerControls`. */
+  readonly readerControls: readonly ReaderContribution[]
   /** By service name. */
   readonly services: ReadonlyMap<string, ServiceContribution>
   readonly clients: readonly ClientContribution[]
@@ -630,6 +635,8 @@ function checkNamespaces(
      by different code; only the namespace prefix is shared. */
   const statuses = new Set<string>()
   const markControls = new Set<string>()
+  const windowHosts = new Set<string>()
+  const readerControls = new Set<string>()
   const services = new Set<string>()
   const clients = new Set<string>()
 
@@ -750,6 +757,20 @@ function checkNamespaces(
       }
       claim(markControls, 'mark control', control.id, cap.id)
     }
+    /* ONE RULE FOR BOTH, EACH WITH ITS OWN SET: a host and the control that drives
+       it are the natural pair to give one name. See `statuses` above. */
+    for (const [kind, contributions, claimed] of [
+      ['window host', cap.windowHosts, windowHosts],
+      ['reader control', cap.readerControls, readerControls],
+    ] as const) {
+      for (const contribution of contributions ?? []) {
+        prefixed(`${kind} id`, contribution.id, colon, cap.id)
+        if (typeof contribution.render !== 'function') {
+          throw invalid('namespace', cap.id, `${kind} "${contribution.id}" has no render() to call`)
+        }
+        claim(claimed, kind, contribution.id, cap.id)
+      }
+    }
     for (const service of capServices.get(cap.id) ?? []) {
       prefixed('service name', service.name, dot, cap.id)
       prefixed('grant', service.grant, colon, cap.id)
@@ -808,9 +829,14 @@ const EMPTY_SECTIONS: readonly SettingsSection[] = Object.freeze([])
 const EMPTY_ACTIONS: readonly BookAction[] = Object.freeze([])
 const EMPTY_STATUSES: readonly BookStatus[] = Object.freeze([])
 const EMPTY_MARK_CONTROLS: readonly MarkControl[] = Object.freeze([])
+const EMPTY_READER_CONTRIBUTIONS: readonly ReaderContribution[] = Object.freeze([])
 const EMPTY_CLIENTS: readonly ClientContribution[] = Object.freeze([])
 const EMPTY_SERVICES: ReadonlyMap<string, ServiceContribution> = new Map()
 const EMPTY_SERVICE_ROWS: readonly ServiceContribution[] = Object.freeze([])
+
+/** Copied and bound, for the overlay's reason below; named field by named field, for a mark control's. */
+const readerSnapshot = (contributions: readonly ReaderContribution[] | undefined): readonly ReaderContribution[] =>
+  Object.freeze((contributions ?? []).map((one) => Object.freeze({ id: one.id, render: one.render.bind(one) })))
 
 /**
  * A contributed list, arranged: by `order` (unset last), then registration.
@@ -1002,6 +1028,8 @@ export async function composeCapabilities(
           }),
         ),
       ),
+      windowHosts: readerSnapshot(cap.windowHosts),
+      readerControls: readerSnapshot(cap.readerControls),
       clients: Object.freeze((cap.clients ?? []).map((client) => Object.freeze({ ...client }))),
       services: capServices.get(cap.id) ?? EMPTY_SERVICE_ROWS,
       /* ⚠️ **THE RECORD IS COPIED, NOT JUST THE ARRAY.** Every other line here
@@ -1257,6 +1285,8 @@ export async function composeCapabilities(
   const bookActions = Object.freeze(kept.flatMap((one) => [...one.bookActions]))
   const bookStatuses = Object.freeze(kept.flatMap((one) => [...one.bookStatuses]))
   const markControls = Object.freeze(kept.flatMap((one) => [...one.markControls]))
+  const windowHosts = Object.freeze(kept.flatMap((one) => [...one.windowHosts]))
+  const readerControls = Object.freeze(kept.flatMap((one) => [...one.readerControls]))
   /* Filtered to what STARTED, like every other contribution: a capability that
      failed to start must not have its overlays drawn in a book. */
   const overlays = Object.freeze(kept.flatMap((one) => [...one.overlays]))
@@ -1330,6 +1360,12 @@ export async function composeCapabilities(
     },
     get markControls() {
       return disposed ? EMPTY_MARK_CONTROLS : markControls
+    },
+    get windowHosts() {
+      return disposed ? EMPTY_READER_CONTRIBUTIONS : windowHosts
+    },
+    get readerControls() {
+      return disposed ? EMPTY_READER_CONTRIBUTIONS : readerControls
     },
     get services() {
       return disposed ? EMPTY_SERVICES : services

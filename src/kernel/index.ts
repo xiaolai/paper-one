@@ -134,6 +134,9 @@ export type {
   PaneContribution,
   ScreenContribution,
   PaneRenderer,
+  ReaderContext,
+  ReaderContribution,
+  ReaderRenderer,
   ServiceContext,
   ServiceContribution,
   ServiceHandler,
@@ -258,10 +261,13 @@ export type {
   MutationKind,
   MutationRecorder,
   MutationToken,
+  ReadingSurface,
+  ReadyBook,
   RemovableBlobName,
   Setting,
   SettingKey,
   SettingsStore,
+  SpokenSection,
 } from './core/ports'
 export { createDiagnostics, defaultDiagnostics, redact } from './core/diagnostics'
 export type { DiagnosticsOptions, Sink } from './core/diagnostics'

@@ -14,7 +14,7 @@ import ts from 'typescript'
  * The seams a capability may contribute to.
  *
  * ⚠️ **`commands` IS DELIBERATELY ABSENT AND THE FIRST VERSION OF THIS COMMENT
- * DID NOT SAY SO.** `core/capability.ts` declares ten seams; `services` and
+ * DID NOT SAY SO.** `core/capability.ts` declares twelve seams; `services` and
  * `clients` are named by the service table and collected from there, and
  * `commands` is a FUNCTION (`(ctx) => Command[]`) rather than an array literal,
  * so `seamOpensAt` — which requires `seam: [` — does not reach it.
@@ -23,8 +23,8 @@ import ts from 'typescript'
  * CORRECTED.** `commands: (ctx) => [{ id: 'x:real' }]` plainly contains one;
  * what is true is that this reader does not look inside a factory, and a
  * factory can build ids conditionally or from its context, so reading the
- * literals would report a list the app may never produce. Seven is therefore
- * right and "ten minus two" was wrong arithmetic. **`archives` contributes
+ * literals would report a list the app may never produce. Nine is therefore
+ * right and "twelve minus two" is wrong arithmetic. **`archives` contributes
  * commands** (its four are built only where a file dialog exists, which is the
  * very case above), so their ids are in no surface list. That gap is real and
  * recorded here rather than papered over by pretending the seam is unreadable in
@@ -37,6 +37,8 @@ export const CONTRIBUTION_SEAMS = Object.freeze([
   'bookActions',
   'bookStatuses',
   'markControls',
+  'windowHosts',
+  'readerControls',
   'overlays',
 ])
 
