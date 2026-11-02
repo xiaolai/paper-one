@@ -407,6 +407,23 @@ describe('a subscriber hears once per change', () => {
     expect(heard).toHaveBeenCalledTimes(1)
   })
 
+  it('names the shelf when a subscriber throws, and still tells the rest', async () => {
+    const { library } = world(['book_1'])
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const heard = vi.fn()
+    library.subscribe(() => {
+      throw new Error('a panel that fails')
+    })
+    library.subscribe(heard)
+    try {
+      await library.patch('book_1', { rating: 3 })
+      expect(heard).toHaveBeenCalledTimes(1)
+      expect(said).toHaveBeenCalledWith('Paper: a library subscriber threw while being notified', expect.any(Error))
+    } finally {
+      said.mockRestore()
+    }
+  })
+
 })
 
 describe('a position remembered without a progress', () => {
