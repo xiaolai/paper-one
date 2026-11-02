@@ -307,6 +307,40 @@ describe('the navigating panels', () => {
   })
 })
 
+/**
+ * A ROW FROM ANOTHER BOOK FOLLOWS THE SHELF AS IT CHANGES. Whether such a row
+ * can be followed is asked of the shelf the pane was last handed, not the one it
+ * was first drawn with: a book imported while Notes is open makes its marks
+ * reachable without the panel being closed and opened again.
+ */
+describe('the notes panel and the shelf', () => {
+  const elsewhere = {
+    id: 'm9',
+    bookId: 'other-book',
+    cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:9)',
+    sectionIndex: 0,
+    text: 'stately plump buck',
+    prefix: '',
+    suffix: '',
+    note: '',
+    kind: 'highlight',
+    tint: 'yellow',
+    style: 'fill',
+    chapter: 'Telemachus',
+    createdAt: 1,
+  }
+
+  it('lets a row from another book be followed once that book is on the shelf, and not before', () => {
+    const marks = { ...propsOf().marks, all: [elsewhere] } as unknown as MarksView
+    const { redraw } = draw({ state: stateOf({ pane: 'marginalia' }), marks })
+    const row = () => screen.getByRole('button', { name: /stately plump buck/i })
+    expect(row().hasAttribute('disabled')).toBe(true)
+
+    redraw({ books: [{ bookId: 'other-book', title: 'Ulysses' } as unknown as SidePaneProps['books'][number]] })
+    expect(row().hasAttribute('disabled')).toBe(false)
+  })
+})
+
 describe('the developer panel', () => {
   const devState = stateOf({ pane: 'dev', lastPane: 'dev', developer: true })
 
