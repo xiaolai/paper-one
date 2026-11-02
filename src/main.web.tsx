@@ -13,24 +13,22 @@
  *     would need `script-src 'unsafe-inline'`. That is precisely what the web
  *     host's policy refuses, so the web entry needs its own HTML anyway.
  *
- * ⚠️ **THIS FILE IS ONE CALL AND MUST STAY ONE CALL.** It imports
- * `virtual:paper-composition`, which `vite.config.ts` resolves per platform and
- * no import graph can follow, so whatever a test loads through here is out of
- * the mutation gate's sight (`unseenAtBase` in `scripts/check-mutants.mjs`). It
- * held 700 lines of client, and its test loaded it, so a pull request that
- * changed them could be authorised nothing: see
- * `dev-docs/decisions/2026-11-02-composition-route.md`. The client is
- * `app/web/client.tsx` now, and nothing loads this file but the build. Anything
- * added here that gives it a new mutant fails the sweep as `no-test-found`, and
- * belongs in the client; `app/web/client.entry.test.ts` reads this file and refuses
- * anything but the one call.
+ * **IT NAMES ITS COMPOSITION, AND DOES NOT ASK `virtual:paper-composition` AS THE
+ * OTHER TWO ENTRIES DO.** That module looks a composition up per platform, and a
+ * browser build has one, so the lookup buys nothing here. What it costs is that
+ * no import graph can follow it: whatever a test loads through it is out of the
+ * mutation gate's sight (`unseenAtBase` in `scripts/check-mutants.mjs`). Named
+ * directly, this file is an ordinary module with an ordinary test,
+ * `main.web.test.ts`, and `assert-bundle` judges the bundle as it always did:
+ * `dev-docs/decisions/2026-11-02-composition-route.md`.
+ *
+ * The client itself, 700 lines of it until 2026-11-02, is `app/web/client.tsx`.
  *
  * Four older comments still point here for the client — in `app/web/Reader.tsx`,
  * `ReadingSettings.tsx`, `remotePositions.ts` and `app/shell/TabBar.tsx`. They mean
  * `app/web/client.tsx`.
  */
 import { mountWebClient } from './app/web/client'
-import { capabilities } from 'virtual:paper-composition'
+import { capabilities } from './app/composition.web'
 
-// Stryker disable next-line CallExpression: only loading this module could see the call go, and a test that loads it is on the hidden route this file was emptied to end, so `app/web/client.entry.test.ts` holds this line as text instead.
 mountWebClient(capabilities)

@@ -61,7 +61,7 @@ import type { BookAction, Capability, IndexedBook } from '../../kernel'
  * THE BROWSER CLIENT, whole: everything `src/main.web.tsx` does not do.
  *
  * It lived in that entry until 2026-11-02 and moved for one reason: the entry
- * imports `virtual:paper-composition`, which no import graph can follow, so a
+ * imported `virtual:paper-composition`, which no import graph can follow, so a
  * test that loaded it was on a route the mutation gate cannot see down
  * (`unseenAtBase` in `scripts/check-mutants.mjs`, and
  * `dev-docs/decisions/2026-11-02-composition-route.md`). The composition arrives
@@ -689,7 +689,7 @@ function App({ bookActions }: { readonly bookActions: readonly BookAction[] }) {
 /**
  * Draw the browser client into `#root`, given this build's composition.
  *
- * `src/main.web.tsx` calls this with `virtual:paper-composition`; a test calls it
+ * `src/main.web.tsx` calls this with `composition.web.ts`'s list; a test calls it
  * with a list of its own. What comes back is the mounted root, which the entry
  * has no use for and a test unmounts.
  */

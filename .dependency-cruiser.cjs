@@ -609,8 +609,9 @@ module.exports = {
         path: '^src/',
         /* The choosers, and none of them may be reached FROM a root.
          *
-         * Each entry imports `virtual:paper-composition` for its own build and
-         * hands the list on, so each is exempt for the same reason. Nothing
+         * Each entry imports its build's composition, two through
+         * `virtual:paper-composition` and the browser's by name, and hands the
+         * list on, so each is exempt for the same reason. Nothing
          * else is: `bootApp.ts` and `app/web/client.tsx` take it as an argument.
          * */
         pathNot: [

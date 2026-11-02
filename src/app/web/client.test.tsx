@@ -18,7 +18,7 @@ import { mountWebClient } from './client'
  * the one every browser reader actually runs.
  *
  * ⚠️ **THE MOUNT WAS THE IMPORT, AND THEN THE COMPOSITION WAS THE PROBLEM.** Those
- * tests loaded the entry, and the entry imports `virtual:paper-composition`, which
+ * tests loaded the entry, and the entry imported `virtual:paper-composition`, which
  * no import graph can follow. So they sat on a route the gate records as unseen
  * (`unseenAtBase`), and any change to the entry left nothing in a sweep authorised:
  * `dev-docs/decisions/2026-11-02-composition-route.md`. The composition is an
