@@ -1144,6 +1144,7 @@ export const sync: Capability = {
             if (running !== owner) return 'ok'
             /* The switch's sentence stands over a session with nothing else to
                say, and gives way to a book it could not move. */
+            // Stryker disable next-line StringLiteral: the switch's watcher stops this runtime's scheduler before it sets `switchedOff`, and a stopped scheduler arms nothing from what a session answers.
             if (switchedOff !== null && !saysMoreThanClosure(summary)) return 'ok'
             syncStatus.set({
               state: 'ok',

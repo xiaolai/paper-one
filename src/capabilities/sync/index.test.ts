@@ -56,6 +56,8 @@ const native = vi.hoisted(() => ({
   syncNow: new Set<() => void>(),
   /** Whether taking a feed back throws — the pane failing to let go. */
   refuseUnregister: false,
+  /** Whether letting go of the switch throws. */
+  refuseUnwatch: false,
 }))
 
 vi.mock('../peer', async (importOriginal) => ({
@@ -65,6 +67,7 @@ vi.mock('../peer', async (importOriginal) => ({
   watchP2p: (listener: (on: boolean) => void) => {
     native.p2pWatcher = listener
     return () => {
+      if (native.refuseUnwatch) throw new Error('the switch would not let go')
       native.p2pWatcher = null
     }
   },
@@ -351,6 +354,7 @@ beforeEach(() => {
   native.port = null
   native.syncNow.clear()
   native.refuseUnregister = false
+  native.refuseUnwatch = false
 })
 
 afterEach(async () => {
@@ -2750,6 +2754,16 @@ describe('the rest of taking a runtime down', () => {
     run.handle.dispose()
 
     expect(named(run.events, 'sync.teardown-step-failed')).toEqual([{ label: 'syncNow', message: 'the Devices pane would not let go' }])
+  })
+
+  it('reports a switch watch that will not let go, by name', async () => {
+    const { run } = await satchelWith(book('book:a', 'Alpha', 'bytes'))
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    native.refuseUnwatch = true
+
+    run.handle.dispose()
+
+    expect(named(run.events, 'sync.teardown-step-failed')).toEqual([{ label: 'p2p-watch', message: 'the switch would not let go' }])
   })
 
   it('offers neither Download nor Evict once the satchel has stopped', async () => {
