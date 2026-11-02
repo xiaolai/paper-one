@@ -1604,6 +1604,17 @@ describe('Optional features', () => {
     expect(screen.queryByText(/gone/)).toBeNull()
   })
 
+  it('says nothing under a running switch but what it does', () => {
+    const { props } = full()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'on' }], switches: switches() }} />)
+    open()
+    const body = screen.getByText(/^Turning one off/).parentElement
+    expect([...(body?.querySelectorAll('p') ?? [])].map((p) => p.textContent)).toEqual([
+      'Turning one off keeps what it saved on this device.',
+      'What it does.',
+    ])
+  })
+
   it('says when this device cannot have it', () => {
     const { props } = full()
     render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'unavailable' }], switches: switches() }} />)
