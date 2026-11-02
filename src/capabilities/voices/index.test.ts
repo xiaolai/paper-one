@@ -41,6 +41,13 @@ describe('what the app is offered', () => {
     expect(voices.requires).toEqual([])
   })
 
+  it('tells the reader what the switch does, in the words of the toggle', () => {
+    expect(voices.toggle?.title).toBe('Downloadable voices')
+    expect(voices.toggle?.summary).toBe(
+      "Better voices for reading aloud, downloaded when you ask for them. Off, Paper reads with this device's own voices where they are good enough, and the voices you downloaded stay on this device.",
+    )
+  })
+
   it('contributes exactly one settings section, named and placed', () => {
     /* ⚠️ Every value here survived a mutation. The ORDER is the one a reader
        feels without being able to name: 14 puts Voices after Reading (10) and
