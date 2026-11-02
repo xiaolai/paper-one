@@ -194,7 +194,8 @@ function typeReader(checker, sources) {
       }),
     )
     if (ts.isTypeAliasDeclaration(declaration)) return classify(declaration.type, parameters, next)
-    const inherited = (declaration.heritageClauses ?? []).filter((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword).flatMap((clause) => [...clause.types])
+    /* What a type extends or a class implements, it has the members of. */
+    const inherited = (declaration.heritageClauses ?? []).flatMap((clause) => [...clause.types])
     return strongest(inherited.map((type) => classify(type, parameters, next))) ?? ownMembers(declaration.members, parameters, next)
   }
 

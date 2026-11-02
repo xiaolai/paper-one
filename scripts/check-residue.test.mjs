@@ -79,4 +79,9 @@ describe('forms the scan once missed', () => {
     expect(scanned({ [B]: 'const services: any = 1\nexport { services as s }\n' })).toEqual([refused('the services, exported under another name: services as s')])
     expect(scanned({ [B]: 'const services: any = 1\nexport { services }\n' })).toEqual([])
   })
+
+  /* A class has the members of what it implements, as an interface has those of what it extends. */
+  it('reads a class through the services type it implements', () => {
+    expect(scanned({ [B]: `${TYPE}class S implements KernelServices {}\nexport const f = (s: S) => s.passages\n` })).toEqual([named('passages', 'services.passages')])
+  })
 })
