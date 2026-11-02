@@ -1239,6 +1239,24 @@ describe('contributed commands', () => {
     const { ctx } = context()
     expect(buildCommands(ctx).some((c) => c.id.startsWith('example:'))).toBe(false)
   })
+
+  /* FILED UNDER A KERNEL GROUP, a contributed row joins that group where the
+     group first appeared: pushed last, it must not drag the whole group to the
+     end of the palette. */
+  it('join a kernel group where that group first appeared, leaving the groups in their order', () => {
+    const { ctx } = context({ screen: 'reader' })
+    const runs = (commands: readonly Command[]) =>
+      commands.map((one) => one.group).filter((group, at, all) => group !== all[at - 1])
+    const kernel = buildCommands(ctx)
+    const first = kernel[0]!.group
+    const joined = buildCommands({
+      ...ctx,
+      contributed: () => [{ id: 'example:extra', label: 'Something extra', group: first, run: () => {} }],
+    })
+    expect(runs(joined)).toEqual(runs(kernel))
+    const lastOfFirst = kernel.map((one) => one.group).lastIndexOf(first)
+    expect(joined[lastOfFirst + 1]?.id).toBe('example:extra')
+  })
 })
 
 /**
