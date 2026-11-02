@@ -135,6 +135,21 @@ describe('a position tick', () => {
     expect(indexOn(fs)?.books[0]?.position).toBe('p3')
   })
 
+  /* A browser's `setTimeout` answers with a number, which has no `unref`. */
+  it('arms its throttle where a timer is a bare number, as in a browser', async () => {
+    const { fs, queue, library } = world(['book_a'])
+    const armed: (() => void)[] = []
+    vi.stubGlobal('setTimeout', (run: () => void) => armed.push(run))
+    try {
+      await library.rememberPosition('book_a', 'p1', 0.1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(armed).toHaveLength(1)
+    armed[0]!()
+    await queue.idle()
+    expect(indexOn(fs)?.books[0]?.position).toBe('p1')
+  })
 })
 
 describe('the next launch', () => {
