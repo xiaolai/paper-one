@@ -552,8 +552,8 @@ const MAX_TAGS = 4096
 
 const text = (v: unknown, limit = MAX_FIELD): string | undefined =>
   typeof v === 'string' && v ? v.slice(0, limit) : undefined
-const num = (v: unknown): number | undefined =>
-  typeof v === 'number' && Number.isFinite(v) ? v : undefined
+// `Number.isFinite` answers false for anything that is not a number, without coercing it.
+const num = (v: unknown): number | undefined => (Number.isFinite(v) ? (v as number) : undefined)
 const list = (v: unknown, limit = MAX_LIST): readonly string[] | undefined => {
   if (!Array.isArray(v)) return undefined
   const clean = v
