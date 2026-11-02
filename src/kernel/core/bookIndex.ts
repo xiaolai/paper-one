@@ -788,11 +788,18 @@ export async function scanAllMarks(
         const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes))
         if (Array.isArray(parsed)) return { folder: entry.name, rows: parsed as unknown[] }
       } catch {
-        const absent = await fs.exists(path).then((there) => !there, () => false)
         /* THE FOLDER GONE TOO MEANS IT MOVED OR WENT AFTER THE LISTING, not that
            this book has no marks: a rekey's rename carries them to a name this
-           walk did not list. */
-        if (absent && (await fs.exists(`${BOOKS_DIR}/${entry.name}`).catch(() => false))) return null
+           walk did not list. An `exists` that fails proves neither, so the book
+           is named. Both questions share this one catch: each used to answer a
+           failure with its own `() => false`, which a condition reads exactly
+           as it reads `undefined`, so a mutation sweep could tell neither from
+           its mutant (2026-11-02). */
+        try {
+          if (!(await fs.exists(path)) && (await fs.exists(`${BOOKS_DIR}/${entry.name}`))) return null
+        } catch {
+          /* named below */
+        }
       }
       onUnreadable?.(entry.name)
       return null
