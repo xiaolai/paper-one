@@ -138,6 +138,13 @@ describe('parseRecord', () => {
     for (const raw of ['', 'null', '"Moby-Dick"', '42', 'true']) expect(parseRecord(raw), raw).toBeNull()
   })
 
+  it('drops a text field that is not a string', () => {
+    const parsed = parseRecord(JSON.stringify({ title: 42, author: 'A', sortAs: true, publisher: { name: 'P' } }))!
+    expect(parsed.title).toBe('')
+    expect(parsed).not.toHaveProperty('sortAs')
+    expect(parsed).not.toHaveProperty('publisher')
+  })
+
   /* A `subjects` that is not an array of strings crashes the shelf the moment
    * it renders — the same trust boundary the flat store needed. */
   it('drops a field of the wrong type rather than passing it through', () => {
