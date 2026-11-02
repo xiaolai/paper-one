@@ -427,6 +427,17 @@ describe('the settings panel', () => {
     ])
   })
 
+  it('lists in the developer band only the panels that call themselves unfinished', () => {
+    const contributed = [
+      { id: 'board:panel', label: 'Board', icon: 'globe', screens: ['reader'], render: () => null },
+      { id: 'deck:panel', label: 'Deck', icon: 'globe', screens: ['reader'], unfinished: true, render: () => null },
+    ] as const
+    draw({ state: settingsState({ developer: true }), contributed })
+    openGroup('Unfinished panels')
+    expect(screen.getByRole('switch', { name: 'Deck' })).not.toBeNull()
+    expect(screen.queryByRole('switch', { name: 'Board' })).toBeNull()
+  })
+
   it('draws no developer band without developer options', () => {
     draw({ state: settingsState({ developer: false }), developer: { recording: true } })
     expect(screen.queryByRole('button', { name: 'Unfinished panels' })).toBeNull()
