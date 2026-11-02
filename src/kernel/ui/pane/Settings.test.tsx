@@ -1615,6 +1615,18 @@ describe('Optional features', () => {
     ])
   })
 
+  it('draws no row for a capability with neither a switch nor one it follows, beside one that has a switch', () => {
+    const { props } = full()
+    const standing = [
+      { id: 'fixed', state: 'on' },
+      { id: 'one', toggle: TOGGLE, state: 'on' },
+    ] as const
+    render(<Settings {...props} optionalFeatures={{ standing, switches: switches() }} />)
+    open()
+    expect(screen.getByRole('switch', { name: 'Some feature' })).toBeTruthy()
+    expect(screen.queryByText(/^Follows/)).toBeNull()
+  })
+
   it('says when this device cannot have it', () => {
     const { props } = full()
     render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'unavailable' }], switches: switches() }} />)

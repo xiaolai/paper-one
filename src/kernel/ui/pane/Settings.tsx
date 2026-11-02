@@ -688,15 +688,16 @@ function OptionalFeatures({ standing, switches }: OptionalFeaturesProps) {
   return (
     <>
       <p className={styles.groupHint}>Turning one off keeps what it saved on this device.</p>
-      {standing.filter(hasRow).map((one) =>
+      {/* `hasRow`, spelled out so the type narrows: a row with neither draws nothing. */}
+      {standing.map((one) =>
         one.toggle ? (
           <OptionalFeature key={one.id} one={one} toggle={one.toggle} standing={standing} switches={switches} />
-        ) : (
+        ) : one.follows ? (
           <div key={one.id} className={styles.settingRow}>
-            <span style={ROW_LABEL}>{one.follows?.title}</span>
-            <span className={styles.settingValue}>Follows {one.follows?.switch}</span>
+            <span style={ROW_LABEL}>{one.follows.title}</span>
+            <span className={styles.settingValue}>Follows {one.follows.switch}</span>
           </div>
-        ),
+        ) : null,
       )}
     </>
   )
