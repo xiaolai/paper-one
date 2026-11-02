@@ -472,15 +472,29 @@ function followServices(source, checker, known, types, found, say) {
   }
 }
 
+/* ONE PROGRAM, for the scopes: no library and no resolving, since what crosses a file
+   is by name, and `typeReader` reads the kernel's types for that. With the library, a
+   generic it declares would be read through its body, and `Map<K, KernelServices>`
+   would hold nothing. */
+const PROGRAM = {
+  // Stryker disable next-line BooleanLiteral: a resolved import only adds files to the program, and every answer is read from the kernel's own files by name
+  noResolve: true,
+  noLib: true,
+  // Stryker disable next-line ArrayDeclaration: a named types package that is not installed is only a diagnostic, and diagnostics are never read
+  types: [],
+  jsx: ts.JsxEmit.Preserve,
+  target: ts.ScriptTarget.Latest,
+  // Stryker disable next-line BooleanLiteral: nothing is ever emitted, since the program is only read
+  noEmit: true,
+}
+
 /** Every naming under the kernel, as a map of `file\0id\0match` to its count. */
 export function scan(root, ids) {
   const files = sourcesUnder(path.join(root, KERNEL))
   /* A walk that found nothing would report every row stale, or with no rows
      report clean. Neither is an answer. */
   if (files.length === 0) throw new Error(`${KERNEL}: no source files under ${root}`)
-  /* ONE PROGRAM, for the scopes: no library and no resolving, since what crosses a file
-     is by name, and `typeReader` reads the kernel's types for that. */
-  const program = ts.createProgram(files, { noResolve: true, noLib: true, types: [], jsx: ts.JsxEmit.Preserve, target: ts.ScriptTarget.Latest, noEmit: true })
+  const program = ts.createProgram(files, PROGRAM)
   const checker = program.getTypeChecker()
   const sources = files.map((full) => program.getSourceFile(full))
   const types = typeReader(checker, sources)
