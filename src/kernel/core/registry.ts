@@ -519,29 +519,33 @@ function stronglyConnectedComponents(nodes: readonly string[], edges: ReadonlyMa
   const onStack = new Set<string>()
   const stack: string[] = []
   const components: string[][] = []
-  const work: { node: string; next: number }[] = []
+  const work: { node: string; rest: Iterator<string> }[] = []
   let counter = 0
 
   /* Numbering a node and giving it a frame are one step: a node with a
      frame and no number would be popped from `stack` looking for itself,
-     and never found. */
+     and never found. Every node has an entry in `edges`: `checkRequires`
+     sets one per id and refuses a target that is not an id. */
   const enter = (node: string) => {
     index.set(node, counter)
     low.set(node, counter)
     counter++
     stack.push(node)
     onStack.add(node)
-    work.push({ node, next: 0 })
+    work.push({ node, rest: edges.get(node)![Symbol.iterator]() })
   }
 
   for (const root of nodes) {
     if (index.has(root)) continue
     enter(root)
     while (work.length > 0) {
-      const frame = work[work.length - 1] as { node: string; next: number }
-      const successors = edges.get(frame.node) ?? []
-      if (frame.next < successors.length) {
-        const next = successors[frame.next++] as string
+      const frame = work[work.length - 1] as { node: string; rest: Iterator<string> }
+      /* An iterator, not a position compared with a length: a frame asks
+         for its next successor and is told when there is none, so there is
+         no bound to get wrong by one. */
+      const step = frame.rest.next()
+      if (!step.done) {
+        const next = step.value
         if (!index.has(next)) {
           enter(next)
         } else if (onStack.has(next)) {
