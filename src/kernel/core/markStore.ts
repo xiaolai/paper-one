@@ -914,15 +914,21 @@ export function createMarkStore({
      disk has at the same stamp or newer adds nothing. A book whose folder has gone
      was removed, and its rows are not a lost write. */
   const unsavedAmong = async (held: readonly Mark[], rows: readonly Mark[]): Promise<readonly Mark[]> => {
-    if (!fs) return EMPTY
-    const target = fs
+    /* NO GUARD FOR A STORE WITHOUT A DISK, because nothing reaches memory there:
+       only a read of a book or a landed write fills `loaded` or `all`, and both
+       need the disk, so `held` is empty, nothing below asks the disk, and the
+       `fs!` is never evaluated. The guard that stood here returned "nothing
+       unsaved" from a branch no call could reach — a mutation sweep found it
+       could be deleted unnoticed (2026-11-02) — and should memory ever hold a
+       mark without a disk, failing here is the right answer for a backup, where
+       "nothing unsaved" is the one it must never assume. */
     const onDisk = new Map(mergeMarks(EMPTY, rows).map((mark) => [mark.id, mark] as const))
     const newer = held.filter((mark) => {
       const row = onDisk.get(mark.id)
       const known = row ? [row] : EMPTY
       return mergeMarks(known, [mark]) !== known
     })
-    const there = await Promise.all(newer.map((mark) => target.exists(folderOf(mark.bookId)).catch(() => true)))
+    const there = await Promise.all(newer.map((mark) => fs!.exists(folderOf(mark.bookId)).catch(() => true)))
     return newer.filter((_, i) => there[i])
   }
 
