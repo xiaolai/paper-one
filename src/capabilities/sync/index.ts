@@ -691,10 +691,9 @@ export const sync: Capability = {
       // Stryker disable next-line StringLiteral,CallExpression: a listener left on the signal can only call this again, and it returns above.
       signal.removeEventListener('abort', stop)
       step('scheduler', () => scheduler?.stop())
-      step('p2p-watch', () => {
-        unwatchP2p()
-        if (running === myRunning) switchedOff = null
-      })
+      /* `switchedOff` is left as it is: every reader needs a runtime that holds
+         the slot, and the next one to claim it starts it clear. */
+      step('p2p-watch', () => unwatchP2p())
       /* A stopped scheduler ignores `syncNow`, so the slot still holding one
        * changes nothing a caller can see — this lets it go. */
       // Stryker disable next-line StringLiteral,BlockStatement,CallExpression: see above; and `unbindScheduler` does not throw.
