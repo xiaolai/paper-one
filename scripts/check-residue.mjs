@@ -276,6 +276,8 @@ const READS_NOTHING = new Set(['rendered', 'written into a string'])
 const SERVICES = Object.freeze({ kind: 'services' })
 const isWrapperNode = (node) => ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node)
 const isExported = (node) => (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Export) !== 0
+/** Every name a binding binds: `s` of `s`, and `a` and `b` of `{ a, b: [b] }`. */
+const boundNames = (name) => (ts.isIdentifier(name) ? [name] : name.elements.flatMap((element) => (ts.isOmittedExpression(element) ? [] : boundNames(element.name))))
 const isFunctionLike = (node) => ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)
 /** The text a row quotes for what could not be followed: short, and on one line. */
 const quoted = (node) => node.getText().replace(/\s+/g, ' ').slice(0, 60)
@@ -465,7 +467,9 @@ function followServices(source, checker, known, types, found, say) {
   for (const statement of source.statements) {
     if (ts.isFunctionDeclaration(statement) && isExported(statement) && statement.name) leaving(statement.name.text, checker.getSymbolAtLocation(statement.name), statement.name)
     if (ts.isVariableStatement(statement) && isExported(statement)) {
-      for (const declaration of statement.declarationList.declarations) if (ts.isIdentifier(declaration.name)) leaving(declaration.name.text, checker.getSymbolAtLocation(declaration.name), declaration.name)
+      for (const declaration of statement.declarationList.declarations) {
+        for (const name of boundNames(declaration.name)) leaving(name.text, checker.getSymbolAtLocation(name), name)
+      }
     }
     if (ts.isExportAssignment(statement) && ts.isIdentifier(unwrapped(statement.expression))) leaving('default', checker.getSymbolAtLocation(unwrapped(statement.expression)), statement)
     if (ts.isExportDeclaration(statement) && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
