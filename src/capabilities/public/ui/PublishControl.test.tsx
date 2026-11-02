@@ -201,6 +201,26 @@ describe('the publish control', () => {
     ).toBeNull()
   })
 
+  /* The circle's answer was about the passage it was asked for. Moving to
+     another passage forgets it, so the next disclosure waits for its own
+     answer rather than being drawn, and offered, from the last one's. */
+  it('waits for the circle again after the passage changes', async () => {
+    let answers = 0
+    const sharedWithCircle = () =>
+      (answers += 1) === 1 ? Promise.resolve([{ ...PASSAGE }]) : new Promise<readonly PublicPassage[]>(() => {})
+    const other: PublicPassage = { quote: 'somewhere else', prefix: '', suffix: '', chapter: 'Two' }
+    const port = portWith()
+    const view = render(<PublishControl bookId="book:1" passage={PASSAGE} port={port} sharedWithCircle={sharedWithCircle} />)
+    button('Publish…')?.click()
+    await waitFor(() => expect(screen.queryByText(new RegExp(PUBLIC_LINKS_DISCLOSURE, 'u'))).not.toBeNull())
+
+    view.rerender(<PublishControl bookId="book:1" passage={other} port={port} sharedWithCircle={sharedWithCircle} />)
+    await waitFor(() => expect(button('Publish…')).not.toBeNull())
+    button('Publish…')?.click()
+    await waitFor(() => expect(screen.queryByText(/Checking what you have already shared/u)).not.toBeNull())
+    expect(button('Publish to anyone')?.hasAttribute('disabled'), 'offered from the last passage’s answer').toBe(true)
+  })
+
   it('keeps a listener’s failure out of the publication’s error report', async () => {
     /* ⚠️ **THE CALLBACK RAN INSIDE THE `then`**, so its throw landed in the
        catch — after `done` was already true, which hid the message behind the
