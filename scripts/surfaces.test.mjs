@@ -32,7 +32,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CONTRIBUTION_SEAMS, contributionsIn, namesOf } from './lib/surfaces.mjs'
+import { CONTRIBUTION_SEAMS, EXCLUDED, contributionsIn, namesOf } from './lib/surfaces.mjs'
 import { capabilityContributions, collectSurfaces, main } from './surfaces.mjs'
 
 const SCRIPT = fileURLToPath(new URL('./surfaces.mjs', import.meta.url))
@@ -413,6 +413,17 @@ describe('namesOf', () => {
     const names = namesOf(surfaces)
     expect(names).toEqual([...names].sort())
     expect(new Set(names).size).toBe(names.length)
+  })
+})
+
+describe('the fields it leaves out', () => {
+  /* A REASON IS THE WHOLE OF AN EXCLUSION. `namesOf` accepts any field named
+   * in `EXCLUDED`, so a reason emptied to `''` would leave a field out of
+   * coverage with nobody having said why — the silent omission the list was
+   * built to end. */
+  it('gives every excluded field a reason', () => {
+    expect(Object.keys(EXCLUDED).sort()).toEqual(['allFaces', 'capabilities', 'paneShortcuts', 'readerStyles', 'readingSteps'])
+    for (const [field, why] of Object.entries(EXCLUDED)) expect(why.trim(), `${field} is excluded without a reason`).not.toBe('')
   })
 })
 

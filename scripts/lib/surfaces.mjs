@@ -205,7 +205,9 @@ const INCLUDED = Object.freeze([
   'acceptFormats',
 ])
 
-const EXCLUDED = Object.freeze({
+/* Exported so that "a reason per field" is held by `surfaces.test.mjs` rather
+   than by review: a reason emptied to `''` reads as a decision and is none. */
+export const EXCLUDED = Object.freeze({
   readingSteps: 'fourteen integers; a document containing "15" proves nothing about whether the size ladder is described',
   paneShortcuts: 'carries a ⌘ glyph and a pane id already covered by `panes`',
   readerStyles: 'a subset of `markStyles`',
