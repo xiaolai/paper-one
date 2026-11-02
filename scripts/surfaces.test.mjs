@@ -471,6 +471,22 @@ describe('capabilityContributions', () => {
         '(ENOENT) — a manifest entry with no capability is a finding, not a skip',
     )
   })
+
+  /* The message carries only the code; the read's own error, path and all, is
+     the `cause`, so whoever reads the refusal can still see what failed. */
+  it('keeps the failed read as the cause of the refusal', () => {
+    const at = tree([{ id: 'ghost' }], {})
+    let refusal
+    try {
+      capabilityContributions(at)
+    } catch (error) {
+      refusal = error
+    }
+    expect(refusal?.cause).toMatchObject({
+      code: 'ENOENT',
+      path: path.join(at, 'src', 'capabilities', 'ghost', 'index.ts'),
+    })
+  })
 })
 
 describe('main', () => {
