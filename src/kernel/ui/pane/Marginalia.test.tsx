@@ -2043,8 +2043,13 @@ describe('what a mark control is given', () => {
   })
 
   it('draws no notice for a control with none, or one that answers nothing', () => {
+    draw({ all: [ANNOTATION()] })
+    const bare = document.body.textContent
+    cleanup()
     draw({ all: [ANNOTATION()], markControls: [{ id: 'cap:note', render: () => null }] })
     expect(document.querySelector('[data-mark-control-notice]')).toBeNull()
+    /* Nothing at all in its place, not merely no notice. */
+    expect(document.body.textContent).toBe(bare)
     cleanup()
     draw({ all: [ANNOTATION()], markControls: [{ id: 'cap:note', render: () => null, notice: () => null }] })
     expect(document.querySelector('[data-mark-control-notice]')?.childElementCount).toBe(0)
