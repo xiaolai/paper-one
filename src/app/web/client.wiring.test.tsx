@@ -799,7 +799,7 @@ describe('reading a book', () => {
     expect(world.readerMounts).toBeGreaterThan(mounts)
   })
 
-  it('shows the shelf for the Reading tab when no book is open', async () => {
+  it('draws neither the shelf nor a reader on the Reading tab when no book is open', async () => {
     await atTheShelf()
     await select('reading')
     expect(shown('Reader')).toBe(false)
