@@ -31,7 +31,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CONTRIBUTION_SEAMS, EXCLUDED, contributionsIn, namesOf } from './lib/surfaces.mjs'
 import { capabilityContributions, collectSurfaces, main } from './surfaces.mjs'
 
@@ -39,9 +39,18 @@ const SCRIPT = fileURLToPath(new URL('./surfaces.mjs', import.meta.url))
 const REPO = fileURLToPath(new URL('..', import.meta.url))
 
 const run = (...args) => execFileSync('node', [SCRIPT, ...args], { cwd: REPO, encoding: 'utf8' })
-const surfaces = await collectSurfaces()
+/* Collected before EACH test that reads it, never once at import. Collected at
+ * import, every mutant on the collection path becomes static: one that throws
+ * fails the suite's load, which Stryker's vitest runner reports as Survived,
+ * so a broken reader read as a test that cannot fail. */
+let surfaces
+const collectBeforeEach = () =>
+  beforeEach(async () => {
+    surfaces = await collectSurfaces()
+  })
 
 describe('the registries it evaluates', () => {
+  collectBeforeEach()
   /* Exact lists, not counts, wherever the list is short enough to read. A count
    * says a member changed; a list says WHICH, which is the difference between a
    * red test somebody can act on and one they re-run. */
@@ -131,6 +140,7 @@ describe('the registries it evaluates', () => {
 })
 
 describe('the capability contributions it reads', () => {
+  collectBeforeEach()
   it('covers every capability the manifest declares', () => {
     const manifest = JSON.parse(execFileSync('cat', ['capabilities.manifest.json'], { cwd: REPO, encoding: 'utf8' }))
     const declared = manifest.capabilities.map((c) => c.ts ?? c.id).sort()
@@ -370,6 +380,7 @@ describe('contributionsIn, against known positives', () => {
 })
 
 describe('namesOf', () => {
+  collectBeforeEach()
   it('carries every reading-typography field through', () => {
     const names = namesOf(surfaces)
     for (const field of surfaces.readingStyle) expect(names, `${field} should reach the name set`).toContain(field)
@@ -463,6 +474,7 @@ describe('capabilityContributions', () => {
 })
 
 describe('main', () => {
+  collectBeforeEach()
   const capture = () => {
     const out = []
     const err = []
@@ -510,6 +522,7 @@ describe('main', () => {
  * resolves the kernel through the hook this file installs as an entry, and
  * reads exactly what the in-process collector reads. */
 describe('the command', () => {
+  collectBeforeEach()
   it('gives a bare node the same inventory, the same names, and exit 2 for a bad flag', () => {
     expect(JSON.parse(run())).toEqual(surfaces)
     expect(run('--names')).toBe(namesOf(surfaces).map((name) => `${name}\n`).join(''))
