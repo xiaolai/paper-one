@@ -1096,6 +1096,24 @@ describe('what crosses a file, at the edges', () => {
     expectAnswer({ 'src/B.tsx': `${IMPORT}export const s = styles\n`, 'src/C.tsx': `import * as re from './B'\n${use}\n` }, { refused: [how] })
   })
 
+  /* Before this, a name bound by a pattern was not exported at all, and a class read
+     through it on the other side was silently not read. */
+  it.each([
+    ['a pattern over a module of a source', "import * as re from './R'\nexport const { s } = re", 'export const s = styles', []],
+    ['a renaming pattern over a namespace', "import * as css from './A.module.css'\nexport const { default: s } = css", '', []],
+    ['a pattern over a module loaded at run time', "export const { default: s } = await import('./A.module.css')", '', []],
+    ['a name after another in a pattern', "import * as re from './R'\nexport const { k, s } = re", 'export const s = styles\nexport const k = 1', []],
+    ['a pattern nested in a pattern', "import * as re from './R'\nexport const { t: { s } } = { t: re }", 'export const s = styles', ['held by an object']],
+    ['an array pattern', "import styles from './A.module.css'\nexport const [s] = [styles]", '', ['held by an array']],
+    ['an array pattern after a hole', "import styles from './A.module.css'\nexport const [, s] = [1, styles]", '', ['held by an array']],
+  ])('carries a stylesheet exported by %s', (_what, exporting, r, refused) => {
+    expectAnswer({
+      'src/R.tsx': `${IMPORT}${r}\n`,
+      'src/B.tsx': `${exporting}\n`,
+      'src/C.tsx': "import { s } from './B'\nexport const f = () => s.gone\n",
+    }, { missing: ['gone'], refused })
+  })
+
   it('re-exports no module of a source that exports nothing', () => {
     expectAnswer({
       'src/B.ts': 'export const k = 1\n',

@@ -130,6 +130,9 @@ function exportedFunctions(source) {
   return found
 }
 
+/** Every name a declaration binds: itself, or each a pattern holds, however deep. */
+const boundNames = (name) => (ts.isIdentifier(name) ? [name] : name.elements.flatMap((element) => (ts.isOmittedExpression(element) ? [] : boundNames(element.name))))
+
 const emptyExport = () => ({ value: new Set(), returns: new Set() })
 
 /** `followHolders`' answer for a file with nothing in it to follow. */
@@ -344,8 +347,9 @@ function readsIn(file, source, checker, functions, known, next) {
   for (const statement of source.statements) {
     if (ts.isFunctionDeclaration(statement) && isExported(statement) && statement.name) addSymbol(isDefault(statement) ? 'default' : statement.name.text, checker.getSymbolAtLocation(statement.name))
     if (ts.isVariableStatement(statement) && isExported(statement)) {
-      /* A pattern has no symbol of its own, so it adds nothing here. */
-      for (const declaration of statement.declarationList.declarations) addSymbol(declaration.name.text, checker.getSymbolAtLocation(declaration.name))
+      for (const declaration of statement.declarationList.declarations) {
+        for (const name of boundNames(declaration.name)) addSymbol(name.text, checker.getSymbolAtLocation(name))
+      }
     }
     if (ts.isExportAssignment(statement)) {
       /* A name says what it holds and what it returns; anything else has no symbol that holds. */
