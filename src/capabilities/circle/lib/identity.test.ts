@@ -181,6 +181,17 @@ describe('WI-22.B2 — expiry is the real revocation', () => {
     )
   })
 
+  it('lives ninety days, in the integer milliseconds the design states', () => {
+    /* The lifetime is the design's number, so it is written out here rather
+       than read back from the constant under test: a delegation minted for
+       `DELEGATION_MS` is still good on day 89 and gone on day 90. */
+    const DAY = 86_400_000
+    const d = delegation()
+    expect(checkDelegation(d, 'alice', 'leaf1', 1, T0 + 89 * DAY)).toBeNull()
+    expect(checkDelegation(d, 'alice', 'leaf1', 1, T0 + 90 * DAY - 1)).toBeNull()
+    expect(checkDelegation(d, 'alice', 'leaf1', 1, T0 + 90 * DAY)).toBe('expired')
+  })
+
   it('renews at two thirds, which is what makes failing closed affordable', () => {
     /* ⚠️ `identity.md` refuses a page signed just before expiry and delivered
        just after, because it cannot be told from one backdated after expiry.
