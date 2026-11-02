@@ -80,6 +80,32 @@ describe('scanBooks', () => {
   })
 })
 
+/* AT MOST `SCAN_WIDTH` (16) FOLDERS IN FLIGHT. The pool exists to overlap
+   round-trips without opening one per book at once; a pool as wide as the
+   library is no pool. */
+describe('the scan of a large library', () => {
+  it('reads at most sixteen folders at once, and more than one', async () => {
+    const files: Record<string, string> = {}
+    for (let i = 0; i < 40; i++) files[`${BOOKS_DIR}/book_${i}/book.json`] = record(`Book ${i}`)
+    const base = fakeFs(files)
+    let inFlight = 0
+    let most = 0
+    const fs: IndexFs = {
+      ...base,
+      readDir: async (path) => {
+        if (path === BOOKS_DIR) return base.readDir(path)
+        inFlight += 1
+        most = Math.max(most, inFlight)
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        inFlight -= 1
+        return base.readDir(path)
+      },
+    }
+    expect(await scanBooks(fs)).toHaveLength(40)
+    expect(most).toBe(16)
+  })
+})
+
 describe('parseIndex', () => {
   it('reads a cache back', () => {
     const raw = JSON.stringify({ version: 2, books: [{ bookId: 'a', title: 'T', author: 'A' }] })
