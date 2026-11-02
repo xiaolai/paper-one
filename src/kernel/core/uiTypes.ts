@@ -151,6 +151,7 @@ export function paneOffered(pane: PaneId, developer: boolean): boolean {
 export function contributionOffered(
   entry: { readonly id: string; readonly unfinished?: boolean },
   developer: boolean,
+  // Stryker disable next-line ArrayDeclaration: every entry asked about is a contributed panel, whose id is `<capability>:<name>`, so a seeded entry with no colon in it can never match one.
   hidden: readonly string[] = [],
 ): boolean {
   return entry.unfinished !== true || (developer && !hidden.includes(entry.id))
