@@ -519,28 +519,31 @@ function stronglyConnectedComponents(nodes: readonly string[], edges: ReadonlyMa
   const onStack = new Set<string>()
   const stack: string[] = []
   const components: string[][] = []
+  const work: { node: string; next: number }[] = []
   let counter = 0
 
-  const visit = (node: string) => {
+  /* Numbering a node and giving it a frame are one step: a node with a
+     frame and no number would be popped from `stack` looking for itself,
+     and never found. */
+  const enter = (node: string) => {
     index.set(node, counter)
     low.set(node, counter)
     counter++
     stack.push(node)
     onStack.add(node)
+    work.push({ node, next: 0 })
   }
 
   for (const root of nodes) {
     if (index.has(root)) continue
-    visit(root)
-    const work: { node: string; next: number }[] = [{ node: root, next: 0 }]
+    enter(root)
     while (work.length > 0) {
       const frame = work[work.length - 1] as { node: string; next: number }
       const successors = edges.get(frame.node) ?? []
       if (frame.next < successors.length) {
         const next = successors[frame.next++] as string
         if (!index.has(next)) {
-          visit(next)
-          work.push({ node: next, next: 0 })
+          enter(next)
         } else if (onStack.has(next)) {
           low.set(frame.node, Math.min(low.get(frame.node) ?? 0, index.get(next) ?? 0))
         }
