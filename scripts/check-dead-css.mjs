@@ -64,14 +64,14 @@ const ROOTS = ['src']
  */
 const KEPT = /^_/
 
-function walk(dir, out = []) {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name)
-    if (entry.isDirectory()) walk(full, out)
-    else if (entry.isFile()) out.push(full)
-  }
-  return out
-}
+/** Every file under `dir`, however deep. A link is not followed, and is no file. */
+const walk = (dir) =>
+  readdirSync(dir, { withFileTypes: true, recursive: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => join(entry.parentPath, entry.name))
+
+/** Every file under each of `roots` that exists in `root`. */
+const filesUnder = (root, roots) => roots.map((dir) => join(root, dir)).filter((dir) => existsSync(dir)).flatMap(walk)
 
 const isModuleImport = (specifier) => ts.isStringLiteralLike(specifier) && specifier.text.endsWith('.module.css')
 
@@ -89,10 +89,15 @@ const interned = (make) => {
     return made.get(key)
   }
 }
+// Stryker disable next-line StringLiteral: no reader compares a kind with 'sheet'; one is told from the others by `modulePath`
 const sheetOf = interned((modulePath) => Object.freeze({ kind: 'sheet', modulePath }))
 const namespaceOf = interned((modulePath) => Object.freeze({ kind: 'namespace', modulePath }))
 const sourceModuleOf = interned((file) => Object.freeze({ kind: 'source', file, modulePath: null }))
+// Stryker disable next-line StringLiteral: no reader compares a kind with 'handedIn'; one is told from the others by its null `modulePath`
 const HANDED_IN = Object.freeze({ kind: 'handedIn', modulePath: null })
+
+const isExported = (node) => (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Export) !== 0
+const isDefault = (node) => (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Default) !== 0
 
 /** The source file a relative specifier means, or null: this tree writes no extensions. */
 function sourceAt(file, specifier, functions) {
@@ -107,17 +112,18 @@ function sourceAt(file, specifier, functions) {
 /** The functions a file exports, by name, whatever else is known of it. A call into one is followed. */
 function exportedFunctions(source) {
   const found = new Map()
-  const isExported = (node) => (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Export) !== 0
   for (const statement of source.statements) {
     if (ts.isFunctionDeclaration(statement) && isExported(statement)) {
-      const isDefault = (ts.getCombinedModifierFlags(statement) & ts.ModifierFlags.Default) !== 0
-      if (isDefault) found.set('default', statement)
-      else if (statement.name) found.set(statement.name.text, statement)
+      /* Only a default may go unnamed: the parser names any other, if only with ''. */
+      if (isDefault(statement)) found.set('default', statement)
+      else found.set(statement.name.text, statement)
     }
     if (ts.isVariableStatement(statement) && isExported(statement)) {
       for (const declaration of statement.declarationList.declarations) {
         const value = declaration.initializer === undefined ? undefined : unwrapped(declaration.initializer)
-        if (ts.isIdentifier(declaration.name) && value !== undefined && (ts.isArrowFunction(value) || ts.isFunctionExpression(value))) found.set(declaration.name.text, value)
+        /* A pattern has no `text`, so a function it is bound to is filed under
+           `undefined`, which no import names. */
+        if (value !== undefined && (ts.isArrowFunction(value) || ts.isFunctionExpression(value))) found.set(declaration.name.text, value)
       }
     }
   }
@@ -140,17 +146,20 @@ function exportFrom(table, file, name) {
   return entry
 }
 
-const tableText = (table) =>
+/* WHAT IS KNOWN ONLY GROWS, round on round, and every origin is made once (`interned`),
+   so a round that learned anything left some set larger: the sizes are the whole
+   comparison, and what each origin is need not be spelled out. */
+const tableSizes = (table) =>
   JSON.stringify([
-    [...table.exports].map(([file, names]) => [file, [...names].map(([name, entry]) => [name, [...entry.value].map(originText), [...entry.returns].map(originText)])]),
-    [...table.handed].map(([key, origins]) => [key, [...origins].map(originText)]),
+    [...table.exports].map(([file, names]) => [file, [...names].map(([name, entry]) => [name, entry.value.size, entry.returns.size])]),
+    [...table.handed].map(([key, origins]) => [key, origins.size]),
   ])
-const originText = (origin) => `${origin.kind}:${origin.modulePath ?? origin.file ?? ''}`
 
 /**
  * Every class one source reads, `{ modulePath, name }`, `modulePath` null for a
- * stylesheet that was handed in; every stylesheet it reads whole; and what it does
- * with one that this cannot follow.
+ * stylesheet that was handed in; every stylesheet it reads whole; what it does
+ * with one that this cannot follow; and whether it could hold one at all, which is
+ * whether it was walked.
  *
  * WHAT HOLDS A STYLESHEET IS A BINDING, so the compiler's scopes decide: an
  * identifier means what it resolves to, and a parameter that shadows an import is
@@ -167,26 +176,30 @@ function readsIn(file, source, checker, functions, known, next) {
   const whole = new Set()
   const unfollowed = []
   const say = (at, how) => unfollowed.push({ line: source.getLineAndCharacterOfPosition(at.getStart()).line + 1, what: at.getText().replace(/\s+/g, ' ').slice(0, 60), how })
-  const readName = (origin, name) => {
-    if (origin.kind !== 'source') reads.set(JSON.stringify([origin.modulePath, name]), { modulePath: origin.modulePath, name })
-  }
+  /* Never of a source module: what a source exports is read through `through`. */
+  const readName = (origin, name) => reads.set(JSON.stringify([origin.modulePath, name]), { modulePath: origin.modulePath, name })
+
+  /** Whether another source is known to export anything: only then is its module worth holding. */
+  const exportsAny = (target) => (known.exports.get(target)?.size ?? 0) > 0
 
   const importedFrom = new Map()
   const seeds = []
+  // Stryker disable next-line ArrayDeclaration: a string in it is filed under a string, and only a symbol is ever looked up
   const returning = []
   const takeFrom = (target, name, nameNode) => {
     importedFrom.set(checker.getSymbolAtLocation(nameNode), { target, name })
     const entry = known.exports.get(target)?.get(name)
     if (entry === undefined) return
-    if (entry.value.size > 0) seeds.push([nameNode, [...entry.value]])
-    if (entry.returns.size > 0) returning.push([checker.getSymbolAtLocation(nameNode), [...entry.returns]])
+    /* An entry holds a value or a return, and an empty list of either fills nothing. */
+    seeds.push([nameNode, [...entry.value]])
+    returning.push([checker.getSymbolAtLocation(nameNode), [...entry.returns]])
   }
 
   for (const statement of source.statements) {
     if (ts.isImportEqualsDeclaration(statement) && ts.isExternalModuleReference(statement.moduleReference) && isModuleImport(statement.moduleReference.expression)) {
       seeds.push([statement.name, [sheetOf(resolve(dirname(file), statement.moduleReference.expression.text))]])
     }
-    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteralLike(statement.moduleSpecifier)) continue
+    /* Only an import declaration has a clause, and one without (`import './x'`) binds nothing. */
     const clause = statement.importClause
     if (clause === undefined) continue
     if (isModuleImport(statement.moduleSpecifier)) {
@@ -202,12 +215,12 @@ function readsIn(file, source, checker, functions, known, next) {
       }
       continue
     }
+    /* A module that is no source here is `null`, of which nothing is known. */
     const target = sourceAt(file, statement.moduleSpecifier.text, functions)
-    if (target === null) continue
     if (clause.name) takeFrom(target, 'default', clause.name)
     if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
       importedFrom.set(checker.getSymbolAtLocation(clause.namedBindings.name), { target, name: null })
-      if ((known.exports.get(target)?.size ?? 0) > 0) seeds.push([clause.namedBindings.name, [sourceModuleOf(target)]])
+      if (exportsAny(target)) seeds.push([clause.namedBindings.name, [sourceModuleOf(target)]])
     }
     if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
       for (const element of clause.namedBindings.elements) takeFrom(target, (element.propertyName ?? element.name).text, element.name)
@@ -225,11 +238,14 @@ function readsIn(file, source, checker, functions, known, next) {
     else if (parameters[index] !== undefined) seeds.push([parameters[index].name, [...origins]])
   }
 
+  /* A source module is only made of a file known to export something, and what is
+     known only grows, so its exports are there to read. */
   const through = (origins, keys) =>
     origins.flatMap((origin) => {
-      if (origin.kind === 'namespace' && keys.includes('default')) return [sheetOf(origin.modulePath)]
-      if (origin.kind === 'source') return keys.flatMap((key) => (key === null ? [] : [...(known.exports.get(origin.file)?.get(key)?.value ?? [])]))
-      return []
+      if (origin.kind === 'namespace') return keys.includes('default') ? [sheetOf(origin.modulePath)] : []
+      if (origin.kind !== 'source') return []
+      const exported = known.exports.get(origin.file)
+      return keys.flatMap((key) => [...(exported.get(key)?.value ?? [])])
     })
 
   const rootOf = (inner) => {
@@ -247,23 +263,23 @@ function readsIn(file, source, checker, functions, known, next) {
     if (specifier === null) return []
     if (specifier.endsWith('.module.css')) return [namespaceOf(resolve(dirname(file), specifier))]
     const target = sourceAt(file, specifier, functions)
-    return target !== null && (known.exports.get(target)?.size ?? 0) > 0 ? [sourceModuleOf(target)] : []
+    return exportsAny(target) ? [sourceModuleOf(target)] : []
   }
 
-  /* NOTHING IN A FILE THAT CANNOT HOLD ONE: the walk is the cost of this gate, and most
-     sources mention no stylesheet and were handed none. */
-  const couldHoldOne = seeds.length > 0 || elementSeeds.length > 0 || returning.length > 0 || /styles|\.module|\bimport\(|\brequire\(/.test(source.text)
+  /* NOTHING IN A FILE THAT CANNOT HOLD ONE: the walk is the cost of this gate, about
+     half of it on this tree, and most sources mention no stylesheet and were handed
+     none. A return is never known without its import's seed, so `returning` adds no
+     file. Whether the file was walked is in the answer, so the saving is held to. */
+  const couldHoldOne = seeds.length > 0 || elementSeeds.length > 0 || /styles|\.module|\bimport\(|\brequire\(/.test(source.text)
 
   /* A stylesheet chosen at run time names no module, so nothing can be said of it. */
-  if (/\.module\.css/.test(source.text)) {
-    const loads = (node) => {
-      if (ts.isCallExpression(node) && node.arguments.length > 0 && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
-        if (staticText(node.arguments[0], checker) === null && node.arguments[0].getText().includes('.module.css')) say(node, 'a stylesheet chosen at run time')
-      }
-      ts.forEachChild(node, loads)
+  const loads = (node) => {
+    if (ts.isCallExpression(node) && node.arguments.length > 0 && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+      if (staticText(node.arguments[0], checker) === null && node.arguments[0].getText().includes('.module.css')) say(node, 'a stylesheet chosen at run time')
     }
-    loads(source)
+    ts.forEachChild(node, loads)
   }
+  loads(source)
 
   const followed = !couldHoldOne ? NOTHING_HELD : followHolders({
     source,
@@ -280,7 +296,7 @@ function readsIn(file, source, checker, functions, known, next) {
         if (origin.kind === 'source') {
           const exported = known.exports.get(origin.file)
           if (name === null) say(at, 'a module read by a key this cannot read')
-          else if ((exported?.get(name)?.returns.size ?? 0) > 0 && !(ts.isPropertyAccessExpression(at) && ts.isCallExpression(at.parent) && at.parent.expression === at)) say(at, 'a function that returns it, handed on')
+          else if ((exported.get(name)?.returns.size ?? 0) > 0 && !(ts.isPropertyAccessExpression(at) && ts.isCallExpression(at.parent) && at.parent.expression === at)) say(at, 'a function that returns it, handed on')
         } else if (name === null) say(at, 'a key this cannot read: name the class')
         else readName(origin, name)
       }
@@ -295,8 +311,8 @@ function readsIn(file, source, checker, functions, known, next) {
     escaped: (origins, at, how) => {
       if (origins.some((origin) => origin.kind !== 'source')) say(at, how)
     },
+    /* `index` is where the value stands among the arguments, which it always does. */
     handedOn: (callee, index, origins) => {
-      if (index < 0) return false
       const inner = unwrapped(callee)
       const named = ts.isIdentifier(inner)
         ? importedFrom.get(checker.getSymbolAtLocation(inner))
@@ -322,57 +338,73 @@ function readsIn(file, source, checker, functions, known, next) {
     for (const origin of value) entry.value.add(origin)
     for (const origin of returns) entry.returns.add(origin)
   }
-  const isExported = (node) => (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Export) !== 0
-  const isDefault = (node) => (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Default) !== 0
   const addSymbol = (name, symbol) => addExport(name, followed.heldBy(symbol), followed.returnsOf(symbol))
   for (const statement of source.statements) {
     if (ts.isFunctionDeclaration(statement) && isExported(statement) && statement.name) addSymbol(isDefault(statement) ? 'default' : statement.name.text, checker.getSymbolAtLocation(statement.name))
     if (ts.isVariableStatement(statement) && isExported(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        if (ts.isIdentifier(declaration.name)) addSymbol(declaration.name.text, checker.getSymbolAtLocation(declaration.name))
-      }
+      /* A pattern has no symbol of its own, so it adds nothing here. */
+      for (const declaration of statement.declarationList.declarations) addSymbol(declaration.name.text, checker.getSymbolAtLocation(declaration.name))
     }
     if (ts.isExportAssignment(statement)) {
+      /* A name says what it holds and what it returns; anything else has no symbol that holds. */
       const value = unwrapped(statement.expression)
-      if (ts.isIdentifier(value)) addSymbol('default', checker.getSymbolAtLocation(value))
+      addSymbol('default', checker.getSymbolAtLocation(value))
       addExport('default', followed.originsOf(value), [])
     }
     if (!ts.isExportDeclaration(statement)) continue
     const specifier = statement.moduleSpecifier
-    const sheet = specifier !== undefined && isModuleImport(specifier) ? resolve(dirname(file), specifier.text) : null
-    const target = specifier !== undefined && sheet === null && ts.isStringLiteralLike(specifier) ? sourceAt(file, specifier.text, functions) : null
     const clause = statement.exportClause
+    if (specifier === undefined) {
+      /* `export { a, b as c }`, of this file's own names. */
+      for (const element of clause.elements) addSymbol(element.name.text, checker.getExportSpecifierLocalTargetSymbol(element))
+      continue
+    }
+    const sheet = isModuleImport(specifier) ? resolve(dirname(file), specifier.text) : null
+    const target = sourceAt(file, specifier.text, functions)
     if (clause === undefined) {
       /* `export * from`: every name goes on, and `default` does not. */
       if (sheet !== null) whole.add(sheet)
-      if (target !== null) {
-        for (const [name, entry] of known.exports.get(target) ?? []) if (name !== 'default') addExport(name, [...entry.value], [...entry.returns])
-      }
+      else for (const [name, entry] of known.exports.get(target) ?? []) if (name !== 'default') addExport(name, [...entry.value], [...entry.returns])
     } else if (ts.isNamespaceExport(clause)) {
       if (sheet !== null) addExport(clause.name.text, [namespaceOf(sheet)], [])
-      if (target !== null && (known.exports.get(target)?.size ?? 0) > 0) addExport(clause.name.text, [sourceModuleOf(target)], [])
+      else if (exportsAny(target)) addExport(clause.name.text, [sourceModuleOf(target)], [])
     } else {
       for (const element of clause.elements) {
         const from = (element.propertyName ?? element.name).text
-        if (sheet !== null) {
-          if (from === 'default') addExport(element.name.text, [sheetOf(sheet)], [])
-          else readName(sheetOf(sheet), from)
-        } else if (target !== null) {
+        if (sheet === null) {
           const entry = known.exports.get(target)?.get(from)
           if (entry !== undefined) addExport(element.name.text, [...entry.value], [...entry.returns])
-        } else if (specifier === undefined) {
-          addSymbol(element.name.text, checker.getExportSpecifierLocalTargetSymbol(element))
-        }
+        } else if (from === 'default') addExport(element.name.text, [sheetOf(sheet)], [])
+        else readName(sheetOf(sheet), from)
       }
     }
   }
-  return { reads: [...reads.values()], whole: [...whole], unfollowed }
+  return { reads: [...reads.values()], whole: [...whole], unfollowed, walked: couldHoldOne }
 }
 
 /** `readsBySource` for every source under `root`. */
 export function scanSources(root, roots = ROOTS) {
-  const files = roots.flatMap((dir) => (existsSync(join(root, dir)) ? walk(join(root, dir)) : []))
+  const files = filesUnder(root, roots)
   return readsBySource(files.filter((f) => ['.ts', '.tsx'].includes(extname(f))))
+}
+
+/*
+ * NO LIBRARY, NO RESOLVING AND NO OUTPUT: the scopes are all this asks of the compiler,
+ * and they are within one file. What crosses a file is `readsIn`'s to carry. So each of
+ * these saves time and decides no answer: a type the library or another file would
+ * lend is asked about only for a key, and a key is held only where this file says so.
+ */
+const PROGRAM = {
+  // Stryker disable next-line BooleanLiteral: resolving adds the files a source imports, whose declarations no scope of this file holds anything under
+  noResolve: true,
+  // Stryker disable next-line BooleanLiteral: the library adds types no scope of this file holds anything under, and costs only time
+  noLib: true,
+  // Stryker disable next-line ArrayDeclaration: a type package that is not there is a diagnostic, and no diagnostic is read
+  types: [],
+  jsx: ts.JsxEmit.Preserve,
+  target: ts.ScriptTarget.Latest,
+  // Stryker disable next-line BooleanLiteral: nothing is ever emitted, so whether it could be decides nothing
+  noEmit: true,
 }
 
 /**
@@ -381,16 +413,14 @@ export function scanSources(root, roots = ROOTS) {
  * since a re-export of a re-export arrives a round later.
  */
 function readsBySource(sources) {
-  /* NO LIBRARY AND NO RESOLVING: the scopes are all this asks of the compiler, and
-     they are within one file. What crosses a file is `readsIn`'s to carry. */
-  const program = ts.createProgram(sources, { noResolve: true, noLib: true, types: [], jsx: ts.JsxEmit.Preserve, target: ts.ScriptTarget.Latest, noEmit: true })
+  const program = ts.createProgram(sources, PROGRAM)
   const checker = program.getTypeChecker()
   const functions = new Map(sources.map((file) => [file, exportedFunctions(program.getSourceFile(file))]))
   let known = emptyTable()
   for (;;) {
     const next = emptyTable()
     const answers = new Map(sources.map((file) => [file, readsIn(file, program.getSourceFile(file), checker, functions, known, next)]))
-    if (tableText(next) === tableText(known)) return answers
+    if (tableSizes(next) === tableSizes(known)) return answers
     known = next
   }
 }
@@ -406,7 +436,7 @@ const unescaped = (name) =>
 /** Where the bracket opened at `open` closes. A selector with none reads to its end. */
 function closing(text, open) {
   let depth = 0
-  for (let at = open; at < text.length; at++) {
+  for (let at = open; text[at] !== undefined; at++) {
     if (text[at] === '\\') at++
     else if (text[at] === '(') depth++
     else if (text[at] === ')' && --depth === 0) return at
@@ -422,13 +452,14 @@ function closing(text, open) {
 function localClasses(selector, inherited) {
   const found = []
   let global = inherited
-  for (let at = 0; at < selector.length; ) {
+  for (let at = 0; selector[at] !== undefined; ) {
     const rest = selector.slice(at)
     const switched = /^:(global|local)(?![\w-])/.exec(rest)
     if (switched) {
       const end = at + switched[0].length
       if (selector[end] === '(') {
         const close = closing(selector, end)
+        // Stryker disable next-line ArithmeticOperator: a slice from before the bracket adds the `l` of `:local`, no class, and the bracket, which opens a group around the same selector kept local by the same `false`
         if (switched[1] === 'local') found.push(...localClasses(selector.slice(end + 1, close), false))
         at = close + 1
       } else {
@@ -444,26 +475,25 @@ function localClasses(selector, inherited) {
       continue
     }
     if (selector[at] === ',') global = inherited
-    if (selector[at] === '.') {
-      CLASS.lastIndex = at
-      const match = CLASS.exec(selector)
-      if (match) {
-        if (!global) found.push(unescaped(match[1]))
-        at += match[0].length
-        continue
-      }
+    /* Sticky, so it matches only a class that starts here, at a dot. */
+    CLASS.lastIndex = at
+    const match = CLASS.exec(selector)
+    if (match) {
+      if (!global) found.push(unescaped(match[1]))
+      at += match[0].length
+      continue
     }
     at += selector[at] === '\\' ? 2 : 1
   }
   return found
 }
 
-/** The names `@value` adds: `a: 1px`, `a, b as c from './x.css'`. */
-function valueNames(statement) {
-  const body = statement.replace(/^@value\s+/, '')
-  const imported = /^(.*?)\s+from\s/s.exec(body)
-  if (imported === null) return [body.split(/[\s:]/)[0]]
-  return imported[1].split(',').map((one) => one.trim().split(/\s+as\s+/).at(-1))
+/** The names an `@value` body adds: `a: 1px`, `a, b as c from './x.css'`. */
+function valueNames(body) {
+  const [names, from] = body.split(/\sfrom\s/)
+  if (from === undefined) return [body.split(/[\s:]/)[0]]
+  /* `b as c` adds `c`, the last word of each. */
+  return names.split(',').map((one) => one.trim().split(/\s/).at(-1))
 }
 
 /**
@@ -477,7 +507,7 @@ function valueNames(statement) {
 function moduleExports(css) {
   const classes = new Set()
   const keys = new Set()
-  const stack = [{ global: false, exporting: false, frames: false }]
+  const stack = [{}]
   let buffer = ''
   for (const char of withoutProse(css)) {
     const top = stack.at(-1)
@@ -487,9 +517,10 @@ function moduleExports(css) {
       stack.push({
         global: prelude === ':global' || (prelude !== ':local' && top.global),
         exporting: prelude === ':export',
-        frames: top.frames || /^@(-\w+-)?keyframes\b/.test(prelude),
       })
-      if (!prelude.startsWith('@') && !top.frames && ![':global', ':local', ':export', ':import'].includes(prelude) && !prelude.startsWith(':import(')) {
+      /* An at-rule's prelude is no selector, and `:import(./x.css)` names a file. A
+         keyframe's `12.5%` needs no exception: a class cannot start with a digit. */
+      if (!prelude.startsWith('@') && !prelude.startsWith(':import(')) {
         const selector = prelude.replace(/\[[^\]]*\]/g, '')
         for (const name of localClasses(selector, top.global)) classes.add(name)
       }
@@ -497,7 +528,8 @@ function moduleExports(css) {
       const statement = buffer.trim()
       buffer = ''
       if (top.exporting && statement.includes(':')) keys.add(statement.split(':')[0].trim())
-      if (statement.startsWith('@value')) for (const name of valueNames(statement)) keys.add(name)
+      const value = /^@value\s+/.exec(statement)
+      if (value !== null) for (const name of valueNames(statement.slice(value[0].length))) keys.add(name)
       if (char === '}' && stack.length > 1) stack.pop()
     } else buffer += char
   }
@@ -556,7 +588,7 @@ export function unfollowedStylesheets(root, roots = ROOTS, scanned = scanSources
  * up passing because it found nothing to look at.
  */
 export function deadClasses(root, roots = ROOTS, scanned = scanSources(root, roots)) {
-  const files = roots.flatMap((dir) => (existsSync(join(root, dir)) ? walk(join(root, dir)) : []))
+  const files = filesUnder(root, roots)
   const modules = files.filter((f) => f.endsWith('.module.css'))
 
   /* Every `styles.name` in every source file, and every `composes:` in every
@@ -597,7 +629,7 @@ export function deadClasses(root, roots = ROOTS, scanned = scanSources(root, roo
        comment instead of the code is a small lie that costs a search. Each line
        is read the way a selector is, so an escaped name (`.a\:b`) is found by
        what it means rather than by how it is spelled. */
-    const code = text.replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, '')).split('\n')
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, (comment) => '\n'.repeat(comment.split('\n').length - 1)).split('\n')
     for (const name of [...declared].sort()) {
       if (KEPT.test(name) || used.has(name)) continue
       const line = code.findIndex((l) => [...l.matchAll(CLASSES)].some((m) => unescaped(m[1]) === name)) + 1
@@ -610,43 +642,47 @@ export function deadClasses(root, roots = ROOTS, scanned = scanSources(root, roo
 /* THE WHOLE CLI BEHIND THE GUARD, not just the exit. Importing this module
    used to run the scan and print its summary as a side effect, so the gate's
    own test emitted the repository's result in the middle of its output — and
-   an importer that only wanted `deadClasses` paid for a full walk of `src`. */
-if (isProcessEntry(import.meta)) {
-  const scanned = scanSources(REPO)
-  const { dead, modules, used } = deadClasses(REPO, ROOTS, scanned)
-  const missing = undefinedClasses(REPO, ROOTS, scanned)
-  const unfollowed = unfollowedStylesheets(REPO, ROOTS, scanned)
+   an importer that only wanted `deadClasses` paid for a full walk of `src`. `main` prints what it found under `root` and
+   returns the exit code. */
+export function main({ root = REPO, stdout = process.stdout } = {}) {
+  const scanned = scanSources(root)
+  const { dead, modules, used } = deadClasses(root, ROOTS, scanned)
+  const missing = undefinedClasses(root, ROOTS, scanned)
+  const unfollowed = unfollowedStylesheets(root, ROOTS, scanned)
   for (const { file, name, line } of dead) {
-    process.stdout.write(`${file}:${line}  .${name} — no source names \`styles.${name}\`\n`)
+    stdout.write(`${file}:${line}  .${name} — no source names \`styles.${name}\`\n`)
   }
-  process.stdout.write(
+  stdout.write(
     `check-dead-css: ${modules} modules, ${used} classes used, ${dead.length} unreachable, ${missing.length} undefined, ${unfollowed.length} unfollowed\n`,
   )
   for (const { file, name } of missing) {
-    process.stdout.write(`${file}  .${name} — named here, declared by no rule in the module it imports\n`)
+    stdout.write(`${file}  .${name} — named here, declared by no rule in the module it imports\n`)
   }
   if (missing.length > 0) {
-    process.stdout.write(
+    stdout.write(
       '\nA class no stylesheet declares reads as undefined and styles nothing, without\n' +
         'an error. Restore the rule, or stop naming the class.\n',
     )
   }
   for (const { file, line, what, how } of unfollowed) {
-    process.stdout.write(`${file}:${line}  ${what} — ${how}\n`)
+    stdout.write(`${file}:${line}  ${what} — ${how}\n`)
   }
   if (unfollowed.length > 0) {
-    process.stdout.write(
+    stdout.write(
       '\nA stylesheet this cannot follow answers neither question above: a class read\n' +
         'that way could be missing, or be all that keeps a rule alive. Read the classes\n' +
         'by name, or hand the stylesheet on as `styles`, where its reader is seen.\n',
     )
   }
   if (dead.length > 0) {
-    process.stdout.write(
+    stdout.write(
       '\nAn unreachable rule is shipped CSS that can never apply. Delete it, or\n' +
         'rename it with a leading `_` if it is kept deliberately — the exemption\n' +
         'belongs at the rule, where the next reader of this file will see it.\n',
     )
   }
-  if (dead.length > 0 || missing.length > 0 || unfollowed.length > 0) process.exit(1)
+  return dead.length > 0 || missing.length > 0 || unfollowed.length > 0 ? 1 : 0
 }
+
+// Stryker disable next-line all: reached only when node starts this file, and a spawned child never runs the mutant under test — every decision is in `main`, which is measured in-process
+if (isProcessEntry(import.meta)) process.exit(main())
