@@ -1582,6 +1582,51 @@ describe('Optional features', () => {
     expect(screen.queryByText(/dep-id/)).toBeNull()
   })
 
+  it('names the row it waits for, not merely the first one listed', () => {
+    const { props } = full()
+    const standing = [
+      { id: 'first', toggle: { title: 'The first one', summary: 's' }, state: 'on' },
+      { id: 'dep-id', toggle: { title: 'The dependency', summary: 's' }, state: 'off' },
+      { id: 'one', toggle: TOGGLE, state: 'needs', on: 'dep-id' },
+    ] as const
+    render(<Settings {...props} optionalFeatures={{ standing, switches: switches(['dep-id']) }} />)
+    open()
+    expect(screen.getByText('Needs The dependency.')).toBeTruthy()
+    expect(screen.queryByText('Needs The first one.')).toBeNull()
+  })
+
+  it('does not name an id when what it needs is not listed at all', () => {
+    const { props } = full()
+    const standing = [{ id: 'one', toggle: TOGGLE, state: 'needs', on: 'gone' }] as const
+    render(<Settings {...props} optionalFeatures={{ standing, switches: switches() }} />)
+    open()
+    expect(screen.getByText('Needs another part of Paper that is off.')).toBeTruthy()
+    expect(screen.queryByText(/gone/)).toBeNull()
+  })
+
+  it('says nothing under a running switch but what it does', () => {
+    const { props } = full()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'on' }], switches: switches() }} />)
+    open()
+    const body = screen.getByText(/^Turning one off/).parentElement
+    expect([...(body?.querySelectorAll('p') ?? [])].map((p) => p.textContent)).toEqual([
+      'Turning one off keeps what it saved on this device.',
+      'What it does.',
+    ])
+  })
+
+  it('draws no row for a capability with neither a switch nor one it follows, beside one that has a switch', () => {
+    const { props } = full()
+    const standing = [
+      { id: 'fixed', state: 'on' },
+      { id: 'one', toggle: TOGGLE, state: 'on' },
+    ] as const
+    render(<Settings {...props} optionalFeatures={{ standing, switches: switches() }} />)
+    open()
+    expect(screen.getByRole('switch', { name: 'Some feature' })).toBeTruthy()
+    expect(screen.queryByText(/^Follows/)).toBeNull()
+  })
+
   it('says when this device cannot have it', () => {
     const { props } = full()
     render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'unavailable' }], switches: switches() }} />)

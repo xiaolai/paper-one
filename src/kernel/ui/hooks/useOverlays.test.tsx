@@ -475,6 +475,46 @@ describe('useOverlays', () => {
     await waitFor(() => expect(result.current[0]?.sectionIndex).toBe(2))
   })
 
+  /* ⚠️ **THE SAME ANSWER IS THE SAME ANCHORS — THE VERY ARRAY, NOT AN EQUAL
+     ONE.** The reader redraws when its marks input changes by identity, so a
+     re-ask answering exactly what is on screen must hand back what is on
+     screen. Every field of every anchor is compared to decide that; one field
+     compared the wrong way round makes every re-ask a redraw of every section,
+     and the anchors would still read as equal. */
+  it('hands back the very anchors it is showing when a re-ask answers the same', async () => {
+    const forBook = vi.fn(() => Promise.resolve([annotation({ pub: 'p1' }), annotation({ pub: 'p2', person: 'bob' })]))
+    const one = contribution('a:x', forBook)
+    const { result } = renderHook((props: OverlayDeps) => useOverlays(props), {
+      initialProps: deps({ contributions: [one] }),
+    })
+    await waitFor(() => expect(result.current).toHaveLength(2))
+    const shown = result.current
+
+    one.fire()
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    })
+    expect(forBook).toHaveBeenCalledTimes(2)
+    expect(result.current).toBe(shown)
+  })
+
+  /* THE SAME FOR A MARK THAT MOVED WITHIN ITS SECTION. The key names the
+     publication, not the passage, so a re-anchored mark keeps its key and its
+     section — the CFI is the only field that says it is somewhere else now. */
+  it('draws a mark that moved to another passage in the same section, though nothing else changed', async () => {
+    let at = 'epubcfi(/6/4!/4/2)'
+    const one = contribution('a:x', () => Promise.resolve([annotation({ at })]))
+    const { result } = renderHook((props: OverlayDeps) => useOverlays(props), {
+      initialProps: deps({ contributions: [one] }),
+    })
+    await waitFor(() => expect(result.current[0]?.cfi).toBe(resolvedCfiForTesting('epubcfi(/6/4!/4/2)')))
+
+    at = 'epubcfi(/6/4!/4/8)'
+    one.fire()
+    await waitFor(() => expect(result.current[0]?.cfi).toBe(resolvedCfiForTesting('epubcfi(/6/4!/4/8)')))
+    expect(result.current).toHaveLength(1)
+  })
+
   it('takes back the listeners it had already installed when one subscribe throws', async () => {
     const off = vi.fn()
     const first: OverlayContribution = {

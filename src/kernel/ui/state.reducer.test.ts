@@ -174,6 +174,19 @@ describe('developer options, by behaviour', () => {
     expect(reducer(opened, { type: 'toggleDeveloper' }, unfinished)).toEqual({ ...reading, developer: false })
   })
 
+  /* TWO CONTRIBUTED PANELS, the finished one first, so the panel remembered is
+     asked about by its own id and not answered for by whichever comes first. */
+  it('forget a remembered unfinished panel when they turn off, whatever else is contributed', () => {
+    const panes = [
+      { id: 'board:panel', screens: ['reader'] },
+      { id: 'cards:deck', screens: ['reader'], unfinished: true },
+    ] as const
+    const opened = at({ screen: 'reader', pane: 'cards:deck', lastPane: 'cards:deck', developer: true })
+    expect(reducer(opened, { type: 'toggleDeveloper' }, panes)).toEqual(
+      at({ screen: 'reader', pane: 'toc', lastPane: 'toc', developer: false }),
+    )
+  })
+
   it('leave a closed pane closed either way', () => {
     const shut = at({ screen: 'reader', pane: null, lastPane: 'toc' })
     expect(reducer(shut, { type: 'toggleDeveloper' })).toEqual({ ...shut, developer: true })

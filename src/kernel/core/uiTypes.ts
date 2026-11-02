@@ -151,6 +151,7 @@ export function paneOffered(pane: PaneId, developer: boolean): boolean {
 export function contributionOffered(
   entry: { readonly id: string; readonly unfinished?: boolean },
   developer: boolean,
+  // Stryker disable next-line ArrayDeclaration: every entry asked about is a contributed panel, whose id is `<capability>:<name>`, so a seeded entry with no colon in it can never match one.
   hidden: readonly string[] = [],
 ): boolean {
   return entry.unfinished !== true || (developer && !hidden.includes(entry.id))
@@ -180,7 +181,7 @@ export function settingsSectionOffered(
   section: { readonly id: string },
   developer: boolean,
   hidden: readonly string[] = [],
-  unfinishedPanes: readonly { readonly id: string }[] = [],
+  unfinishedPanes: readonly { readonly id: string }[],
 ): boolean {
   const capability = section.id.slice(0, section.id.indexOf(':'))
   /* A CONTRIBUTED PANEL CARRIES ITS OWN CAPABILITY'S NAME, so the same match
@@ -206,7 +207,9 @@ export function isContributedPaneId(id: PaneId): id is ContributedPaneId {
 
 /** Whether an id — from anywhere, typed or not — names one of the kernel's own panes. */
 export function isKernelPaneId(id: unknown): id is KernelPaneId {
-  return typeof id === 'string' && (KERNEL_PANE_IDS as readonly string[]).includes(id)
+  /* No `typeof` check first: `includes` answers false for anything that is not
+     one of the ids, whatever its type. */
+  return (KERNEL_PANE_IDS as readonly unknown[]).includes(id)
 }
 
 export const SIDES = ['left', 'right'] as const
