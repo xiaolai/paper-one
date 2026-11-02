@@ -145,6 +145,13 @@ describe('parseRecord', () => {
     expect(parsed).not.toHaveProperty('publisher')
   })
 
+  it('keeps the sort key, series place and publication date under their own names', () => {
+    const parsed = parseRecord(JSON.stringify({ title: 'T', author: 'A', sortAs: 'Moby', seriesIndex: 2, published: '1851' }))!
+    expect(parsed.sortAs).toBe('Moby')
+    expect(parsed.seriesIndex).toBe(2)
+    expect(parsed.published).toBe('1851')
+  })
+
   /* A `subjects` that is not an array of strings crashes the shelf the moment
    * it renders — the same trust boundary the flat store needed. */
   it('drops a field of the wrong type rather than passing it through', () => {
