@@ -1615,6 +1615,12 @@ export function createLibrary({
         /* AND THE PATH FOLLOWS THE BOOK from here on: a write enqueued under
          * the old id before the rename lands in the new folder when its turn
          * comes — see `rekeyed`. */
+        /* AND `to` IS LIVE AGAIN, so whatever it once pointed at is stale. A
+         * book rekeyed back to a name it had left (`a`→`b`, then `b`→`a`)
+         * kept `a`→`b` beside the new `b`→`a`, and the walk from `a` stopped
+         * at `b`, a folder that had gone: every write under the book's own id
+         * was dropped (2026-11-02). With this, `rekeyed` holds no cycle. */
+        rekeyed.delete(to)
         rekeyed.set(from, to)
         const moved = await readBook(target, to)
         if (moved) await recorded(recorder, to, 'record', () => writeBook(target, to, moved))
