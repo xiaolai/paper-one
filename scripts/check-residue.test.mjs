@@ -84,4 +84,9 @@ describe('forms the scan once missed', () => {
   it('reads a class through the services type it implements', () => {
     expect(scanned({ [B]: `${TYPE}class S implements KernelServices {}\nexport const f = (s: S) => s.passages\n` })).toEqual([named('passages', 'services.passages')])
   })
+
+  /* A base this cannot name is still handed the services. */
+  it('refuses a class extending a call given the services type', () => {
+    expect(scanned({ [B]: `${TYPE}class C extends mixin()<KernelServices> {}\nexport const f = (c: C) => c\n` })).toEqual([refused('a type holding the services where this cannot see them: C')])
+  })
 })

@@ -201,7 +201,6 @@ function typeReader(checker, sources) {
 
   const reference = (type, name, bound, seen) => {
     const called = originalName(name)
-    if (called === null) return null
     const args = type.typeArguments ?? []
     if (bound.has(called)) return bound.get(called)
     if (called === 'KernelServices') return MEMBERS
