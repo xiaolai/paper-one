@@ -137,9 +137,9 @@ export const LEGAL_TREE = {
     "import { channel } from './app/web/channel.ts'\nvoid channel\n",
   /* THE FOURTH ROOT (mobile), and the sequence the two native shells share.
    *
-   * `bootApp.ts` is a composition root in its own right: it is what imports
-   * the platform composition now, and it reaches the kernel through the public
-   * entry and the NARROW boot door — never `ui/index.ts`, which names `App`
+   * `bootApp.ts` is a composition root in its own right, though it is HANDED the
+   * platform composition (the entries import it) rather than importing it, and it
+   * reaches the kernel through the public entry and the NARROW boot door — never `ui/index.ts`, which names `App`
    * and would drag the desktop pane tree into a mobile bundle. Both edges are
    * pinned here so that an `only-a-desktop-root-takes-the-desktop-ui-entry`
    * which stops matching fails on the CLEAN tree rather than silently in the
@@ -149,9 +149,11 @@ export const LEGAL_TREE = {
   'src/app/bootApp.ts':
     "import { kernelThing } from '../kernel/index.ts'\n" +
     "import { loadShelf } from '../kernel/ui/boot.ts'\n" +
-    "import { composition } from './composition.desktop.ts'\n" +
-    'export const booted = { kernelThing, loadShelf, composition }\n',
-  'src/main.mobile.tsx': "import { booted } from './app/bootApp.ts'\nvoid booted\n",
+    'export const booted = { kernelThing, loadShelf }\n',
+  'src/main.mobile.tsx':
+    "import { booted } from './app/bootApp.ts'\n" +
+    "import { composition } from './app/composition.desktop.ts'\n" +
+    'void booted\nvoid composition\n',
   /* THE SHARED MOBILE SHELL, and the two leaves it renders.
    *
    * `src/app/shell/` is mounted by BOTH clients, so it may not name either
@@ -457,6 +459,30 @@ export const CASES = [
     },
     from: 'src/shared/roots.ts',
     to: 'src/app/composition.desktop.ts',
+    expect: ['no-capability-to-composition-root'],
+  },
+  /* ⚠️ **THESE TWO ARE HANDED THE COMPOSITION, AND A TEST LOADS BOTH.** Importing
+   * it again would put `virtual:paper-composition` back on those tests' routes,
+   * where the mutation gate cannot follow them
+   * (`dev-docs/decisions/2026-11-02-composition-route.md`). */
+  {
+    name: 'the launch sequence -> a composition root (it is handed the list)',
+    files: {
+      'src/app/bootApp.ts':
+        LEGAL_TREE['src/app/bootApp.ts'] + "import { capabilities } from './composition.desktop.ts'\nvoid capabilities\n",
+    },
+    from: 'src/app/bootApp.ts',
+    to: 'src/app/composition.desktop.ts',
+    expect: ['no-capability-to-composition-root'],
+  },
+  {
+    name: 'the browser client -> a composition root (it is handed the list)',
+    files: {
+      'src/app/web/client.tsx': "import { capabilities } from '../composition.web.ts'\nvoid capabilities\n",
+      'src/app/composition.web.ts': 'export const capabilities = []\n',
+    },
+    from: 'src/app/web/client.tsx',
+    to: 'src/app/composition.web.ts',
     expect: ['no-capability-to-composition-root'],
   },
   {

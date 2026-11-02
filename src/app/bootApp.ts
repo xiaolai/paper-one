@@ -24,8 +24,16 @@
  * ⚠️ **THIS SAID THOSE TESTS LIVE ELSEWHERE "PRECISELY BECAUSE THEY CANNOT RUN
  * AGAINST A FILE LIKE THIS ONE", WHICH STOPPED BEING TRUE THE SAME DAY.**
  * `bootApp.test.ts` runs `bootApp()` whole, with only the native side stood in
- * for — the fs plugin, `invoke`, the shell's events and the composition list —
- * and holds both incidents above as cases of their own.
+ * for — the fs plugin, `invoke` and the shell's events — over a composition list
+ * of its own, and holds both incidents above as cases of their own.
+ *
+ * ⚠️ **THE COMPOSITION ARRIVES AS AN ARGUMENT, AND THIS FILE MUST NOT IMPORT IT.**
+ * `virtual:paper-composition` was imported here until 2026-11-02. No import graph
+ * can follow it, so every test on a route through this file was out of the
+ * mutation gate's sight, and changing the file left nothing in a sweep
+ * authorised: `dev-docs/decisions/2026-11-02-composition-route.md`. The two native
+ * entries import it and hand it in. `.dependency-cruiser.cjs` refuses it here
+ * (`no-capability-to-composition-root`).
  *
  * IMPORTS THE KERNEL THROUGH `ui/boot.ts`, NOT `ui/index.ts`: that barrel
  * names `App`, and a barrel retains everything it names, so taking the wide
@@ -87,7 +95,6 @@ import {
 import type { OpenRequests } from '../kernel/ui/boot'
 import { armShutdownInBackground, type ShutdownDeps } from './shutdown'
 import { bootNoticeOf, bootShelf, legacySources } from './boot'
-import { capabilities } from 'virtual:paper-composition'
 
 /**
  * The shell's event channel, loaded once and lazily.
@@ -144,8 +151,11 @@ export interface BootedApp {
  * A failure opening the store cannot stop the app — `openAppStorage` falls
  * back rather than throwing — so there is no error branch for a shell to
  * render. What it could not do is reported through `bootNotice`.
+ *
+ * `capabilities` is this build's composition, which the entry imports at module
+ * load and hands in as it calls this.
  */
-export async function bootApp(): Promise<BootedApp> {
+export async function bootApp(capabilities: readonly Capability[]): Promise<BootedApp> {
   /* EVERY PHASE BELOW RUNS WHILE THE WINDOW IS BLANK, which is why they are
    * measured rather than reasoned about. Dev only, and gone from a build —
    * see `devTiming`. */
@@ -363,8 +373,8 @@ export async function bootApp(): Promise<BootedApp> {
      composition below act on one answer. A change made in this run waits for the
      next launch: nothing can take one capability down (`createPluginSwitches`). */
   const switchedOff = readSwitchedOff(services.settings)
-  /* `capabilities` IS THE STATIC LIST imported at module load, not the
-     composition awaited below — see `quiesce` in `shutdownDepsOf`. */
+  /* `capabilities` IS THE STATIC LIST the entry handed in, not the composition
+     awaited below — see `quiesce` in `shutdownDepsOf`. */
   const teardown = armShutdownInBackground(
     shutdownDepsOf({ services, lifetime, diagnosticSpool, capabilities: withoutSwitchedOff(capabilities, switchedOff) }),
   )
@@ -547,8 +557,8 @@ export async function shelfAtLaunch({
  * not change a name. `bootApp.test.ts` runs the real teardown over this, with
  * the kernel's real registries.
  *
- * `capabilities` is the STATIC composition list — see `quiesce` — and is an
- * argument only so a test can hand in capabilities of its own.
+ * `capabilities` is the STATIC composition list — see `quiesce` — as `bootApp`
+ * was handed it.
  */
 export function shutdownDepsOf({
   services,
@@ -598,7 +608,8 @@ export function shutdownDepsOf({
        sync's `start` opens the journal: quit there and the flag stays up,
        which is the failure the handshake exists to prevent.
 
-       `capabilities` is imported at module load, so this thunk sees every
+       The entry imports `capabilities` at module load and `bootApp` holds it from
+       its first line, so this thunk sees every
        capability's `quiesce` from the first tick, and each one answers about
        live module state at the moment it is called. `Promise.all` rather than
        `allSettled`: one tail rejecting must reach `shutdown.ts`'s failure

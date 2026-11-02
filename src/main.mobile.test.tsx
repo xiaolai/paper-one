@@ -12,8 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
  *
  * The launch itself (`bootApp`) and the shell (`MobileApp`) have tests of their
  * own and are replaced here; what is left is exactly this file's job — the root
- * element, the geometry published before the first render, and the wiring
- * between the two. The module is imported INSIDE each case rather than at the
+ * element, the geometry published before the first render, this build's
+ * composition handed to the launch, and the wiring between the two. The module is imported INSIDE each case rather than at the
  * top, because its work is done at import time: a throw there would fail the
  * suite's loading rather than a test, and a suite that fails to load is not a
  * test that failed.
@@ -21,17 +21,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const launch = vi.hoisted(() => ({
   booted: null as unknown,
+  /* What the build composes, and each list the launch was then handed. */
+  composed: [{ id: 'one capability of this build' }],
+  handed: [] as unknown[],
   drawn: [] as { props: Record<string, unknown>; titlebar: string }[],
   firstFrames: [] as unknown[],
   fatalHandlers: 0,
 }))
 
 vi.mock('./app/bootApp', () => ({
-  bootApp: async () => launch.booted,
+  bootApp: async (capabilities: unknown) => {
+    launch.handed.push(capabilities)
+    return launch.booted
+  },
   reportFirstFrame: (booted: unknown) => {
     launch.firstFrames.push(booted)
   },
 }))
+
+vi.mock('virtual:paper-composition', () => ({ capabilities: launch.composed }))
 
 vi.mock('./app/mobile/MobileApp', () => ({
   MobileApp: (props: Record<string, unknown>) => {
@@ -59,6 +67,7 @@ const NOTICE = 'Your library could not be read, so it was moved aside and a new 
 beforeEach(() => {
   vi.resetModules()
   launch.booted = { services: SERVICES, shelfUnread: true, composition: COMPOSITION, bootNotice: NOTICE }
+  launch.handed = []
   launch.drawn = []
   launch.firstFrames = []
   launch.fatalHandlers = 0
@@ -90,6 +99,7 @@ describe('the mobile root', () => {
       composition: COMPOSITION,
       bootNotice: NOTICE,
     })
+    expect(launch.handed, 'the launch was not handed this build’s composition').toEqual([launch.composed])
     expect(launch.fatalHandlers, 'a failure before the shell drew would reach nobody').toBe(1)
     expect(launch.firstFrames, 'the first frame was not reported, or not for this launch').toEqual([launch.booted])
   })

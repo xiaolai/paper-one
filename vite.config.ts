@@ -323,9 +323,10 @@ export default defineConfig({
   // set — the WI-5.9 assertion, inside the build. See
   // scripts/vite/assert-bundle.mjs.
   //
-  // ⚠️ IMPORTED BY `src/app/bootApp.ts` AND `src/main.web.tsx` — this said
-  // `src/main.tsx`, which imports it only through `bootApp()` and is one of
-  // three entries (2026-09-19 audit). Grep before naming an importer here.
+  // ⚠️ IMPORTED BY TWO ENTRIES, `src/main.tsx` AND `src/main.mobile.tsx`, and by
+  // nothing else (2026-11-02; it has said one entry, and then `bootApp.ts`).
+  // `src/main.web.tsx` names `composition.web.ts` itself, and `generateBundle`
+  // judges that build all the same. Grep before naming an importer here.
   //
   // `timingLog()` is dev-only (`apply: 'serve'`) and puts the launch timings
   // `kernel/ui/devTiming` sends over the HMR socket into THIS terminal.
