@@ -262,7 +262,8 @@ function typeReader(checker, sources) {
    Rendering them or writing them into a string reads no member, so nothing is named. */
 const READS_NOTHING = new Set(['rendered', 'written into a string'])
 
-const SERVICES = Object.freeze({ kind: 'services' })
+/** Where a value came from: here only ever the services, and only ever compared by identity. */
+const SERVICES = Object.freeze({})
 const isWrapperNode = (node) => ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node)
 const isExported = (node) => (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Export) !== 0
 /** Every name a binding binds: `s` of `s`, and `a` and `b` of `{ a, b: [b] }`. */
