@@ -173,6 +173,27 @@ describe('a position tick', () => {
     expect(indexOn(fs)?.books[0]?.position).toBe('p3')
   })
 
+  /* A flush on demand ends the period, throttle and all. Left armed, the old
+     timer swallowed the next tick's arming and then flushed that tick half a
+     period early. */
+  it('starts a fresh throttle after a flush on demand', async () => {
+    const { fs, queue, library } = world(['book_a'])
+    await library.rememberPosition('book_a', 'p1', 0.1)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await library.flushIndex()
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(1)
+
+    await library.rememberPosition('book_a', 'p2', 0.2)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(1)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(2)
+    expect(indexOn(fs)?.books[0]?.position).toBe('p2')
+  })
+
   /* A browser's `setTimeout` answers with a number, which has no `unref`. */
   it('arms its throttle where a timer is a bare number, as in a browser', async () => {
     const { fs, queue, library } = world(['book_a'])
