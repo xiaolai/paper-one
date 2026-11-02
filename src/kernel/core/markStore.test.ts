@@ -356,6 +356,10 @@ describe('the mark store splits bookmarks from annotations', () => {
     /* Armed only around the scan, and consumed by its first read — the write's
        own read of the same file must not wait on a gate only it could open. */
     let gate: Promise<void> | null = null
+    let reached = () => {}
+    const scanHeld = new Promise<void>((resolve) => {
+      reached = resolve
+    })
     const fs = {
       ...real,
       readFile: async (path: string) => {
@@ -363,6 +367,7 @@ describe('the mark store splits bookmarks from annotations', () => {
         if (gate && path.endsWith('marks.json')) {
           const wait = gate
           gate = null
+          reached()
           await wait
         }
         return bytes
@@ -375,6 +380,15 @@ describe('the mark store splits bookmarks from annotations', () => {
 
     gate = held
     const scan = marks.loadAll()
+    /* THE SCAN HOLDS THE GATE BEFORE THE WRITE STARTS, or the write's own read
+       takes it and waits on a release that comes after it: a scan that never
+       read anything hung here until the test's deadline instead of failing. */
+    await Promise.race([
+      scanHeld,
+      Promise.resolve(scan).then(() => {
+        throw new Error('the scan finished without reading a marks file')
+      }),
+    ])
     await marks.add(highlight({ text: 'second', cfi: 'epubcfi(/6/4!/4/2,/1:40,/1:48)' }))
     release()
     await scan
@@ -751,3 +765,4 @@ describe('carrying marks onto a new book id', () => {
     expect(marks.getSnapshot().all.map((one) => one.id)).toEqual(['m1'])
   })
 })
+
