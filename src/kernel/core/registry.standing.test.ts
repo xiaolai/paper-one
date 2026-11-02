@@ -130,6 +130,7 @@ describe('Composition.standing', () => {
       }),
     ])
     expect(composition.standing).toEqual([{ id: 'bad', state: 'failed' }])
+    expect(composition.failures.map((one) => one.kind)).toEqual(['start-failed'])
   })
 
   it('reads a requirement that failed ahead of one left out, since that is what is wrong', async () => {
