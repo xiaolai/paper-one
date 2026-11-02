@@ -424,6 +424,20 @@ describe('a subscriber hears once per change', () => {
     }
   })
 
+  /* A write that lands after its row was taken off the shelf — the reader
+     rated a book and removed it before the rating reached the disk. The
+     landed record has no row left to correct, so it is not given one, and
+     the rating is not reported as a failure. */
+  it('corrects no row, and reports nothing, when a write lands for a book already taken off', async () => {
+    const { queue, library } = world(['book_1', 'book_2'])
+    const rated = library.patch('book_1', { rating: 3 })
+    const removed = library.remove('book_1')
+    await expect(rated).resolves.toBeUndefined()
+    await removed
+    await queue.idle()
+    expect(library.getSnapshot().map((one) => one.bookId)).toEqual(['book_2'])
+    expect(library.lastFailure()).toBeNull()
+  })
 })
 
 describe('a position remembered without a progress', () => {
