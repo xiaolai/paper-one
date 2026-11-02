@@ -351,6 +351,9 @@ jobs:
   # 41227478169, with those costs, gives a slowest shard of 337 at 7 shards with 5 alone,
   # where a plain count gave 581. The test beside these numbers replays it. It is an
   # estimate, with 26 of those 129 files projected, and 337 of 345 is not much room.
+  # Run 41403407796 proved it too little: shards 6 and 7 reached the step and left 28
+  # files unmeasured. So SHARDS is 16, which shortens every shard but the five alone;
+  # the slowest is still check-mutants.mjs's 337, and only a lighter file can change that.
   #
   # ⚠️ THE BOUND IS FOR WHAT WAS MEASURED, NOT FOR THE LIMITS. A file at both limits
   # costs 60 + 180 + 180 = 420, past the step. It times out, leaves no receipt, and the
@@ -371,7 +374,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      SHARDS: 7
+      SHARDS: 16
       ISOLATE: 5
     outputs:
       count: ${{ steps.plan.outputs.count }}
