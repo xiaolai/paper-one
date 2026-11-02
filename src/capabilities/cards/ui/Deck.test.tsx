@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createKernelServices, rowHue, type Card } from '../../../kernel'
 import { Deck, DeckPane } from './Deck'
@@ -123,9 +123,25 @@ describe('what the panel says', () => {
   })
 
   it('shows no answer line for a card with none, and says so when it has no source', () => {
-    render(<Deck cards={view([CARD({ answer: '', source: '' })])} bookId={null} />)
+    const { container } = render(<Deck cards={view([CARD({ answer: '', source: '' })])} bookId={null} />)
     expect(screen.queryByText('Ishmael')).toBeNull()
+    expect(container.querySelector('.paper-cap-card-answer')).toBeNull()
     expect(screen.getByText('No source')).toBeTruthy()
+  })
+
+  it('shows the answer on its own line under a card that has one', () => {
+    render(<Deck cards={view([CARD()])} bookId={null} />)
+    expect(screen.getByText('Ishmael').className).toBe('paper-cap-card-answer')
+  })
+
+  it('says nothing is missing under All, where every card shows', () => {
+    render(<Deck cards={view([CARD({ kind: 'Idea', body: 'an idea' })])} bookId={null} />)
+    const filters = screen.getByRole('group', { name: 'Filter cards' })
+    fireEvent.click(within(filters).getByRole('button', { name: 'Excerpt' }))
+    expect(screen.getByText('No excerpt cards yet.')).toBeTruthy()
+    fireEvent.click(within(filters).getByRole('button', { name: 'All' }))
+    expect(screen.queryByText(/yet\.$/u)).toBeNull()
+    expect(screen.getByText('an idea')).toBeTruthy()
   })
 
   it('filters by kind and names the kind it found none of', () => {
@@ -163,6 +179,22 @@ describe('the panel over the kernel stores', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Discard card' }))
     await waitFor(() => expect(services.cards.getSnapshot().all).toEqual([]))
     expect(screen.getByText('No cards yet')).toBeTruthy()
+  })
+
+  it('follows a card into another book on the shelf, and one that arrives after it was drawn', async () => {
+    const services = await stored()
+    await services.cards.add({ ...CARD(), id: 'c2', bookId: 'other-book', body: 'from another book' })
+    await services.cards.add({ ...CARD(), id: 'c3', bookId: 'late-book', body: 'from a later book' })
+    await services.library.add('other-book', { title: 'Other', author: 'A', addedAt: 1, ext: 'epub' })
+    const goTo = vi.fn()
+    render(<DeckPane services={services} bookId="open-book" goTo={goTo} />)
+    expect(screen.getByRole('button', { name: /from a later book/ }).hasAttribute('disabled')).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: /from another book/ }))
+    expect(goTo).toHaveBeenCalledWith({ bookId: 'other-book', cfi: 'epubcfi(/6/4!/4/2)' })
+    await act(async () => {
+      await services.library.add('late-book', { title: 'Later', author: 'A', addedAt: 2, ext: 'epub' })
+    })
+    expect(screen.getByRole('button', { name: /from a later book/ }).hasAttribute('disabled')).toBe(false)
   })
 
   it('asks the shelf whether a book can be opened', async () => {
