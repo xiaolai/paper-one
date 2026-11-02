@@ -388,15 +388,18 @@ const importMarksNow = (): void => {
       plan.additions.length,
       plan.additions.length + unplacedWrites.length,
     )
+    // Stryker disable next-line OptionalChaining: the cards write is queued after every other one, always, so this index is always inside `settled`
     const cardsFailed = settled[plan.additions.length + unplacedWrites.length]?.status === 'rejected'
     /* ⚠️ **A BOOK IS COUNTED ONCE**, however many of its writes failed. A
      * name-matched book has two, and counting rejections rather than books
      * told the reader "2 books could not be saved" about one book. */
     const failedBookIds = new Set<string>()
     for (const [at, one] of plan.additions.entries()) {
+      // Stryker disable next-line OptionalChaining: `at` walks `plan.additions`, and `bookOutcomes` was sliced to exactly its length, so the outcome is always there
       if (bookOutcomes[at]?.status === 'rejected') failedBookIds.add(one.bookId)
     }
     for (const [at, one] of unplacedWrites.entries()) {
+      // Stryker disable next-line OptionalChaining: `at` walks `unplacedWrites`, and `unplacedOutcomes` was sliced to exactly its length, so the outcome is always there
       if (unplacedOutcomes[at]?.status === 'rejected') failedBookIds.add(one.bookId)
     }
     const failedBooks = failedBookIds.size
@@ -409,6 +412,7 @@ const importMarksNow = (): void => {
      * derivable: a fulfilled book contributed its marks, a rejected one
      * contributed none, and the cards are one write for the lot. */
     const marksAdded = plan.additions.reduce(
+      // Stryker disable next-line OptionalChaining: `at` walks `plan.additions`, and `bookOutcomes` was sliced to exactly its length, so the outcome is always there
       (sum, one, at) => (bookOutcomes[at]?.status === 'fulfilled' ? sum + one.marks.length : sum),
       0,
     )
@@ -444,6 +448,7 @@ const importMarksNow = (): void => {
      * `plan.unplacedAdded`, the number PLANNED, so a refused write still
      * promised the reader their marks were kept. */
     const kept = unplacedWrites.reduce(
+      // Stryker disable next-line OptionalChaining: `at` walks `unplacedWrites`, and `unplacedOutcomes` was sliced to exactly its length, so the outcome is always there
       (sum, one, at) => (unplacedOutcomes[at]?.status === 'fulfilled' ? sum + one.unplaced.length : sum),
       0,
     )
