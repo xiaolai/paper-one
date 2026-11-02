@@ -114,6 +114,44 @@ describe('a position tick', () => {
     expect(fs.writes(INDEX_FILE)).toBe(1)
   })
 
+  /* The marker is APPENDED on the index key, so a flush asked for while the
+     marker is still being written runs after it, and the flush's clear is
+     the last word. Written on a key of its own, the marker landed after the
+     flush had cleared it, and stood beside a current index naming a book
+     that nothing was behind. */
+  it('is cleared by a flush asked for while its marker is still being written', async () => {
+    const ids = ['book_a']
+    const fs = fakeFs(seeded(ids))
+    let gate: (() => void) | null = null
+    const stalled = new Promise<void>((resolve) => {
+      gate = resolve
+    })
+    let stalls = 0
+    const gated: IndexFs = {
+      ...fs,
+      rename: async (from, to) => {
+        if (to === INDEX_DIRTY_FILE && stalls++ === 0) await stalled
+        await fs.rename(from, to)
+      },
+    }
+    const queue = writeQueue()
+    const library = createLibrary({ fs: gated, queue, initial: ids.map((id) => row(id)) })
+
+    const tick = library.rememberPosition('book_a', 'p1', 0.1)
+    /* Let the tick write its record and reach the stalled marker. */
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(stalls).toBe(1)
+    const flush = library.flushIndex()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    gate!()
+    await Promise.all([tick, flush])
+    await queue.idle()
+
+    expect(indexOn(fs)?.books[0]?.position).toBe('p1')
+    expect(fs.store.has(INDEX_DIRTY_FILE)).toBe(false)
+  })
+
   /* One throttle per period. A timer armed over one still pending orphans
      the first, which then fires inside the NEXT period and flushes it early. */
   it('arms one throttle for a period, however many ticks land in it', async () => {
