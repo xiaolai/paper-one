@@ -165,32 +165,40 @@ function Shelf({ bookActions, onSignOut }: { readonly bookActions: readonly Book
     return link.onOpened(() => setEverOpen(true))
   }, [link])
 
-  /* ONE STORE PER LINK, and the link outlives every channel — so the shelf
-   * listing survives a drop and is re-read when a channel is back, rather
-   * than rebuilt from nothing. */
-  const books = useMemo(() => (link === null ? null : createRemoteBooks(link)), [link])
-  useEffect(() => () => books?.dispose(), [books])
+  /* WHAT THE LINK CARRIES, built together because it is one question: is there a
+   * link yet? Each of these is one per link.
+   *
+   * `books`: the link outlives every channel, so the shelf listing survives a
+   * drop and is re-read when a channel is back, rather than rebuilt from nothing.
+   *
+   * `content`: ONE CHANNEL, both uses. The shelf listing and a book's bytes travel
+   * the same socket, so opening a book costs no second handshake and a dropped
+   * connection takes both down together — which is the truth.
+   *
+   * `remote`: THE READER'S PLACE, both ways — see `remotePositions.ts`. Its pending
+   * writes are retried when the link reopens. */
+  const linked = useMemo(
+    () =>
+      link === null
+        ? null
+        : { link, books: createRemoteBooks(link), content: remoteContent(link), remote: remotePositions(link) },
+    [link],
+  )
+  useEffect(() => () => linked?.books.dispose(), [linked])
   useEffect(() => {
-    // Stryker disable next-line ConditionalExpression,LogicalOperator: `books` is null in exactly the renders `link` is, so either half alone decides this; both are named for the compiler.
-    if (link === null || books === null) return
-    if (link.getSnapshot().kind === 'open') void books.refresh()
-    return link.onOpened(() => void books.refresh())
-  }, [link, books])
-  /* ONE CHANNEL, both uses. The shelf listing and a book's bytes travel the
-   * same socket, so opening a book costs no second handshake and a dropped
-   * connection takes both down together — which is the truth. */
-  const content = useMemo(() => (link === null ? null : remoteContent(link)), [link])
-  /* THE READER'S PLACE, both ways — see `remotePositions.ts`. One per link,
-   * because its pending writes are retried when the link reopens. */
-  const remote = useMemo(() => (link === null ? null : remotePositions(link)), [link])
-  useEffect(() => () => remote?.dispose(), [remote])
+    if (linked === null) return
+    const { link: live, books } = linked
+    if (live.getSnapshot().kind === 'open') void books.refresh()
+    return live.onOpened(() => void books.refresh())
+  }, [linked])
+  useEffect(() => () => linked?.remote.dispose(), [linked])
 
-  // Stryker disable next-line ConditionalExpression,LogicalOperator: all four are null together, and only before a link exists, when `everOpen` is false and the next line draws nothing as well; the names are for the compiler.
-  if (link === null || books === null || content === null || remote === null) return null
+  if (linked === null) return null
+  const { link: live, books, content, remote } = linked
   if (!everOpen) {
-    return state.kind === 'waiting' ? <LinkWaiting state={state} onRetry={link.retryNow} onSignOut={onSignOut} /> : null
+    return state.kind === 'waiting' ? <LinkWaiting state={state} onRetry={live.retryNow} onSignOut={onSignOut} /> : null
   }
-  return <ShelfList bookActions={bookActions} books={books} content={content} link={link} remote={remote} onSignOut={onSignOut} />
+  return <ShelfList bookActions={bookActions} books={books} content={content} link={live} remote={remote} onSignOut={onSignOut} />
 }
 
 /**
