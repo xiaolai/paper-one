@@ -892,7 +892,9 @@ export function createLibrary({
    * interleaving (round 2, #4). */
   const dirty = new Set<string>()
   let generation = 0
-  let flushTimer: ReturnType<typeof setTimeout> | null = null
+  /* UNDEFINED, not null, when disarmed: `clearTimeout` takes `undefined`, so
+   * a flush can disarm without first asking whether anything is armed. */
+  let flushTimer: ReturnType<typeof setTimeout> | undefined
   let flushing: Promise<void> | null = null
 
   /**
@@ -938,9 +940,9 @@ export function createLibrary({
   }
 
   const armFlush = () => {
-    if (flushTimer !== null) return
+    if (flushTimer !== undefined) return
     flushTimer = setTimeout(() => {
-      flushTimer = null
+      flushTimer = undefined
       void flushIndex().catch((cause: unknown) => console.error('Paper: could not save the shelf index', cause))
     }, INDEX_FLUSH_MS)
     /* A timer must not keep a Node process — `paper` — alive for a flush
@@ -949,10 +951,8 @@ export function createLibrary({
   }
 
   const flushIndex: Library['flushIndex'] = () => {
-    if (flushTimer !== null) {
-      clearTimeout(flushTimer)
-      flushTimer = null
-    }
+    clearTimeout(flushTimer)
+    flushTimer = undefined
     if (!fs || dirty.size === 0) return Promise.resolve()
     /* ONE IN FLIGHT: a blur and a drain a moment apart share the rewrite
      * rather than queueing two. */
