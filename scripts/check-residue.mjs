@@ -157,15 +157,8 @@ function typeReader(checker, sources) {
     }
   }
 
-  const throughRenames = (name) => {
-    const seen = new Set()
-    let called = name
-    while (renamed.has(called) && !seen.has(called)) {
-      seen.add(called)
-      called = renamed.get(called)
-    }
-    return called
-  }
+  /* A rename of a rename is followed to the end, and a cycle ends where it closes. */
+  const throughRenames = (name, seen = new Set()) => (renamed.has(name) && !seen.has(name) ? throughRenames(renamed.get(name), seen.add(name)) : name)
   const originalName = (name) => {
     let called = lastName(name)
     const declarations = checker.getSymbolAtLocation(name)?.declarations ?? []
