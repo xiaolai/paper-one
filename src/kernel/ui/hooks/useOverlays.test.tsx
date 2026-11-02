@@ -498,6 +498,23 @@ describe('useOverlays', () => {
     expect(result.current).toBe(shown)
   })
 
+  /* THE SAME FOR A MARK THAT MOVED WITHIN ITS SECTION. The key names the
+     publication, not the passage, so a re-anchored mark keeps its key and its
+     section — the CFI is the only field that says it is somewhere else now. */
+  it('draws a mark that moved to another passage in the same section, though nothing else changed', async () => {
+    let at = 'epubcfi(/6/4!/4/2)'
+    const one = contribution('a:x', () => Promise.resolve([annotation({ at })]))
+    const { result } = renderHook((props: OverlayDeps) => useOverlays(props), {
+      initialProps: deps({ contributions: [one] }),
+    })
+    await waitFor(() => expect(result.current[0]?.cfi).toBe(resolvedCfiForTesting('epubcfi(/6/4!/4/2)')))
+
+    at = 'epubcfi(/6/4!/4/8)'
+    one.fire()
+    await waitFor(() => expect(result.current[0]?.cfi).toBe(resolvedCfiForTesting('epubcfi(/6/4!/4/8)')))
+    expect(result.current).toHaveLength(1)
+  })
+
   it('takes back the listeners it had already installed when one subscribe throws', async () => {
     const off = vi.fn()
     const first: OverlayContribution = {
