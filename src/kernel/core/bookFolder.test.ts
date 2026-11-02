@@ -132,6 +132,12 @@ describe('parseRecord', () => {
     expect(parseRecord('[1,2,3]')).toBeNull()
   })
 
+  /* Valid JSON that is not an object is no record: reading a field of it
+   * would crash on `null`, and answer a book of nothing for the rest. */
+  it('refuses JSON that is not an object', () => {
+    for (const raw of ['', 'null', '"Moby-Dick"', '42', 'true']) expect(parseRecord(raw), raw).toBeNull()
+  })
+
   /* A `subjects` that is not an array of strings crashes the shelf the moment
    * it renders — the same trust boundary the flat store needed. */
   it('drops a field of the wrong type rather than passing it through', () => {
