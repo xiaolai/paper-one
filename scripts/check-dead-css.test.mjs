@@ -3,8 +3,21 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { deadClasses, main, scanSources, undefinedClasses, unfollowedStylesheets } from './check-dead-css.mjs'
+
+/* Held from before the import above runs the module to just after it: a guard that ran the
+   module as a program on import would call `process.exit` there, and vitest makes that an
+   error of the whole file, with no test failing. Recorded instead, a test can say so. */
+const importing = vi.hoisted(() => {
+  const exits = []
+  const exit = process.exit
+  process.exit = (code) => {
+    exits.push(code)
+  }
+  return { exits, restore: () => (process.exit = exit) }
+})
+importing.restore()
 
 /**
  * `check-dead-css`: what counts as reaching a class, and what does not.
@@ -346,6 +359,39 @@ describe('the CLI', () => {
     const run = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' })
     expect(run.stdout).toMatch(/check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined, 0 unfollowed/)
     expect(run.status).toBe(0)
+  })
+
+  /* The guard, in-process: a child runs the file from disk, so only these see a change to
+     it. Whether this file is the one node started is `isProcessEntry`'s to say, and has its
+     own tests; here it is told. */
+  afterEach(() => {
+    vi.doUnmock('./lib/entry.mjs')
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+  const load = async (entry) => {
+    vi.doMock('./lib/entry.mjs', () => ({ isProcessEntry: () => entry }))
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined)
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.resetModules()
+    await import('./check-dead-css.mjs')
+    return { exit, printed: write.mock.calls.map(([text]) => text).join('') }
+  }
+
+  it('runs, and exits with what it found, when node starts this file', async () => {
+    const { exit, printed } = await load(true)
+    expect(exit.mock.calls).toEqual([[0]])
+    expect(printed).toMatch(/^check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined, 0 unfollowed\n$/)
+  })
+
+  it('did not exit when this file imported it', () => {
+    expect(importing.exits).toEqual([])
+  })
+
+  it('neither prints nor exits when imported', async () => {
+    const { exit, printed } = await load(false)
+    expect(exit).not.toHaveBeenCalled()
+    expect(printed).toBe('')
   })
 })
 

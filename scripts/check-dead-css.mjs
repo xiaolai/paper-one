@@ -694,5 +694,4 @@ export function main({ root = REPO, stdout = process.stdout } = {}) {
   return dead.length > 0 || missing.length > 0 || unfollowed.length > 0 ? 1 : 0
 }
 
-// Stryker disable next-line all: reached only when node starts this file, and a spawned child never runs the mutant under test — every decision is in `main`, which is measured in-process
 if (isProcessEntry(import.meta)) process.exit(main())
