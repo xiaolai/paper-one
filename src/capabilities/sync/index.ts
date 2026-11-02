@@ -34,6 +34,8 @@ import {
   describeRefusal,
   describeSession,
   isLinkClosure,
+  P2P_CLOSED_DETAIL,
+  P2P_OFF_DETAIL,
   refusalKind,
   saysMoreThanClosure,
   type RefusalNames,
@@ -506,8 +508,7 @@ async function integrityPass(
 }
 
 /** What the status says once the reader changed the P2P switch in this run. */
-const switchDetail = (on: boolean): string =>
-  describeRefusal({ kind: on ? 'p2p-closed' : 'p2p-off', message: '' }, { shelf: null, title: () => null })
+const switchDetail = (on: boolean): string => (on ? P2P_CLOSED_DETAIL : P2P_OFF_DETAIL)
 
 /** Why this run will never sync, in the words the Storage pane shows. */
 async function unwiredDetail(hasFilesystem: boolean): Promise<string> {
