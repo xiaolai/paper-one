@@ -97,7 +97,7 @@ export type RefusalKind = (typeof REFUSAL_KINDS)[number]
 export interface SessionRefusal {
   readonly kind: RefusalKind
   /** The book it was about, when it was about one. The cards group is `''`. */
-  readonly book?: string
+  readonly book?: string | undefined
   /** The raw message, for the diagnostic — never shown as the sentence. */
   readonly message: string
 }

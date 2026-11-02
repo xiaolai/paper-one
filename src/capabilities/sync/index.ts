@@ -261,11 +261,7 @@ async function degrade(thrown: unknown, owner: typeof running, book?: string): P
      which action it was: a download's own local write has nothing to do with
      that connection either, and its sentence is the only sign of it. */
   if (switchedOff !== null && isLinkClosure(thrown)) return
-  const refusal: SessionRefusal = {
-    kind: refusalKind(thrown),
-    message: messageOf(thrown),
-    ...(book === undefined ? {} : { book }),
-  }
+  const refusal: SessionRefusal = { kind: refusalKind(thrown), message: messageOf(thrown), book }
   syncStatus.set({ state: 'degraded', detail: describeRefusal(refusal, names) })
 }
 
