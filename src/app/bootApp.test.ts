@@ -377,12 +377,14 @@ describe('the launch sequence, run', () => {
     expect(app.fs).not.toBeNull()
     expect(await app.composition.services.get('shelf.status')?.handler({}, ASKED)).toMatchObject({ books: 1, bytes: expect.any(Number) })
     expect(await app.services.sizes()?.contentBytes('book_b')).toBe('bytes'.length)
+    expect(app.services.files?.available).toBe(true)
   })
 
   it('has no filesystem and no file outside Tauri, and still records what it is told', async () => {
     const app = await launch({ tauri: false })
 
     expect(app).toMatchObject({ fs: null, shelfUnread: false, bootNotice: null, bookCount: 0, onDiagnosticsCleared: null })
+    expect(app.services.files?.available).toBe(false)
     app.services.diagnostics.warn('launch.probe', { at: 'outside' })
     expect(app.diagnosticLog?.entries().map((one) => one.event)).toContain('launch.probe')
   })
