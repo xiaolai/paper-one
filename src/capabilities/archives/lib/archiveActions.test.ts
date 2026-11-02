@@ -635,3 +635,430 @@ describe('a batch of marks for one book', () => {
     expect(await store.forBook(BOOK), 'part of a refused batch was written').toEqual([])
   })
 })
+
+/**
+ * WHAT EACH ERRAND SAYS, sentence by sentence. The notice is the only thing a
+ * reader learns from an archive errand, and the console line is the only thing
+ * a report from them carries, so both are the behaviour under test here.
+ */
+describe('archives — what each errand says', () => {
+  /* Every mocked layer answers at once, so one macrotask is past all of it. */
+  const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+  const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => {})
+  const book = (bookId: string, title: string, tags?: readonly string[]) =>
+    ({ bookId, title, author: '', ...(tags === undefined ? {} : { tags }) }) as unknown as IndexedBook
+
+  describe('exporting tags', () => {
+    function mount(books: readonly IndexedBook[]) {
+      const library = { getSnapshot: () => books } as unknown as Library
+      const notice = vi.fn()
+      return { notice, archives: wired({ library, marks: {} as MarkStore, cards: {} as Cards, notice }) }
+    }
+
+    it('says nothing when the reader closed the dialog', async () => {
+      vi.mocked(exportTagsToFile).mockResolvedValue(false)
+      const { notice, archives } = mount([book('a', 'A', ['Sea'])])
+      archives.exportTags()
+      await settle()
+      expect(exportTagsToFile).toHaveBeenCalled()
+      expect(notice).not.toHaveBeenCalled()
+    })
+
+    it('counts only the books that carry a tag', async () => {
+      vi.mocked(exportTagsToFile).mockResolvedValue(true)
+      const { notice, archives } = mount([book('a', 'A', ['Sea']), book('b', 'B', []), book('c', 'C')])
+      archives.exportTags()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(notice.mock.calls).toEqual([['Exported the tags on 1 book.']])
+    })
+
+    it('counts books in the plural', async () => {
+      vi.mocked(exportTagsToFile).mockResolvedValue(true)
+      const { notice, archives } = mount([book('a', 'A', ['Sea']), book('b', 'B', ['Sky', 'Sea'])])
+      archives.exportTags()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(notice.mock.calls).toEqual([['Exported the tags on 2 books.']])
+    })
+
+    it('says when nothing on the shelf is filed', async () => {
+      vi.mocked(exportTagsToFile).mockResolvedValue(true)
+      const { notice, archives } = mount([book('b', 'B', []), book('c', 'C')])
+      archives.exportTags()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(notice.mock.calls).toEqual([['No tags to export yet — nothing on the shelf is filed.']])
+    })
+
+    it('names a failed write as a write, and logs it', async () => {
+      const logged = quiet()
+      const cause = new Error('disk full')
+      vi.mocked(exportTagsToFile).mockRejectedValue(cause)
+      const { notice, archives } = mount([book('a', 'A', ['Sea'])])
+      archives.exportTags()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(notice.mock.calls).toEqual([['Those tags could not be written.']])
+      expect(logged).toHaveBeenCalledWith('Paper: could not export your tags', cause)
+      logged.mockRestore()
+    })
+
+    it('logs an archive past the limit as that', async () => {
+      const logged = quiet()
+      const cause = new ArchiveOverLimit('67108865 bytes, past 67108864')
+      vi.mocked(exportTagsToFile).mockRejectedValue(cause)
+      const { notice, archives } = mount([])
+      archives.exportTags()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(logged).toHaveBeenCalledWith('Paper: your filing is past what one archive can hold', cause)
+      logged.mockRestore()
+    })
+  })
+
+  describe('importing tags', () => {
+    function mount(books: readonly IndexedBook[], tagMany = vi.fn(async () => ({ changed: 1, failed: 0 }))) {
+      const library = { getSnapshot: () => books, tagMany } as unknown as Library
+      const notice = vi.fn()
+      return { notice, tagMany, archives: wired({ library, marks: {} as MarkStore, cards: {} as Cards, notice }) }
+    }
+
+    it('says nothing when the reader closed the dialog', async () => {
+      vi.mocked(importTagsFromFile).mockResolvedValue(null)
+      const { notice, tagMany, archives } = mount([book('a', 'A')])
+      archives.importTags()
+      await settle()
+      expect(importTagsFromFile).toHaveBeenCalled()
+      expect(notice).not.toHaveBeenCalled()
+      expect(tagMany).not.toHaveBeenCalled()
+    })
+
+    it('refuses a file that is not a tag export, and writes nothing', async () => {
+      vi.mocked(importTagsFromFile).mockResolvedValue({ archive: null })
+      const { notice, tagMany, archives } = mount([book('a', 'A')])
+      archives.importTags()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(notice.mock.calls).toEqual([['That file is not a Paper tag export.']])
+      expect(tagMany).not.toHaveBeenCalled()
+    })
+
+    it('writes nothing when nothing is new, and counts what is not on this shelf', async () => {
+      vi.mocked(importTagsFromFile).mockResolvedValue({
+        archive: { version: 1, books: [{ bookId: 'elsewhere', title: 'Gone', author: '', tags: ['Sea'] }] },
+      })
+      const { notice, tagMany, archives } = mount([book('a', 'A')])
+      archives.importTags()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(tagMany).not.toHaveBeenCalled()
+      expect(notice.mock.calls).toEqual([['Nothing to add — those tags are already here. 1 not on this shelf.']])
+    })
+
+    it('counts one tag on one book in the singular', async () => {
+      vi.mocked(importTagsFromFile).mockResolvedValue({
+        archive: { version: 1, books: [{ bookId: 'a', title: 'A', author: '', tags: ['Sea'] }] },
+      })
+      const { notice, archives } = mount([book('a', 'A')])
+      archives.importTags()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(notice.mock.calls).toEqual([['Added 1 tag across 1 book.']])
+    })
+
+    it('blames the file when it could not be read', async () => {
+      const logged = quiet()
+      const cause = new Error('unreadable')
+      vi.mocked(importTagsFromFile).mockRejectedValue(cause)
+      const { notice, archives } = mount([book('a', 'A')])
+      archives.importTags()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(notice.mock.calls).toEqual([['That file could not be read.']])
+      expect(logged).toHaveBeenCalledWith('Paper: could not import those tags', cause)
+      logged.mockRestore()
+    })
+
+    it('does not blame a file it read when the write was refused', async () => {
+      const logged = quiet()
+      vi.mocked(importTagsFromFile).mockResolvedValue({
+        archive: { version: 1, books: [{ bookId: 'a', title: 'A', author: '', tags: ['Sea'] }] },
+      })
+      const { notice, archives } = mount([book('a', 'A')], vi.fn(() => Promise.reject(new Error('disk full'))))
+      archives.importTags()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(notice.mock.calls).toEqual([['The file was read, but those tags could not be saved.']])
+      logged.mockRestore()
+    })
+  })
+
+  describe('exporting marginalia', () => {
+    function mount() {
+      const marks = { loadAllNow: vi.fn(async () => []) } as unknown as MarkStore
+      const cards = { getSnapshot: () => ({ all: [] }) } as unknown as Cards
+      const library = { getSnapshot: () => [] } as unknown as Library
+      const notice = vi.fn()
+      return { notice, archives: wired({ library, marks, cards, notice }) }
+    }
+
+    it('says nothing when the reader closed the dialog', async () => {
+      vi.mocked(exportMarksToFile).mockResolvedValue(null)
+      const { notice, archives } = mount()
+      archives.exportMarks()
+      await settle()
+      expect(exportMarksToFile).toHaveBeenCalled()
+      expect(notice).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      [{ format: 'json', books: 1, marks: 0, cards: 2 }, 'Exported 0 marks and 2 cards from 1 book.'],
+      [{ format: 'md', books: 2, marks: 1, cards: 1 }, 'Exported 1 mark and 1 card from 2 books as Markdown, which cannot be imported back.'],
+      [{ format: 'json', books: 3, marks: 2, cards: 0 }, 'Exported 2 marks and 0 cards from 3 books.'],
+    ] as const)('says what it wrote: %o', async (written, sentence) => {
+      vi.mocked(exportMarksToFile).mockResolvedValue(written)
+      const { notice, archives } = mount()
+      archives.exportMarks()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(notice.mock.calls).toEqual([[sentence]])
+    })
+
+    it('names a failed write as a write, and logs it', async () => {
+      const logged = quiet()
+      const cause = new Error('disk full')
+      vi.mocked(exportMarksToFile).mockRejectedValue(cause)
+      const { notice, archives } = mount()
+      archives.exportMarks()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(notice.mock.calls).toEqual([['Those marks could not be written.']])
+      expect(logged).toHaveBeenCalledWith('Paper: could not export your marginalia', cause)
+      logged.mockRestore()
+    })
+
+    it('logs an archive past the limit as that', async () => {
+      const logged = quiet()
+      const cause = new ArchiveOverLimit('200001 rows, past 200000')
+      vi.mocked(exportMarksToFile).mockRejectedValue(cause)
+      const { notice, archives } = mount()
+      archives.exportMarks()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(logged).toHaveBeenCalledWith('Paper: your marginalia is past what one archive can hold', cause)
+      logged.mockRestore()
+    })
+
+    it('logs a scan that failed as the shelf, not the file', async () => {
+      const logged = quiet()
+      const cause = new MarksScanFailed()
+      const marks = { loadAllNow: vi.fn(() => Promise.reject(cause)) } as unknown as MarkStore
+      const notice = vi.fn()
+      wired({ library: { getSnapshot: () => [] } as unknown as Library, marks, cards: {} as Cards, notice }).exportMarks()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(logged).toHaveBeenCalledWith('Paper: could not read your marginalia to export it', cause)
+      logged.mockRestore()
+    })
+  })
+
+  describe('importing marginalia', () => {
+    const mark = (text: string, at = text.length, createdAt = '2026-01-01T00:00:00.000Z') => ({
+      text,
+      prefix: '',
+      suffix: '',
+      note: '',
+      kind: 'highlight',
+      tint: 'yellow',
+      style: 'fill',
+      chapter: 'One',
+      createdAt,
+      localAnchor: { cfi: `epubcfi(/6/2!/4/${at})`, sectionIndex: 1 },
+    })
+    const card = (body: string) => ({ kind: 'Idea', body, answer: '', source: '', createdAt: '2026-01-02T00:00:00.000Z', localAnchor: null })
+    const row = (bookId: string, title: string, marks: unknown[], cards: unknown[] = []) => ({ bookId, title, author: '', marks, cards })
+
+    interface Setup {
+      readonly shelf?: readonly IndexedBook[]
+      readonly have?: readonly unknown[]
+      /** Which `addMany` calls throw, by book and by the rows handed over. */
+      readonly refuse?: (bookId: string, rows: { unplaced?: unknown }[]) => boolean
+      readonly refuseCards?: boolean
+    }
+
+    function mount(
+      archiveBooks: unknown[],
+      { shelf = [book('book_a', 'A'), book('book_b', 'B')], have = [], refuse = () => false, refuseCards = false }: Setup = {},
+    ) {
+      const addMany = vi.fn(async (bookId: string, rows: { unplaced?: unknown }[]) => {
+        if (refuse(bookId, rows)) throw new Error(`refused ${bookId}`)
+      })
+      const makeMany = vi.fn(async (_cards: readonly unknown[]) => {
+        if (refuseCards) throw new Error('cards refused')
+      })
+      const marks = { loadAllNow: vi.fn(async () => have), addMany } as unknown as MarkStore
+      const cards = { getSnapshot: () => ({ all: [] }), addMany: makeMany } as unknown as Cards
+      const library = { getSnapshot: () => shelf } as unknown as Library
+      const notice = vi.fn()
+      vi.mocked(importMarksFromFile).mockResolvedValue({
+        archive: { version: 1, books: archiveBooks },
+      } as unknown as Awaited<ReturnType<typeof importMarksFromFile>>)
+      return { notice, addMany, makeMany, loadAllNow: marks.loadAllNow, archives: wired({ library, marks, cards, notice }) }
+    }
+
+    const said = async (archives: Archives, notice: ReturnType<typeof vi.fn>) => {
+      archives.importMarks()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(notice).toHaveBeenCalledTimes(1)
+      return notice.mock.calls[0]?.[0] as string
+    }
+
+    it('says nothing when the reader closed the dialog', async () => {
+      const { notice, loadAllNow, archives } = mount([])
+      vi.mocked(importMarksFromFile).mockResolvedValue(null)
+      archives.importMarks()
+      await settle()
+      expect(importMarksFromFile).toHaveBeenCalled()
+      expect(loadAllNow).not.toHaveBeenCalled()
+      expect(notice).not.toHaveBeenCalled()
+    })
+
+    it('refuses a file that is not a marginalia export, and reads nothing against it', async () => {
+      const { notice, loadAllNow, archives } = mount([])
+      vi.mocked(importMarksFromFile).mockResolvedValue({ archive: null })
+      expect(await said(archives, notice)).toBe('That file is not a Paper marginalia export.')
+      expect(loadAllNow).not.toHaveBeenCalled()
+    })
+
+    it('writes each book once when every mark has its place, and counts one in the singular', async () => {
+      const { notice, addMany, archives } = mount([row('book_a', 'A', [mark('one')])])
+      expect(await said(archives, notice)).toBe('Added 1 mark and 0 cards across 1 book.')
+      expect(addMany).toHaveBeenCalledTimes(1)
+    })
+
+    it('files a book’s cards under that book', async () => {
+      const { notice, makeMany, archives } = mount([row('book_a', 'A', [], [card('Worth keeping')])])
+      expect(await said(archives, notice)).toBe('Added 0 marks and 1 card across 1 book.')
+      expect(makeMany).toHaveBeenCalledWith([expect.objectContaining({ bookId: 'book_a', body: 'Worth keeping', cfi: null })])
+    })
+
+    it('counts only the books whose write landed, and logs the one that did not', async () => {
+      const logged = quiet()
+      const { notice, archives } = mount([row('book_a', 'A', [mark('one'), mark('three')]), row('book_b', 'B', [mark('two')])], {
+        refuse: (bookId) => bookId === 'book_b',
+      })
+      expect(await said(archives, notice)).toBe('Added 2 marks and 0 cards across 1 book. 1 book could not be saved.')
+      expect(logged.mock.calls).toEqual([['Paper: an import write failed', new Error('refused book_b')]])
+      logged.mockRestore()
+    })
+
+    it('logs nothing when every write landed', async () => {
+      const logged = quiet()
+      const { notice, archives } = mount([row('book_a', 'A', [mark('one')])])
+      await said(archives, notice)
+      expect(logged).not.toHaveBeenCalled()
+      logged.mockRestore()
+    })
+
+    it('says the cards alone could not be saved, without a count of books', async () => {
+      const logged = quiet()
+      const { notice, archives } = mount([row('book_a', 'A', [mark('one')], [card('Worth keeping')])], { refuseCards: true })
+      expect(await said(archives, notice)).toBe('Added 1 mark and 0 cards across 1 book. the cards could not be saved.')
+      logged.mockRestore()
+    })
+
+    it('says a book and the cards could not be saved, in one breath', async () => {
+      const logged = quiet()
+      const { notice, archives } = mount(
+        [row('book_a', 'A', [mark('one')]), row('book_b', 'B', [mark('two')], [card('Worth keeping')])],
+        { refuse: (bookId) => bookId === 'book_b', refuseCards: true },
+      )
+      expect(await said(archives, notice)).toBe('Added 1 mark and 0 cards across 1 book. 1 book and the cards could not be saved.')
+      logged.mockRestore()
+    })
+
+    it('names up to three books that are not on this shelf, and counts no more', async () => {
+      const { notice, archives } = mount([
+        row('book_a', 'A', [mark('one')]),
+        row('x1', 'Gone One', [mark('one')]),
+        row('x2', 'Gone Two', [mark('one')]),
+        row('x3', 'Gone Three', [mark('one')]),
+      ])
+      expect(await said(archives, notice)).toBe('Added 1 mark and 0 cards across 1 book. Not on this shelf: Gone One, Gone Two, Gone Three.')
+    })
+
+    it('says what was already here, and that there was nothing to add', async () => {
+      const have = [{ id: 'm1', bookId: 'book_a', kind: 'highlight', cfi: '', sectionIndex: 0, text: 'one', createdAt: 1 }]
+      const { notice, addMany, archives } = mount([row('book_a', 'A', [mark('one')])], { have })
+      expect(await said(archives, notice)).toBe('Nothing to add. 1 already here.')
+      expect(addMany).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      [2, ' 1 overlapping mark kept as one.'],
+      [3, ' 2 overlapping marks kept as one.'],
+    ])('says when %i marks of the file overlapped and were kept as one', async (copies, sentence) => {
+      const { notice, archives } = mount([row('book_a', 'A', Array.from({ length: copies }, () => mark('one')))])
+      expect(await said(archives, notice)).toBe(`Added 1 mark and 0 cards across 1 book.${sentence}`)
+    })
+
+    describe('beside a book found only by its name', () => {
+      const shelf = [book('book_a', 'A'), { bookId: 'local-copy', title: 'Moby-Dick', author: 'Herman Melville' } as unknown as IndexedBook]
+      const moby = (marks: unknown[]) => ({ bookId: 'from-elsewhere', title: 'Moby-Dick', author: 'Herman Melville', marks, cards: [] })
+      const unplacedRows = (rows: { unplaced?: unknown }[]) => rows.length > 0 && rows.every((one) => one.unplaced !== undefined)
+
+      it('counts marks kept without a place in the plural', async () => {
+        const { notice, archives } = mount([moby([mark('one'), mark('three', 9)])], { shelf })
+        expect(await said(archives, notice)).toBe('2 marks kept without a place — another edition here: Moby-Dick.')
+      })
+
+      it('gives a stranded write only to the book that has stranded marks', async () => {
+        /* Two placed writes (book_a, and the name-matched copy's empty one)
+           and ONE stranded write, the copy's: book_a has nothing stranded. */
+        const { notice, addMany, archives } = mount([row('book_a', 'A', [mark('one')]), moby([mark('two')])], { shelf })
+        await said(archives, notice)
+        const stranded = addMany.mock.calls.filter((call) => call[1].some((one) => one.unplaced !== undefined))
+        expect(stranded.map((call) => call[0])).toEqual(['local-copy'])
+        expect(addMany).toHaveBeenCalledTimes(3)
+      })
+
+      it('reads each unplaced write’s own outcome, not a placed one beside it', async () => {
+        const logged = quiet()
+        const { notice, archives } = mount([row('book_a', 'A', [mark('one')]), moby([mark('two')])], {
+          shelf,
+          refuse: (bookId, rows) => bookId === 'book_a' && !unplacedRows(rows),
+        })
+        expect(await said(archives, notice)).toBe(
+          '1 mark kept without a place — another edition here: Moby-Dick. 1 book could not be saved.',
+        )
+        logged.mockRestore()
+      })
+
+      it('counts a book whose unplaced write alone was refused', async () => {
+        const logged = quiet()
+        const { notice, archives } = mount([moby([mark('two')])], { shelf, refuse: (_bookId, rows) => unplacedRows(rows) })
+        expect(await said(archives, notice)).toBe('Nothing was saved. 1 book could not be saved.')
+        logged.mockRestore()
+      })
+    })
+
+    it('blames the file when it could not be read, and logs it', async () => {
+      const logged = quiet()
+      const cause = new Error('unreadable')
+      const { notice, archives } = mount([])
+      vi.mocked(importMarksFromFile).mockRejectedValue(cause)
+      expect(await said(archives, notice)).toBe('That file could not be read.')
+      expect(logged).toHaveBeenCalledWith('Paper: could not import that marginalia', cause)
+      logged.mockRestore()
+    })
+
+    it('logs an archive past the limit as that', async () => {
+      const logged = quiet()
+      const cause = new ArchiveOverLimit('past the budget')
+      const { notice, archives } = mount([])
+      vi.mocked(importMarksFromFile).mockRejectedValue(cause)
+      await said(archives, notice)
+      expect(logged).toHaveBeenCalledWith('Paper: that marginalia is past what one archive can hold', cause)
+      logged.mockRestore()
+    })
+
+    it('logs a scan that failed as the shelf, not the file', async () => {
+      const logged = quiet()
+      const cause = new MarksScanFailed()
+      const notice = vi.fn()
+      const marks = { loadAllNow: vi.fn(() => Promise.reject(cause)) } as unknown as MarkStore
+      vi.mocked(importMarksFromFile).mockResolvedValue({ archive: { version: 1, books: [] } } as unknown as Awaited<ReturnType<typeof importMarksFromFile>>)
+      wired({ library: { getSnapshot: () => [] } as unknown as Library, marks, cards: {} as Cards, notice }).importMarks()
+      await vi.waitFor(() => expect(notice).toHaveBeenCalled())
+      expect(logged).toHaveBeenCalledWith('Paper: could not read your marginalia to import against it', cause)
+      logged.mockRestore()
+    })
+  })
+})
