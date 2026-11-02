@@ -676,8 +676,10 @@ function rowsAsked(books: readonly unknown[], looseCards: unknown): number {
   for (const one of books) {
     if (rows > ARCHIVE_MAX_ROWS) break
     rows += 1
-    if (typeof one !== 'object' || one === null) continue
-    const row = one as Record<string, unknown>
+    /* `Object` RATHER THAN A GUARD: a book that is null, a number or a string
+       boxes to an object with no `marks` and no `cards`, so it costs its one row
+       and nothing more, which is all a guard skipping it would have counted. */
+    const row = Object(one) as Record<string, unknown>
     const [marks, cards] = [row['marks'], row['cards']]
     rows += (Array.isArray(marks) ? marks.length : 0) + (Array.isArray(cards) ? cards.length : 0)
   }
