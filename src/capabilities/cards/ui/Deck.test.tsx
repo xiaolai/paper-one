@@ -157,6 +157,21 @@ describe('what the panel says', () => {
     expect(screen.getByText('No recall cards yet.')).toBeTruthy()
   })
 
+  /* `aria-pressed` says which filter is chosen; `data-on` is what the pane's
+     stylesheet draws it from, so a reader who sees the chips relies on it. */
+  it('draws the chosen filter, and only that one', () => {
+    render(<Deck cards={view([CARD({ kind: 'Idea', body: 'an idea' })])} bookId={null} />)
+    const filters = screen.getByRole('group', { name: 'Filter cards' })
+    const drawn = () =>
+      within(filters)
+        .getAllByRole('button')
+        .filter((one) => one.getAttribute('data-on') === 'true')
+        .map((one) => one.textContent)
+    expect(drawn()).toEqual(['All'])
+    fireEvent.click(within(filters).getByRole('button', { name: 'Excerpt' }))
+    expect(drawn()).toEqual(['Excerpt'])
+  })
+
   it('discards the card whose bin was pressed', () => {
     const cards = view([CARD({ id: 'c9' })])
     render(<Deck cards={cards} bookId={null} />)
