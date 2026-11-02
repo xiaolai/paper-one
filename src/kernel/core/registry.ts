@@ -810,7 +810,6 @@ const EMPTY_STATUSES: readonly BookStatus[] = Object.freeze([])
 const EMPTY_MARK_CONTROLS: readonly MarkControl[] = Object.freeze([])
 const EMPTY_CLIENTS: readonly ClientContribution[] = Object.freeze([])
 const EMPTY_SERVICES: ReadonlyMap<string, ServiceContribution> = new Map()
-const EMPTY_SERVICE_ROWS: readonly ServiceContribution[] = Object.freeze([])
 
 /**
  * A contributed list, arranged: by `order` (unset last), then registration.
@@ -1003,7 +1002,10 @@ export async function composeCapabilities(
         ),
       ),
       clients: Object.freeze((cap.clients ?? []).map((client) => Object.freeze({ ...client }))),
-      services: capServices.get(cap.id) ?? EMPTY_SERVICE_ROWS,
+      /* Every capability has its row in `capServices`, made above from the
+         same list `ordered` is drawn from, so there is no absent row to
+         default. (A fallback stood here that no composition could reach.) */
+      services: capServices.get(cap.id) as readonly ServiceContribution[],
       /* ⚠️ **THE RECORD IS COPIED, NOT JUST THE ARRAY.** Every other line here
        * freezes the array and keeps the contributed objects, which is right
        * for the ones the kernel only reads. An overlay is different: its two
@@ -1117,14 +1119,14 @@ export async function composeCapabilities(
      * through `peer`, so starting it without one would fail later, further from
      * the cause. Registration order is topological, so a dependency has always
      * been decided by the time this runs. */
-    const missing = (cap.requires ?? []).find((id) => failed.has(id))
+    const missing = cap.requires?.find((id) => failed.has(id))
     if (missing !== undefined) {
       skip(cap.id, 'requires-failed', new Error(`capability "${cap.id}" requires "${missing}", which did not compose`), missing)
       continue
     }
     /* AFTER THE FAILURE CHECK, so a capability with one requirement failed and
        another off reads as what is actually wrong. */
-    const absent = (cap.requires ?? []).find((id) => leftOut.has(id))
+    const absent = cap.requires?.find((id) => leftOut.has(id))
     if (absent !== undefined) {
       leaveOut(cap.id, { state: 'needs', on: absent })
       continue
