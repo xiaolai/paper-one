@@ -125,6 +125,8 @@ const STRONGEST_FIRST = [MEMBERS, ELEMENTS, RETURNS, HOLDS]
 const MEMBER_KEEPING = new Set(['Pick', 'Omit', 'Partial', 'Required', 'Readonly', 'NonNullable', 'Promise', 'PromiseLike', 'Awaited'])
 const ELEMENT_KEEPING = new Set(['Array', 'ReadonlyArray', 'Set', 'ReadonlySet'])
 const ENDS_IN_SERVICES = /services$/i
+/** Whether a name ends in `services`; no name (`null`, `undefined`) ends in anything. */
+const endsInServices = (name) => ENDS_IN_SERVICES.test(String(name))
 
 const strongest = (kinds) => STRONGEST_FIRST.find((kind) => kinds.includes(kind)) ?? null
 /** What a container's elements make of it. */
@@ -195,7 +197,7 @@ function typeReader(checker, sources) {
     const args = type.typeArguments ?? []
     if (bound.has(called)) return bound.get(called)
     if (called === 'KernelServices') return MEMBERS
-    if (called === 'ReturnType') return args[0] !== undefined && ts.isTypeQueryNode(args[0]) && returnsServices(lastName(args[0].exprName) ?? '') ? MEMBERS : null
+    if (called === 'ReturnType') return args[0] !== undefined && ts.isTypeQueryNode(args[0]) && returnsServices(lastName(args[0].exprName)) ? MEMBERS : null
     if (MEMBER_KEEPING.has(called)) return args[0] === undefined ? null : classify(args[0], bound, seen)
     if (ELEMENT_KEEPING.has(called)) return args[0] === undefined ? null : holding(classify(args[0], bound, seen))
     const here = (checker.getSymbolAtLocation(name)?.declarations ?? [])
@@ -219,8 +221,8 @@ function typeReader(checker, sources) {
     if (ts.isTypeLiteralNode(type)) return ownMembers(type.members, bound, seen)
     if (ts.isTypeReferenceNode(type)) return reference(type, type.typeName, bound, seen)
     if (ts.isExpressionWithTypeArguments(type)) return reference(type, type.expression, bound, seen)
-    if (ts.isImportTypeNode(type)) return type.qualifier === undefined ? null : reference(type, type.qualifier, bound, seen)
-    return null
+    /* Of the type nodes left, only an import type has a qualifier: `import('./x').Name`. */
+    return type.qualifier === undefined ? null : reference(type, type.qualifier, bound, seen)
   }
 
   /* A FUNCTION THE KERNEL DECLARES says for itself what it takes and what it returns, and
@@ -241,7 +243,7 @@ function typeReader(checker, sources) {
   /* `readServices()` is a list of descriptors, whatever its name suggests. A declared type
      with nothing of the services in it outranks the name; no type leaves the name to speak. */
   const returnsServices = (name) => {
-    if (!ENDS_IN_SERVICES.test(name)) return false
+    if (!endsInServices(name)) return false
     const declaredFns = functions.get(name) ?? []
     return declaredFns.length === 0 || !declaredFns.every((fn) => fn.type !== undefined && classify(fn.type) === null)
   }
@@ -345,7 +347,7 @@ function namingsIn(source, checker, ids, types) {
     }
     if (isObjectMember(node) || isClassMember(node) || ts.isEnumMember(node)) {
       const key = keyText(node.name, checker)?.replace(/^#/, '')
-      if (key !== undefined && known.has(key)) found.push({ id: key, match: `${key}:` })
+      if (known.has(key)) found.push({ id: key, match: `${key}:` })
     }
     if (ts.isJsxAttribute(node) && ts.isIdentifier(node.name) && known.has(node.name.text)) found.push({ id: node.name.text, match: `${node.name.text}=` })
     ts.forEachChild(node, visit)
@@ -359,7 +361,7 @@ function followServices(source, checker, known, types, found, say) {
   const { classify, returnsServices, takesServices } = types
   /* Only a bare name is the function the kernel declares: `other.readServices()` may be
      anything, so the name speaks for it. */
-  const namedForServices = (expression) => (ts.isIdentifier(expression) ? returnsServices(expression.text) : ENDS_IN_SERVICES.test(lastName(expression) ?? ''))
+  const namedForServices = (expression) => (ts.isIdentifier(expression) ? returnsServices(expression.text) : endsInServices(lastName(expression)))
   const importedName = (callee) => {
     if (ts.isIdentifier(callee)) {
       const imported = checker.getSymbolAtLocation(callee)?.declarations?.find(ts.isImportSpecifier)
@@ -388,10 +390,9 @@ function followServices(source, checker, known, types, found, say) {
       if (kind === RETURNS && ts.isIdentifier(node.name)) returningSymbol(checker.getSymbolAtLocation(node.name))
     }
     /* `const g = getServices`, whose call then says what it is. */
-    if (ts.isVariableDeclaration(node) && node.initializer && ts.isIdentifier(node.name) && !ENDS_IN_SERVICES.test(node.name.text)) {
+    if (ts.isVariableDeclaration(node) && node.initializer && ts.isIdentifier(node.name) && !endsInServices(node.name.text)) {
       const value = unwrapped(node.initializer)
-      const called = ts.isIdentifier(value) || ts.isPropertyAccessExpression(value) ? lastName(value) : null
-      if (called !== null && called !== 'services' && namedForServices(value)) returningSymbol(checker.getSymbolAtLocation(node.name))
+      if (lastName(value) !== 'services' && namedForServices(value)) returningSymbol(checker.getSymbolAtLocation(node.name))
     }
     if (isFunctionLike(node) && node.type && classify(node.type) === MEMBERS) returningSymbol(symbolOfFunction(node))
     if ((ts.isPropertySignature(node) || ts.isPropertyDeclaration(node) || (ts.isParameter(node) && ts.isParameterPropertyDeclaration(node, node.parent))) && node.type) {
@@ -399,9 +400,9 @@ function followServices(source, checker, known, types, found, say) {
       const key = keyText(node.name, checker)
       if (kind === MEMBERS && key !== 'services') say(node, 'a member holding the services under another name')
       if (kind === ELEMENTS) say(node, 'a member holding the services in an array')
-      if (kind === RETURNS && !ENDS_IN_SERVICES.test(key ?? '')) say(node, 'a member returning the services under another name')
+      if (kind === RETURNS && !endsInServices(key)) say(node, 'a member returning the services under another name')
     }
-    if ((ts.isMethodSignature(node) || ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node)) && node.type && classify(node.type) === MEMBERS && !ENDS_IN_SERVICES.test(keyText(node.name, checker) ?? '')) {
+    if ((ts.isMethodSignature(node) || ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node)) && node.type && classify(node.type) === MEMBERS && !endsInServices(keyText(node.name, checker))) {
       say(node.name, 'a method returning the services under another name')
     }
     if ((ts.isTypeReferenceNode(node) || ts.isImportTypeNode(node) || ts.isArrayTypeNode(node) || ts.isTupleTypeNode(node)) && classify(node) === HOLDS) {
@@ -422,8 +423,7 @@ function followServices(source, checker, known, types, found, say) {
         if (at.type !== undefined && classify(at.type) === MEMBERS) return [SERVICES]
       }
       if (!ts.isCallExpression(inner)) return []
-      const callee = unwrapped(inner.expression)
-      return (ts.isIdentifier(callee) || ts.isPropertyAccessExpression(callee)) && namedForServices(callee) ? [SERVICES] : []
+      return namedForServices(unwrapped(inner.expression)) ? [SERVICES] : []
     },
     seeds,
     elementSeeds,
@@ -436,21 +436,20 @@ function followServices(source, checker, known, types, found, say) {
     escaped: (_origins, at, how) => {
       if (!READS_NOTHING.has(how)) say(at, how)
     },
-    handedOn: (callee, index) => index >= 0 && takesServices(importedName(callee), index),
+    handedOn: (callee, index) => takesServices(importedName(callee), index),
   })
 
   /* WHAT LEAVES THE FILE leaves by name, and the far side has only that to go on. `local` is
      what an export list or a default calls it here, which may be the services' own name. */
   const leaving = (name, symbol, at, local) => {
-    if (symbol === undefined) return
-    if (followed.returnsOf(symbol).length > 0 && !ENDS_IN_SERVICES.test(name)) say(at, 'a function returning the services, exported under another name')
+    if (followed.returnsOf(symbol).length > 0 && !endsInServices(name)) say(at, 'a function returning the services, exported under another name')
     if ((followed.heldBy(symbol).length > 0 || local === 'services') && name !== 'services') say(at, 'the services, exported under another name')
   }
   const renames = (element) => {
     const from = element.propertyName?.text
     /* The type is `typeReader`'s, which can read a rename of it. */
-    if (from === undefined || from === 'KernelServices' || element.name.text === from) return
-    if (from === 'services' || (ENDS_IN_SERVICES.test(from) && !ENDS_IN_SERVICES.test(element.name.text))) say(element, 'the services under another name')
+    if (from === 'KernelServices' || element.name.text === from) return
+    if (from === 'services' || (endsInServices(from) && !endsInServices(element.name.text))) say(element, 'the services under another name')
   }
   for (const statement of source.statements) {
     if (ts.isFunctionDeclaration(statement) && isExported(statement) && statement.name) leaving(statement.name.text, checker.getSymbolAtLocation(statement.name), statement.name)
