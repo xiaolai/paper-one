@@ -93,11 +93,14 @@ export async function collectSurfaces() {
   const load = (rel) => import(new URL(rel, KERNEL).href)
 
   const [settings, metrics, uiTypes, table, marks, cards, panes, typefaces, formats] = await Promise.all([
+    // Stryker disable next-line StringLiteral: under Vite an empty path resolves to `src/kernel/index.ts`, which re-exports this registry, so in-process the same list is read; a bare node refuses the directory import, which only the child run in `surfaces.test.mjs` sees
     load('core/settings.ts'),
     load('core/metrics.ts'),
     load('core/uiTypes.ts'),
+    // Stryker disable next-line StringLiteral: under Vite an empty path resolves to `src/kernel/index.ts`, which re-exports this registry, so in-process the same list is read; a bare node refuses the directory import, which only the child run in `surfaces.test.mjs` sees
     load('core/serviceTable.ts'),
     load('core/marks.ts'),
+    // Stryker disable next-line StringLiteral: under Vite an empty path resolves to `src/kernel/index.ts`, which re-exports this registry, so in-process the same list is read; a bare node refuses the directory import, which only the child run in `surfaces.test.mjs` sees
     load('core/cards.ts'),
     load('ui/panes.ts'),
     load('core/typefaces.ts'),
