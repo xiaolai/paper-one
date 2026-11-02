@@ -1,10 +1,23 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterAll, describe, expect, it } from 'vitest'
-import { deadClasses, scanSources, undefinedClasses, unfollowedStylesheets } from './check-dead-css.mjs'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { deadClasses, main, scanSources, undefinedClasses, unfollowedStylesheets } from './check-dead-css.mjs'
+
+/* Held from before the import above runs the module to just after it: a guard that ran the
+   module as a program on import would call `process.exit` there, and vitest makes that an
+   error of the whole file, with no test failing. Recorded instead, a test can say so. */
+const importing = vi.hoisted(() => {
+  const exits = []
+  const exit = process.exit
+  process.exit = (code) => {
+    exits.push(code)
+  }
+  return { exits, restore: () => (process.exit = exit) }
+})
+importing.restore()
 
 /**
  * `check-dead-css`: what counts as reaching a class, and what does not.
@@ -41,6 +54,55 @@ function fixture(files) {
 
 const names = (root) => deadClasses(root).dead.map((d) => d.name).sort()
 
+/*
+ * FIRST IN THE FILE, ON PURPOSE. One stylesheet is one origin, whichever import
+ * reached it: two imports of it held by one binding are one stylesheet, refused once.
+ * Were each import its own origin, what a binding holds would grow every pass and
+ * the walk would never settle; this row fails before any row that would hang.
+ */
+describe('one stylesheet, however many imports reach it', () => {
+  it('is one origin, refused once', () => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n',
+      'src/A.tsx': "import a from './A.module.css'\nimport b from './A.module.css'\nexport const f = (x: boolean, k: string) => { const s = x ? a : b; return s[k] }\n",
+    })
+    expect(unfollowedStylesheets(root).map((one) => one.how)).toEqual(['a key this cannot read: name the class'])
+  })
+})
+
+/*
+ * SECOND, ON PURPOSE. A file that holds none, answering as if it held something, leaves
+ * the walk unsettled on some trees, and a function's return read where there is none is
+ * otherwise first caught by a run over this repository, seconds long. Both fail here,
+ * in milliseconds, before any test that would hang or take long.
+ */
+describe('what a file that holds none carries', () => {
+  const answer = (files) => {
+    const root = fixture({ 'src/A.module.css': '.live { color: red; }\n', ...files })
+    const scanned = scanSources(root)
+    return {
+      missing: undefinedClasses(root, undefined, scanned).map((u) => u.name).sort(),
+      dead: deadClasses(root, undefined, scanned).dead.map((d) => d.name).sort(),
+      refused: unfollowedStylesheets(root, undefined, scanned).map((one) => one.how).sort(),
+    }
+  }
+
+  it('takes nothing from a file whose exports hold nothing, even when it is read', () => {
+    expect(answer({
+      'src/X.module.css': '.x { color: red; }\n',
+      'src/B.tsx': 'export default 1\nexport const k = 1\nexport function g() { return 1 }\n',
+      'src/C.tsx': "import d, { k, g } from './B'\nexport const f = () => [d.x, k.x, g().x]\n",
+    })).toEqual({ missing: [], dead: ['live', 'x'], refused: [] })
+  })
+
+  it('reads nothing off a call of a name a module does not export', () => {
+    expect(answer({
+      'src/B.tsx': "import styles from './A.module.css'\nexport const s = styles\n",
+      'src/C.tsx': "import * as ns from './B'\nexport const f = () => ns.unknown().live\n",
+    })).toEqual({ missing: [], dead: ['live'], refused: [] })
+  })
+})
+
 describe('what the gate reports', () => {
   it('finds a rule no source names', () => {
     const root = fixture({
@@ -59,6 +121,19 @@ describe('what the gate reports', () => {
       'src/A.tsx': "export const A = () => null\n",
     })
     expect(deadClasses(root).dead[0]).toMatchObject({ name: 'orphan', line: 3 })
+  })
+
+  it('points at an escaped class by what its name means', () => {
+    /* `.a\:b` declares `a:b`. Searching the text for `.a:b` finds nothing, and
+       the report said line 0, a line no file has. */
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n.a\\:b { color: blue; }\n.\\31 x { color: blue; }\n',
+      'src/A.tsx': "import styles from './A.module.css'\nexport const A = () => styles.live\n",
+    })
+    expect(deadClasses(root).dead.map((d) => [d.name, d.line])).toEqual([
+      ['1x', 3],
+      ['a:b', 2],
+    ])
   })
 })
 
@@ -86,6 +161,24 @@ describe('every way a class is reached', () => {
       ...sources,
     })
     expect(names(root)).not.toContain('target')
+  })
+
+  /* A `from` read only when something followed it on the same line: a rule
+     closed on the next line kept a class called `.from` alive, and the path, and
+     an `@value` import, whose path is gone by the time it is read, declared only
+     its first name. */
+  it.each([
+    ['a cross-file composes closed on the next line', ".a { color: red;\n  composes: b from './B.module.css'\n}\n.from { color: red; }", ['from'], 2],
+    ['a composes with no space after its colon', '.a { composes:b c; }\n.b { color: red; }\n.c { color: red; }', [], 3],
+    ['a composes list', '.a { composes: b, c; }\n.b { color: red; }\n.c { color: red; }', [], 3],
+  ])('reads %s', (_what, css, dead, used) => {
+    const root = fixture({
+      'src/A.module.css': `${css}\n`,
+      'src/B.module.css': '.b { color: red; }\n',
+      'src/A.tsx': "import styles from './A.module.css'\nexport const A = () => styles.a\n",
+    })
+    expect(deadClasses(root).dead.map((d) => d.name)).toEqual(dead)
+    expect(deadClasses(root).used).toBe(used)
   })
 
   /* THE ESCAPE HATCH IS A RENAME, not a list in the script. An allowlist grows
@@ -299,6 +392,39 @@ describe('the CLI', () => {
     const run = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' })
     expect(run.stdout).toMatch(/check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined, 0 unfollowed/)
     expect(run.status).toBe(0)
+  })
+
+  /* The guard, in-process: a child runs the file from disk, so only these see a change to
+     it. Whether this file is the one node started is `isProcessEntry`'s to say, and has its
+     own tests; here it is told. */
+  afterEach(() => {
+    vi.doUnmock('./lib/entry.mjs')
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+  const load = async (entry) => {
+    vi.doMock('./lib/entry.mjs', () => ({ isProcessEntry: () => entry }))
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined)
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.resetModules()
+    await import('./check-dead-css.mjs')
+    return { exit, printed: write.mock.calls.map(([text]) => text).join('') }
+  }
+
+  it('runs, and exits with what it found, when node starts this file', async () => {
+    const { exit, printed } = await load(true)
+    expect(exit.mock.calls).toEqual([[0]])
+    expect(printed).toMatch(/^check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined, 0 unfollowed\n$/)
+  })
+
+  it('did not exit when this file imported it', () => {
+    expect(importing.exits).toEqual([])
+  })
+
+  it('neither prints nor exits when imported', async () => {
+    const { exit, printed } = await load(false)
+    expect(exit).not.toHaveBeenCalled()
+    expect(printed).toBe('')
   })
 })
 
@@ -623,6 +749,23 @@ describe('what the gate refuses to guess at', () => {
     expect(found.map((one) => one.how)).toEqual(['a function that returns it, handed on'])
   })
 
+  /* Only `ns.fn()`, called where it is read, is followed; these reach the same function
+     and are not. */
+  it.each([
+    ['by a literal key', "import * as re from './re'\nexport const f = () => re['get']().live", "re['get']"],
+    ['by name, and called later', "import * as re from './re'\nconst g = re.get\nexport const f = () => g().live", 're.get'],
+  ])('refuses a function taken off a module %s', (_what, source, what) => {
+    expect(refused(source, { 'src/re.ts': "import styles from './A.module.css'\nexport const get = () => styles\n" })).toEqual([
+      { file: 'src/A.tsx', line: 2, what, how: 'a function that returns it, handed on' },
+    ])
+  })
+
+  it('quotes what it refuses on one line, cut at sixty characters', () => {
+    expect(refused(`${IMPORT}export const f = (k: string) => styles[k +\n  'a-suffix-long-enough-to-run-well-past-the-sixty-character-cut']`)).toEqual([
+      { file: 'src/A.tsx', line: 3, what: "styles[k + 'a-suffix-long-enough-to-run-well-past-the-sixty-", how: 'a key this cannot read: name the class' },
+    ])
+  })
+
   it('names the file and the line', () => {
     expect(refused(`${IMPORT}export const a = 1\nexport const f = () => g(styles)`)).toEqual([
       { file: 'src/A.tsx', line: 4, what: 'styles', how: 'handed to a call' },
@@ -907,6 +1050,219 @@ describe('the whole answer for each form a holder takes', () => {
  * WHAT A MODULE EXPORTS IS NOT EVERY DOT IN ITS SELECTORS. `:global` hands a class
  * to the page: the import holds no such key, so a read of it is `undefined`.
  */
+/*
+ * Each row is one turn of the walk across files that the forms above take for
+ * granted: a name that is not exported, a module that is not a source, a call with
+ * nothing to hand, a round that learns only a little more than the last.
+ */
+describe('what crosses a file, at the edges', () => {
+  const IMPORT = "import styles from './A.module.css'\n"
+  const answer = (files) => {
+    const root = fixture({ 'src/A.module.css': '.live { color: red; }\n', ...files })
+    const scanned = scanSources(root)
+    return {
+      missing: undefinedClasses(root, undefined, scanned).map((u) => u.name).sort(),
+      dead: deadClasses(root, undefined, scanned).dead.map((d) => d.name).sort(),
+      refused: unfollowedStylesheets(root, undefined, scanned).map((one) => one.how).sort(),
+    }
+  }
+  const expectAnswer = (files, expected) => expect(answer(files)).toEqual({ missing: [], dead: ['live'], refused: [], ...expected })
+  const HANDED = 'handed to a call'
+  const RETURNS = 'a function that returns it, handed on'
+  const RUN_TIME = 'a stylesheet chosen at run time'
+
+  it('carries nothing a file does not export', () => {
+    expectAnswer({
+      'src/B.tsx': `${IMPORT}const s = styles\nfunction g() { return styles }\nexport const k = 1\n`,
+      'src/C.tsx': "import { s, g } from './B'\nexport const f = () => [s.gone, g().gone]\n",
+    }, {})
+  })
+
+  it('does not take a bare specifier for a file beside it', () => {
+    expectAnswer({
+      'src/B.tsx': `${IMPORT}export const s = styles\n`,
+      'src/C.tsx': "import { s } from 'B'\nexport const f = () => s.gone\n",
+    }, {})
+  })
+
+  it.each([
+    ['a path with its extension', 'src/B.tsx', './B.tsx'],
+    ['a .ts file', 'src/B.ts', './B'],
+    ['a .tsx file', 'src/B.tsx', './B'],
+    ['a directory with index.ts', 'src/lib/index.ts', './lib'],
+    ['a directory with index.tsx', 'src/ui/index.tsx', './ui'],
+  ])('resolves %s', (_what, at, specifier) => {
+    const depth = at.split('/').length - 2
+    const sheet = depth === 0 ? './A.module.css' : '../A.module.css'
+    expectAnswer({
+      [at]: `import styles from '${sheet}'\nexport const s = styles\n`,
+      'src/C.tsx': `import { s } from '${specifier}'\nexport const f = () => s.gone\n`,
+    }, { missing: ['gone'] })
+  })
+
+  it.each([
+    ['an exported class', 'export class Paint {}', "import { Paint } from './R'\n", 'Paint(styles)', { refused: [HANDED] }],
+    ['an exported let with no value', 'export let read: any', "import { read } from './R'\n", 'read(styles)', { refused: [HANDED] }],
+    ['an exported constant that is no function', 'export const read: any = 1', "import { read } from './R'\n", 'read(styles)', { refused: [HANDED] }],
+    ['a default function with a name', 'export default function paint(s: any) { return s.live }', "import paint from './R'\n", 'paint(styles)', { dead: [] }],
+    ['a function of no parameters', 'export const read = () => 1', "import { read } from './R'\n", 'read(styles)', {}],
+    ['a parameter beyond the last', 'export const read = (a: any) => a.live', "import { read } from './R'\n", 'read(1, styles)', {}],
+    ['the first of a parameter and a rest', 'export const read = (a: any, ...rest: any[]) => a.live', "import { read } from './R'\n", 'read(styles)', { dead: [] }],
+    ['a rest after a parameter', 'export const read = (a: any, ...rest: any[]) => rest[0].live', "import { read } from './R'\n", 'read(1, styles)', { dead: [] }],
+    ['a function taken by a key', 'export const read = (s: any) => s.live', "import * as re from './R'\n", "re['read'](styles)", { refused: [HANDED] }],
+  ])('hands a stylesheet to %s', (_what, callee, imported, call, expected) => {
+    expectAnswer({ 'src/R.tsx': `${callee}\n`, 'src/C.tsx': `${IMPORT}${imported}export const f = () => ${call}\n` }, expected)
+  })
+
+  it('carries every holder a file exports', () => {
+    expectAnswer({
+      'src/O.module.css': '.other { color: red; }\n',
+      'src/B.tsx': `${IMPORT}import other from './O.module.css'\nexport const s = styles\nexport const t = other\n`,
+      'src/C.tsx': "import { s, t } from './B'\nexport const f = () => [s.live, t.other, s.gone, t.lost]\n",
+    }, { missing: ['gone', 'lost'], dead: [] })
+  })
+
+  it('reads a name two re-exports of everything both carry against both', () => {
+    const root = fixture({
+      'src/A.module.css': '.a { color: red; }\n',
+      'src/B.module.css': '.b { color: red; }\n',
+      'src/ra.ts': "export { default as s } from './A.module.css'\n",
+      'src/rb.ts': "export { default as s } from './B.module.css'\n",
+      'src/mid.ts': "export * from './ra'\nexport * from './rb'\n",
+      'src/use.tsx': "import { s } from './mid'\nexport const f = () => [s.a, s.b]\n",
+    })
+    expect(undefinedClasses(root).map((u) => `${u.file} ${u.name}`).sort()).toEqual(['src/use.tsx a', 'src/use.tsx b'])
+    expect(names(root)).toEqual([])
+  })
+
+  /* Each row learns something in its second round that leaves every name where it
+     was and only a set larger, so a walk that stopped on names alone reads too little. */
+  it.each([
+    ['an export that grows under the same name', {
+      'src/C.ts': "export { default as t } from './A.module.css'\n",
+      'src/B.ts': "import { t } from './C'\nimport other from './O.module.css'\nexport const s = (globalThis as any).c ? t : other\n",
+      'src/use.tsx': "import { s } from './B'\nexport const f = () => Object.keys(s)\n",
+    }],
+    ['a call that hands one only once its import is known', {
+      'src/C.ts': "export { default as s } from './A.module.css'\n",
+      'src/R.ts': 'export const read = (x: any) => Object.keys(x)\n',
+      'src/B.ts': "import { s } from './C'\nimport { read } from './R'\nimport other from './O.module.css'\nexport const f = () => [read(s), Object.keys(other)]\n",
+    }],
+    ['what a call hands growing under the same parameter', {
+      'src/C.ts': "export { default as s } from './A.module.css'\n",
+      'src/R.ts': 'export const read = (x: any) => Object.keys(x)\n',
+      'src/B.ts': "import other from './O.module.css'\nimport { read } from './R'\nexport const f = () => read(other)\n",
+      'src/D.ts': "import { s } from './C'\nimport { read } from './R'\nexport const f = () => read(s)\n",
+    }],
+  ])('keeps walking while %s', (_what, files) => {
+    expect(answer({ 'src/O.module.css': '.o { color: red; }\n', ...files })).toEqual({ missing: [], dead: [], refused: [] })
+  })
+
+  it('names a refused read on one line, however many it spans', () => {
+    const root = fixture({ 'src/A.module.css': '.live { color: red; }\n', 'src/A.tsx': `${IMPORT}export const f = (k: string) => styles[\n    k\n  ]\n` })
+    expect(unfollowedStylesheets(root).map((one) => one.what)).toEqual(['styles[ k ]'])
+  })
+
+  it.each([
+    ['a name a file does not export', { 'src/B.ts': "export { default } from './A.module.css'\n", 'src/C.tsx': "import { k } from './B'\nexport const f = () => k.live\n" }, {}],
+    ['a name a module does not export', { 'src/B.tsx': `${IMPORT}export const get = () => styles\n`, 'src/C.tsx': "import * as re from './B'\nexport const f = () => re.nothing.live\n" }, {}],
+    ['a require with nothing to load', { 'src/C.tsx': 'export const f = () => require().live\n' }, {}],
+    ['a call that only looks like a load', { 'src/C.tsx': "declare const load: any\nexport const f = () => load('./A.module.css').default.live\n" }, {}],
+    ['a require of a name', { 'src/C.tsx': 'export const f = (name: string) => require(name).live\n' }, {}],
+    ['a require of a file that exports nothing', { 'src/B.ts': 'export const k = 1\n', 'src/C.tsx': "export const f = () => require('./B').live\n" }, {}],
+    ['a require of a file that exports one', { 'src/B.tsx': `${IMPORT}export const s = styles\n`, 'src/C.tsx': "export const f = () => require('./B').s.live\n" }, { dead: [] }],
+    ['a module of a file that exports none, read by any key', { 'src/B.ts': 'export const k = 1\n', 'src/C.tsx': `${IMPORT}import * as ns from './B'\nexport const f = (k: string) => [ns[k], styles.live]\n` }, { dead: [] }],
+    ['a stylesheet required by a template', { 'src/C.tsx': 'export const f = (x: string) => require(`./${x}.module.css`)\n' }, { refused: [RUN_TIME] }],
+    ['a stylesheet imported by a template', { 'src/C.tsx': 'export const f = (x: string) => import(`./${x}.module.css`)\n' }, { refused: [RUN_TIME] }],
+    ['a run-time name passed to anything but a load', { 'src/C.tsx': "declare const load: any\nexport const f = (x: string) => load(x + '.module.css')\n" }, {}],
+    ['a run-time load that names no stylesheet', { 'src/C.tsx': 'export const f = (x: string) => require(x + `.module`)\n' }, {}],
+    ['a function that returns one, handed on', { 'src/B.tsx': `${IMPORT}export const get = () => styles\n`, 'src/C.tsx': "import * as re from './B'\ndeclare const g: any\nexport const f = () => g(re.get)\n" }, { refused: [RETURNS] }],
+    ['a function that returns one, bound to a name', { 'src/B.tsx': `${IMPORT}export const get = () => styles\n`, 'src/C.tsx': "import * as re from './B'\nexport const h = re.get\n" }, { refused: [RETURNS] }],
+  ])('reads %s', (_what, files, expected) => {
+    expectAnswer(files, expected)
+  })
+
+  it.each([
+    ['a default bound to a function first', { 'src/B.tsx': `${IMPORT}const get = () => styles\nexport default get\n`, 'src/C.tsx': "import get from './B'\nexport const f = () => get().gone\n" }],
+    ['a function re-exported with everything', { 'src/B.tsx': `${IMPORT}export const get = () => styles\n`, 'src/M.ts': "export * from './B'\n", 'src/C.tsx': "import { get } from './M'\nexport const f = () => get().gone\n" }],
+    ['a function re-exported by name', { 'src/B.tsx': `${IMPORT}export const get = () => styles\n`, 'src/M.ts': "export { get } from './B'\n", 'src/C.tsx': "import { get } from './M'\nexport const f = () => get().gone\n" }],
+    ['a module of a source re-exported under a name', { 'src/B.tsx': `${IMPORT}export const s = styles\n`, 'src/M.ts': "export * as ns from './B'\n", 'src/C.tsx': "import { ns } from './M'\nexport const f = () => ns.s.gone\n" }],
+  ])('follows %s', (_what, files) => {
+    expectAnswer(files, { missing: ['gone'] })
+  })
+
+  /* A module of a source is held only when the source exports one, so where it
+     goes, a stylesheet goes too, and what is read of it there is not known. */
+  it.each([
+    ['handed to a call', "declare const g: any\nexport const f = () => g(re)", HANDED],
+    ['read for every value', 'export const f = () => Object.values(re)', 'every member of a module that holds one'],
+    ['walked key by key', 'export const f = () => { for (const k in re) g(k) }\ndeclare const g: any', 'every member of a module that holds one'],
+  ])('refuses a module of a source %s', (_what, use, how) => {
+    expectAnswer({ 'src/B.tsx': `${IMPORT}export const s = styles\n`, 'src/C.tsx': `import * as re from './B'\n${use}\n` }, { refused: [how] })
+  })
+
+  /* Before this, a name bound by a pattern was not exported at all, and a class read
+     through it on the other side was silently not read. */
+  it.each([
+    ['a pattern over a module of a source', "import * as re from './R'\nexport const { s } = re", 'export const s = styles', []],
+    ['a renaming pattern over a namespace', "import * as css from './A.module.css'\nexport const { default: s } = css", '', []],
+    ['a pattern over a module loaded at run time', "export const { default: s } = await import('./A.module.css')", '', []],
+    ['a name after another in a pattern', "import * as re from './R'\nexport const { k, s } = re", 'export const s = styles\nexport const k = 1', []],
+    ['a pattern nested in a pattern', "import * as re from './R'\nexport const { t: { s } } = { t: re }", 'export const s = styles', ['held by an object']],
+    ['an array pattern', "import styles from './A.module.css'\nexport const [s] = [styles]", '', ['held by an array']],
+    ['an array pattern after a hole', "import styles from './A.module.css'\nexport const [, s] = [1, styles]", '', ['held by an array']],
+  ])('carries a stylesheet exported by %s', (_what, exporting, r, refused) => {
+    expectAnswer({
+      'src/R.tsx': `${IMPORT}${r}\n`,
+      'src/B.tsx': `${exporting}\n`,
+      'src/C.tsx': "import { s } from './B'\nexport const f = () => s.gone\n",
+    }, { missing: ['gone'], refused })
+  })
+
+  it('re-exports no module of a source that exports nothing', () => {
+    expectAnswer({
+      'src/B.ts': 'export const k = 1\n',
+      'src/M.ts': "export * as ns from './B'\n",
+      'src/C.tsx': `${IMPORT}import { ns } from './M'\nexport const f = (k: string) => [ns[k], styles.live]\n`,
+    }, { dead: [] })
+  })
+})
+
+/*
+ * MOST FILES ARE NOT WALKED, and that is half the gate's time: a file is walked only
+ * when it mentions a stylesheet or is handed one. Each row says which.
+ */
+describe('which files are walked', () => {
+  const walkedIn = (files, file) => {
+    const root = fixture({ 'src/A.module.css': '.live { color: red; }\n', ...files })
+    return scanSources(root).get(join(root, file)).walked
+  }
+
+  it.each([
+    ['a file that mentions none', 'export const k = 1', false],
+    ['a file that says styles', '// styles\nexport {}', true],
+    ['a file that names a module', '// a.module\nexport {}', true],
+    ['a file that imports at run time', '// import(\nexport {}', true],
+    ['a file that requires', '// require(\nexport {}', true],
+    ['a file that says xmodule', '// xmodule\nexport {}', false],
+    ['a file that says reimport(', '// reimport(\nexport {}', false],
+    ['a file that says unrequire(', '// unrequire(\nexport {}', false],
+  ])('walks %s: %s', (_what, text, expected) => {
+    expect(walkedIn({ 'src/C.ts': `${text}\n` }, 'src/C.ts')).toBe(expected)
+  })
+
+  it('walks a file that imports one from another source and mentions none', () => {
+    expect(walkedIn({ 'src/B.tsx': "import styles from './A.module.css'\nexport const s = styles\n", 'src/C.ts': "import { s } from './B'\nexport const f = () => s\n" }, 'src/C.ts')).toBe(true)
+  })
+
+  it('walks a file handed one into a rest parameter, that mentions none', () => {
+    expect(walkedIn({
+      'src/B.tsx': "import styles from './A.module.css'\nimport { read } from './R'\nexport const f = () => read(styles)\n",
+      'src/R.ts': 'export const read = (...all: any[]) => all\n',
+    }, 'src/R.ts')).toBe(true)
+  })
+})
+
 describe('what a stylesheet exports', () => {
   const reading = (css, ...classes) =>
     fixture({
@@ -969,5 +1325,166 @@ describe('what a stylesheet exports', () => {
       ['alsoOrphan', 2],
       ['orphan', 1],
     ])
+  })
+})
+
+/*
+ * WHAT A STYLESHEET'S TEXT DECLARES, read as the gate reads it: prose first gone,
+ * then the blocks walked. Each row is a near neighbour of a rule, so a looser
+ * reading shows as a class declared that is not, or a key lost that is there.
+ */
+describe('what a stylesheet declares, at the edges', () => {
+  const declared = (css) => names(fixture({ 'src/A.module.css': `${css}\n`, 'src/A.tsx': 'export {}\n' }))
+  const keyed = (css, ...keys) =>
+    undefinedClasses(
+      fixture({
+        'src/A.module.css': `${css}\n`,
+        'src/A.tsx': `import styles from './A.module.css'\nexport const A = () => [${keys.map((k) => `styles.${k}`).join(', ')}]\n`,
+      }),
+    ).map((u) => u.name)
+
+  it.each([
+    ['a string in double quotes', 'a::before { content: ".fake{"; }\n.real {}', ['real']],
+    ['an escaped double quote in a string', 'a::before { content: "\\" .fake{ \\""; }\n.real {}', ['real']],
+    ['an escaped space in a string', 'a::before { content: "\\ .fake{"; }\n.real {}', ['real']],
+    ['a string in single quotes', "a::before { content: '.fake{'; }\n.real {}", ['real']],
+    ['an escaped single quote in a string', "a::before { content: '\\' .fake{ \\''; }\n.real {}", ['real']],
+    ['an escaped space in a single-quoted string', "a::before { content: '\\ .fake{'; }\n.real {}", ['real']],
+    ['an unquoted url', 'a { background: url(x.fake{); }\n.real {}', ['real']],
+    ['an unquoted url after a space', 'a { background: url( x.fake{); }\n.real {}', ['real']],
+    ['a comment before the block', '.a/* note */ { color: red; }', ['a']],
+    ['an escaped digit and a space', '.\\31 a { color: red; }', ['1a']],
+    ['an escaped digit', '.\\31x { color: red; }', ['1x']],
+    ['an escaped colon', '.\\:a { color: red; }', [':a']],
+    ['an escaped digit and a space, inside', '.a\\31 b { color: red; }', ['a1b']],
+    ['an escaped digit, inside', '.a\\31x { color: red; }', ['a1x']],
+    ['an escaped bracket in a global function', ':global(.x\\) .y) { color: red; }', []],
+    ['a nested bracket in a global function', ':global(:not(.a) .b) { color: red; }', []],
+    ['a global switch after a local class', '.a :global .b { color: red; }', ['a']],
+    ['a local function inside a global switch', ':global .x :local(.y,) .z { color: red; }', ['y']],
+    ['a list inside a global switch', ':global .x:not(.y, .z) .w { color: red; }', []],
+    ['a number after a class', '.a, .5 { color: red; }', ['a']],
+    ['an escaped dot in an id', '#id\\.fake .a { color: red; }', ['a']],
+    ['a rule inside @supports selector()', '@supports selector(.fake) { .real { color: red; } }', ['real']],
+    ['a keyframe at a fraction', '@keyframes k { 12.5% { opacity: 0; } }\n.real {}', ['real']],
+    ['two global rules in a global block', ':global { .x { color: red; } .y {} }\n.z {}', ['z']],
+    ['a stray closing brace', '}\n.a { color: red; }', ['a']],
+    ['a kept class and one only partly kept', '._kept { color: red; }\n.kept_on { color: red; }', ['kept_on']],
+    ['a list ended by a comma inside a global switch', ':global :not(.x,) .y { color: red; }', []],
+  ])('reads %s', (_what, css, dead) => {
+    expect(declared(css)).toEqual(dead)
+  })
+
+  it.each([
+    ['an @value with two spaces', '@value  a: 1px;', ['a'], []],
+    ['an @value that is part of a declaration', '.r { --v: x @value b; }', ['b'], ['b']],
+    ['@value names taken from a file', "@value a , b, c as d from './x.css';", ['a', 'b', 'c', 'd'], ['c']],
+    ['@value after a rule', '.r { color: red; }\n@value v: 1px;', ['v'], []],
+    ['a declaration in a rule', '.a { color: red; }', ['a', 'color'], ['color']],
+    ['an :import of a file', ':import(./colors.css) { x: y; }', ['css', 'x'], ['css', 'x']],
+    ['two :export keys', ':export { a: 1; b: 2; }', ['a', 'b'], []],
+    ['an :export line with no value', ':export { lonely; shown: 1; }', ['lonely', 'shown'], ['lonely']],
+    ['an :export key spaced from its colon', ':export { gap : 4px; }', ['gap'], []],
+    ['an @value after a declaration with no colon', '.r { x @value y; }', ['e', 'y'], ['e', 'y']],
+  ])('keys %s', (_what, css, read, missing) => {
+    expect(keyed(css, ...read)).toEqual(missing)
+  })
+
+  it('counts lines through a comment that spans them', () => {
+    const root = fixture({ 'src/A.module.css': '/* one\ntwo .orphan */\n.orphan { color: red; }\n', 'src/A.tsx': 'export {}\n' })
+    expect(deadClasses(root).dead).toEqual([{ file: 'src/A.module.css', name: 'orphan', line: 3 }])
+  })
+})
+
+describe('where the gate looks', () => {
+  it('reads only under the roots it is given, and a root that is not there is no error', () => {
+    const root = fixture({ 'src/A.module.css': '.orphan { color: red; }\n', 'other/X.module.css': '.elsewhere { color: red; }\n', 'src/A.tsx': 'export {}\n' })
+    expect(names(root)).toEqual(['orphan'])
+    expect(deadClasses(root, ['other', 'absent']).dead.map((d) => d.name)).toEqual(['elsewhere'])
+    expect(deadClasses(root, ['absent'])).toEqual({ dead: [], modules: 0, used: 0 })
+  })
+
+  it('names a missing class once for each file that reads it', () => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n',
+      'src/B.module.css': '.live { color: red; }\n',
+      'src/A.tsx': "import a from './A.module.css'\nimport b from './B.module.css'\nexport const f = () => [a.gone, b.gone, a.lost, a.live, b.live]\n",
+      'src/B.tsx': "import a from './A.module.css'\nexport const f = () => a.gone\n",
+    })
+    expect(undefinedClasses(root)).toEqual([
+      { file: 'src/A.tsx', name: 'gone' },
+      { file: 'src/A.tsx', name: 'lost' },
+      { file: 'src/B.tsx', name: 'gone' },
+    ])
+  })
+
+  it('takes a stylesheet nothing declares as declaring nothing', () => {
+    const root = fixture({ 'src/A.tsx': "import styles from './Gone.module.css'\nexport const f = () => [styles.gone, Object.keys(styles)]\n" })
+    expect(undefinedClasses(root)).toEqual([{ file: 'src/A.tsx', name: 'gone' }])
+    expect(deadClasses(root)).toEqual({ dead: [], modules: 0, used: 1 })
+  })
+
+  it('reads every stylesheet however deep, and takes no link and no directory for one', () => {
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n',
+      'src/A.tsx': "import styles from './A.module.css'\nexport const f = () => styles.live\n",
+      'src/deep/er/B.module.css': '.deep { color: red; }\n',
+      'src/Dir.module.css/inner.ts': 'export {}\n',
+    })
+    symlinkSync(join(root, 'src/A.module.css'), join(root, 'src/Link.module.css'))
+    expect(deadClasses(root)).toEqual({ dead: [{ file: 'src/deep/er/B.module.css', name: 'deep', line: 1 }], modules: 2, used: 1 })
+  })
+})
+
+describe('what the command prints, and how it exits', () => {
+  const run = (files) => {
+    const written = []
+    const code = main({ root: fixture(files), stdout: { write: (text) => written.push(text) } })
+    return { code, text: written.join('') }
+  }
+  const SHEET = '.live { color: red; }\n'
+  const READ = "import styles from './A.module.css'\nimport { g } from 'somewhere'\n"
+  const DEAD =
+    '\nAn unreachable rule is shipped CSS that can never apply. Delete it, or\n' +
+    'rename it with a leading `_` if it is kept deliberately — the exemption\n' +
+    'belongs at the rule, where the next reader of this file will see it.\n'
+  const MISSING = '\nA class no stylesheet declares reads as undefined and styles nothing, without\nan error. Restore the rule, or stop naming the class.\n'
+  const UNFOLLOWED =
+    '\nA stylesheet this cannot follow answers neither question above: a class read\n' +
+    'that way could be missing, or be all that keeps a rule alive. Read the classes\n' +
+    'by name, or hand the stylesheet on as `styles`, where its reader is seen.\n'
+
+  it('exits 0 on a clean tree, and says what it looked at', () => {
+    expect(run({ 'src/A.module.css': SHEET, 'src/A.tsx': `${READ}export const f = () => styles.live\n` })).toEqual({
+      code: 0,
+      text: 'check-dead-css: 1 modules, 1 classes used, 0 unreachable, 0 undefined, 0 unfollowed\n',
+    })
+  })
+
+  it('exits 1 on an unreachable rule alone', () => {
+    expect(run({ 'src/A.module.css': SHEET, 'src/A.tsx': 'export {}\n' })).toEqual({
+      code: 1,
+      text: 'src/A.module.css:1  .live — no source names `styles.live`\ncheck-dead-css: 1 modules, 0 classes used, 1 unreachable, 0 undefined, 0 unfollowed\n' + DEAD,
+    })
+  })
+
+  it('exits 1 on a missing class alone', () => {
+    expect(run({ 'src/A.module.css': SHEET, 'src/A.tsx': `${READ}export const f = () => [styles.live, styles.gone]\n` })).toEqual({
+      code: 1,
+      text: 'check-dead-css: 1 modules, 2 classes used, 0 unreachable, 1 undefined, 0 unfollowed\nsrc/A.tsx  .gone — named here, declared by no rule in the module it imports\n' + MISSING,
+    })
+  })
+
+  it('exits 1 on a stylesheet it cannot follow alone', () => {
+    expect(run({ 'src/A.module.css': SHEET, 'src/A.tsx': `${READ}export const f = () => [styles.live, g(styles)]\n` })).toEqual({
+      code: 1,
+      text: 'check-dead-css: 1 modules, 1 classes used, 0 unreachable, 0 undefined, 1 unfollowed\nsrc/A.tsx:3  styles — handed to a call\n' + UNFOLLOWED,
+    })
+  })
+
+  it('reads this repository when given no root', () => {
+    const written = []
+    expect(main({ stdout: { write: (text) => written.push(text) } })).toBe(0)
+    expect(written.join('')).toMatch(/^check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined, 0 unfollowed\n$/)
   })
 })
