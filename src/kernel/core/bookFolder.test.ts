@@ -152,6 +152,13 @@ describe('parseRecord', () => {
     expect(parsed.published).toBe('1851')
   })
 
+  /* JSON cannot write NaN, but an exponent past the double range parses to
+   * Infinity, and a series place is only ever a finite number. */
+  it('drops a series place that is not a finite number', () => {
+    expect(parseRecord('{"title":"T","author":"A","seriesIndex":1e999}')).not.toHaveProperty('seriesIndex')
+    expect(parseRecord(JSON.stringify({ title: 'T', author: 'A', seriesIndex: '3' }))).not.toHaveProperty('seriesIndex')
+  })
+
   /* A `subjects` that is not an array of strings crashes the shelf the moment
    * it renders — the same trust boundary the flat store needed. */
   it('drops a field of the wrong type rather than passing it through', () => {
