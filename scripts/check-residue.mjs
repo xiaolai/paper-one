@@ -301,16 +301,10 @@ function joinedParts(node, checker) {
 }
 /** A join's stretches of constant text, each read as a literal would be, and the whole, for a row to quote. */
 function readJoin(node, checker) {
-  const runs = []
-  let run = null
-  for (const part of joinedParts(node, checker)) {
-    if (part === null) {
-      if (run !== null) runs.push(run)
-      run = null
-    } else run = (run ?? '') + part
-  }
-  if (run !== null) runs.push(run)
-  return { runs, whole: joinedParts(node, checker).map((part) => part ?? '${…}').join('') }
+  const parts = joinedParts(node, checker)
+  /* A part that is not constant ends one run and starts the next. */
+  const runs = parts.reduce((all, part) => (part === null ? [...all, ''] : [...all.slice(0, -1), all.at(-1) + part]), [''])
+  return { runs, whole: parts.map((part) => part ?? '${…}').join('') }
 }
 
 /**
