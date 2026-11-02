@@ -214,6 +214,11 @@ describe('what the scan finds, form by form', () => {
     ['middle naming', "export const f = (y: string, z: string) => 'a' + y + 'cir' + 'cle/x' + z + 'b'", [named("circle", "a${…}circle/x${…}b")]],
     ['prefix naming', "export const f = () => '/cir' + 'cle' + 'x'", []],
     ['services as services', "import { services as services } from './x'\nexport const f = 1", []],
+    ['anonymous default class', "export default class {}\nexport const x = './circle/x'", [named('circle', './circle/x')]],
+    ['generic short of an argument', `${TYPE}interface Box<T> { value: T }\nexport const f = (b: Box) => b.value.circle`, []],
+    ['or of constants', "export const f = () => 'cir' || 'cle/x'", []],
+    ['handed to arguments', 'export function f(services: any) { return arguments(services) }', [refused('handed to a call: services')]],
+    ['handed to a member of arguments', 'export function f(services: any) { return arguments.use(services) }', [refused('handed to a call: services')]],
   ])('%s', (_name, source, expected, more = {}, ids = IDS) => {
     expect(scanned({ [B]: `${source}\n`, ...more }, ids)).toEqual(expected)
   })
