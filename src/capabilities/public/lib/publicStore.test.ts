@@ -248,7 +248,10 @@ function equivocationsCosting(total: number, firstSeq: number): string[] {
 describe('readPublic', () => {
   it('a book nobody has annotated is empty, not an error', () => {
     return readPublic2(fakeFs(new Map()), 'book:1', crypto(accepted), NOW, never).then((read) => {
-      expect(read.file).toEqual(EMPTY_PUBLIC_FILE)
+      /* Spelled out, not compared with `EMPTY_PUBLIC_FILE`: a reader's first
+         look at a book must hold nothing at all, and comparing the constant
+         with itself would pass whatever the constant held. */
+      expect(read.file).toEqual({ kept: [], held: [], withdrawn: [], equivocated: [] })
     })
   })
 
