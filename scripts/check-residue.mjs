@@ -467,6 +467,7 @@ function followServices(source, checker, known, types, found, say) {
     }
     if (ts.isExportAssignment(statement) && ts.isIdentifier(unwrapped(statement.expression))) {
       const local = unwrapped(statement.expression)
+      // Stryker disable next-line StringLiteral: an export's own name is only asked whether it is or ends in `services`, and neither `default` nor an empty name does
       leaving('default', checker.getSymbolAtLocation(local), statement, local.text)
     }
     if (ts.isExportDeclaration(statement) && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
