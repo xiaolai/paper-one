@@ -93,7 +93,7 @@ describe('the browser client, mounted', () => {
       .toMatch(/librar|connect|code|digits/iu)
   })
 
-  it('installs the platform metrics on the document, before the mount', async () => {
+  it('installs the platform metrics on the document', async () => {
     /* ⚠️ **EVERY SURFACE READS THESE AS CUSTOM PROPERTIES**, and a browser tab
      * has no titlebar and no window controls — the table says so with zeros.
      * Nothing else writes them, so their absence is silent: the layout is

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from 'react'
+import { act, type ReactNode } from 'react'
 import type { Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Capability } from '../../kernel'
@@ -69,7 +69,8 @@ const world = vi.hoisted(() => ({
   storesOver: [] as unknown[],
   stores: { marks: { name: 'marks' }, cards: null, cardRows: [] } as unknown,
   settings: [] as unknown[],
-  fatalHandlersAt: [] as string[],
+  /** Each start-up step that leaves a trace, and the titlebar height published by then. */
+  startup: [] as (readonly [step: string, titlebar: string])[],
   drawn: new Map<string, Record<string, unknown>>(),
   readerMounts: 0,
 }))
@@ -80,6 +81,24 @@ function drew(name: string): Record<string, unknown> {
   return props
 }
 
+/* The real root, with the call to `render` written down. React renders later, off
+   a scheduler, so nothing the first render does could say when that call was made. */
+vi.mock('react-dom/client', async (importOriginal) => {
+  const real = await importOriginal<typeof import('react-dom/client')>()
+  return {
+    ...real,
+    createRoot: (...args: Parameters<typeof real.createRoot>) => {
+      const created = real.createRoot(...args)
+      return {
+        render: (children: ReactNode) => {
+          world.startup.push(['render', document.documentElement.style.getPropertyValue('--titlebar-h')])
+          created.render(children)
+        },
+        unmount: () => created.unmount(),
+      }
+    },
+  }
+})
 vi.mock('./session', () => ({
   checkSession: () => {
     world.checks += 1
@@ -219,7 +238,7 @@ vi.mock('../../kernel/ui/browser', () => ({
     return <div data-stub="Cards" />
   },
   installFatalHandlers: () => {
-    world.fatalHandlersAt.push(document.documentElement.style.getPropertyValue('--titlebar-h'))
+    world.startup.push(['fatal handlers', document.documentElement.style.getPropertyValue('--titlebar-h')])
   },
 }))
 
@@ -335,7 +354,7 @@ beforeEach(() => {
     storesOver: [],
     stores: { marks: { name: 'marks' }, cards: null, cardRows: [] },
     settings: [],
-    fatalHandlersAt: [],
+    startup: [],
     drawn: new Map(),
     readerMounts: 0,
   })
@@ -372,16 +391,19 @@ describe('what a mount does first', () => {
         `Paper: composition.web.ts names ${named} capability/capabilities and this entry does not compose any. Wire composeCapabilities here before adding one.`,
       ),
     )
-    expect(world.fatalHandlersAt, 'it went on past a composition it refused').toEqual([])
+    expect(world.startup, 'it went on past a composition it refused').toEqual([])
     expect(page().childElementCount).toBe(0)
   })
 
   /* A browser tab has no titlebar, and the table says so with zeros: a desktop's
      geometry would reserve a band for one. Published before the fatal handlers,
      and both before the first render. */
-  it('publishes a browser’s geometry and installs the fatal handlers, in that order, before it draws', async () => {
+  it('publishes a browser’s geometry, then installs the fatal handlers, then renders', async () => {
     await mount()
-    expect(world.fatalHandlersAt).toEqual(['0px'])
+    expect(world.startup).toEqual([
+      ['fatal handlers', '0px'],
+      ['render', '0px'],
+    ])
     expect(document.documentElement.style.getPropertyValue('--titlebar-h')).toBe('0px')
   })
 
