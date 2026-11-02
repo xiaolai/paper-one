@@ -1157,13 +1157,12 @@ export type ServiceName = (typeof TABLE)[number]['name']
  * is exported from the kernel's public entry, so any module loaded before
  * `buildServices()` could have rewritten a destructive service's grant to a
  * reading one, or renamed a service, and nothing would have noticed: the
- * derived `SERVICE_NAMES` and `BY_NAME` are built from the same objects and
+ * derived `SERVICE_NAMES` and `serviceDescriptor` read the same objects and
  * would have agreed with the tampered version.
  *
  * Freezing is shallow by default, so this walks: descriptors, their `input`
  * arrays and each field, and `output`. Frozen in place rather than copied,
- * so `BY_NAME` and the row identities stay the same objects the handlers are
- * typed against.
+ * so the row identities stay the same objects the handlers are typed against.
  */
 /* ⚠️ **FROZEN BY A FUNCTION FROM ANOTHER MODULE, ON PURPOSE.** `deepFreeze`
    lived here, and this call runs at module scope, so every mutant that broke it
@@ -1177,12 +1176,13 @@ export const SERVICE_TABLE: readonly ServiceDescriptor[] = deepFreeze(TABLE)
 /** Names, in table order. */
 export const SERVICE_NAMES: readonly ServiceName[] = Object.freeze(TABLE.map((one) => one.name))
 
-const BY_NAME: ReadonlyMap<string, ServiceDescriptor> = new Map(SERVICE_TABLE.map((one) => [one.name, one]))
-
 /** The descriptor for a name, or null — the router's `unknown-service` and the
  *  CLI's "did you mean" both start here. */
 export function serviceDescriptor(name: string): ServiceDescriptor | null {
-  return BY_NAME.get(name) ?? null
+  /* A walk of the table, not an index built when this module loads: a mutant
+     of that index's arrow threw at import, which reads as a survivor for the
+     reason above. The table holds a few dozen rows. */
+  return SERVICE_TABLE.find((one) => one.name === name) ?? null
 }
 
 /** Every service on a noun, in table order. The CLI's per-noun help. */
