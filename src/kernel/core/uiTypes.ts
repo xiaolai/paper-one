@@ -207,7 +207,9 @@ export function isContributedPaneId(id: PaneId): id is ContributedPaneId {
 
 /** Whether an id — from anywhere, typed or not — names one of the kernel's own panes. */
 export function isKernelPaneId(id: unknown): id is KernelPaneId {
-  return typeof id === 'string' && (KERNEL_PANE_IDS as readonly string[]).includes(id)
+  /* No `typeof` check first: `includes` answers false for anything that is not
+     one of the ids, whatever its type. */
+  return (KERNEL_PANE_IDS as readonly unknown[]).includes(id)
 }
 
 export const SIDES = ['left', 'right'] as const
