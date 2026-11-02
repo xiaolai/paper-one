@@ -213,6 +213,36 @@ describe('the tag section', () => {
   })
 })
 
+/**
+ * ⚠️ **A TAG ROW IS THE SAME ROW WHETHER OR NOT ANYTHING IS FILED UNDER IT.**
+ * A tag with no children was drawn bare and one with children inside its
+ * group, so the first `Fiction/…` tag to arrive — from another device, or a
+ * drop — swapped the `Fiction` row for a new one and threw away the name the
+ * reader was half-way through typing into it. The same in reverse when the last
+ * child went.
+ */
+describe('a tag being renamed', () => {
+  const startRenaming = (tag: string, typed: string) => {
+    fireEvent.click(screen.getByRole('button', { name: `More for the tag ${tag}` }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Rename/ }))
+    fireEvent.change(screen.getByRole('textbox', { name: `Rename the tag ${tag}` }), { target: { value: typed } })
+  }
+
+  it('keeps what was typed when the shelf gains a tag filed under it', () => {
+    const { redraw } = draw({ books: [book('a', { tags: ['Fiction'] })] })
+    startRenaming('Fiction', 'Novels')
+    redraw({ books: [book('a', { tags: ['Fiction'] }), book('b', { tags: ['Fiction/Sea'] })] })
+    expect(screen.getByRole('textbox', { name: 'Rename the tag Fiction' })).toHaveProperty('value', 'Novels')
+  })
+
+  it('keeps what was typed when the last tag filed under it goes', () => {
+    const { redraw } = draw({ books: [book('a', { tags: ['Fiction'] }), book('b', { tags: ['Fiction/Sea'] })] })
+    startRenaming('Fiction', 'Novels')
+    redraw({ books: [book('a', { tags: ['Fiction'] })] })
+    expect(screen.getByRole('textbox', { name: 'Rename the tag Fiction' })).toHaveProperty('value', 'Novels')
+  })
+})
+
 describe('the name filter', () => {
   /** Thirteen tags, one per book — one more than the field waits for — and a book with none. */
   const thirteen = [
