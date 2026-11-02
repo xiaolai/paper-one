@@ -253,11 +253,7 @@ function typeReader(checker, sources) {
       return (ts.isIdentifier(parameter.name) && parameter.name.text === 'services') || (parameter.type !== undefined && classify(parameter.type) === MEMBERS)
     })
   }
-  /* A file with no word for them holds them only under an alias the kernel declares. */
-  const aliases = [...declared.entries()].filter(([, declarations]) => strongest(declarations.map((one) => ofDeclaration(one, [], new Map(), new Set()))) !== null).map(([name]) => name)
-  const names = [...aliases, ...[...renamed.keys()].filter((name) => ['KernelServices', ...aliases].includes(throughRenames(name)))]
-  const mentions = names.length === 0 ? /services/i : new RegExp(`services|\\b(?:${names.map((name) => name.replace(/\$/g, '\\$')).join('|')})\\b`, 'i')
-  return { classify, returnsServices, takesServices, mightHold: (text) => mentions.test(text) }
+  return { classify, returnsServices, takesServices }
 }
 
 /* EVERY ESCAPE IS REFUSED BUT THESE, so one the engine learns later is loud by default.
@@ -329,7 +325,7 @@ function namingsIn(source, checker, ids, types) {
   const inLiteral = ids.map((id) => ({ id, shape: new RegExp(`(?:^|/)${id}(?:[:./]|$)`) }))
   const say = (at, how) => found.push({ id: UNFOLLOWED, match: `${how}: ${quoted(at)}` })
 
-  if (types.mightHold(source.text)) followServices(source, checker, known, types, found, say)
+  followServices(source, checker, known, types, found, say)
 
   const hasPartNaming = (node) => {
     const literal = literalText(node)
