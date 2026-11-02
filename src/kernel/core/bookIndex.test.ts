@@ -441,6 +441,16 @@ describe('a library whose records will not read', () => {
     await expect(scanBooks(fs)).rejects.toThrow('could not be read')
   })
 
+  /* A RECORD THAT WILL NOT PARSE IS UNREADABLE, whatever `exists` says
+   * afterwards. `gone` is for a folder the walk could not read at all; a
+   * parse failure answered there would drop the book from the count, and a
+   * library of damaged records would come back as an empty shelf. */
+  it('counts a record that will not parse as unreadable without asking whether its folder is gone', async () => {
+    const base = fakeFs({ [`${BOOKS_DIR}/book_a/book.json`]: 'half a write' })
+    const fs: IndexFs = { ...base, exists: async (path) => path !== `${BOOKS_DIR}/book_a` && base.exists(path) }
+    await expect(scanBooks(fs)).rejects.toThrow('could not be read')
+  })
+
   /* One damaged book among good ones costs that book, which is the rule the
    * scan is written around and the right one. */
   it('still skips a single damaged book when others load', async () => {
