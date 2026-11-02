@@ -134,6 +134,19 @@ describe('an empty shelf', () => {
   })
 })
 
+describe('the whole-shelf row', () => {
+  /* The count is the collection's, so it moves with the shelf the panel is
+     handed, not with the shelf it was first drawn with. */
+  const allBooks = (): string | null => screen.getByText('All books').closest('button')?.textContent ?? null
+
+  it('counts the shelf it was last handed', () => {
+    const { redraw } = draw({ books: [book('a')] })
+    expect(allBooks()).toBe('All books1')
+    redraw({ books: [book('a'), book('b'), book('c')] })
+    expect(allBooks()).toBe('All books3')
+  })
+})
+
 describe('saved views', () => {
   const kept = { id: 'v1', name: 'In flight', query: 'is:reading' }
 
