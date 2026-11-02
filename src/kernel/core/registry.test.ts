@@ -20,6 +20,14 @@ describe('isCapabilityId', () => {
   })
 })
 
+describe('the reserved id', () => {
+  it('refuses a capability that calls itself the kernel, and says so by name', async () => {
+    const kernel: Capability = { id: 'kernel', start: () => ({ dispose: () => {} }) }
+    const composing = composeCapabilities([kernel], kernelApi(createKernelServices({ fs: null, storage: null })), new AbortController().signal)
+    await expect(composing).rejects.toMatchObject({ code: 'reserved-id', message: '"kernel" is not a capability id' })
+  })
+})
+
 describe('resolvePaneId', () => {
   /* Only a contributed id, which is namespaced, is looked up in `known`: an
      unnamespaced name that is no kernel pane is not a pane, whatever a
