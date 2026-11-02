@@ -44,3 +44,35 @@ describe('a disposed composition', () => {
     expect(composition.bookStatuses).toEqual([])
   })
 })
+
+describe('a requires cycle', () => {
+  const cap = (id: string, requires: readonly string[] = []): Capability => ({
+    id,
+    requires,
+    start: () => ({ dispose: () => {} }),
+  })
+  const compose = (caps: readonly Capability[]) =>
+    composeCapabilities(caps, kernelApi(createKernelServices({ fs: null, storage: null })), new AbortController().signal)
+
+  it('is refused, naming every member and no bystander', async () => {
+    await expect(compose([cap('a', ['b']), cap('b', ['a'])])).rejects.toMatchObject({
+      code: 'cyclic-requires',
+      message: 'requires cycle among: a, b',
+    })
+    await expect(compose([cap('a', ['c']), cap('b', ['a']), cap('c', ['b']), cap('d')])).rejects.toMatchObject({
+      code: 'cyclic-requires',
+      message: 'requires cycle among: a, b, c',
+    })
+    await expect(compose([cap('a', ['a'])])).rejects.toMatchObject({
+      code: 'cyclic-requires',
+      message: 'requires cycle among: a',
+    })
+  })
+
+  it('is not seen where a chain or a diamond has none', async () => {
+    const chain = await compose([cap('c', ['b']), cap('b', ['a']), cap('a')])
+    expect(chain.standing.map((one) => one.id)).toEqual(['a', 'b', 'c'])
+    const diamond = await compose([cap('d', ['b', 'c']), cap('c', ['a']), cap('b', ['a']), cap('a')])
+    expect(diamond.standing.map((one) => one.id)).toEqual(['a', 'c', 'b', 'd'])
+  })
+})
