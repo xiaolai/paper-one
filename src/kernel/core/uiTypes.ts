@@ -181,7 +181,7 @@ export function settingsSectionOffered(
   section: { readonly id: string },
   developer: boolean,
   hidden: readonly string[] = [],
-  unfinishedPanes: readonly { readonly id: string }[] = [],
+  unfinishedPanes: readonly { readonly id: string }[],
 ): boolean {
   const capability = section.id.slice(0, section.id.indexOf(':'))
   /* A CONTRIBUTED PANEL CARRIES ITS OWN CAPABILITY'S NAME, so the same match
