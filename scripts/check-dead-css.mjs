@@ -303,13 +303,15 @@ function readsIn(file, source, checker, functions, known, next) {
     },
     enumerated: (origins, at) => {
       for (const origin of origins) {
-        if (origin.kind === 'source') continue
-        if (origin.modulePath === null) say(at, 'every key of a stylesheet handed in, whose module is not known')
+        if (origin.kind === 'source') say(at, 'every member of a module that holds one')
+        else if (origin.modulePath === null) say(at, 'every key of a stylesheet handed in, whose module is not known')
         else whole.add(origin.modulePath)
       }
     },
+    /* A source module is only made of a file that exports one, so wherever it goes,
+       one goes with it. An imported function known to return nothing escapes empty. */
     escaped: (origins, at, how) => {
-      if (origins.some((origin) => origin.kind !== 'source')) say(at, how)
+      if (origins.length > 0) say(at, how)
     },
     /* `index` is where the value stands among the arguments, which it always does. */
     handedOn: (callee, index, origins) => {

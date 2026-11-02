@@ -1086,6 +1086,16 @@ describe('what crosses a file, at the edges', () => {
     expectAnswer(files, { missing: ['gone'] })
   })
 
+  /* A module of a source is held only when the source exports one, so where it
+     goes, a stylesheet goes too, and what is read of it there is not known. */
+  it.each([
+    ['handed to a call', "declare const g: any\nexport const f = () => g(re)", HANDED],
+    ['read for every value', 'export const f = () => Object.values(re)', 'every member of a module that holds one'],
+    ['walked key by key', 'export const f = () => { for (const k in re) g(k) }\ndeclare const g: any', 'every member of a module that holds one'],
+  ])('refuses a module of a source %s', (_what, use, how) => {
+    expectAnswer({ 'src/B.tsx': `${IMPORT}export const s = styles\n`, 'src/C.tsx': `import * as re from './B'\n${use}\n` }, { refused: [how] })
+  })
+
   it('re-exports no module of a source that exports nothing', () => {
     expectAnswer({
       'src/B.ts': 'export const k = 1\n',
