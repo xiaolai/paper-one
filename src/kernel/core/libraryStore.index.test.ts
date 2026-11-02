@@ -68,7 +68,9 @@ describe('a position tick', () => {
     /* ONE marker write for the period, at full, however many ticks. */
     const markers = fs.synced().filter((one) => one.path === INDEX_DIRTY_FILE)
     expect(markers).toEqual([{ path: INDEX_DIRTY_FILE, level: 'full', kind: 'write' }])
-    expect(await readDirtyMarker(fs)).toMatchObject({ version: 1, books: ['book_a'] })
+    /* The generation the period began at: the first tick's, counted up from
+       nothing, as Calibre's `dirtied_sequence` is. */
+    expect(await readDirtyMarker(fs)).toMatchObject({ version: 1, generation: 1, books: ['book_a'] })
     expect(recordOn(fs, 'book_a').position).toBe('p3')
     expect(library.getSnapshot().find((one) => one.bookId === 'book_a')?.position).toBe('p3')
   })
@@ -175,9 +177,10 @@ describe('the next launch', () => {
     await flush
     await queue.idle()
 
-    /* The index installed the older world, and the marker says so. */
+    /* The index installed the older world, and the marker says so — at the
+       generation the second tick moved it to. */
     expect(indexOn(fs)?.books[0]?.position).toBe('p2')
-    expect(await readDirtyMarker(fs)).toMatchObject({ books: ['book_a'] })
+    expect(await readDirtyMarker(fs)).toMatchObject({ generation: 2, books: ['book_a'] })
 
     /* The crash before the next timer. */
     const shelf = await loadShelf(fs)
