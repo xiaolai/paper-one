@@ -97,6 +97,16 @@ describe('the publish control', () => {
 
   /* A build with no circle composed — every phone — passes nothing, and empty
      is the TRUE answer there rather than a default standing in for one. */
+  /* The port decides the wording for each audience; this control's part is to
+     ask about the one it publishes to, which is everyone. */
+  it('asks the port what publishing to anyone discloses', async () => {
+    const disclosure = (audience: string) => (audience === 'public' ? 'Seen by anyone at all.' : 'Seen by someone else.')
+    render(<PublishControl bookId="book:1" passage={PASSAGE} port={portWith({ disclosure })} />)
+    button('Publish…')?.click()
+    await waitFor(() => expect(screen.queryByText('Seen by anyone at all.')).not.toBeNull())
+    expect(screen.queryByText('Seen by someone else.')).toBeNull()
+  })
+
   it('shows the plain disclosure when no circle is composed', async () => {
     render(<PublishControl bookId="book:1" passage={PASSAGE} port={portWith()} />)
     button('Publish…')?.click()
