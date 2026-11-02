@@ -400,6 +400,7 @@ export function scanSources(root, roots = ROOTS) {
  * these saves time and decides no answer: a type the library or another file would
  * lend is asked about only for a key, and a key is held only where this file says so.
  */
+// Stryker disable next-line ObjectLiteral: with none of these every program loads the whole default library, which only slows each scan past the timeout; a file's extension decides JSX and any target parses the same syntax, so no answer moves
 const PROGRAM = {
   // Stryker disable next-line BooleanLiteral: resolving adds the files a source imports, whose declarations no scope of this file holds anything under
   noResolve: true,
