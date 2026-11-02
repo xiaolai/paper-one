@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MobileApp } from './MobileApp'
 import { createKernelServices, type Composition } from '../../kernel'
+import styles from '../shell/shell.module.css'
 
 /**
  * EVERY TAB RENDERS — which is the thing a screenshot of one tab cannot say.
@@ -62,6 +63,8 @@ afterEach(() => {
   cleanup()
 })
 
+const MOBY = { bookId: 'book:m', title: 'Moby-Dick', author: 'Melville', addedAt: 1 }
+
 describe('the phone shell', () => {
   it('opens on the Library', () => {
     mount()
@@ -81,6 +84,38 @@ describe('the phone shell', () => {
        nothing at all would pass a smoke test and show a blank tab. */
     expect(screen.getByRole('heading', { name: tab })).not.toBeNull()
     expect(screen.getByRole('button', { name: tab }).getAttribute('aria-current')).toBe('page')
+  })
+
+  /* ONE SCREEN AT A TIME. Each tab's screen is drawn while its tab is current
+     and not otherwise — a shelf left under the settings, or the settings drawn
+     over the shelf, is two screens fighting for one stage. */
+  it('draws the shelf alone on Library, and the settings alone on Settings', () => {
+    mount([MOBY])
+    expect(screen.queryByRole('heading', { name: 'Settings' })).toBeNull()
+    expect(screen.queryByTitle('Open Moby-Dick')).not.toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    expect(screen.queryByTitle('Open Moby-Dick')).toBeNull()
+    expect(screen.getByRole('heading', { name: 'Settings' })).not.toBeNull()
+  })
+
+  /* THE SETTINGS SCREEN SITS ON THE STAGE AS A SCROLLING SCREEN — `stage` is
+     what gives it the space under the safe area and `screen` what lets a long
+     settings list scroll, so a bare box would run off the bottom of the phone. */
+  it('lays the Settings screen out on the stage, as a screen', () => {
+    mount()
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    const box = screen.getByRole('heading', { name: 'Settings' }).parentElement
+    expect([...(box?.classList ?? [])]).toEqual(expect.arrayContaining([styles.stage, styles.screen]))
+  })
+
+  /* NO BOOK ON A PHONE YET, so Reading has nothing to open and must not leave
+     the reader on a stage with nothing drawn on it. */
+  it('keeps the shelf when Reading is pressed with no book open', () => {
+    mount([MOBY])
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reading' }))
+    expect(screen.getByRole('button', { name: 'Library' }).getAttribute('aria-current')).toBe('page')
+    expect(screen.queryByTitle('Open Moby-Dick')).not.toBeNull()
   })
 
   /**
