@@ -381,11 +381,13 @@ function followServices(source, checker, known, types, found, say) {
   const returningSymbol = (symbol) => {
     if (symbol !== undefined) returning.push([symbol, [SERVICES]])
   }
+  /* The name a function is bound to: its own, or the variable, parameter or pattern default it
+     stands in. Where nothing names it, the checker answers `undefined` for the missing name. */
   const symbolOfFunction = (fn) => {
-    if (ts.isFunctionDeclaration(fn)) return fn.name === undefined ? undefined : checker.getSymbolAtLocation(fn.name)
+    if (ts.isFunctionDeclaration(fn)) return checker.getSymbolAtLocation(fn.name)
     let at = fn
     while (isWrapperNode(at.parent)) at = at.parent
-    return ts.isVariableDeclaration(at.parent) && ts.isIdentifier(at.parent.name) ? checker.getSymbolAtLocation(at.parent.name) : undefined
+    return checker.getSymbolAtLocation(at.parent.name)
   }
   const collect = (node) => {
     if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && node.type) {

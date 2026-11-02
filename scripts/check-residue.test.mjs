@@ -253,6 +253,16 @@ describe('forms the scan once missed', () => {
       scanned({ [B]: "import type * as Core from './core/services'\nnamespace N { export import K = Core.KernelServices }\nexport const f = (s: N.K) => s.passages\n" }),
     ).toEqual([named('passages', 'services.passages')])
   })
+
+  /* A function declared to return the services, standing as a default, binds to the
+     name it defaults. */
+  it('reads a function declared to return the services through the default it stands in', () => {
+    const KS = '(): KernelServices => null as any'
+    expect(scanned({ [B]: `${TYPE}export const f = (read = ${KS}) => read().passages\n` })).toEqual([named('passages', 'services.passages')])
+    expect(scanned({ [B]: `${TYPE}const { r = ${KS} } = {} as any\nexport const f = () => r().passages\n` })).toEqual([named('passages', 'services.passages')])
+    expect(scanned({ [B]: `${TYPE}const [r = ${KS}] = [] as any[]\nexport const f = () => r().passages\n` })).toEqual([named('passages', 'services.passages')])
+    expect(scanned({ [B]: `${TYPE}export const f = (read = ${KS}) => read\n` })).toEqual([refused('a function that returns it, handed on: read')])
+  })
 })
 
 describe('check-residue on a planted tree', () => {
