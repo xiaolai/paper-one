@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   archiveName,
   ArchiveOverLimit,
@@ -333,6 +333,36 @@ describe('planImport', () => {
     /* Order in the file does not decide it; the stamp does. */
     const reversed = planImport(exportMarks(shelf, [late, early], []), shelf, [], [])
     expect(reversed.additions[0]?.marks.map((m) => m.note)).toEqual(['kept'])
+  })
+
+  /* WITHOUT AN ANCHOR, THE QUOTE DECIDES. A mark with no CFI on either side
+     is the same passage when its words are, so two copies fold into one and a
+     copy of a shelf mark is already here. Kept ahead of the full-size archive
+     below, which leans on exactly this fold to stay linear. */
+  it('matches marks with no anchor by their quote', () => {
+    const shelf = [BOOK()]
+    const quoted = (text: string) => ({
+      text,
+      prefix: '',
+      suffix: '',
+      note: '',
+      kind: 'highlight' as const,
+      tint: 'yellow' as const,
+      style: 'fill' as const,
+      chapter: '',
+      createdAt: '2026-01-02T03:04:05.000Z',
+      localAnchor: { cfi: '', sectionIndex: 0 },
+    })
+    const archive = (marks: ReturnType<typeof quoted>[]): MarksArchive => ({
+      version: 1,
+      books: [{ bookId: 'moby', title: 'Moby-Dick', author: 'Herman Melville', marks, cards: [] }],
+    })
+    const twice = planImport(archive([quoted('Call me Ishmael'), quoted('Call me Ishmael'), quoted('Loomings')]), shelf, [], [])
+    expect(twice.marksAdded).toBe(2)
+    expect(twice.folded).toBe(1)
+    const here = planImport(archive([quoted('Call me Ishmael')]), shelf, [MARK({ cfi: '', text: 'Call me Ishmael' })], [])
+    expect(here.duplicates).toBe(1)
+    expect(here.marksAdded).toBe(0)
   })
 
   /* ⚠️ **AN ARCHIVE AT ITS OWN LIMIT USED TO THROW BEFORE IT WAS PLANNED.**
@@ -873,6 +903,19 @@ describe('the full content digest, where both sides have one', () => {
     expect(planImport(parsed!, [BOOK({ contentHash: HASH_B })], [], []).marksAdded).toBe(1)
   })
 
+  it('drops a digest with anything before or after its sixty-four digits, rather than cutting it down to one', () => {
+    /* ⚠️ A value one character too long used to be sliced to sixty-four and
+       kept, so the archive carried a digest it never held — and a digest that
+       disagrees with the shelf's demotes an id match. */
+    for (const malformed of [`${HASH_A}0`, `0${HASH_A}`, `${HASH_A}${HASH_A}`]) {
+      const doc = exportMarks([BOOK({ contentHash: HASH_A })], [MARK()], [])
+      const mangled = JSON.parse(JSON.stringify(doc)) as { books: { contentHash?: unknown }[] }
+      mangled.books[0]!.contentHash = malformed
+      const parsed = parseArchive(JSON.stringify(mangled))
+      expect(parsed?.books[0], malformed).not.toHaveProperty('contentHash')
+    }
+  })
+
   it('carries no digest at all when the exporting library has none', () => {
     /* Absent, never empty — the same rule every optional field here follows.
        An empty string would parse back as a hash that matches nothing. */
@@ -1063,10 +1106,44 @@ describe('cards with no book on this shelf', () => {
       ['cards of one book', { books: [{ ...emptyBook, cards: of(ARCHIVE_MAX_ROWS, row) }] }],
       ['books alone', { books: of(ARCHIVE_MAX_ROWS + 1, emptyBook) }],
       ['books that are not objects', { books: of(ARCHIVE_MAX_ROWS + 1, 3) }],
+      ['books that are null', { books: of(ARCHIVE_MAX_ROWS + 1, null) }],
       ['rows that will not parse', { books: [{ ...emptyBook, marks: of(ARCHIVE_MAX_ROWS, null) }] }],
       ['the loose cards after full books', { books: [{ ...emptyBook, cards: [row] }, ...of(ARCHIVE_MAX_ROWS - 3, emptyBook)], looseCards: of(2, row) }],
     ])('refuses %s, rather than read as far as it reaches', (_name, body) => {
       expect(() => parseArchive(JSON.stringify({ version: 1, ...body }))).toThrow(ArchiveOverLimit)
+    })
+
+    it('says which budget it refused at', () => {
+      const refusal = (): unknown => parseArchive(JSON.stringify({ version: 1, books: [], looseCards: of(ARCHIVE_MAX_ROWS + 1, row) }))
+      expect(refusal).toThrow(new RegExp(`^past ${ARCHIVE_MAX_ROWS} rows$`, 'u'))
+    })
+
+    it('counts a book that is null as the one row it is, beside books that are read', () => {
+      const parsed = parseArchive(JSON.stringify({ version: 1, books: [null, 3, { ...emptyBook, cards: [row] }] }))
+      expect(parsed?.books.map((book) => book.cards.length)).toEqual([1])
+    })
+
+    describe('a forged list of books', () => {
+      afterEach(() => {
+        vi.restoreAllMocks()
+      })
+
+      /* STOPS AS SOON AS IT IS PAST: the count reads a book list only until the
+         budget is spent, not to its end. Read through a proxy, because a list from
+         `JSON.parse` cannot say how far it was read. */
+      it('is read no further than the budget, however long it is', () => {
+        const forged = of(ARCHIVE_MAX_ROWS * 2, emptyBook)
+        let read = 0
+        const counted = new Proxy(forged, {
+          get(target, key, receiver) {
+            if (typeof key === 'string' && /^[0-9]+$/u.test(key)) read += 1
+            return Reflect.get(target, key, receiver) as unknown
+          },
+        })
+        vi.spyOn(JSON, 'parse').mockReturnValueOnce({ version: 1, books: counted })
+        expect(() => parseArchive('{}')).toThrow(ArchiveOverLimit)
+        expect(read).toBeLessThanOrEqual(ARCHIVE_MAX_ROWS + 2)
+      })
     })
 
     it('reads back one exactly at it, with nothing dropped', () => {
@@ -1145,7 +1222,7 @@ describe('cards with no book on this shelf', () => {
 
   it('shows them in the reading copy under their own heading, and only when there are any', () => {
     const md = toMarkdown(exportMarks([BOOK()], [], [GONE]))
-    expect(md).toContain('## Cards with no book on this shelf')
+    expect(md).toContain('## Cards with no book on this shelf\n\n- **Still worth keeping**')
     expect(md).toContain('- **Still worth keeping**')
     expect(md).toContain('  - Ishmael')
     expect(toMarkdown(exportMarks([BOOK()], [MARK()], []))).not.toContain('no book on this shelf')
@@ -1187,6 +1264,9 @@ describe('an export at the limits of what can be read back', () => {
   it('refuses one row over, rather than write a file that loses it on the way back', () => {
     const archive: MarksArchive = { version: 1, books: [], looseCards: Array.from({ length: ARCHIVE_MAX_ROWS + 1 }, () => looseRow) }
     expect(() => archiveText(archive)).toThrow(ArchiveOverLimit)
+    expect(() => archiveText(archive)).toThrow(
+      expect.objectContaining({ name: 'ArchiveOverLimit', message: `${ARCHIVE_MAX_ROWS + 1} rows, past ${ARCHIVE_MAX_ROWS}` }),
+    )
     expect(() => parseArchive(JSON.stringify(archive)), 'what the refusal saves the reader from').toThrow(ArchiveOverLimit)
   })
 
@@ -1196,6 +1276,9 @@ describe('an export at the limits of what can be read back', () => {
     const carrying = (body: string): MarksArchive => ({ version: 1, books: [], looseCards: [{ ...looseRow, body }] })
     expect(new TextEncoder().encode(archiveText(carrying('x'.repeat(fits)))).length).toBe(ARCHIVE_MAX_BYTES)
     expect(() => archiveText(carrying('x'.repeat(fits + 1)))).toThrow(ArchiveOverLimit)
+    expect(() => archiveText(carrying('x'.repeat(fits + 1)))).toThrow(
+      new RegExp(`^${ARCHIVE_MAX_BYTES + 1} bytes, past ${ARCHIVE_MAX_BYTES}$`, 'u'),
+    )
     /* Three bytes each in UTF-8, one character each in a JavaScript string. */
     expect(() => archiveText(carrying('漢'.repeat(Math.ceil(fits / 3) + 1)))).toThrow(ArchiveOverLimit)
   })

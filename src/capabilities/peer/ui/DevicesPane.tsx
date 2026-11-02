@@ -84,6 +84,7 @@ function P2pSwitchRow({ p2p }: { readonly p2p: P2pSwitch }) {
   )
 }
 
+// Stryker disable next-line ArrowFunction: with no switch there is nothing to hear, so nothing calls back, and React takes an unsubscribe of `undefined` as no cleanup at all.
 const noSwitchToWatch = () => () => {}
 
 export interface DevicesPaneProps {
@@ -99,6 +100,7 @@ export function DevicesPane({ model, syncNow, p2p = null }: DevicesPaneProps) {
   const snapshot = useSyncExternalStore(model.subscribe, model.getSnapshot)
   /* The writing signal, because `needsReopen` is settled when writing ends and
      `subscribe` hears only of an answer or a close, not of every settling. */
+  // Stryker disable next-line BooleanLiteral: `needsReopen` is read only beside a switch, so the answer for no switch is never read.
   const needsReopen = useSyncExternalStore(p2p?.subscribeWriting ?? noSwitchToWatch, () => p2p?.needsReopen() ?? false)
   const [code, setCode] = useState('')
   /* Reset by the offer's identity, so a second pairing does not open already

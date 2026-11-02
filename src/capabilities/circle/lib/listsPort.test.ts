@@ -219,6 +219,8 @@ describe('the lists a circle carries, bounded', () => {
     const { port } = world()
     for (let i = 0; i < MAX_LISTS_PER_REQUEST; i++) await port.create(`List ${i}`)
     await expect(port.create('one more')).rejects.toThrow(TOO_MANY_LISTS)
+    // And the refusal says the cap in words the reader can act on.
+    await expect(port.create('one more')).rejects.toThrow(/^A circle carries at most 64 lists\.$/u)
     /* A deleted list is still a file a friend holds a cursor for. */
     const [first] = await port.lists()
     await port.delete(first!.id)

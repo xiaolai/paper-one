@@ -57,9 +57,6 @@ export interface ShelfFile {
 
 export const NOTHING_SHELVED: ShelfFile = { works: [], sealed: [] }
 
-/** BLAKE3, hex — what a cover on a shelf entry is (WI-23.C5). */
-export const COVER_DIGEST = /^[0-9a-f]{64}$/u
-
 /** A book as the library holds it, narrowed to what the shelf publishes. */
 export interface ShelvedBook {
   readonly bookId: string

@@ -34,6 +34,8 @@ import {
   describeRefusal,
   describeSession,
   isLinkClosure,
+  P2P_CLOSED_DETAIL,
+  P2P_OFF_DETAIL,
   refusalKind,
   saysMoreThanClosure,
   type RefusalNames,
@@ -259,11 +261,7 @@ async function degrade(thrown: unknown, owner: typeof running, book?: string): P
      which action it was: a download's own local write has nothing to do with
      that connection either, and its sentence is the only sign of it. */
   if (switchedOff !== null && isLinkClosure(thrown)) return
-  const refusal: SessionRefusal = {
-    kind: refusalKind(thrown),
-    message: messageOf(thrown),
-    ...(book === undefined ? {} : { book }),
-  }
+  const refusal: SessionRefusal = { kind: refusalKind(thrown), message: messageOf(thrown), book }
   syncStatus.set({ state: 'degraded', detail: describeRefusal(refusal, names) })
 }
 
@@ -506,13 +504,13 @@ async function integrityPass(
 }
 
 /** What the status says once the reader changed the P2P switch in this run. */
-const switchDetail = (on: boolean): string =>
-  describeRefusal({ kind: on ? 'p2p-closed' : 'p2p-off', message: '' }, { shelf: null, title: () => null })
+const switchDetail = (on: boolean): string => (on ? P2P_CLOSED_DETAIL : P2P_OFF_DETAIL)
 
 /** Why this run will never sync, in the words the Storage pane shows. */
 async function unwiredDetail(hasFilesystem: boolean): Promise<string> {
   if (!hasFilesystem) return 'No filesystem in a browser tab'
   /* The peer capability counts a switch it cannot read as off; so does this. */
+  // Stryker disable next-line ArrowFunction: `on` is read only as the condition below, where `undefined` reads exactly as `false`
   const on = await p2pAvailable().catch(() => false)
   return on ? 'Peer plugin unavailable' : 'Peer-to-peer is off'
 }
@@ -694,10 +692,9 @@ export const sync: Capability = {
       // Stryker disable next-line StringLiteral,CallExpression: a listener left on the signal can only call this again, and it returns above.
       signal.removeEventListener('abort', stop)
       step('scheduler', () => scheduler?.stop())
-      step('p2p-watch', () => {
-        unwatchP2p()
-        if (running === myRunning) switchedOff = null
-      })
+      /* `switchedOff` is left as it is: every reader needs a runtime that holds
+         the slot, and the next one to claim it starts it clear. */
+      step('p2p-watch', () => unwatchP2p())
       /* A stopped scheduler ignores `syncNow`, so the slot still holding one
        * changes nothing a caller can see — this lets it go. */
       // Stryker disable next-line StringLiteral,BlockStatement,CallExpression: see above; and `unbindScheduler` does not throw.
@@ -1147,6 +1144,7 @@ export const sync: Capability = {
             if (running !== owner) return 'ok'
             /* The switch's sentence stands over a session with nothing else to
                say, and gives way to a book it could not move. */
+            // Stryker disable next-line StringLiteral: the switch's watcher stops this runtime's scheduler before it sets `switchedOff`, and a stopped scheduler arms nothing from what a session answers.
             if (switchedOff !== null && !saysMoreThanClosure(summary)) return 'ok'
             syncStatus.set({
               state: 'ok',

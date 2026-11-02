@@ -25,6 +25,11 @@ function Probe() {
 }
 
 describe('a control that reaches a peer', () => {
+  it('stays drawn where no switch was ever composed', () => {
+    render(<Probe />)
+    expect(screen.queryByRole('button', { name: 'Reach a peer' })).not.toBeNull()
+  })
+
   it('stays drawn while the switch is on, goes when it goes off, and stays gone when it goes back on', async () => {
     const composition = await composeCapabilities([peer], kernelApi(createKernelServices({ fs: null, storage: null })), new AbortController().signal)
     const pane = peer.settings?.find((section) => section.title === 'Devices')?.render({ bookId: null }) as ReactElement<{

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { invoke } from '@tauri-apps/api/core'
 import { tauriWire } from './wire'
 
 /**
@@ -129,5 +130,20 @@ describe('the wire’s registrations, held to the letter', () => {
     await expect(failing.whenListening!()).rejects.toThrow(/no peer:\/\/session-closed/u)
     for (const name of names) expect(listeners.has(name)).toBe(true)
     spy.mockRestore()
+  })
+})
+
+describe('the P2P switch on the Tauri wire', () => {
+  it('asks the plugin what the switch reads, and hands back its answer', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(true)
+    await expect(tauriWire().p2pOn()).resolves.toBe(true)
+    expect(vi.mocked(invoke)).toHaveBeenLastCalledWith('plugin:peer|peer_p2p_on')
+  })
+
+  it('tells the plugin which way it was set, and hands back what it answered', async () => {
+    const answer = { closed: true, recordError: null, fileSaysOn: false }
+    vi.mocked(invoke).mockResolvedValueOnce(answer)
+    await expect(tauriWire().setP2p(false)).resolves.toBe(answer)
+    expect(vi.mocked(invoke)).toHaveBeenLastCalledWith('plugin:peer|peer_set_p2p', { on: false })
   })
 })

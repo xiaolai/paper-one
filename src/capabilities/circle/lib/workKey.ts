@@ -121,16 +121,24 @@ export function sameWork(a: string | undefined, b: string | undefined): boolean 
 function isbn13(declared: string): string | null {
   /* Only from a value that ANNOUNCES itself as an ISBN, or is nothing but
    * digits. Hunting for a digit run inside arbitrary text would find the `2701`
-   * in a Gutenberg URL and the year in a title. */
-  const announced = ISBN_PREFIX.test(declared)
+   * in a Gutenberg URL and the year in a title — so both shapes below are
+   * anchored at BOTH ends of what is left once the prefix, spaces and hyphens
+   * are gone, and nothing else is ever read as one.
+   *
+   * ⚠️ **THERE WAS A GUARD HERE THAT ASKED THE SAME QUESTION FIRST.** "Not
+   * announced and not nine-digits-then-[0-9X] or thirteen digits, return null"
+   * — but each shape below is a strict, anchored subset of that pattern, so
+   * whatever it refused the two below refused too, announced or not. Mutation
+   * testing showed it: deleting it, or inverting its `announced`, changed no
+   * answer at all. A guard nothing depends on is a second copy of a rule that
+   * drifts from the first, so it went (2026-11-02). */
   const body = declared.replace(ISBN_PREFIX, '')
   const digits = body.replace(/[\s-]/gu, '').toUpperCase()
+
   /* ⚠️ NINE DIGITS THEN `[0-9X]`, not ten-then-optional-X. An ISBN-10's check
      digit can be `X` for ten, and it REPLACES the tenth digit rather than
      following it — a `{10,13}X?` shape refuses every such book, which is
      roughly one in eleven of them, while looking entirely reasonable. */
-  if (!announced && !/^(?:[0-9]{9}[0-9X]|[0-9]{13})$/u.test(digits)) return null
-
   if (/^[0-9]{9}[0-9X]$/u.test(digits)) {
     let sum = 0
     for (let i = 0; i < 10; i++) {
@@ -152,6 +160,7 @@ function isbn13(declared: string): string | null {
      `isbn:` key — the STRONGEST signal this module gives — for two unrelated
      things, which is the one failure it can least afford. */
   if (/^97[89][0-9]{10}$/u.test(digits)) {
+    // Stryker disable next-line MethodExpression: `ean13Check` reads the first twelve characters and no more, so handing it all thirteen changes no answer
     const core = digits.slice(0, 12)
     return digits[12] === ean13Check(core) ? digits : null
   }

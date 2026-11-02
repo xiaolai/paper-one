@@ -126,6 +126,31 @@ function paneProps(): Record<string, unknown> {
   return element.props
 }
 
+describe('what the app is offered', () => {
+  it('is public sharing, which asks for the peer and has no switch of its own', () => {
+    /* Every value here is a fact the composition or a reader meets: `requires`
+       is what makes the composition start `peer` first, and `follows` is the
+       line Settings draws under the peer-to-peer switch that governs this. */
+    expect(publicSharing.id).toBe('public')
+    expect(publicSharing.requires).toEqual(['peer'])
+    expect(publicSharing.follows).toEqual({ title: 'Public sharing', switch: 'Peer-to-peer' })
+  })
+
+  it('puts one publish control on a mark’s row, and one pane in the reader', () => {
+    expect(publicSharing.markControls?.map((one) => one.id)).toEqual(['public:publish'])
+    expect(publicSharing.panes?.map((one) => [one.id, one.label, one.icon, [...one.screens], one.order])).toEqual([
+      ['public:book', 'Publish', 'globe', ['reader'], 20],
+    ])
+  })
+
+  it('hears no voices on a book while it is not running, rather than failing to answer', async () => {
+    /* The pane asks on opening a book; drawn before `start` or after a
+       teardown, the honest answer is nobody, and it must still be an answer. */
+    const heardOn = paneProps()['heardOn'] as (bookId: string) => Promise<readonly string[]>
+    await expect(heardOn('book:1')).resolves.toEqual([])
+  })
+})
+
 describe('the receiving half', () => {
   it('asks a provider, keeps what verifies, and tells the overlay', async () => {
     const { ctx, fs } = contextWith()

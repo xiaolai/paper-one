@@ -61,6 +61,7 @@ export interface PublishControlProps {
 export function PublishControl({ bookId, passage, sharedWithCircle, port, onPublished }: PublishControlProps) {
   const p2pLive = useP2pLive()
   const [asked, setAsked] = useState(false)
+  // Stryker disable next-line BooleanLiteral: `belongsTo` starts null, so the reset below runs during the first render and sets `busy` to false before anything is committed
   const [busy, setBusy] = useState(false)
   const [trouble, setTrouble] = useState<string | null>(null)
   const [done, setDone] = useState(false)

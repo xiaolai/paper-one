@@ -108,6 +108,44 @@ describe('workKey', () => {
     expect(sameWork('urn:uuid:1B2C3D4E-5F60-7182-93A4-B5C6D7E8F901', '1b2c3d4e-5f60-7182-93a4-b5c6d7e8f901')).toBe(true)
   })
 
+  it('reads an ISBN or UUID prefix with any run of separators, or none, and only at the start', () => {
+    /* The prefixes are what a value ANNOUNCES itself with, so they are read
+       however the publisher punctuated them — no separator, or several — and a
+       scheme name anywhere but the front announces nothing. */
+    const isbn = 'isbn:9780142437247'
+    expect(workKey('ISBN9780142437247')?.key).toBe(isbn)
+    expect(workKey('urn:isbn::9780142437247')?.key).toBe(isbn)
+    const uuid = 'uuid:1b2c3d4e-5f60-7182-93a4-b5c6d7e8f901'
+    expect(workKey('uuid:1b2c3d4e-5f60-7182-93a4-b5c6d7e8f901')?.key).toBe(uuid)
+    expect(workKey('UUID1B2C3D4E-5F60-7182-93A4-B5C6D7E8F901')?.key).toBe(uuid)
+    expect(workKey('urn:uuid::1b2c3d4e-5f60-7182-93a4-b5c6d7e8f901')?.key).toBe(uuid)
+    // `uuid` trailing the value is not a prefix, and leaves no UUID behind.
+    expect(workKey('1b2c3d4e-5f60-7182-93a4-b5c6d7e8f901uuid')?.kind).toBe('opaque')
+  })
+
+  it('takes a UUID or an ISBN only when it is the whole of what is left', () => {
+    /* ⚠️ EVERY SHAPE IS ANCHORED AT BOTH ENDS. One more character before or
+       after a valid UUID or ISBN-13 makes it a different identifier, and
+       reading the valid run out of it would give the strongest key there is
+       to something that does not carry one. */
+    expect(workKey('urn:uuid:x1b2c3d4e-5f60-7182-93a4-b5c6d7e8f901')?.kind).toBe('opaque')
+    expect(workKey('urn:uuid:1b2c3d4e-5f60-7182-93a4-b5c6d7e8f901x')?.kind).toBe('opaque')
+    /* Fourteen digits whose first twelve check out against the thirteenth, and
+       fourteen whose LAST thirteen are a valid ISBN-13 — neither is one. */
+    expect(workKey('isbn:97801424372475')?.kind).toBe('opaque')
+    expect(workKey('isbn:19780142437227')?.kind).toBe('opaque')
+    expect(workKey('19780142437227')?.kind).toBe('opaque')
+  })
+
+  it('never matches a book that declares something against one that declares nothing', () => {
+    /* Either side absent is not a match, and is not an error: half a shelf
+       declares nothing, and a comparison must answer for every pair on it. */
+    expect(sameWork(undefined, 'urn:isbn:9780142437247')).toBe(false)
+    expect(sameWork('urn:isbn:9780142437247', undefined)).toBe(false)
+    expect(sameWork('  ', 'urn:x:a')).toBe(false)
+    expect(sameWork('urn:x:a', 'urn:x:b')).toBe(false)
+  })
+
   it('is idempotent and symmetric, which is what "the same key on both devices" means', () => {
     /* The acceptance criterion, as a property. Two replicas run the same code
        over the same string and must agree — so the function may not depend on

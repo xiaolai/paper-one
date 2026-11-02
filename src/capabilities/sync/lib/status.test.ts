@@ -59,6 +59,13 @@ describe('classifying what a session threw', () => {
     [remote('malformed'), 'broken-peer'],
     [remote('protocol'), 'broken-peer'],
     [remote('internal'), 'broken-peer'],
+    // Every other envelope code, each to its kind — a code that read as `unknown` would say "Sync failed" about a dropped link.
+    [remote('overloaded', true), 'unreachable'],
+    [remote('cancelled'), 'unreachable'],
+    [remote('unknown-service'), 'broken-peer'],
+    [remote('duplicate-id'), 'broken-peer'],
+    [remote('frame-too-large'), 'broken-peer'],
+    [remote('not-found'), 'broken-peer'],
     // The ledger's own local refusals are plain `{code, retryable, message}` objects.
     [{ code: 'unreadable', retryable: true, message: 'book.json is there but could not be read' }, 'unreadable'],
     [{ code: 'unsupported', retryable: false, message: 'the shelf speaks sync [2, 2]' }, 'unsupported'],
@@ -79,17 +86,33 @@ describe('classifying what a session threw', () => {
     [{ kind: 'iroh', message: 'peer unreachable' }, 'unreachable'],
     [{ kind: 'connect', message: 'no route' }, 'unreachable'],
     [{ kind: 'timeout', message: 'dial timed out' }, 'unreachable'],
+    // Every way the plugin says the link itself failed is the link, not the book.
+    [{ kind: 'connection', message: 'connection lost' }, 'unreachable'],
+    [{ kind: 'streamClosed', message: 'stream closed' }, 'unreachable'],
+    [{ kind: 'streamRead', message: 'read failed' }, 'unreachable'],
+    [{ kind: 'streamWrite', message: 'write failed' }, 'unreachable'],
+    [{ kind: 'noSession', message: 'no session' }, 'unreachable'],
+    [{ kind: 'sessionUnknown', message: 'session gone' }, 'unreachable'],
+    [{ kind: 'tooManySessions', message: 'busy' }, 'unreachable'],
     [{ kind: 'blobRefused', message: 'ungranted' }, 'revoked'],
     [{ kind: 'blobHashMismatch', message: 'digest differs' }, 'content'],
     [{ kind: 'blobInterrupted', message: 'short read' }, 'content'],
+    [{ kind: 'blobMismatch', message: 'not the promised file' }, 'content'],
+    [{ kind: 'blobTooLarge', message: 'past the cap' }, 'content'],
     [{ kind: 'p2pOff', message: 'peer-to-peer is off' }, 'p2p-off'],
     [{ kind: 'peerClosed', message: 'peer-to-peer was closed' }, 'p2p-closed'],
     [new Error('not paired with a shelf'), 'unpaired'],
     [new Error('No space left on device (os error 28)'), 'disk-full'],
+    // A quota is spelled with a space, an underscore or nothing between its words, and is a full disk each way.
+    [new Error('quota exceeded'), 'disk-full'],
+    [new Error('QUOTA_EXCEEDED'), 'disk-full'],
+    [new Error('QuotaExceeded on write'), 'disk-full'],
+    [new Error('disk full'), 'disk-full'],
     [new Error('sync.push answered an ack that does not match the pushed group'), 'broken-peer'],
     [new Error('something else entirely'), 'unknown'],
     ['a string', 'unknown'],
     [null, 'unknown'],
+    [undefined, 'unknown'],
   ]
   it.each(cases)('%o → %s', (thrown, kind) => {
     expect(refusalKind(thrown)).toBe(kind)
@@ -200,6 +223,13 @@ describe('audit-fix round 1 — what the classifier got wrong', () => {
     expect(describeRefusal({ kind: 'p2p-off', message: 'x' }, names)).toBe('Peer-to-peer is off')
     expect(describeRefusal({ kind: 'p2p-closed', message: 'x' }, names)).toBe('Quit and reopen Paper to use peer-to-peer')
   })
+  it('a shelf whose pairing name is empty still gets a sentence, rather than a crash', () => {
+    /* `capital` reads the first character; a name that is there and empty has
+       none, and the status line must still be written. */
+    const blank = { shelf: '', title: () => null }
+    expect(describeRefusal({ kind: 'revoked', message: 'x' }, blank)).toBe(' no longer allows this device — pair it again')
+    expect(describeRefusal({ kind: 'unsupported', message: 'x' }, blank)).toBe(' runs a different version of Paper — update both')
+  })
   it('the raw message never becomes the sentence', () => {
     expect(describeRefusal({ kind: 'unknown', message: '/Users/x/Library/…/journal: EACCES' }, names)).toBe('Sync failed')
   })
@@ -233,6 +263,9 @@ describe('what a closed connection excuses', () => {
       { kind: 'blobHashMismatch', message: 'digest differs' },
       { code: 'unreadable', message: 'the record will not read' },
       null,
+      /* A promise rejected with nothing at all: there is no kind to read, and
+         asking for one must not itself throw. */
+      undefined,
     ]) {
       expect(isLinkClosure(thrown)).toBe(false)
     }

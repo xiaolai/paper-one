@@ -155,6 +155,9 @@ describe('an export at the limits of what can be read back', () => {
 
   it('refuses a file the reader would refuse by size, and counts bytes rather than characters', () => {
     expect(() => archiveText(carrying('x'.repeat(fits + 1)))).toThrow(ArchiveOverLimit)
+    expect(() => archiveText(carrying('x'.repeat(fits + 1)))).toThrow(
+      new RegExp(`^${ARCHIVE_MAX_BYTES + 1} bytes, past ${ARCHIVE_MAX_BYTES}$`, 'u'),
+    )
     /* Three bytes each in UTF-8, one character each in a JavaScript string. */
     expect(() => archiveText(carrying('漢'.repeat(Math.ceil(fits / 3) + 1)))).toThrow(ArchiveOverLimit)
   })

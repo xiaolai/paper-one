@@ -800,7 +800,10 @@ describe('through the real composition', () => {
        is supplied by hand, so a composition that no longer ASKS for `peer`
        still gets it, and no test read the label a reader sees on the rail. */
     expect(circle.requires).toEqual(['peer'])
-    expect(circle.screens?.map((one) => [one.id, one.label])).toEqual([['circle:circle', 'Circle']])
+    expect(circle.screens?.map((one) => [one.id, one.label, one.icon])).toEqual([['circle:circle', 'Circle', 'people']])
+    /* And the line Settings draws where a switch would be: the circle has no
+       switch of its own, so it is named under the one that governs it. */
+    expect(circle.follows?.title).toBe('Circle')
 
     /* A STUB `peer`, because `circle` declares it in `requires` and the real
        one binds a Tauri plugin this test has no business starting. What is

@@ -676,8 +676,10 @@ function rowsAsked(books: readonly unknown[], looseCards: unknown): number {
   for (const one of books) {
     if (rows > ARCHIVE_MAX_ROWS) break
     rows += 1
-    if (typeof one !== 'object' || one === null) continue
-    const row = one as Record<string, unknown>
+    /* `Object` RATHER THAN A GUARD: a book that is null, a number or a string
+       boxes to an object with no `marks` and no `cards`, so it costs its one row
+       and nothing more, which is all a guard skipping it would have counted. */
+    const row = Object(one) as Record<string, unknown>
     const [marks, cards] = [row['marks'], row['cards']]
     rows += (Array.isArray(marks) ? marks.length : 0) + (Array.isArray(cards) ? cards.length : 0)
   }
@@ -716,8 +718,10 @@ export function parseArchive(raw: string): MarksArchive | null {
   for (const one of doc['books']) {
     if (typeof one !== 'object' || one === null) continue
     const row = one as Record<string, unknown>
+    // Stryker disable next-line ArrayDeclaration: a row that is not an object is no mark — `parseMark` answers null for it — so what fills the list a missing `marks` stands for is dropped either way
     const markRows: readonly unknown[] = Array.isArray(row['marks']) ? row['marks'] : []
     const marks = markRows.map(parseMark).filter((mark): mark is ArchivedMark => mark !== null)
+    // Stryker disable next-line ArrayDeclaration: a row that is not an object is no card — `parseCard` answers null for it — so what fills the list a missing `cards` stands for is dropped either way
     const cardRows: readonly unknown[] = Array.isArray(row['cards']) ? row['cards'] : []
     const cards = cardRows.map(parseCard).filter((card): card is ArchivedCard => card !== null)
     if (marks.length === 0 && cards.length === 0) continue
@@ -729,8 +733,13 @@ export function parseArchive(raw: string): MarksArchive | null {
        for EQUALITY and nothing else, so a malformed one cannot cause a wrong
        match — but it can cause a wrong MISmatch, refusing anchors that were
        fine. Dropped, the row falls back to the id match, which is where it was
-       before this field existed. */
-    const contentHash = str(row['contentHash'], 64)
+       before this field existed.
+
+       ⚠️ **READ WHOLE, AND IT WAS CUT TO 64 FIRST.** A value one character too
+       long was sliced down to a well-formed digest and kept — so an edited
+       archive could carry a digest it never said, which is exactly the wrong
+       MISmatch above. The shape decides, on the value as written. */
+    const contentHash = str(row['contentHash'])
     books.push({
       bookId,
       title,
@@ -742,6 +751,7 @@ export function parseArchive(raw: string): MarksArchive | null {
   }
   /* What is unreadable is dropped row by row, and a field that is not a list is no
      field — the books beside it are still good. */
+  // Stryker disable next-line ArrayDeclaration: a row that is not an object is no card — `parseCard` answers null for it — so what fills the list a missing `looseCards` stands for is dropped either way
   const looseRows: readonly unknown[] = Array.isArray(doc['looseCards']) ? doc['looseCards'] : []
   const looseCards = looseRows.flatMap((raw): LooseCard[] => {
     const card = parseCard(raw)

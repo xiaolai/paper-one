@@ -97,7 +97,7 @@ export type RefusalKind = (typeof REFUSAL_KINDS)[number]
 export interface SessionRefusal {
   readonly kind: RefusalKind
   /** The book it was about, when it was about one. The cards group is `''`. */
-  readonly book?: string
+  readonly book?: string | undefined
   /** The raw message, for the diagnostic — never shown as the sentence. */
   readonly message: string
 }
@@ -251,6 +251,12 @@ export function saysMoreThanClosure(outcome: { readonly refused: readonly Sessio
  *  no detail. Every real degradation sets a detail through `describeRefusal`. */
 export const DEGRADED_DETAIL = 'Your library isn’t reachable'
 
+/** The status once the reader turned the P2P switch off in this run. */
+export const P2P_OFF_DETAIL = 'Peer-to-peer is off'
+
+/** The status once the reader turned it back on in a run whose transport has already closed. */
+export const P2P_CLOSED_DETAIL = 'Quit and reopen Paper to use peer-to-peer'
+
 const quoted = (book: string, names: RefusalNames): string => `“${names.title(book) ?? book}”`
 const shelfOr = (names: RefusalNames, fallback: string): string => names.shelf ?? fallback
 
@@ -284,9 +290,9 @@ export function describeRefusal(refusal: SessionRefusal, names: RefusalNames): s
     case 'disk-full':
       return 'This device is out of space, so nothing more could be saved'
     case 'p2p-off':
-      return 'Peer-to-peer is off'
+      return P2P_OFF_DETAIL
     case 'p2p-closed':
-      return 'Quit and reopen Paper to use peer-to-peer'
+      return P2P_CLOSED_DETAIL
     case 'unknown':
       /* The raw message goes to the diagnostic (`sync.session-failed`,
        * `sync.push-refused`), never here — `SessionRefusal.message`'s own

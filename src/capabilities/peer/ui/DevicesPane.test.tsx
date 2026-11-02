@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { CAPABILITY_UI } from '../../../kernel'
 import { createP2pSwitch } from '../lib/p2pSwitch'
-import type { P2pAnswer } from '../lib/wire'
+import type { P2pAnswer, PairingResult } from '../lib/wire'
 import { DevicesPane } from './DevicesPane'
 import type { DevicesModel, DevicesSnapshot } from './devicesModel'
 
@@ -73,6 +74,26 @@ describe('the P2P switch', () => {
     render(<DevicesPane model={fakeModel()} syncNow={null} p2p={createP2pSwitch(true, landed)} />)
     expect(toggle().getAttribute('aria-checked')).toBe('true')
     expect(screen.getByText('This device')).toBeTruthy()
+  })
+
+  it('says On or Off in words, not only in its state', () => {
+    render(<DevicesPane model={fakeModel()} syncNow={null} p2p={createP2pSwitch(true, landed)} />)
+    expect(toggle().textContent).toBe('On')
+    cleanup()
+    render(<DevicesPane model={fakeModel()} syncNow={null} p2p={createP2pSwitch(false, landed)} />)
+    expect(toggle().textContent).toBe('Off')
+  })
+
+  it('takes down the last failure as soon as it is asked again', async () => {
+    const set = vi
+      .fn<(on: boolean) => Promise<P2pAnswer>>()
+      .mockRejectedValueOnce(new Error('ipc down'))
+      .mockImplementationOnce(() => new Promise<P2pAnswer>(() => {}))
+    render(<DevicesPane model={fakeModel()} syncNow={null} p2p={createP2pSwitch(true, set)} />)
+    fireEvent.click(toggle())
+    await screen.findByText('Could not change this: ipc down')
+    fireEvent.click(toggle())
+    expect(screen.queryByText('Could not change this: ipc down')).toBeNull()
   })
 
   it('writes the choice and says a relaunch finishes it', async () => {
@@ -251,5 +272,103 @@ describe('the invite code, and where it is', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Copy invite code' }))
     expect(await screen.findByRole('button', { name: /Couldn’t copy/ })).toBeTruthy()
     expect(screen.getByText(OFFER.url), 'the code the message points at').toBeTruthy()
+  })
+})
+
+describe('what the pane draws from the snapshot', () => {
+  const PEER = { id: 'a', name: 'Phone', platform: 'ios', role: 'satchel' as const, grants: [], pairedAt: 1, lastSeenAt: 1, lastAddrs: [] }
+  const draw = (over: Partial<DevicesSnapshot> = {}) => render(<DevicesPane model={fakeModel(over)} syncNow={null} />)
+  const ASKED = 'Where do your books live?'
+  const PRIMARY = `${CAPABILITY_UI.button} ${CAPABILITY_UI.buttonPrimary}`
+  const result = (over: Partial<PairingResult>): PairingResult => ({ ok: false, kind: 'device', ...over }) as PairingResult
+
+  it('asks where the books live only once the peers are read, and only while there are none', () => {
+    draw({ peersLoaded: true, peers: [] })
+    expect(screen.getByText(ASKED)).toBeTruthy()
+    cleanup()
+    draw({ peersLoaded: false, peers: [] })
+    expect(screen.queryByText(ASKED)).toBeNull()
+    cleanup()
+    draw({ peersLoaded: true, peers: [PEER] })
+    expect(screen.queryByText(ASKED)).toBeNull()
+    cleanup()
+    draw({ peersLoaded: false, peers: [PEER] })
+    expect(screen.queryByText(ASKED)).toBeNull()
+  })
+
+  it('explains the side chosen, and asks for one when none is', () => {
+    draw({ role: 'satchel' })
+    expect(screen.getByText('This one reads from it and keeps the books you download.')).toBeTruthy()
+    cleanup()
+    draw({ role: null })
+    expect(screen.getByText('Pick where the whole library is kept.')).toBeTruthy()
+  })
+
+  it('asks for a relaunch only when the side chosen is not yet in force', () => {
+    draw({ roleNeedsRestart: true })
+    expect(screen.getByText('Quit and reopen Paper to apply this, then pair.')).toBeTruthy()
+    cleanup()
+    draw({ roleNeedsRestart: false })
+    expect(screen.queryByText('Quit and reopen Paper to apply this, then pair.')).toBeNull()
+  })
+
+  it('offers to pair a new device only on the shelf, and not while an invite is open', () => {
+    const pair = () => screen.queryByRole('button', { name: 'Pair a new device…' })
+    draw({ role: 'shelf' })
+    expect(pair()).not.toBeNull()
+    cleanup()
+    draw({ role: 'shelf', offer: OFFER })
+    expect(pair()).toBeNull()
+    cleanup()
+    draw({ role: 'satchel' })
+    expect(pair()).toBeNull()
+  })
+
+  it('asks for an invite code only on the side that joins', () => {
+    draw({ role: 'satchel' })
+    expect(screen.getByRole('textbox', { name: 'Pairing code' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Pair' }).className).toBe(PRIMARY)
+    cleanup()
+    draw({ role: 'shelf' })
+    expect(screen.queryByRole('textbox', { name: 'Pairing code' })).toBeNull()
+  })
+
+  it('marks the one action each surface is for, and the refusal as destructive', () => {
+    clipboard(async () => {})
+    draw({ offer: OFFER, pending: { id: 'b', name: 'Tablet', platform: 'ios', sas: '1234', attemptId: 'attempt', kind: 'device' } })
+    expect(screen.getByRole('button', { name: 'Copy invite code' }).className).toBe(PRIMARY)
+    expect(screen.getByRole('button', { name: 'Pair' }).className).toBe(PRIMARY)
+    expect(screen.getByRole('button', { name: 'Refuse' }).className).toBe(`${CAPABILITY_UI.button} ${CAPABILITY_UI.buttonDanger}`)
+  })
+
+  it('shows the code to confirm only while there is one', () => {
+    draw({ sas: '4321' })
+    expect(screen.getByText('4321')).toBeTruthy()
+    expect(screen.getByText(/Confirm on the other device\. Code:/u)).toBeTruthy()
+    cleanup()
+    draw({ sas: null })
+    expect(screen.queryByText(/Confirm on the other device/u)).toBeNull()
+  })
+
+  it('says why a pairing did not finish, refused when it was not told why, and nothing when it did', () => {
+    draw({ lastResult: result({ reason: 'expired' }) })
+    expect(screen.getByText('Pairing did not finish: expired.')).toBeTruthy()
+    cleanup()
+    draw({ lastResult: result({}) })
+    expect(screen.getByText('Pairing did not finish: refused.')).toBeTruthy()
+    cleanup()
+    draw({ lastResult: result({ ok: true }) })
+    expect(screen.queryByText(/Pairing did not finish/u)).toBeNull()
+    cleanup()
+    draw({ lastResult: null })
+    expect(screen.queryByText(/Pairing did not finish/u)).toBeNull()
+  })
+
+  it('says what failed only when something did', () => {
+    draw({ error: 'the plugin is gone' })
+    expect(screen.getByText('Something failed: the plugin is gone')).toBeTruthy()
+    cleanup()
+    draw({ error: null })
+    expect(screen.queryByText(/Something failed/u)).toBeNull()
   })
 })

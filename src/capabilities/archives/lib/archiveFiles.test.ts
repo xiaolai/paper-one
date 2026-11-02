@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ARCHIVE_MAX_BYTES, type FilePicker, type IndexedBook, type PickedFile } from '../../../kernel'
+import { ARCHIVE_MAX_BYTES, type Card, type FilePicker, type IndexedBook, type Mark, type PickedFile } from '../../../kernel'
 import { ArchiveOverLimit } from './marksArchive'
 import { exportMarksToFile, importMarksFromFile } from './marksFiles'
 import { exportTagsToFile, importTagsFromFile } from './tagFiles'
@@ -53,6 +53,33 @@ describe('exporting marginalia', () => {
     const done = await exportMarksToFile(picker(file), BOOKS, [], [], NOW)
     expect(done?.format).toBe('md')
     expect(() => JSON.parse(writeText.mock.calls[0]![0])).toThrow()
+  })
+
+  it('takes Markdown only from the last extension, not from one inside the name', async () => {
+    const { file, writeText } = picked('notes.md.json')
+    const done = await exportMarksToFile(picker(file), BOOKS, [], [], NOW)
+    expect(done?.format).toBe('json')
+    expect(JSON.parse(writeText.mock.calls[0]![0])).toMatchObject({ version: 1 })
+  })
+
+  it('counts every mark and every card it wrote, a card whose book is gone included', async () => {
+    const shelf = [
+      { bookId: 'b1', title: 'One', author: '' },
+      { bookId: 'b2', title: 'Two', author: '' },
+    ] as unknown as IndexedBook[]
+    const mark = (id: string, bookId: string) =>
+      ({ id, bookId, cfi: 'epubcfi(/6/4)', sectionIndex: 0, text: id, prefix: '', suffix: '', note: '', kind: 'highlight', tint: 'green', style: 'underline', chapter: '', createdAt: 1 }) as unknown as Mark
+    const card = (id: string, bookId: string) =>
+      ({ id, bookId, kind: 'Recall', body: id, answer: '', source: '', cfi: '', createdAt: 1 }) as unknown as Card
+    const { file } = picked('mine.json')
+    const done = await exportMarksToFile(
+      picker(file),
+      shelf,
+      [mark('m1', 'b1'), mark('m2', 'b1'), mark('m3', 'b2')],
+      [card('c1', 'b1'), card('c2', 'b1'), card('c3', 'b2'), card('c4', 'b2'), card('c5', 'b2'), card('c6', 'gone')],
+      NOW,
+    )
+    expect(done).toEqual({ format: 'json', books: 2, marks: 3, cards: 6 })
   })
 })
 
