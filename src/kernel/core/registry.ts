@@ -550,13 +550,11 @@ function stronglyConnectedComponents(nodes: readonly string[], edges: ReadonlyMa
         continue
       }
       if (low.get(frame.node) === index.get(frame.node)) {
-        const component: string[] = []
-        let member: string
-        do {
-          member = stack.pop() as string
-          onStack.delete(member)
-          component.push(member)
-        } while (member !== frame.node)
+        /* Everything above the root on `stack`, taken in one cut: a member
+           at a time, looking for the root, would never stop if it were not
+           there. */
+        const component = stack.splice(stack.lastIndexOf(frame.node))
+        for (const member of component) onStack.delete(member)
         components.push(component)
       }
       work.pop()
