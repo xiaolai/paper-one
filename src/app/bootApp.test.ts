@@ -390,11 +390,17 @@ describe('the launch sequence, run', () => {
      has thrown away. */
   it('writes what it records beside the library, and rewrites the file when the window is cleared', async () => {
     const app = await launch()
+    await armed()
+    await settled()
 
     app.services.diagnostics.warn('launch.probe', { at: 'inside' })
     expect(app.diagnosticLog?.entries().map((one) => one.event)).toContain('launch.probe')
     await vi.advanceTimersByTimeAsync(DEFAULT_FLUSH_MS)
     await vi.waitFor(() => expect(textAt(DIAGNOSTICS_FILE)).toContain('"event":"launch.probe"'))
+    /* A WRITE STILL PENDING AT THE CLEAR EMPTIES THE FILE WITH NOBODY HAVING ASKED,
+       and this case would then pass with the rewrite it is here to prove gone. A
+       background record arms one: the arming's failure did, under the mutation run. */
+    await vi.waitFor(() => expect(vi.getTimerCount(), 'a write is still pending').toBe(0))
 
     app.diagnosticLog?.clear()
     app.onDiagnosticsCleared?.()
