@@ -115,8 +115,10 @@ describe('Composition.standing', () => {
     ])
     expect(composition.failures.map((one) => one.id)).toEqual(['bad', 'dependant'])
     /* A failure with no dependency at fault says none, rather than carrying an
-       empty `because` a reader would have to tell from a named one. */
+       empty `because` a reader would have to tell from a named one — in
+       `failures` and in `standing` alike (`toEqual` above cannot tell). */
     expect('because' in composition.failures[0]!).toBe(false)
+    expect('because' in composition.standing[0]!).toBe(false)
     expect(composition.failures[1]!.because).toBe('bad')
     expect(error).toHaveBeenCalledTimes(2)
   })
