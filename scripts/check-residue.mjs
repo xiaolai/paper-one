@@ -115,9 +115,13 @@ function literalText(node) {
 
 /* WHAT A TYPE SAYS OF ITS VALUE. Its members are the services'; its elements are the
    services; calling it gives the services; or it has them somewhere this cannot reach. */
+// Stryker disable next-line StringLiteral: a kind is only compared with another, and is never printed, so an empty name is as distinct as this one
 const MEMBERS = 'members'
+// Stryker disable next-line StringLiteral: a kind is only compared with another, and is never printed, so an empty name is as distinct as this one
 const ELEMENTS = 'elements'
+// Stryker disable next-line StringLiteral: a kind is only compared with another, and is never printed, so an empty name is as distinct as this one
 const RETURNS = 'returns'
+// Stryker disable next-line StringLiteral: a kind is only compared with another, and is never printed, so an empty name is as distinct as this one
 const HOLDS = 'holds'
 const STRONGEST_FIRST = [MEMBERS, ELEMENTS, RETURNS, HOLDS]
 
@@ -368,8 +372,11 @@ function followServices(source, checker, known, types, found, say) {
     if (!ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.expression)) return null
     return checker.getSymbolAtLocation(callee.expression)?.declarations?.some(ts.isNamespaceImport) ? callee.name.text : null
   }
+  // Stryker disable next-line ArrayDeclaration: `followHolders` takes each entry apart as a binding and its origins, and a string's letters are no node, so it passes them by as it does an empty list
   const seeds = []
+  // Stryker disable next-line ArrayDeclaration: `followHolders` takes each entry apart as a binding and its origins, and a string's letters are no node, so it passes them by as it does an empty list
   const elementSeeds = []
+  // Stryker disable next-line ArrayDeclaration: `followHolders` takes each entry apart as a binding and its origins, and a string's letters are no node, so it passes them by as it does an empty list
   const returning = []
   const returningSymbol = (symbol) => {
     if (symbol !== undefined) returning.push([symbol, [SERVICES]])
@@ -577,8 +584,10 @@ export function main(argv) {
   let result
   let rows
   try {
+    // Stryker disable next-line StringLiteral: with no encoding the file comes back as bytes, and JSON.parse reads bytes as UTF-8 text
     const manifest = JSON.parse(readFileSync(path.join(args.root, MANIFEST), 'utf8'))
     const ids = manifest.capabilities.map((entry) => entry.id)
+    // Stryker disable next-line StringLiteral: with no encoding the file comes back as bytes, and JSON.parse reads bytes as UTF-8 text
     rows = parseAllowList(readFileSync(path.join(args.root, ALLOW_LIST), 'utf8'))
     result = compare(scan(args.root, ids), rows, ids)
   } catch (cause) {
