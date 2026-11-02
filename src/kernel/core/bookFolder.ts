@@ -717,10 +717,10 @@ function capRegisters(clock: Record<string, TagClockEntry>): TagClock {
  * memory — the correction phase 3's audit forced, kept.
  */
 export function parseRecord(raw: string | null): BookRecord | null {
-  if (!raw) return null
   let parsed: unknown
   try {
-    parsed = JSON.parse(raw)
+    // An absent file reads as the JSON text `null`, refused below with every other non-object.
+    parsed = JSON.parse(String(raw))
   } catch {
     return null
   }
