@@ -160,6 +160,7 @@ function isbn13(declared: string): string | null {
      `isbn:` key — the STRONGEST signal this module gives — for two unrelated
      things, which is the one failure it can least afford. */
   if (/^97[89][0-9]{10}$/u.test(digits)) {
+    // Stryker disable next-line MethodExpression: `ean13Check` reads the first twelve characters and no more, so handing it all thirteen changes no answer
     const core = digits.slice(0, 12)
     return digits[12] === ean13Check(core) ? digits : null
   }
