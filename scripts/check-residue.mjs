@@ -127,6 +127,9 @@ const ELEMENT_KEEPING = new Set(['Array', 'ReadonlyArray', 'Set', 'ReadonlySet']
 const ENDS_IN_SERVICES = /services$/i
 /** Whether a name ends in `services`; no name (`null`, `undefined`) ends in anything. */
 const endsInServices = (name) => ENDS_IN_SERVICES.test(String(name))
+/** Nothing found: shared, and frozen so that no one can add to it. */
+// Stryker disable next-line ArrayDeclaration: a string where a declaration would be is no node, so every `ts.is…` test fails on it and every reader passes it by, as it does an empty list
+const NONE = Object.freeze([])
 
 const strongest = (kinds) => STRONGEST_FIRST.find((kind) => kinds.includes(kind)) ?? null
 /** What a container's elements make of it. */
@@ -152,7 +155,7 @@ function typeReader(checker, sources) {
   const renamed = new Map()
   for (const source of sources) {
     for (const statement of source.statements) {
-      if (isTypeDeclaration(statement) && statement.name) declared.set(statement.name.text, [...(declared.get(statement.name.text) ?? []), statement])
+      if (isTypeDeclaration(statement) && statement.name) declared.set(statement.name.text, [...(declared.get(statement.name.text) ?? NONE), statement])
       if (ts.isExportDeclaration(statement) && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
         for (const element of statement.exportClause.elements) if (element.propertyName) renamed.set(element.name.text, element.propertyName.text)
       }
@@ -163,7 +166,7 @@ function typeReader(checker, sources) {
   const throughRenames = (name, seen = new Set()) => (renamed.has(name) && !seen.has(name) ? throughRenames(renamed.get(name), seen.add(name)) : name)
   const originalName = (name) => {
     let called = lastName(name)
-    const declarations = checker.getSymbolAtLocation(name)?.declarations ?? []
+    const declarations = checker.getSymbolAtLocation(name)?.declarations ?? NONE
     const imported = declarations.find(ts.isImportSpecifier)
     const assigned = declarations.find(ts.isImportEqualsDeclaration)
     if (imported !== undefined) called = (imported.propertyName ?? imported.name).text
@@ -200,7 +203,7 @@ function typeReader(checker, sources) {
     if (called === 'ReturnType') return args[0] !== undefined && ts.isTypeQueryNode(args[0]) && returnsServices(lastName(args[0].exprName)) ? MEMBERS : null
     if (MEMBER_KEEPING.has(called)) return args[0] === undefined ? null : classify(args[0], bound, seen)
     if (ELEMENT_KEEPING.has(called)) return args[0] === undefined ? null : holding(classify(args[0], bound, seen))
-    const here = (checker.getSymbolAtLocation(name)?.declarations ?? [])
+    const here = checker.getSymbolAtLocation(name)?.declarations ?? NONE
     const parameter = here.find(ts.isTypeParameterDeclaration)
     if (parameter !== undefined) return parameter.constraint === undefined ? null : classify(parameter.constraint, bound, seen)
     const local = here.filter(isTypeDeclaration)
@@ -244,7 +247,7 @@ function typeReader(checker, sources) {
      with nothing of the services in it outranks the name; no type leaves the name to speak. */
   const returnsServices = (name) => {
     if (!endsInServices(name)) return false
-    const declaredFns = functions.get(name) ?? []
+    const declaredFns = functions.get(name) ?? NONE
     return declaredFns.length === 0 || !declaredFns.every((fn) => fn.type !== undefined && classify(fn.type) === null)
   }
   const takesServices = (name, index) => {
