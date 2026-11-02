@@ -53,6 +53,12 @@ describe('the publish control', () => {
     expect(button('Publish…')).toBeNull()
   })
 
+  it('draws nothing when there is no port to publish through, even with the transport open', () => {
+    render(<PublishControl bookId="book:1" passage={PASSAGE} port={null} />)
+    expect(screen.queryByText('Say this publicly')).toBeNull()
+    expect(button('Publish…')).toBeNull()
+  })
+
   it('publishes nothing on the first click — the disclosure is a step', async () => {
     const port = portWith()
     render(<PublishControl bookId="book:1" passage={PASSAGE} port={port} />)
