@@ -335,6 +335,36 @@ describe('planImport', () => {
     expect(reversed.additions[0]?.marks.map((m) => m.note)).toEqual(['kept'])
   })
 
+  /* WITHOUT AN ANCHOR, THE QUOTE DECIDES. A mark with no CFI on either side
+     is the same passage when its words are, so two copies fold into one and a
+     copy of a shelf mark is already here. Kept ahead of the full-size archive
+     below, which leans on exactly this fold to stay linear. */
+  it('matches marks with no anchor by their quote', () => {
+    const shelf = [BOOK()]
+    const quoted = (text: string) => ({
+      text,
+      prefix: '',
+      suffix: '',
+      note: '',
+      kind: 'highlight' as const,
+      tint: 'yellow' as const,
+      style: 'fill' as const,
+      chapter: '',
+      createdAt: '2026-01-02T03:04:05.000Z',
+      localAnchor: { cfi: '', sectionIndex: 0 },
+    })
+    const archive = (marks: ReturnType<typeof quoted>[]): MarksArchive => ({
+      version: 1,
+      books: [{ bookId: 'moby', title: 'Moby-Dick', author: 'Herman Melville', marks, cards: [] }],
+    })
+    const twice = planImport(archive([quoted('Call me Ishmael'), quoted('Call me Ishmael'), quoted('Loomings')]), shelf, [], [])
+    expect(twice.marksAdded).toBe(2)
+    expect(twice.folded).toBe(1)
+    const here = planImport(archive([quoted('Call me Ishmael')]), shelf, [MARK({ cfi: '', text: 'Call me Ishmael' })], [])
+    expect(here.duplicates).toBe(1)
+    expect(here.marksAdded).toBe(0)
+  })
+
   /* ⚠️ **AN ARCHIVE AT ITS OWN LIMIT USED TO THROW BEFORE IT WAS PLANNED.**
      The rows were gathered with `push(...row.marks)`, which passes every row
      as an ARGUMENT — and `ARCHIVE_MAX_ROWS` permits 200 000, well past what
