@@ -394,6 +394,26 @@ describe('ReaderSession disposal', () => {
     return { reached, enter }
   }
 
+  /**
+   * Wait for the fake to reach its method — or fail at once if the session
+   * finishes without ever calling it.
+   *
+   * A bare `await reached` waited for ever on a session that skipped the
+   * method, so a change that stopped `start` opening the book hung the test
+   * until the runner's timeout instead of failing it (a mutation sweep,
+   * 2026-11-02). Raced against `start` itself, the skip is a failed
+   * assertion the moment `start` returns; no rejection is left unhandled,
+   * because the race settles to a word either way.
+   */
+  async function reach(step: { reached: Promise<void> }, started: Promise<unknown>, what: string): Promise<void> {
+    const ended = started.then(
+      () => 'ended' as const,
+      () => 'ended' as const,
+    )
+    const first = await Promise.race([step.reached.then(() => 'reached' as const), ended])
+    expect(first, `the session finished without reaching ${what}`).toBe('reached')
+  }
+
   it('closes a view when disposal lands mid-open', async () => {
     let release: () => void = () => {}
     const gate = new Promise<void>((r) => (release = r))
@@ -409,7 +429,7 @@ describe('ReaderSession disposal', () => {
     const session = new ReaderSession(fakeHost(), callbacks())
 
     const started = session.start('book.epub', deps(view))
-    await open.reached
+    await reach(open, started, 'open')
     session.dispose()
     release()
     await started
@@ -433,7 +453,7 @@ describe('ReaderSession disposal', () => {
     const session = new ReaderSession(fakeHost(), callbacks())
 
     const started = session.start('book.epub', deps(view))
-    await init.reached
+    await reach(init, started, 'init')
     session.dispose()
     release()
     await started
