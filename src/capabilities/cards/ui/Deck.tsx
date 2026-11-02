@@ -105,8 +105,9 @@ export function Deck({ cards, bookId, onShelf, onGoTo }: CardsProps) {
         <div className={ui.empty}>
           <div className={ui.emptyBody}>
             {/* Named, for the same reason as Notes: a blank list under a
-                selected chip looks like the cards are gone. */}
-            No {filter === 'All' ? 'cards' : `${filter.toLowerCase()} cards`} yet.
+                selected chip looks like the cards are gone. Never under All,
+                which shows every card, and an empty deck returned above. */}
+            No {filter.toLowerCase()} cards yet.
           </div>
         </div>
       )}
