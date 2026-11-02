@@ -494,9 +494,13 @@ function localClasses(selector, inherited) {
   return found
 }
 
+/* THE `from` OF AN IMPORT, wherever it stands: a line may end after it, and an
+   `@value` has lost its quoted path with the prose by the time it is read. */
+const FROM = /\sfrom(?:\s|$)/
+
 /** The names an `@value` body adds: `a: 1px`, `a, b as c from './x.css'`. */
 function valueNames(body) {
-  const [names, from] = body.split(/\sfrom\s/)
+  const [names, from] = body.split(FROM)
   if (from === undefined) return [body.split(/[\s:]/)[0]]
   /* `b as c` adds `c`, the last word of each. */
   return names.split(',').map((one) => one.trim().split(/\s/).at(-1))
@@ -621,8 +625,8 @@ export function deadClasses(root, roots = ROOTS, scanned = scanSources(root, roo
        gate worth ignoring. `.groupTitle` is exactly that shape: never written
        into markup on purpose, composed by the heading that is also a toggle. */
     for (const m of readFileSync(file, 'utf8').matchAll(/composes:\s*([^;{}]+)/g)) {
-      const names = m[1].replace(/\s+from\s+.*$/, '')
-      for (const name of names.split(/[,\s]+/).filter(Boolean)) used.add(name)
+      const [names] = m[1].split(FROM)
+      for (const name of names.split(/[,\s]/).filter(Boolean)) used.add(name)
     }
   }
 

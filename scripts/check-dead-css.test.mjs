@@ -117,6 +117,24 @@ describe('every way a class is reached', () => {
     expect(names(root)).not.toContain('target')
   })
 
+  /* A `from` read only when something followed it on the same line: a rule
+     closed on the next line kept a class called `.from` alive, and the path, and
+     an `@value` import, whose path is gone by the time it is read, declared only
+     its first name. */
+  it.each([
+    ['a cross-file composes closed on the next line', ".a { color: red;\n  composes: b from './B.module.css'\n}\n.from { color: red; }", ['from'], 2],
+    ['a composes with no space after its colon', '.a { composes:b c; }\n.b { color: red; }\n.c { color: red; }', [], 3],
+    ['a composes list', '.a { composes: b, c; }\n.b { color: red; }\n.c { color: red; }', [], 3],
+  ])('reads %s', (_what, css, dead, used) => {
+    const root = fixture({
+      'src/A.module.css': `${css}\n`,
+      'src/B.module.css': '.b { color: red; }\n',
+      'src/A.tsx': "import styles from './A.module.css'\nexport const A = () => styles.a\n",
+    })
+    expect(deadClasses(root).dead.map((d) => d.name)).toEqual(dead)
+    expect(deadClasses(root).used).toBe(used)
+  })
+
   /* THE ESCAPE HATCH IS A RENAME, not a list in the script. An allowlist grows
      a line at a time until nobody reads it; a leading underscore is visible at
      the rule, to the next person who reads the CSS. */
@@ -1273,6 +1291,7 @@ describe('what a stylesheet declares, at the edges', () => {
   it.each([
     ['an @value with two spaces', '@value  a: 1px;', ['a'], []],
     ['an @value that is part of a declaration', '.r { --v: x @value b; }', ['b'], ['b']],
+    ['@value names taken from a file', "@value a , b, c as d from './x.css';", ['a', 'b', 'c', 'd'], ['c']],
     ['@value after a rule', '.r { color: red; }\n@value v: 1px;', ['v'], []],
     ['a declaration in a rule', '.a { color: red; }', ['a', 'color'], ['color']],
     ['an :import of a file', ':import(./colors.css) { x: y; }', ['css', 'x'], ['css', 'x']],
