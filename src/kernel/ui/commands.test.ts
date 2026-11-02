@@ -618,8 +618,10 @@ describe('advertised combos are bound', () => {
      everywhere was the hole: deleting the digit branch entirely left the suite
      green, because the only other test of it asserted that the PANELS render. */
   it('binds every panel digit the rail advertises, and toggles the open one', () => {
-    /* What is being checked here is that an OFFERED panel's digit works. */
-    const offered = { ...anything, developer: true }
+    /* What is being checked here is that an OFFERED panel's digit works. The
+       context carries no developer options: a digit for a panel they gate would
+       be refused, and this is what would say so. */
+    const offered = anything
     for (const { digit, pane } of PANE_SHORTCUTS) {
       expect(resolveAccel({ key: digit, repeat: false }, offered), `⌘${digit}`).toEqual({
         kind: 'openPane',
@@ -636,7 +638,7 @@ describe('advertised combos are bound', () => {
   /* ⌘4 LEFT WITH THE PANEL: the seam offers a capability no accelerator. */
   it('gives Cards no digit: the panel is a capability\'s, and a contributed pane gets none', () => {
     expect(PANE_SHORTCUTS.map(({ pane }) => pane)).not.toContain('cards')
-    expect(resolveAccel({ key: '4', repeat: false }, { ...anything, developer: true })).toBeNull()
+    expect(resolveAccel({ key: '4', repeat: false }, anything)).toBeNull()
   })
 
   /**
@@ -814,8 +816,8 @@ describe('advertised combos are bound', () => {
    * it — letter, character, digit or chord.
    */
   describe('the modifier that is neither the accelerator nor a layout’s', () => {
-    const windows = { ...anything, platform: 'windows', developer: true } as const
-    const mac = { ...anything, developer: true } as const
+    const windows = { ...anything, platform: 'windows' } as const
+    const mac = anything
     const KEYS = ['k', 'l', 'd', 'b', 't', '\\', '[', ']', '=', '+', '-', '_', '0', ...PANE_SHORTCUTS.map((entry) => entry.digit)]
 
     it('binds nothing with Meta added off a Mac', () => {

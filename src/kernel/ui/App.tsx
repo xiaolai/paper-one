@@ -2440,10 +2440,6 @@ export function App({
         hasBook: readingBook !== null,
         canJumpBack: jumps.canBack,
         canJumpForward: jumps.canForward,
-        /* THE DIGITS READ THIS. An unfinished panel's digit has to be as dead
-           as a digit for a panel this screen has not got — see `AccelContext`. */
-        developer: state.developer,
-        hiddenPanes: state.hiddenPanes,
         /* Who took this key's first press — see `pressTaken`, and `taken`. */
         pressTaken: event.repeat && taken.current === pressed,
       })
@@ -2544,8 +2540,9 @@ export function App({
     state.pane,
     /* ⚠️ **THREE OF THE FOUR LAYERS WERE LISTED AND `trashOpen` WAS NOT**, so
        closing the trash alone left the handler holding the previous layer state.
-       This array has already been bitten twice by the same shape — see the digits
-       note and the tint note below — so the fix is not a fourth entry.
+       This array has already been bitten twice by the same shape — the digits,
+       which read developer options while Cards had ⌘4, and the tint note below —
+       so the fix is not a fourth entry.
 
        The handler never reads an individual layer: they reach it only through
        `hasOpenLayer(state)`, and through `readerTakesInput`, which calls the same
@@ -2555,13 +2552,6 @@ export function App({
        from. */
     anyLayerOpen,
     state.stepIdx,
-    /* ⚠️ THE DIGITS READ THESE, AND THEY WERE MISSING — the same defect the
-       tint note below records, on the day developer options landed. The handler
-       went on closing over the visibility rules as they were when the effect
-       last ran, so a digit stayed dead for a whole render after its panel was
-       revealed, and stayed live after it was hidden. */
-    state.developer,
-    state.hiddenPanes,
     /* ⌘D MARKS IN THE COLOUR THE BAR IS SHOWING, and `state.markTint` and
        `state.markStyle` were missing here — so the handler went on closing over
        whichever tint was current when the effect last ran. Change the colour in

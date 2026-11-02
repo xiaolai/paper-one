@@ -99,17 +99,6 @@ export interface AccelContext {
   readonly canJumpBack: boolean
   readonly canJumpForward: boolean
   /**
-   * Whether developer options are on, and which panels are hidden inside them.
-   *
-   * HERE BECAUSE THE DIGITS READ `paneFits`, and an unfinished panel does not
-   * fit for a reader who has not asked for it — so its digit must be dead while
-   * it is hidden, exactly as it is dead on a screen the panel does not belong to.
-   * A key that opens a panel the rail does not draw is the same defect as a
-   * rail button that opens nothing.
-   */
-  readonly developer?: boolean
-  readonly hiddenPanes?: readonly string[]
-  /**
    * Whether the press a REPEAT belongs to was taken — resolved to an action
    * rather than left to the platform. Read only on a repeat; absent is false.
    * `App` remembers it per physical key, from the first keydown to its keyup.
@@ -383,17 +372,16 @@ function bind(event: Omit<AccelEvent, 'repeat'>, context: AccelContext): AccelAc
   /* NOT ON A SCREEN THAT HAS NO SUCH PANEL. `openPane` falls back rather than
      failing, which is right for a palette entry the reader chose by name — and
      wrong for a digit: pressing ⌘1 for Contents on the library and being given
-     Marginalia is a key that does something else, silently. */
-  if (
-    !digit ||
-    !paneFits(context.screen, digit.pane, {
-      developer: context.developer ?? false,
-      // Stryker disable next-line ArrayDeclaration: a default naming no panel hides nothing, exactly as the empty one does.
-      hiddenPanes: context.hiddenPanes ?? [],
-    })
-  ) {
-    return null
-  }
+     Marginalia is a key that does something else, silently.
+
+     ASKED WITH NO AUDIENCE, because no digit has one. The digits name kernel
+     panels only, and the one kernel panel developer options gate — Developer —
+     has no combo; hidden panels are contributed ones, which get no digit. This
+     passed `developer` and `hiddenPanes` while Cards had ⌘4, and with Cards gone
+     nothing either could change was left to change. A gated panel given a digit
+     later is refused by the default here, and the digits test, which presses
+     every digit and expects its panel, is what fails and says so. */
+  if (!digit || !paneFits(context.screen, digit.pane)) return null
   /* A TOGGLE, exactly as the palette row behaves — the row for an open panel
      says "Close" and carries this combo, so the combo has to close it too.
      Returning `openPane` unconditionally made the shortcut re-open a panel its
