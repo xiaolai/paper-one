@@ -87,6 +87,7 @@ function marksRefusal(cause: MarksScanFailed, shelf: readonly { readonly bookId:
   }
   const said = facts.join(' and ')
   const step = steps.join(', and ')
+  // Stryker disable next-line OptionalChaining: this line is reached only with a damaged or an unsaved book, so `facts` and `steps` each hold a sentence and neither string is empty
   return `${said[0]?.toUpperCase()}${said.slice(1)} — nothing was ${undone}. ${step[0]?.toUpperCase()}${step.slice(1)}, then try again.`
 }
 
