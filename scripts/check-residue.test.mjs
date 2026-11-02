@@ -89,4 +89,11 @@ describe('forms the scan once missed', () => {
   it('refuses a class extending a call given the services type', () => {
     expect(scanned({ [B]: `${TYPE}class C extends mixin()<KernelServices> {}\nexport const f = (c: C) => c\n` })).toEqual([refused('a type holding the services where this cannot see them: C')])
   })
+
+  /* `N.K` is the alias `K` that `N` declares, followed to what it stands for. */
+  it('reads the services type through an alias reached by a qualified name', () => {
+    expect(
+      scanned({ [B]: "import type * as Core from './core/services'\nnamespace N { export import K = Core.KernelServices }\nexport const f = (s: N.K) => s.passages\n" }),
+    ).toEqual([named('passages', 'services.passages')])
+  })
 })

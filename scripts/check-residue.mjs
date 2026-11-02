@@ -168,13 +168,11 @@ function typeReader(checker, sources) {
   }
   const originalName = (name) => {
     let called = lastName(name)
-    if (ts.isIdentifier(name)) {
-      const declarations = checker.getSymbolAtLocation(name)?.declarations ?? []
-      const imported = declarations.find(ts.isImportSpecifier)
-      const assigned = declarations.find(ts.isImportEqualsDeclaration)
-      if (imported !== undefined) called = (imported.propertyName ?? imported.name).text
-      else if (assigned !== undefined && !ts.isExternalModuleReference(assigned.moduleReference)) called = lastName(assigned.moduleReference)
-    }
+    const declarations = checker.getSymbolAtLocation(name)?.declarations ?? []
+    const imported = declarations.find(ts.isImportSpecifier)
+    const assigned = declarations.find(ts.isImportEqualsDeclaration)
+    if (imported !== undefined) called = (imported.propertyName ?? imported.name).text
+    else if (assigned !== undefined && !ts.isExternalModuleReference(assigned.moduleReference)) called = lastName(assigned.moduleReference)
     return throughRenames(called)
   }
 
