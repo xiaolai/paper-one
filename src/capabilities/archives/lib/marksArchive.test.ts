@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   archiveName,
   ArchiveOverLimit,
@@ -1076,10 +1076,44 @@ describe('cards with no book on this shelf', () => {
       ['cards of one book', { books: [{ ...emptyBook, cards: of(ARCHIVE_MAX_ROWS, row) }] }],
       ['books alone', { books: of(ARCHIVE_MAX_ROWS + 1, emptyBook) }],
       ['books that are not objects', { books: of(ARCHIVE_MAX_ROWS + 1, 3) }],
+      ['books that are null', { books: of(ARCHIVE_MAX_ROWS + 1, null) }],
       ['rows that will not parse', { books: [{ ...emptyBook, marks: of(ARCHIVE_MAX_ROWS, null) }] }],
       ['the loose cards after full books', { books: [{ ...emptyBook, cards: [row] }, ...of(ARCHIVE_MAX_ROWS - 3, emptyBook)], looseCards: of(2, row) }],
     ])('refuses %s, rather than read as far as it reaches', (_name, body) => {
       expect(() => parseArchive(JSON.stringify({ version: 1, ...body }))).toThrow(ArchiveOverLimit)
+    })
+
+    it('says which budget it refused at', () => {
+      const refusal = (): unknown => parseArchive(JSON.stringify({ version: 1, books: [], looseCards: of(ARCHIVE_MAX_ROWS + 1, row) }))
+      expect(refusal).toThrow(new RegExp(`^past ${ARCHIVE_MAX_ROWS} rows$`, 'u'))
+    })
+
+    it('counts a book that is null as the one row it is, beside books that are read', () => {
+      const parsed = parseArchive(JSON.stringify({ version: 1, books: [null, 3, { ...emptyBook, cards: [row] }] }))
+      expect(parsed?.books.map((book) => book.cards.length)).toEqual([1])
+    })
+
+    describe('a forged list of books', () => {
+      afterEach(() => {
+        vi.restoreAllMocks()
+      })
+
+      /* STOPS AS SOON AS IT IS PAST: the count reads a book list only until the
+         budget is spent, not to its end. Read through a proxy, because a list from
+         `JSON.parse` cannot say how far it was read. */
+      it('is read no further than the budget, however long it is', () => {
+        const forged = of(ARCHIVE_MAX_ROWS * 2, emptyBook)
+        let read = 0
+        const counted = new Proxy(forged, {
+          get(target, key, receiver) {
+            if (typeof key === 'string' && /^[0-9]+$/u.test(key)) read += 1
+            return Reflect.get(target, key, receiver) as unknown
+          },
+        })
+        vi.spyOn(JSON, 'parse').mockReturnValueOnce({ version: 1, books: counted })
+        expect(() => parseArchive('{}')).toThrow(ArchiveOverLimit)
+        expect(read).toBeLessThanOrEqual(ARCHIVE_MAX_ROWS + 2)
+      })
     })
 
     it('reads back one exactly at it, with nothing dropped', () => {
@@ -1158,7 +1192,7 @@ describe('cards with no book on this shelf', () => {
 
   it('shows them in the reading copy under their own heading, and only when there are any', () => {
     const md = toMarkdown(exportMarks([BOOK()], [], [GONE]))
-    expect(md).toContain('## Cards with no book on this shelf')
+    expect(md).toContain('## Cards with no book on this shelf\n\n- **Still worth keeping**')
     expect(md).toContain('- **Still worth keeping**')
     expect(md).toContain('  - Ishmael')
     expect(toMarkdown(exportMarks([BOOK()], [MARK()], []))).not.toContain('no book on this shelf')
@@ -1200,6 +1234,9 @@ describe('an export at the limits of what can be read back', () => {
   it('refuses one row over, rather than write a file that loses it on the way back', () => {
     const archive: MarksArchive = { version: 1, books: [], looseCards: Array.from({ length: ARCHIVE_MAX_ROWS + 1 }, () => looseRow) }
     expect(() => archiveText(archive)).toThrow(ArchiveOverLimit)
+    expect(() => archiveText(archive)).toThrow(
+      expect.objectContaining({ name: 'ArchiveOverLimit', message: `${ARCHIVE_MAX_ROWS + 1} rows, past ${ARCHIVE_MAX_ROWS}` }),
+    )
     expect(() => parseArchive(JSON.stringify(archive)), 'what the refusal saves the reader from').toThrow(ArchiveOverLimit)
   })
 
@@ -1209,6 +1246,9 @@ describe('an export at the limits of what can be read back', () => {
     const carrying = (body: string): MarksArchive => ({ version: 1, books: [], looseCards: [{ ...looseRow, body }] })
     expect(new TextEncoder().encode(archiveText(carrying('x'.repeat(fits)))).length).toBe(ARCHIVE_MAX_BYTES)
     expect(() => archiveText(carrying('x'.repeat(fits + 1)))).toThrow(ArchiveOverLimit)
+    expect(() => archiveText(carrying('x'.repeat(fits + 1)))).toThrow(
+      new RegExp(`^${ARCHIVE_MAX_BYTES + 1} bytes, past ${ARCHIVE_MAX_BYTES}$`, 'u'),
+    )
     /* Three bytes each in UTF-8, one character each in a JavaScript string. */
     expect(() => archiveText(carrying('漢'.repeat(Math.ceil(fits / 3) + 1)))).toThrow(ArchiveOverLimit)
   })

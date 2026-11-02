@@ -718,8 +718,10 @@ export function parseArchive(raw: string): MarksArchive | null {
   for (const one of doc['books']) {
     if (typeof one !== 'object' || one === null) continue
     const row = one as Record<string, unknown>
+    // Stryker disable next-line ArrayDeclaration: a row that is not an object is no mark — `parseMark` answers null for it — so what fills the list a missing `marks` stands for is dropped either way
     const markRows: readonly unknown[] = Array.isArray(row['marks']) ? row['marks'] : []
     const marks = markRows.map(parseMark).filter((mark): mark is ArchivedMark => mark !== null)
+    // Stryker disable next-line ArrayDeclaration: a row that is not an object is no card — `parseCard` answers null for it — so what fills the list a missing `cards` stands for is dropped either way
     const cardRows: readonly unknown[] = Array.isArray(row['cards']) ? row['cards'] : []
     const cards = cardRows.map(parseCard).filter((card): card is ArchivedCard => card !== null)
     if (marks.length === 0 && cards.length === 0) continue
@@ -749,6 +751,7 @@ export function parseArchive(raw: string): MarksArchive | null {
   }
   /* What is unreadable is dropped row by row, and a field that is not a list is no
      field — the books beside it are still good. */
+  // Stryker disable next-line ArrayDeclaration: a row that is not an object is no card — `parseCard` answers null for it — so what fills the list a missing `looseCards` stands for is dropped either way
   const looseRows: readonly unknown[] = Array.isArray(doc['looseCards']) ? doc['looseCards'] : []
   const looseCards = looseRows.flatMap((raw): LooseCard[] => {
     const card = parseCard(raw)
