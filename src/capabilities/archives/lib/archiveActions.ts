@@ -169,7 +169,8 @@ const importTagsNow = (): void => {
      * disk, and what could not be saved is said in the same breath. */
     const { changed, failed } = await library.tagMany(plan.additions)
     const books = (n: number) => `${n.toLocaleString()} ${n === 1 ? 'book' : 'books'}`
-    const lost = failed > 0 ? ` ${books(failed)} could not be saved.` : ''
+    /* Read only by the two sentences below that have a write that failed. */
+    const lost = ` ${books(failed)} could not be saved.`
     /* ⚠️ THE TAG COUNT IS THE PLAN'S, AND THE PLAN IS ONLY TRUE IF EVERY WRITE
      * LANDED. `tagMany` answers in BOOKS — how many changed, how many failed —
      * so a partial write leaves no tag figure anybody can stand behind, and
