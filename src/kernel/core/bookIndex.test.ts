@@ -296,6 +296,15 @@ describe('loadShelf', () => {
     expect((await loadShelf(fs)).books).toHaveLength(1)
   })
 
+  /* A FILE BESIDE THE FOLDERS IS NOT A FOLDER. The trust check lists only
+     directories, so a snapshot that took in a stray file would disagree with
+     every later listing and rescan on every launch. */
+  it('trusts the cache after a rescan when a loose file sits among the books', async () => {
+    const fs = fakeFs({ ...twoBooks, [`${BOOKS_DIR}/.DS_Store`]: 'x' })
+    expect((await loadShelf(fs)).rescanned).toBe(true)
+    expect((await loadShelf(fs)).rescanned).toBe(false)
+  })
+
   it('leaves a usable cache behind after a rescan', async () => {
     const fs = fakeFs(twoBooks)
     await loadShelf(fs)
