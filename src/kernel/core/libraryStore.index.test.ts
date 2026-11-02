@@ -113,6 +113,28 @@ describe('a position tick', () => {
     await queue.idle()
     expect(fs.writes(INDEX_FILE)).toBe(1)
   })
+
+  /* One throttle per period. A timer armed over one still pending orphans
+     the first, which then fires inside the NEXT period and flushes it early. */
+  it('arms one throttle for a period, however many ticks land in it', async () => {
+    const { fs, queue, library } = world(['book_a'])
+    await library.rememberPosition('book_a', 'p1', 0.1)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await library.rememberPosition('book_a', 'p2', 0.2)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(1)
+
+    await library.rememberPosition('book_a', 'p3', 0.3)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(1)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(2)
+    expect(indexOn(fs)?.books[0]?.position).toBe('p3')
+  })
+
 })
 
 describe('the next launch', () => {
@@ -369,6 +391,7 @@ describe('a subscriber hears once per change', () => {
     await library.patch('book_1', { rating: 3 })
     expect(heard).toHaveBeenCalledTimes(1)
   })
+
 })
 
 describe('a position remembered without a progress', () => {
