@@ -334,6 +334,7 @@ function main(argv) {
   return runSteps(args.steps, (step) => spawnStep(step, REPO_ROOT))
 }
 
+// Stryker disable next-line all: reached only when node starts this file, and a spawned child never runs the mutant under test — `false` and the emptied block are caught only by the CLI test's child, and `true` starts every gate step inside the test runner at import
 if (isProcessEntry(import.meta)) {
   process.exitCode = main(process.argv.slice(2))
 }
