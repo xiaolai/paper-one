@@ -399,6 +399,7 @@ function readsBySource(sources) {
 const withoutProse = (css) => css.replace(/\/\*[\s\S]*?\*\/|"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|url\(\s*[^"'\s)][^)]*\)/g, '')
 
 const CLASS = /\.(-?(?:[A-Za-z_\u0080-\uffff]|\\[0-9a-fA-F]{1,6}\s?|\\[^0-9a-fA-F])(?:[\w\u0080-\uffff-]|\\[0-9a-fA-F]{1,6}\s?|\\[^0-9a-fA-F])*)/y
+const CLASSES = new RegExp(CLASS.source, 'g')
 const unescaped = (name) =>
   name.replace(/\\([0-9a-fA-F]{1,6})\s?|\\(.)/g, (_all, hex, char) => (hex ? String.fromCodePoint(Number.parseInt(hex, 16)) : char))
 
@@ -591,14 +592,15 @@ export function deadClasses(root, roots = ROOTS, scanned = scanSources(root, roo
   for (const file of modules) {
     const text = readFileSync(file, 'utf8')
     const declared = moduleExports(text).classes
+    /* The DECLARATION, not the first mention: a class is usually described in
+       prose above the rule that defines it, and pointing the reader at the
+       comment instead of the code is a small lie that costs a search. Each line
+       is read the way a selector is, so an escaped name (`.a\:b`) is found by
+       what it means rather than by how it is spelled. */
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, '')).split('\n')
     for (const name of [...declared].sort()) {
       if (KEPT.test(name) || used.has(name)) continue
-      /* The DECLARATION, not the first mention: a class is usually described in
-         prose above the rule that defines it, and pointing the reader at the
-         comment instead of the code is a small lie that costs a search. */
-      const code = text.replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, ' ')).split('\n')
-      const shape = new RegExp(`\\.${name.replace(/[^\w-]/g, '\\$&')}(?![\\w-])`)
-      const line = code.findIndex((l) => shape.test(l)) + 1
+      const line = code.findIndex((l) => [...l.matchAll(CLASSES)].some((m) => unescaped(m[1]) === name)) + 1
       dead.push({ file: relative(root, file).split(sep).join('/'), name, line })
     }
   }

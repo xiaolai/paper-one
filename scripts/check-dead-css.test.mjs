@@ -60,6 +60,19 @@ describe('what the gate reports', () => {
     })
     expect(deadClasses(root).dead[0]).toMatchObject({ name: 'orphan', line: 3 })
   })
+
+  it('points at an escaped class by what its name means', () => {
+    /* `.a\:b` declares `a:b`. Searching the text for `.a:b` finds nothing, and
+       the report said line 0, a line no file has. */
+    const root = fixture({
+      'src/A.module.css': '.live { color: red; }\n.a\\:b { color: blue; }\n.\\31 x { color: blue; }\n',
+      'src/A.tsx': "import styles from './A.module.css'\nexport const A = () => styles.live\n",
+    })
+    expect(deadClasses(root).dead.map((d) => [d.name, d.line])).toEqual([
+      ['1x', 3],
+      ['a:b', 2],
+    ])
+  })
 })
 
 describe('every way a class is reached', () => {
