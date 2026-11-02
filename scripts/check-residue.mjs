@@ -452,11 +452,12 @@ function followServices(source, checker, known, types, found, say) {
     handedOn: (callee, index) => index >= 0 && takesServices(importedName(callee), index),
   })
 
-  /* WHAT LEAVES THE FILE leaves by name, and the far side has only that to go on. */
-  const leaving = (name, symbol, at) => {
+  /* WHAT LEAVES THE FILE leaves by name, and the far side has only that to go on. `local` is
+     what an export list or a default calls it here, which may be the services' own name. */
+  const leaving = (name, symbol, at, local) => {
     if (symbol === undefined) return
     if (followed.returnsOf(symbol).length > 0 && !ENDS_IN_SERVICES.test(name)) say(at, 'a function returning the services, exported under another name')
-    if (followed.heldBy(symbol).length > 0 && name !== 'services') say(at, 'the services, exported under another name')
+    if ((followed.heldBy(symbol).length > 0 || local === 'services') && name !== 'services') say(at, 'the services, exported under another name')
   }
   const renames = (element) => {
     const from = element.propertyName?.text
@@ -471,11 +472,14 @@ function followServices(source, checker, known, types, found, say) {
         for (const name of boundNames(declaration.name)) leaving(name.text, checker.getSymbolAtLocation(name), name)
       }
     }
-    if (ts.isExportAssignment(statement) && ts.isIdentifier(unwrapped(statement.expression))) leaving('default', checker.getSymbolAtLocation(unwrapped(statement.expression)), statement)
+    if (ts.isExportAssignment(statement) && ts.isIdentifier(unwrapped(statement.expression))) {
+      const local = unwrapped(statement.expression)
+      leaving('default', checker.getSymbolAtLocation(local), statement, local.text)
+    }
     if (ts.isExportDeclaration(statement) && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
       for (const element of statement.exportClause.elements) {
         if (statement.moduleSpecifier !== undefined) renames(element)
-        else leaving(element.name.text, checker.getExportSpecifierLocalTargetSymbol(element), element)
+        else leaving(element.name.text, checker.getExportSpecifierLocalTargetSymbol(element), element, (element.propertyName ?? element.name).text)
       }
     }
     if (ts.isImportDeclaration(statement) && statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings)) {

@@ -72,4 +72,11 @@ describe('forms the scan once missed', () => {
       refused('the services, exported under another name: u'),
     ])
   })
+
+  /* The services' own name is no help to an importer that receives them under another. */
+  it('refuses the services exported by their own name under another', () => {
+    expect(scanned({ [B]: 'const services: any = 1\nexport default services\n' })).toEqual([refused('the services, exported under another name: export default services')])
+    expect(scanned({ [B]: 'const services: any = 1\nexport { services as s }\n' })).toEqual([refused('the services, exported under another name: services as s')])
+    expect(scanned({ [B]: 'const services: any = 1\nexport { services }\n' })).toEqual([])
+  })
 })
