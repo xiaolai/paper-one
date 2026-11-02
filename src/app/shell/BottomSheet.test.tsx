@@ -27,7 +27,7 @@ afterEach(cleanup)
  * Both rendered together on purpose. Testing Library CLEARS the container it is
  * given, so a page appended beforehand is removed before the sheet mounts — and
  * "what is behind the sheet" is precisely a question about them being siblings.
- * `main.web.tsx` mounts both at the same level.
+ * `app/web/client.tsx` mounts both at the same level.
  */
 function open(onDismiss = vi.fn()) {
   const view = render(

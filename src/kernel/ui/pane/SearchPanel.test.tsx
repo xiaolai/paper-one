@@ -790,7 +790,7 @@ describe('the states the panel passes through, and the styling hook it sets', ()
      * render, and the library effect lists `searchLibrary` among its
      * dependencies — so it re-subscribes each time, and a promise resolved
      * from outside lands on a run that is no longer the current one. Every
-     * host supplies a stable one (`main.web.tsx` memoises it); a case that
+     * host supplies a stable one (`app/web/client.tsx` memoises it); a case that
      * does not is testing something the app never does. */
     const searchLibrary = () =>
       new Promise<readonly PassageHit[]>((r) => {

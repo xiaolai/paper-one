@@ -36,9 +36,10 @@ import { SHUTDOWN_DONE_EVENT, SHUTDOWN_EVENT, armShutdown } from './shutdown'
  * REACHED** — the diagnostics switch, the recorder, the spool, the size port,
  * the trash sweep's report, `pagehide`, the opened-files bridge. It runs here
  * now, whole. What is stood in for is the native side and nothing else: the
- * shell's event module, the fs plugin and `invoke` (over an in-memory library),
- * and the build's composition list, which is the one input a launch does not
- * build itself.
+ * shell's event module, the fs plugin and `invoke` (over an in-memory library).
+ * The build's composition list is the one input a launch does not build itself,
+ * and it is handed in, so no `vi.mock` of `virtual:paper-composition` keeps this
+ * file on a route the mutation gate cannot see down.
  */
 
 type Disk = ReturnType<typeof fakeTrashFs>
@@ -58,8 +59,6 @@ const native = vi.hoisted(() => ({
   disk: null as Disk | null,
   /** Paths the fs plugin refuses, whatever is asked of them. */
   refused: new Set<string>(),
-  /** The build's composition — read by `bootApp.ts` at module load, so filled in place. */
-  capabilities: [] as Capability[],
 }))
 
 /* ⚠️ **A LAZY IMPORT OF THIS MOCK THAT OVERLAPS ANOTHER STILL IN FLIGHT GETS THE
@@ -139,8 +138,6 @@ vi.mock('@tauri-apps/plugin-fs', () => {
     },
   }
 })
-
-vi.mock('virtual:paper-composition', () => ({ capabilities: native.capabilities }))
 
 /** What the launch has built by the time it arms the handshake, each part recording into `order`. */
 function launched(order: string[]) {
@@ -312,11 +309,10 @@ async function launch({
   files = LIBRARY,
   capabilities = [],
   boot = bootApp,
-}: { tauri?: boolean; files?: Record<string, string>; capabilities?: Capability[]; boot?: () => Promise<BootedApp> } = {}): Promise<BootedApp> {
+}: { tauri?: boolean; files?: Record<string, string>; capabilities?: Capability[]; boot?: typeof bootApp } = {}): Promise<BootedApp> {
   native.disk = tauri ? fakeTrashFs(files) : null
-  native.capabilities.splice(0, native.capabilities.length, ...capabilities)
   page(tauri)
-  const one = await boot()
+  const one = await boot(capabilities)
   booted.push(one)
   return one
 }
@@ -394,11 +390,17 @@ describe('the launch sequence, run', () => {
      has thrown away. */
   it('writes what it records beside the library, and rewrites the file when the window is cleared', async () => {
     const app = await launch()
+    await armed()
+    await settled()
 
     app.services.diagnostics.warn('launch.probe', { at: 'inside' })
     expect(app.diagnosticLog?.entries().map((one) => one.event)).toContain('launch.probe')
     await vi.advanceTimersByTimeAsync(DEFAULT_FLUSH_MS)
     await vi.waitFor(() => expect(textAt(DIAGNOSTICS_FILE)).toContain('"event":"launch.probe"'))
+    /* A WRITE STILL PENDING AT THE CLEAR EMPTIES THE FILE WITH NOBODY HAVING ASKED,
+       and this case would then pass with the rewrite it is here to prove gone. A
+       background record arms one: the arming's failure did, under the mutation run. */
+    await vi.waitFor(() => expect(vi.getTimerCount(), 'a write is still pending').toBe(0))
 
     app.diagnosticLog?.clear()
     app.onDiagnosticsCleared?.()
