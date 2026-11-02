@@ -95,6 +95,35 @@ describe('every delivery order reaches the same result', () => {
   })
 })
 
+describe('the suppression records are written in one order', () => {
+  /* ⚠️ **SORTED BY KEY, SO TWO DEVICES HOLDING THE SAME RECORDS WRITE THE SAME
+     BYTES.** Left in the order they were met, the records followed delivery
+     order, and two replicas that agree on everything wrote two different files. */
+  it('lists withdrawals by key, whichever order they arrived in', () => {
+    const items = [
+      delivered(unnote({ voice: B, pub: 'q1' })),
+      delivered(unnote({ voice: A, pub: 'p2', seq: 3 })),
+      delivered(unnote({ voice: A, pub: 'p1' })),
+    ]
+    for (const order of orders(items)) {
+      const keys = foldPublic(EMPTY_PUBLIC_FILE, order, NOW).withdrawn.map((one) => one.key)
+      expect(keys).toEqual([publicationKey(A, 'p1'), publicationKey(A, 'p2'), publicationKey(B, 'q1')])
+    }
+  })
+
+  it('lists equivocations by key, whichever order they arrived in', () => {
+    const twice = (voice: string, seq: number): Delivered[] =>
+      ['one thing', 'another thing'].map((quote) =>
+        delivered(note({ voice, seq, pub: `p${seq}`, passage: { quote, prefix: '', suffix: '', chapter: '' } })),
+      )
+    const items = [...twice(B, 1), ...twice(A, 2), ...twice(A, 1)]
+    for (const order of [items, [...items].reverse()]) {
+      const keys = foldPublic(EMPTY_PUBLIC_FILE, order, NOW).equivocated.map((one) => one.key)
+      expect(keys).toEqual([sequenceKey(A, 1), sequenceKey(A, 2), sequenceKey(B, 1)])
+    }
+  })
+})
+
 describe('withdrawal precedence', () => {
   it('a withdrawal that arrives first suppresses the publication that follows', () => {
     const file = foldPublic(EMPTY_PUBLIC_FILE, [delivered(unnote()), delivered(note())], NOW)
