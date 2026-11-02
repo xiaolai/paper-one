@@ -58,7 +58,9 @@ const KERNEL = new URL('../src/kernel/', import.meta.url)
  * finding this one raises rather than skips past.
  */
 function capabilityIds(root) {
-  const manifest = JSON.parse(readFileSync(path.join(root, 'capabilities.manifest.json'), 'utf8'))
+  const file = path.join(root, 'capabilities.manifest.json')
+  // Stryker disable next-line StringLiteral: an emptied encoding makes readFileSync return a Buffer, and JSON.parse reads a Buffer as its UTF-8 text, so the same manifest parses
+  const manifest = JSON.parse(readFileSync(file, 'utf8'))
   return manifest.capabilities.map((c) => c.ts ?? c.id)
 }
 
