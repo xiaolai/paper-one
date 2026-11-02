@@ -729,8 +729,13 @@ export function parseArchive(raw: string): MarksArchive | null {
        for EQUALITY and nothing else, so a malformed one cannot cause a wrong
        match — but it can cause a wrong MISmatch, refusing anchors that were
        fine. Dropped, the row falls back to the id match, which is where it was
-       before this field existed. */
-    const contentHash = str(row['contentHash'], 64)
+       before this field existed.
+
+       ⚠️ **READ WHOLE, AND IT WAS CUT TO 64 FIRST.** A value one character too
+       long was sliced down to a well-formed digest and kept — so an edited
+       archive could carry a digest it never said, which is exactly the wrong
+       MISmatch above. The shape decides, on the value as written. */
+    const contentHash = str(row['contentHash'])
     books.push({
       bookId,
       title,

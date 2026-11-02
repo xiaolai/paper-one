@@ -873,6 +873,19 @@ describe('the full content digest, where both sides have one', () => {
     expect(planImport(parsed!, [BOOK({ contentHash: HASH_B })], [], []).marksAdded).toBe(1)
   })
 
+  it('drops a digest with anything before or after its sixty-four digits, rather than cutting it down to one', () => {
+    /* ⚠️ A value one character too long used to be sliced to sixty-four and
+       kept, so the archive carried a digest it never held — and a digest that
+       disagrees with the shelf's demotes an id match. */
+    for (const malformed of [`${HASH_A}0`, `0${HASH_A}`, `${HASH_A}${HASH_A}`]) {
+      const doc = exportMarks([BOOK({ contentHash: HASH_A })], [MARK()], [])
+      const mangled = JSON.parse(JSON.stringify(doc)) as { books: { contentHash?: unknown }[] }
+      mangled.books[0]!.contentHash = malformed
+      const parsed = parseArchive(JSON.stringify(mangled))
+      expect(parsed?.books[0], malformed).not.toHaveProperty('contentHash')
+    }
+  })
+
   it('carries no digest at all when the exporting library has none', () => {
     /* Absent, never empty — the same rule every optional field here follows.
        An empty string would parse back as a hash that matches nothing. */
