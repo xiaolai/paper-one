@@ -371,3 +371,19 @@ describe('an add that must create', () => {
     expect(await fs.exists('books/book_a/book.json')).toBe(true)
   })
 })
+
+/* THE LANE IS THE FOLDER'S, not the id's: writers outside the store queue on
+   `library.lane`, so two ids for one directory must get one lane, two books
+   two, and a rekeyed book the lane its earlier writes are still draining on. */
+describe('the lane a book is written on', () => {
+  it('is one per folder, and follows a rekey', async () => {
+    const { library } = shelf({ 'books/book_a/book.json': JSON.stringify(record('book_a')) }, [row('book_a')])
+    expect(typeof library.lane('book_a')).toBe('string')
+    expect(library.lane('book:a')).toBe(library.lane('book_a'))
+    expect(library.lane('Book_A')).toBe(library.lane('book_a'))
+    expect(library.lane('book_b')).not.toBe(library.lane('book_a'))
+    const before = library.lane('book_a')
+    await expect(library.rekeyBook('book_a', 'book_b')).resolves.toBe('moved')
+    expect(library.lane('book_b')).toBe(before)
+  })
+})
