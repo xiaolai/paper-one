@@ -1166,6 +1166,24 @@ describe('the work identifier', () => {
     expect(parseRecord(JSON.stringify({ title: 'x', author: '', metaSchema: -1 }))).not.toHaveProperty('metaSchema')
     expect(parseRecord(JSON.stringify({ title: 'x', author: '', metaSchema: 'soon' }))).not.toHaveProperty('metaSchema')
   })
+
+  it('keeps a parse time of zero or more and drops a negative one', () => {
+    /* A negative "parse time" claims a parse that never happened; dropped, the
+       record reads as never parsed, which a backfill will put right. */
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', parsedAt: 0 }))?.parsedAt).toBe(0)
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', parsedAt: 5 }))?.parsedAt).toBe(5)
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', parsedAt: -1 }))).not.toHaveProperty('parsedAt')
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '' }))).not.toHaveProperty('parsedAt')
+  })
+
+  it('keeps an id and an identifier of exactly the field bound, and drops one a character longer', () => {
+    const at = 'a'.repeat(MAX_RECORD_FIELD)
+    const over = 'a'.repeat(MAX_RECORD_FIELD + 1)
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', bookId: at, identifier: at }))).toMatchObject({ bookId: at, identifier: at })
+    const dropped = parseRecord(JSON.stringify({ title: 'x', author: '', bookId: over, identifier: over }))
+    expect(dropped).not.toHaveProperty('bookId')
+    expect(dropped).not.toHaveProperty('identifier')
+  })
 })
 
 describe('the reader’s own opinion on the record — WI-23.B3', () => {
