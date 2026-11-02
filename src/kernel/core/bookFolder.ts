@@ -796,7 +796,10 @@ function bookMetaOf(r: Record<string, unknown>): Partial<BookRecord> & Pick<Book
 
 /** A finite number that is not negative, or `undefined` — never one moved. */
 function nonNegative(value: number | undefined): number | undefined {
-  return value === undefined || value < 0 ? undefined : value
+  /* No separate "absent" clause: absent is not negative, and is handed back as
+     it came. Spelled as one, it was a question no answer could tell from its
+     removal, which a mutation sweep found (2026-11-02). */
+  return (value ?? 0) < 0 ? undefined : value
 }
 
 /** A stored schema number, clamped to what this build can have written. */
