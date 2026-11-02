@@ -284,15 +284,13 @@ const SCAN_WIDTH = 16
  * Run `work` over every item, at most `width` in flight.
  *
  * Results keep the ITEMS' order, not completion order — the walk is concurrent,
- * what it produces is not allowed to be. `null` is "nothing came of this item",
- * so a worker can decline without a slot going missing.
+ * what it produces is not allowed to be. Every item gets the answer its own
+ * worker gave, so a worker that can decline says so in its own type (`null`
+ * for the marks walk), and one that always answers is read without a guard.
  */
-async function pooledMap<T, R>(
-  items: readonly T[],
-  width: number,
-  work: (item: T) => Promise<R | null>,
-): Promise<(R | null)[]> {
-  const results: (R | null)[] = new Array<R | null>(items.length).fill(null)
+async function pooledMap<T, R>(items: readonly T[], width: number, work: (item: T) => Promise<R>): Promise<R[]> {
+  // Stryker disable next-line ArrayDeclaration: both callers pass SCAN_WIDTH, so at least one worker runs and every index below items.length is assigned before this returns; an unsized array ends identical.
+  const results: R[] = new Array<R>(items.length)
   let cursor = 0
   const worker = async () => {
     for (;;) {
@@ -458,15 +456,15 @@ async function scanShelf(fs: IndexFs): Promise<{ books: IndexedBook[]; folders: 
   const entries = await listBooksDir(fs)
   const walked = entries.filter((entry) => entry.isDirectory).map((entry) => entry.name)
   const outcomes = await pooledMap(walked, SCAN_WIDTH, (name) => scanFolder(fs, name))
-  const books = outcomes.flatMap((one) => (one?.kind === 'book' ? [one.book] : []))
+  const books = outcomes.flatMap((one) => (one.kind === 'book' ? [one.book] : []))
   /* ONLY WHAT THE SCAN COULD LOOK AT. A `gone` folder is left out of the
    * snapshot — see `FolderScan` — so a folder this scan failed to see keeps
    * the cache distrusted rather than agreeing its books away. */
-  const folders = walked.filter((_name, at) => outcomes[at]?.kind !== 'gone')
+  const folders = walked.filter((_name, at) => outcomes[at]!.kind !== 'gone')
   /* Folders whose record IS THERE and would not read — as distinct from one
    * that simply has no record yet, which is a half-written import and is
    * correctly skipped. */
-  const unreadable = outcomes.filter((one) => one?.kind === 'unreadable').length
+  const unreadable = outcomes.filter((one) => one.kind === 'unreadable').length
   /* EVERY RECORD UNREADABLE IS NOT AN EMPTY LIBRARY. One damaged book costs
    * that book — the rule `scanFolder` is written around, and the right one.
    * But a whole library that will not read is the state where the shelf says
