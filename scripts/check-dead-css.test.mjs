@@ -716,6 +716,23 @@ describe('what the gate refuses to guess at', () => {
     expect(found.map((one) => one.how)).toEqual(['a function that returns it, handed on'])
   })
 
+  /* Only `ns.fn()`, called where it is read, is followed; these reach the same function
+     and are not. */
+  it.each([
+    ['by a literal key', "import * as re from './re'\nexport const f = () => re['get']().live", "re['get']"],
+    ['by name, and called later', "import * as re from './re'\nconst g = re.get\nexport const f = () => g().live", 're.get'],
+  ])('refuses a function taken off a module %s', (_what, source, what) => {
+    expect(refused(source, { 'src/re.ts': "import styles from './A.module.css'\nexport const get = () => styles\n" })).toEqual([
+      { file: 'src/A.tsx', line: 2, what, how: 'a function that returns it, handed on' },
+    ])
+  })
+
+  it('quotes what it refuses on one line, cut at sixty characters', () => {
+    expect(refused(`${IMPORT}export const f = (k: string) => styles[k +\n  'a-suffix-long-enough-to-run-well-past-the-sixty-character-cut']`)).toEqual([
+      { file: 'src/A.tsx', line: 3, what: "styles[k + 'a-suffix-long-enough-to-run-well-past-the-sixty-", how: 'a key this cannot read: name the class' },
+    ])
+  })
+
   it('names the file and the line', () => {
     expect(refused(`${IMPORT}export const a = 1\nexport const f = () => g(styles)`)).toEqual([
       { file: 'src/A.tsx', line: 4, what: 'styles', how: 'handed to a call' },
