@@ -70,6 +70,39 @@ describe('one stylesheet, however many imports reach it', () => {
   })
 })
 
+/*
+ * SECOND, ON PURPOSE. A file that holds none, answering as if it held something, leaves
+ * the walk unsettled on some trees, and a function's return read where there is none is
+ * otherwise first caught by a run over this repository, seconds long. Both fail here,
+ * in milliseconds, before any test that would hang or take long.
+ */
+describe('what a file that holds none carries', () => {
+  const answer = (files) => {
+    const root = fixture({ 'src/A.module.css': '.live { color: red; }\n', ...files })
+    const scanned = scanSources(root)
+    return {
+      missing: undefinedClasses(root, undefined, scanned).map((u) => u.name).sort(),
+      dead: deadClasses(root, undefined, scanned).dead.map((d) => d.name).sort(),
+      refused: unfollowedStylesheets(root, undefined, scanned).map((one) => one.how).sort(),
+    }
+  }
+
+  it('takes nothing from a file whose exports hold nothing, even when it is read', () => {
+    expect(answer({
+      'src/X.module.css': '.x { color: red; }\n',
+      'src/B.tsx': 'export default 1\nexport const k = 1\nexport function g() { return 1 }\n',
+      'src/C.tsx': "import d, { k, g } from './B'\nexport const f = () => [d.x, k.x, g().x]\n",
+    })).toEqual({ missing: [], dead: ['live', 'x'], refused: [] })
+  })
+
+  it('reads nothing off a call of a name a module does not export', () => {
+    expect(answer({
+      'src/B.tsx': "import styles from './A.module.css'\nexport const s = styles\n",
+      'src/C.tsx': "import * as ns from './B'\nexport const f = () => ns.unknown().live\n",
+    })).toEqual({ missing: [], dead: ['live'], refused: [] })
+  })
+})
+
 describe('what the gate reports', () => {
   it('finds a rule no source names', () => {
     const root = fixture({
@@ -1081,14 +1114,6 @@ describe('what crosses a file, at the edges', () => {
     expectAnswer({ 'src/R.tsx': `${callee}\n`, 'src/C.tsx': `${IMPORT}${imported}export const f = () => ${call}\n` }, expected)
   })
 
-  it('takes nothing from a file whose exports hold nothing, even when it is read', () => {
-    expect(answer({
-      'src/X.module.css': '.x { color: red; }\n',
-      'src/B.tsx': 'export default 1\nexport const k = 1\nexport function g() { return 1 }\n',
-      'src/C.tsx': "import d, { k, g } from './B'\nexport const f = () => [d.x, k.x, g().x]\n",
-    })).toEqual({ missing: [], dead: ['live', 'x'], refused: [] })
-  })
-
   it('carries every holder a file exports', () => {
     expectAnswer({
       'src/O.module.css': '.other { color: red; }\n',
@@ -1140,7 +1165,6 @@ describe('what crosses a file, at the edges', () => {
 
   it.each([
     ['a name a file does not export', { 'src/B.ts': "export { default } from './A.module.css'\n", 'src/C.tsx': "import { k } from './B'\nexport const f = () => k.live\n" }, {}],
-    ['a call of a name a module does not export', { 'src/B.tsx': `${IMPORT}export const s = styles\n`, 'src/C.tsx': "import * as ns from './B'\nexport const f = () => ns.unknown().live\n" }, {}],
     ['a name a module does not export', { 'src/B.tsx': `${IMPORT}export const get = () => styles\n`, 'src/C.tsx': "import * as re from './B'\nexport const f = () => re.nothing.live\n" }, {}],
     ['a require with nothing to load', { 'src/C.tsx': 'export const f = () => require().live\n' }, {}],
     ['a call that only looks like a load', { 'src/C.tsx': "declare const load: any\nexport const f = () => load('./A.module.css').default.live\n" }, {}],
