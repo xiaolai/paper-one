@@ -769,10 +769,19 @@ export function createLibrary({
   const lanes = new Map<string, string>()
   const rekeyed = new Map<string, string>()
 
-  /** A map followed to its end, cycle-safe. */
+  /**
+   * A map followed to its end, cycle-safe.
+   *
+   * The only cycle either map can hold is a lane aliased onto itself, after a
+   * book is rekeyed back to a name it left: `rekeyed` drops the destination's
+   * alias on every move, and `lanes` points a name at the end of a walk. A
+   * self-loop ends where it starts whether or not the start is counted as
+   * seen, so it is not: the start pre-seeded was a difference no walk could
+   * show, which a mutation sweep found (2026-11-02).
+   */
   const follow = (start: string, map: ReadonlyMap<string, string>): string => {
     let at = start
-    const seen = new Set([at])
+    const seen = new Set<string>()
     for (;;) {
       const next = map.get(at)
       if (next === undefined || seen.has(next)) return at
