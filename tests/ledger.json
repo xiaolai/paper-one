@@ -2399,11 +2399,11 @@
     "src/app/web/cards.test.ts > parseCards > reads a card that came from no book",
     "src/app/web/cards.test.ts > parseCards > reads the rows a page carries",
     "src/app/web/cards.test.ts > parseCards > survives an answer that is not a list",
-    "src/app/web/client.entry.test.ts > the browser entry hands this build’s composition to the client, and does nothing else",
     "src/app/web/client.test.tsx > the browser client, mounted > draws the gate when the shelf has never seen this browser",
-    "src/app/web/client.test.tsx > the browser client, mounted > installs the platform metrics on the document, before the mount",
+    "src/app/web/client.test.tsx > the browser client, mounted > installs the platform metrics on the document",
     "src/app/web/client.test.tsx > the browser client, mounted > refuses to mount with nowhere to mount into, rather than drawing nothing",
     "src/app/web/client.test.tsx > the browser client, mounted > reports a shelf it cannot reach rather than a blank page",
+    "src/app/web/client.wiring.test.tsx > reading a book > draws neither the shelf nor a reader on the Reading tab when no book is open",
     "src/app/web/client.wiring.test.tsx > reading a book > finds a library hit among the rows as they are now, not as they were",
     "src/app/web/client.wiring.test.tsx > reading a book > forgets the open book: false, when the list is 'failed' with +0 rows",
     "src/app/web/client.wiring.test.tsx > reading a book > forgets the open book: false, when the list is 'loading' with +0 rows",
@@ -2418,7 +2418,6 @@
     "src/app/web/client.wiring.test.tsx > reading a book > opens the book a library hit names, and refuses one that left the shelf",
     "src/app/web/client.wiring.test.tsx > reading a book > opens the reader over the shelf’s content, on the same link",
     "src/app/web/client.wiring.test.tsx > reading a book > remounts the reader for another book, which reads its place only at mount",
-    "src/app/web/client.wiring.test.tsx > reading a book > shows the shelf for the Reading tab when no book is open",
     "src/app/web/client.wiring.test.tsx > the link under the shelf > builds its stores over the live link and lets each go with the screen",
     "src/app/web/client.wiring.test.tsx > the link under the shelf > builds no store until there is a link to build it over",
     "src/app/web/client.wiring.test.tsx > the link under the shelf > does not read a shelf it has no channel to",
@@ -2435,7 +2434,7 @@
     "src/app/web/client.wiring.test.tsx > the other tabs > hands the settings screen one store for this browser, however often it draws, and the way out",
     "src/app/web/client.wiring.test.tsx > what a mount does first > derives a composition’s row-menu entries from each capability that has any",
     "src/app/web/client.wiring.test.tsx > what a mount does first > names what is missing when there is nowhere to mount",
-    "src/app/web/client.wiring.test.tsx > what a mount does first > publishes a browser’s geometry and installs the fatal handlers, in that order, before it draws",
+    "src/app/web/client.wiring.test.tsx > what a mount does first > publishes a browser’s geometry, then installs the fatal handlers, then renders",
     "src/app/web/client.wiring.test.tsx > what a mount does first > refuses a composition of 1, which it does not know how to compose",
     "src/app/web/client.wiring.test.tsx > what a mount does first > refuses a composition of 2, which it does not know how to compose",
     "src/app/web/client.wiring.test.tsx > what a sign-out says > asks again after it signs out, and says nothing when it worked",
@@ -12883,6 +12882,7 @@
     "src/main.test.tsx > the desktop root > draws the window with everything the launch produced, when it is recording 'a log and a file'",
     "src/main.test.tsx > the desktop root > draws the window with everything the launch produced, when it is recording 'a log and no file'",
     "src/main.test.tsx > the desktop root > draws the window with everything the launch produced, when it is recording 'neither'",
-    "src/main.test.tsx > the desktop root > refuses to start without its root element, and names the page that should hold it"
+    "src/main.test.tsx > the desktop root > refuses to start without its root element, and names the page that should hold it",
+    "src/main.web.test.ts > hands the browser build’s own composition to the client, once"
   ]
 }
