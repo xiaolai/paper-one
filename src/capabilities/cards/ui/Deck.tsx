@@ -129,6 +129,7 @@ export function Deck({ cards, bookId, onShelf, onGoTo }: CardsProps) {
                reader home, exactly as it does for a mark. What remains is a
                book that has LEFT the shelf, which cannot be opened at all. */
             disabled={!card.cfi || !onGoTo || !(card.bookId === bookId || (onShelf?.(card.bookId) ?? false))}
+            // Stryker disable next-line OptionalChaining: the button is disabled whenever `onGoTo` is absent, and a disabled button is never clicked.
             onClick={() => card.cfi && onGoTo?.({ bookId: card.bookId, cfi: card.cfi })}
           >
             <span className={ui.cardBody}>{card.body}</span>
