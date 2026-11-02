@@ -510,6 +510,7 @@ const switchDetail = (on: boolean): string => (on ? P2P_CLOSED_DETAIL : P2P_OFF_
 async function unwiredDetail(hasFilesystem: boolean): Promise<string> {
   if (!hasFilesystem) return 'No filesystem in a browser tab'
   /* The peer capability counts a switch it cannot read as off; so does this. */
+  // Stryker disable next-line ArrowFunction: `on` is read only as the condition below, where `undefined` reads exactly as `false`
   const on = await p2pAvailable().catch(() => false)
   return on ? 'Peer plugin unavailable' : 'Peer-to-peer is off'
 }
