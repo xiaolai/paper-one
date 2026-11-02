@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  deepFreeze,
   GRANT_FAMILIES,
   SERVICE_AUDIENCES,
   SERVICE_GRANTS,
@@ -333,9 +332,10 @@ describe('the table is frozen, and reachable by name', () => {
   /* ⚠️ **SIX MUTANTS SAT ON `deepFreeze` AND THE BY-NAME INDEX, AND THE MERGE
    * BASE COULD DECIDE NONE OF THEM** — its report marks each `static`, and a
    * static mutant that throws while the module loads is reported `Survived` by
-   * Stryker's vitest runner because the suite fails no test. So they were
-   * neither authorised nor billed; the gate's own instruction is to settle them
-   * by killing them here. */
+   * Stryker's vitest runner because the suite fails no test. Asserting them
+   * here could not change that, since a broken freeze never let this file
+   * load: `deepFreeze` now has its own module and test (2026-11-02). These
+   * cases hold the table to what it gives. */
   it('freezes the rows, their arrays and their nested fields', () => {
     const row = SERVICE_TABLE[0]
     expect(row).toBeDefined()
@@ -349,20 +349,6 @@ describe('the table is frozen, and reachable by name', () => {
       .filter((value): value is object => value !== null && typeof value === 'object')
     expect(nested.length, 'a row with no object field cannot show the recursion').toBeGreaterThan(0)
     for (const value of nested) expect(Object.isFrozen(value)).toBe(true)
-  })
-
-  it('leaves a null field alone rather than walking its properties', () => {
-    /* ⚠️ **`typeof null === 'object'`**, so without the null clause this falls
-     * through to `Object.getOwnPropertyNames(null)` and throws — at IMPORT,
-     * because the table is frozen at module scope. No row carries a null field
-     * today, which is why nothing that walks `SERVICE_TABLE` reaches it, and
-     * why that one mutant survives where every other one in the function stops
-     * the module loading. Asked directly instead. */
-    expect(deepFreeze(null)).toBeNull()
-    const holding = { a: null, b: { c: null } }
-    expect(() => deepFreeze(holding)).not.toThrow()
-    expect(Object.isFrozen(holding)).toBe(true)
-    expect(Object.isFrozen(holding.b)).toBe(true)
   })
 
   it('leaves a primitive alone rather than trying to freeze it', () => {
