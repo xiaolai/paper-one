@@ -1239,15 +1239,15 @@ describe('which files are walked', () => {
   }
 
   it.each([
-    ['a file that mentions none', 'export const k = 1', false],
-    ['a file that says styles', '// styles\nexport {}', true],
-    ['a file that names a module', '// a.module\nexport {}', true],
-    ['a file that imports at run time', '// import(\nexport {}', true],
-    ['a file that requires', '// require(\nexport {}', true],
-    ['a file that says xmodule', '// xmodule\nexport {}', false],
-    ['a file that says reimport(', '// reimport(\nexport {}', false],
-    ['a file that says unrequire(', '// unrequire(\nexport {}', false],
-  ])('walks %s: %s', (_what, text, expected) => {
+    ['a file that mentions none', false, 'export const k = 1'],
+    ['a file that says styles', true, '// styles\nexport {}'],
+    ['a file that names a module', true, '// a.module\nexport {}'],
+    ['a file that imports at run time', true, '// import(\nexport {}'],
+    ['a file that requires', true, '// require(\nexport {}'],
+    ['a file that says xmodule', false, '// xmodule\nexport {}'],
+    ['a file that says reimport(', false, '// reimport(\nexport {}'],
+    ['a file that says unrequire(', false, '// unrequire(\nexport {}'],
+  ])('%s: walked is %s', (_what, expected, text) => {
     expect(walkedIn({ 'src/C.ts': `${text}\n` }, 'src/C.ts')).toBe(expected)
   })
 
