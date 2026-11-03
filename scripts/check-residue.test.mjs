@@ -471,9 +471,11 @@ describe('what the command prints, and how it exits', () => {
     })
   })
 
+  /* A tree with a capability deleted, as verify-without makes, keeps that capability's
+   * rows, and the scan sets them aside by name rather than call them stale. */
   it('passes on this tree, whose allow-list matches it', () => {
     const { code, stdout, stderr } = run([])
     expect({ code, stderr }).toEqual({ code: 0, stderr: '' })
-    expect(stdout).toMatch(/^check-residue: [1-9]\d* rows, [1-9]\d* namings; 0 finding\(s\)\n$/)
+    expect(stdout).toMatch(/^check-residue: [1-9]\d* rows, [1-9]\d* namings(; [1-9]\d* for an id not in the manifest, ignored)?; 0 finding\(s\)\n$/)
   })
 })
