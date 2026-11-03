@@ -39,6 +39,8 @@ describe('what a capability holds after a pick', () => {
     ['a POSIX path', '/made/up/a/b.md', 'b.md'],
     ['a Windows path', 'C:\\made\\up\\b.json', 'b.json'],
     ['a bare name', 'b.json', 'b.json'],
+    ['a path whose last separator is a backslash', '/made/up\\b.json', 'b.json'],
+    ['a path whose last separator is a slash', 'C:\\made\\up/b.json', 'b.json'],
     ['a folder', '/made/up/dir/', ''],
   ])('names %s by its last part', (_shape, path, name) => {
     expect(fileNameOf(path)).toBe(name)
