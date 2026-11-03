@@ -390,7 +390,7 @@ export function useSpeech(
    */
   /* Stryker disable next-line ArrowFunction,BooleanLiteral: the layout effect below writes this on every commit, before anything can read it. */
   const advanceRef = useRef<(at: number) => boolean>(() => false)
-  /* Stryker disable next-line BooleanLiteral: the same layout effect writes this on every commit, before a tap can arrive. */
+  /* Stryker disable next-line ArrowFunction,BooleanLiteral: the same layout effect writes this on every commit, before a tap can arrive. */
   const seekRef = useRef<(offset: number) => boolean>(() => false)
   /** The tap listener on the section being read, while one is. */
   const tapOff = useRef<(() => void) | null>(null)
@@ -996,6 +996,7 @@ export function useSpeech(
     }
     paceHold.current?.()
     paceHold.current = null
+    /* Stryker disable next-line ArrayDeclaration: it reads only refs, so no dependency could change what it does. */
   }, [])
 
   const start = useCallback(() => {
@@ -1016,6 +1017,7 @@ export function useSpeech(
     const queued = speakDocument(section)
     setReading(queued)
     setSpeaking(queued)
+    /* Stryker disable next-line ArrayDeclaration: each of these is built once for the component's life, so with none listed it would still hold the same four. */
   }, [speaker, speakDocument, clearContinuation, setReading])
 
   /**
