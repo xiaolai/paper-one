@@ -169,20 +169,13 @@ const enclosingFunction = (node) => {
   return at !== undefined && isFunctionLike(at) ? at : null
 }
 
+/** Hold `origins` under `key`, and say whether `key` holds anything now. */
 const add = (map, key, origins) => {
-  let added = false
-  let held = map.get(key)
   for (const origin of origins) {
-    if (held === undefined) {
-      held = new Set()
-      map.set(key, held)
-    }
-    if (!held.has(origin)) {
-      held.add(origin)
-      added = true
-    }
+    if (!map.has(key)) map.set(key, new Set())
+    map.get(key).add(origin)
   }
-  return added
+  return map.has(key)
 }
 
 /**
