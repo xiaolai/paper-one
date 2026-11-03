@@ -41,6 +41,7 @@ const speech: Speech = {
 function bar(platform: Platform) {
   return render(
     <TitleBar
+      readerControls={null}
       screens={[]}
       state={initialState}
       dispatch={vi.fn()}
@@ -92,6 +93,7 @@ describe('the controls a contributed screen does not have', () => {
   it('draws no pane toggle on a capability’s screen', () => {
     render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, screen: 'circle:circle' }}
         dispatch={vi.fn()}
@@ -116,6 +118,7 @@ describe('the controls a contributed screen does not have', () => {
       cleanup()
       render(
         <TitleBar
+          readerControls={null}
           screens={[]}
           state={{ ...initialState, screen: which, chromeOn: true }}
           dispatch={vi.fn()}
@@ -143,6 +146,7 @@ describe('the reading speed button', () => {
     const dispatch = vi.fn()
     render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, screen: 'reader', chromeOn: true, readingRate: rate }}
         dispatch={dispatch}
@@ -181,6 +185,7 @@ describe('the Listen control when no voice is good enough', () => {
   function listen(listenRefusal: string | null): HTMLElement {
     render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, screen: 'reader', chromeOn: true }}
         dispatch={vi.fn()}
@@ -227,11 +232,13 @@ function draw(
     screens?: React.ComponentProps<typeof TitleBar>['screens']
     hasBook?: boolean
     listenRefusal?: string | null
+    readerControls?: React.ReactNode
   } = {},
 ) {
   const dispatch = vi.fn()
   render(
     <TitleBar
+      readerControls={over.readerControls ?? null}
       screens={over.screens ?? []}
       state={{ ...initialState, ...over.state }}
       dispatch={dispatch}
@@ -350,6 +357,30 @@ describe('the reading transport', () => {
  * the reader is choosing what to look at — and not in the reader, where the
  * book is the place they are in.
  */
+describe('what a capability put beside the reading controls', () => {
+  const CONTROL = <button type="button">contributed</button>
+
+  it('sits after Listen and before the appearance control', () => {
+    draw({ state: { screen: 'reader', chromeOn: true }, readerControls: CONTROL })
+    const control = screen.getByRole('button', { name: 'contributed' })
+    const listen = screen.getByRole('button', { name: 'Read aloud' })
+    const appearance = screen.getByTitle(/^Appearance/u)
+    expect(listen.compareDocumentPosition(control) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(control.compareDocumentPosition(appearance) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('stays through a reading, beside the transport', () => {
+    draw({ state: { screen: 'reader', chromeOn: true }, speech: { ...speech, available: true, speaking: true }, readerControls: CONTROL })
+    expect(screen.getByRole('group', { name: 'Reading aloud' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'contributed' })).toBeTruthy()
+  })
+
+  it('is not drawn away from the reader', () => {
+    draw({ state: { screen: 'library' }, readerControls: CONTROL })
+    expect(screen.queryByRole('button', { name: 'contributed' })).toBeNull()
+  })
+})
+
 describe('the screens a capability contributed', () => {
   const screens = [{ id: 'circle:circle' as const, label: 'Circle', icon: 'people' as const }]
 
@@ -424,6 +455,7 @@ describe('the traffic lights, in a browser', () => {
   it('draws three of them on macOS, and none elsewhere', () => {
     const { container } = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={initialState}
         dispatch={vi.fn()}
@@ -440,6 +472,7 @@ describe('the traffic lights, in a browser', () => {
 
     const other = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={initialState}
         dispatch={vi.fn()}
@@ -508,6 +541,7 @@ describe('what the chrome says without a word', () => {
        for a book that did not exist. The mark belongs to the application. */
     const { container } = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, chromeOn: true }}
         dispatch={vi.fn()}
@@ -524,6 +558,7 @@ describe('what the chrome says without a word', () => {
 
     const open = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, chromeOn: true }}
         dispatch={vi.fn()}
@@ -544,6 +579,7 @@ describe('what the chrome says without a word', () => {
        opposite. */
     const { container } = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, chromeOn: true, side: 'left' }}
         dispatch={vi.fn()}
@@ -617,6 +653,7 @@ describe('what the chrome says without a word', () => {
        that always drew the left one would pass. */
     const { container } = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, chromeOn: true, side: 'right' }}
         dispatch={vi.fn()}
@@ -817,6 +854,7 @@ describe('the chrome, and what keeps it up', () => {
     const dispatch = vi.fn()
     const view = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, screen: 'reader', chromeOn: true }}
         dispatch={dispatch}

@@ -20,6 +20,7 @@ import {
   Type,
   X,
 } from 'lucide-react'
+import type { ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ICON, READING_RATE } from '../../core/metrics'
@@ -67,6 +68,12 @@ export interface TitleBarProps {
   bookSubtitle: string
   /** Reading aloud — the Listen control drives this directly. */
   speech: Speech
+  /**
+   * What capabilities put beside the reading controls, already drawn: `App` holds
+   * the context they are given. Required for the reason `screens` is; null says
+   * there are none.
+   */
+  readerControls: ReactNode
   /**
    * Why no voice can read the book on screen, or `null` when one can.
    *
@@ -139,6 +146,7 @@ export function TitleBar({
   listenRefusal,
   hasBook,
   screens,
+  readerControls,
 }: TitleBarProps) {
   const isMac = platform === 'macos'
   const isReader = state.screen === 'reader'
@@ -406,6 +414,7 @@ export function TitleBar({
                 <AudioLines size={ICON.control} strokeWidth={ICON.stroke} />
               </button>
             )}
+            {readerControls}
             <button
               type="button"
               className={styles.action}

@@ -1,5 +1,5 @@
 import { isValidElement, type ReactNode } from 'react'
-import type { PaneContext, PaneContribution, PaneRenderer } from '../core/capability'
+import type { PaneContribution } from '../core/capability'
 import { resolvePaneId } from '../core/registry'
 import { paneFits, type KernelPaneId, type PaneAudience, type PaneId, type Screen, type Theme } from './state'
 import type { Platform } from '../core/metrics'
@@ -154,7 +154,7 @@ export function shownPane(
  * with "Objects are not valid as a React child" and no word about which
  * capability sent it. What "plainly" can and cannot see is `isReactNode`'s.
  */
-export function renderContribution(id: string, render: PaneRenderer, context: PaneContext): ReactNode {
+export function renderContribution<Context>(id: string, render: (context: Context) => unknown, context: Context): ReactNode {
   const value = render(context)
   if (isReactNode(value)) return value
   throw new Error(`pane "${id}" rendered ${describe(value)}, which React cannot show`)

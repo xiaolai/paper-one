@@ -36,7 +36,7 @@ export interface AutoAdvanceDeps {
    * speak time and never captures them.
    */
   readonly pace: () => StepPace
-  /** True while a reading is speaking — see the header. */
+  /** True while anything holds the pace, a reading above all — see the header. */
   readonly speaking: boolean
   /**
    * True while the reader is looking at the book.
