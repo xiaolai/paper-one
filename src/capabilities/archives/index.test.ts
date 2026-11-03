@@ -93,6 +93,15 @@ describe('the rows', () => {
     expect(services.cards.getSnapshot().all).toEqual([])
   })
 
+  /* A stopped capability is one whose services are gone, so a row it still offered
+     would run against a kernel that has let go of it. */
+  it('are absent once the capability has stopped', async () => {
+    const { composition } = await launch({ files: fileDesk('/x/a.json').files })
+    expect(archives.commands?.(CTX)).toHaveLength(4)
+    composition.dispose()
+    expect(archives.commands?.(CTX)).toEqual([])
+  })
+
   it('words its switch without saying plugin or capability', () => {
     expect(archives.toggle?.title).toBe('Archives')
     expect(`${archives.toggle?.title} ${archives.toggle?.summary}`).not.toMatch(/plugin|capability/iu)
