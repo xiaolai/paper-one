@@ -764,6 +764,41 @@ describe('carrying marks onto a new book id', () => {
     ).toEqual([NEW])
     expect(marks.getSnapshot().all.map((one) => one.id)).toEqual(['m1'])
   })
+
+  /* The other half: the rename has not happened, so the marks are still only in
+     the old book's folder, and the new book's file is written from them. */
+  it('carries the marks still in the old folder into the new book, under the new id', async () => {
+    const OLD = 'file:old'
+    const NEW = 'book:new'
+    const fs = libraryWith(NEW)
+    fs.store.set(marksPathIn(OLD), new TextEncoder().encode(JSON.stringify([{ ...highlight(), id: 'm1', bookId: OLD }])))
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+
+    await marks.rekey(OLD, NEW)
+
+    expect((await marks.forBook(NEW)).map((one) => [one.id, one.bookId])).toEqual([['m1', NEW]])
+    const written = JSON.parse(new TextDecoder().decode(fs.store.get(marksPathIn(NEW))!)) as Mark[]
+    expect(written.map((one) => [one.id, one.bookId])).toEqual([['m1', NEW]])
+  })
+
+  /* A file that is there and will not read is not "no marks": resolving would say
+     the migration happened while the reader's marks stayed behind. */
+  it('rejects, and moves nothing, when the old folder holds marks that will not read', async () => {
+    const OLD = 'file:old'
+    const NEW = 'book:new'
+    const fs = libraryWith(NEW)
+    fs.store.set(marksPathIn(OLD), new TextEncoder().encode('{"not":"a list"}'))
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(marks.rekey(OLD, NEW)).rejects.toThrow(`could not read the marks under ${OLD}`)
+      expect(logged).toHaveBeenCalledWith('Paper: could not read the marks under the old book id', expect.any(Error))
+    } finally {
+      logged.mockRestore()
+    }
+    expect(fs.store.has(marksPathIn(NEW))).toBe(false)
+    expect(new TextDecoder().decode(fs.store.get(marksPathIn(OLD))!)).toBe('{"not":"a list"}')
+  })
 })
 
 /**
