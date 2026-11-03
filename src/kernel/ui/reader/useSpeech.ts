@@ -988,37 +988,43 @@ export function useSpeech(
    * next render would leave a window, and one tied to the sound would open at
    * every gap. This flag is true for exactly the reading.
    */
-  const setReading = useCallback((reading: boolean) => {
-    readingRef.current = reading
-    if (reading) {
-      paceHold.current ??= surfaceRef.current.holdPace()
-      return
-    }
-    paceHold.current?.()
-    paceHold.current = null
+  const setReading = useCallback(
+    (reading: boolean) => {
+      readingRef.current = reading
+      if (reading) {
+        paceHold.current ??= surfaceRef.current.holdPace()
+        return
+      }
+      paceHold.current?.()
+      paceHold.current = null
+    },
     /* Stryker disable next-line ArrayDeclaration: it reads only refs, so no dependency could change what it does. */
-  }, [])
+    [],
+  )
 
-  const start = useCallback(() => {
-    /* THE READER'S SKIP CHOICE, from the same prefs the voice and the gaps come
-       from — so the words the reading speaks and the words the export writes are
-       decided by one value rather than two defaults. */
-    const section = speaker && surfaceRef.current.speakable(skipOf(prefsRef.current))
-    if (!section) return
-    clearContinuation()
-    setFollowsWords(true)
-    /* THE READER'S OWN LISTEN CLEARS THE LAST REFUSAL. Left standing, a sentence
-       about a chapter that could not be made would sit over the one that can. */
-    setRefusal(null)
-    /* Only claim to be reading if something was actually queued — see
-     * `speakDocument`: the empty case has already reported done by the time
-     * `speak` returns, and a flag set afterwards would overwrite it, leaving
-     * the Listen control switched on with silence behind it. */
-    const queued = speakDocument(section)
-    setReading(queued)
-    setSpeaking(queued)
+  const start = useCallback(
+    () => {
+      /* THE READER'S SKIP CHOICE, from the same prefs the voice and the gaps come
+         from — so the words the reading speaks and the words the export writes are
+         decided by one value rather than two defaults. */
+      const section = speaker && surfaceRef.current.speakable(skipOf(prefsRef.current))
+      if (!section) return
+      clearContinuation()
+      setFollowsWords(true)
+      /* THE READER'S OWN LISTEN CLEARS THE LAST REFUSAL. Left standing, a sentence
+         about a chapter that could not be made would sit over the one that can. */
+      setRefusal(null)
+      /* Only claim to be reading if something was actually queued — see
+       * `speakDocument`: the empty case has already reported done by the time
+       * `speak` returns, and a flag set afterwards would overwrite it, leaving
+       * the Listen control switched on with silence behind it. */
+      const queued = speakDocument(section)
+      setReading(queued)
+      setSpeaking(queued)
+    },
     /* Stryker disable next-line ArrayDeclaration: each of these is built once for the component's life, so with none listed it would still hold the same four. */
-  }, [speaker, speakDocument, clearContinuation, setReading])
+    [speaker, speakDocument, clearContinuation, setReading],
+  )
 
   /**
    * The reading is over, however it ended.
