@@ -154,6 +154,16 @@ describe('a section is bound to the document it was made from', () => {
     expect(one.band()).toBeNull()
   })
 
+  it('answers null for a word with no box yet, and paints nothing', () => {
+    /* A section being attached lays its words out at zero size first. */
+    const one = page('<p>Bonjour.</p>')
+    ;(one.doc.defaultView as unknown as { Range: typeof Range }).Range.prototype.getBoundingClientRect = () =>
+      rect(0, 0, 0, 0)
+    const section = createReadingSurface(source(one.doc)).surface.speakable(NO_NOTES)!
+    expect(section.paintWord(0, 7)).toBeNull()
+    expect(one.band()).toBeNull()
+  })
+
   it('takes its word back off the page', () => {
     const one = page('<p>Bonjour.</p>')
     const section = createReadingSurface(source(one.doc)).surface.speakable(NO_NOTES)!
@@ -378,11 +388,32 @@ describe('a tap', () => {
     expect(heard).not.toHaveBeenCalled()
   })
 
-  it('is silent where there is no caret under the point', () => {
+  it('is silent where there is no caret under the point, and does not fail', () => {
     const { one, heard } = tapped()
+    const failed = vi.fn()
+    one.doc.defaultView!.addEventListener('error', failed)
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     one.aim(null)
     one.click()
     expect(heard).not.toHaveBeenCalled()
+    expect(failed, 'the listener returned rather than threw').not.toHaveBeenCalled()
+    expect(logged).not.toHaveBeenCalled()
+    logged.mockRestore()
+  })
+
+  it('still reaches its listener in a document with no window', () => {
+    /* Nothing to read a selection from is not a selection in progress. */
+    const doc = document.implementation.createHTMLDocument('')
+    doc.body.innerHTML = '<p>Some words here.</p>'
+    const word = doc.querySelector('p')!.firstChild!
+    ;(doc as Partial<Document>).caretRangeFromPoint = (() =>
+      ({ startContainer: word, startOffset: 2 }) as unknown as Range) as Document['caretRangeFromPoint']
+    const section = createReadingSurface(source(doc)).surface.speakable(NO_NOTES)!
+    const heard = vi.fn()
+    section.onTap(heard)
+    doc.body.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }))
+    expect(doc.defaultView).toBeNull()
+    expect(heard).toHaveBeenCalledExactlyOnceWith(2)
   })
 
   it('stops when unsubscribed, leaving another listener alone', () => {
