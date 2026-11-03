@@ -62,10 +62,13 @@ describe('the direction the reader agreed to', () => {
     expect(io.readText).toHaveBeenCalledWith(PICKED)
   })
 
+  /* `rejects.toEqual(new Error(…))`, not `rejects.toThrow(…)`: the latter passes on a
+     rejection with no reason at all, so it could not tell a refusal from a bare
+     `Promise.reject()`. */
   it('refuses to write over a file the reader only agreed to open', async () => {
     const io = ioAnswering(PICKED)
     const file = await createFilePicker(io).pickOpen(FILTERS)
-    await expect(file?.writeText('x')).rejects.toThrow('A file picked to read cannot be written: the reader was asked to open')
+    await expect(file?.writeText('x')).rejects.toEqual(new Error('A file picked to read cannot be written: the reader was asked to open'))
     expect(io.writeText).not.toHaveBeenCalled()
   })
 
@@ -79,8 +82,8 @@ describe('the direction the reader agreed to', () => {
   it('refuses to read or measure what is already at the name the reader will overwrite', async () => {
     const io = ioAnswering(PICKED)
     const file = await createFilePicker(io).pickSave('offered.json', FILTERS)
-    await expect(file?.readText()).rejects.toThrow('A file picked to write cannot be read: the reader was asked to save')
-    await expect(file?.size()).rejects.toThrow('A file picked to write cannot be measured: the reader was asked to save')
+    await expect(file?.readText()).rejects.toEqual(new Error('A file picked to write cannot be read: the reader was asked to save'))
+    await expect(file?.size()).rejects.toEqual(new Error('A file picked to write cannot be measured: the reader was asked to save'))
     expect(io.readText).not.toHaveBeenCalled()
     expect(io.size).not.toHaveBeenCalled()
   })
