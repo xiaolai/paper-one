@@ -1,3 +1,4 @@
+import type { TocItem } from 'foliate-js/view.js'
 import { CONTENT_EXTENSIONS, type ContentExtension } from './bookVault'
 
 /**
@@ -435,6 +436,99 @@ export interface SectionText {
 export interface SectionTextWalk {
   readonly sections: readonly SectionText[]
   readonly complete: boolean
+}
+
+/** One sentence of a section's text, as offsets into it. */
+export interface SentenceSpan {
+  readonly start: number
+  readonly end: number
+}
+
+/** Where a block of prose begins in a section's text: a paragraph, a heading. */
+export type SpeechBlock = number
+
+/**
+ * One section of the book, bound to the document and the text it was made from.
+ *
+ * ⚠️ **A BINDING RATHER THAN SEPARATE CALLS ON THE SURFACE, AND THAT IS D7.** A
+ * reading rejects a callback from a stale document, and it maps a tap through
+ * the same text it is speaking. Methods on the surface would lose both: an offset
+ * from one section's utterance could be painted on the next section's words, and
+ * a tap could be mapped through a skip choice the voice never read.
+ */
+export interface SpokenSection {
+  /** Empty until the book's content hash resolves. */
+  readonly bookId: string
+  /**
+   * The spine index, or null where the reader's place cannot say.
+   *
+   * Null is real and reaches the engine: see `ClipKey.section`, which records what
+   * a sentinel in its place cost.
+   */
+  readonly sectionIndex: number | null
+  readonly lang: string | null
+  readonly text: string
+  readonly sentences: readonly SentenceSpan[]
+  readonly blocks: readonly SpeechBlock[]
+  /** Over `indexText`'s canonical form, not over `text`: see `ClipKey.textDigest`. */
+  readonly digest: string
+  /** False once the document is replaced. The calls below then do nothing. */
+  live(): boolean
+  /** Draw the word being spoken, and say where it fell against the page. */
+  paintWord(start: number, length: number): 'visible' | 'ahead' | 'behind' | null
+  clearWord(): void
+  /**
+   * A plain tap on the book's text, as an offset into `text`.
+   *
+   * Silent on text this section does not read, and on a click that is not a tap: a
+   * link, a selection ending, a modified click, one somebody else handled.
+   */
+  onTap(listener: (offset: number) => void): () => void
+}
+
+/** The open book, once a walk of its text can run, bound to that one opening. */
+export interface ReadyBook {
+  readonly bookId: string
+  readonly title: string
+  readonly author: string
+  readonly lang: string | null
+  readonly toc: readonly TocItem[]
+  readonly fixedLayout: boolean
+  /** Incomplete, rather than the next book's text, once this book is replaced. */
+  sectionTexts(shouldStop: () => boolean, skip: SpeechSkipPrefs): Promise<SectionTextWalk>
+}
+
+/**
+ * The reader, as something that reads along with it sees it.
+ *
+ * ⚠️ **COMMIT ORDER IS PART OF THIS CONTRACT.** Which section is on screen arrives
+ * by render, so a change lands in one commit with everything else. The surface
+ * answers for that commit from every passive effect and every later callback. It
+ * does not yet answer for it in a child's layout effect, which runs first: a
+ * consumer records what it was rendered with there and asks here afterwards.
+ */
+export interface ReadingSurface {
+  /** The section on screen, read with these skips, or null with no document. */
+  speakable(skip: SpeechSkipPrefs): SpokenSection | null
+  turn(by: 1 | -1): void
+  chapter: {
+    can(by: 1 | -1): boolean
+    /** Whether it moved: a step that declines must leave a reading undisturbed. */
+    go(by: 1 | -1): boolean
+    /** Told when `can` changes in either direction. */
+    subscribe(listener: () => void): () => void
+  }
+  /** The book, or null until it is ready: see `readyBookOf`. */
+  book(): ReadyBook | null
+  /** Told when `book` answers something new. */
+  subscribeBook(listener: () => void): () => void
+  /**
+   * Refuse any other pace on the book until released.
+   *
+   * Synchronous and reference-counted, so two holders cannot release each other.
+   * A reading holds it through pauses and gaps. Releasing twice is one release.
+   */
+  holdPace(): () => void
 }
 
 /**
