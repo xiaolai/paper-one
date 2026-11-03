@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { invoke } from '@tauri-apps/api/core'
 import { tauriWire } from './wire'
 
 /**
@@ -9,7 +8,11 @@ import { tauriWire } from './wire'
 const listeners = new Map<string, (event: { payload: unknown }) => void>()
 let attach: (event: string) => Promise<() => void> = () => Promise.resolve(() => {})
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve(null)) }))
+const invoke = vi.hoisted(() =>
+  vi.fn((_command: string, _args?: unknown): Promise<unknown> => Promise.resolve(null)),
+)
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn((event: string, fn: (event: { payload: unknown }) => void) => {
     listeners.set(event, fn)
