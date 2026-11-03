@@ -1306,6 +1306,15 @@ describe('the voice the picker shows', () => {
     expect(asked).toEqual([['volume', 0]])
   })
 
+  it('sets the volume in a static row, like the steppers around it', () => {
+    /* The slider is the one row in §07 that does not step, but it stands in the
+       same band: a row without these classes would sit at its own height and
+       light up under the pointer as if it could be pressed. */
+    voiceGroup()
+    const row = screen.getByRole('slider', { name: 'Reading volume' }).parentElement
+    expect(row?.className).toBe(`${styles.settingRow} ${styles.settingStatic}`)
+  })
+
   it('names each tier it groups by, whichever tiers are installed', () => {
     /* Three tiers can be offered and each has its own word: the two Apple names
        a `voiceURI` spells out, and `Other` for a machine whose identifiers say
