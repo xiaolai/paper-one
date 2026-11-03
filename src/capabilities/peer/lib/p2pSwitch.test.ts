@@ -230,4 +230,53 @@ describe('the P2P switch across one run', () => {
       expect(pending).toEqual([true, false])
     })
   })
+
+  /* A subscriber that throws is logged and the rest are still told; the log names
+     which subscription it was, so the sentence is how the throw is traced. */
+  describe('a subscriber that throws', () => {
+    const logged = () => vi.spyOn(console, 'error').mockImplementation(() => {})
+    const labels = (spy: ReturnType<typeof logged>) => spy.mock.calls.map(([label]) => label)
+    const boom = () => {
+      throw new Error('subscriber failed')
+    }
+
+    it('is named as a writing subscriber when a write begins and when it ends', async () => {
+      const spy = logged()
+      try {
+        const p2p = createP2pSwitch(true, write)
+        p2p.subscribeWriting(boom)
+        await p2p.set(false)
+        expect(labels(spy)).toEqual([
+          'Paper: a P2P switch writing subscriber threw while being notified',
+          'Paper: a P2P switch writing subscriber threw while being notified',
+        ])
+      } finally {
+        spy.mockRestore()
+      }
+    })
+
+    it('is named as a switch subscriber when an answer lands', async () => {
+      const spy = logged()
+      try {
+        const p2p = createP2pSwitch(true, write)
+        p2p.subscribe(boom)
+        await p2p.set(false)
+        expect(labels(spy)).toEqual(['Paper: a P2P switch subscriber threw while being notified'])
+      } finally {
+        spy.mockRestore()
+      }
+    })
+
+    it('is named as a switch subscriber when a refused write closed the transport', async () => {
+      const spy = logged()
+      try {
+        const p2p = createP2pSwitch(true, async () => ({ closed: true, recordError: new Error('disk full'), fileSaysOn: null }))
+        p2p.subscribe(boom)
+        await expect(p2p.set(false)).rejects.toThrow('disk full')
+        expect(labels(spy)).toEqual(['Paper: a P2P switch subscriber threw while being notified'])
+      } finally {
+        spy.mockRestore()
+      }
+    })
+  })
 })
