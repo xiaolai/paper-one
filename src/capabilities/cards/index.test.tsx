@@ -60,6 +60,25 @@ describe('the cards, switched on', () => {
     composition.dispose()
   })
 
+  it('jumps through the host when a card in the open book is chosen', async () => {
+    const { composition, services } = await launch(new Set())
+    await services.cards.add({
+      id: 'c1',
+      bookId: 'b1',
+      kind: 'Idea',
+      body: 'a card to go back to',
+      answer: '',
+      source: 'Loomings',
+      cfi: MARK.cfi,
+      createdAt: 1,
+    } as never)
+    const goTo = vi.fn()
+    render(composition.panes[0]?.render({ bookId: 'b1', goTo }) as ReactElement)
+    fireEvent.click(await screen.findByRole('button', { name: /a card to go back to/u }))
+    expect(goTo).toHaveBeenCalledWith({ bookId: 'b1', cfi: MARK.cfi })
+    composition.dispose()
+  })
+
   it('says nothing over the rows while the store is writing, and says so when it is not', async () => {
     const { composition, services } = await launch(new Set())
     const notice = composition.markControls[0]?.notice
