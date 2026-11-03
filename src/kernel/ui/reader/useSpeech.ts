@@ -741,6 +741,15 @@ export function useSpeech(
     [available, clearGap, clearContinuation, clearBand, retireTap],
   )
 
+  /* ⚠️ **THE ONE PREFERENCE THAT DOES NOT WAIT FOR THE NEXT `speak`.** A downloaded
+   * voice is a whole section in one sound, so "the next sentence" is the next
+   * chapter; a gain can change under the sound as it plays. Web Speech has no such
+   * thing, and takes it from `prefsRef` per sentence like the rest. */
+  const volume = prefs.volume ?? 1
+  useEffect(() => {
+    speaker?.setVolume(volume)
+  }, [speaker, volume])
+
   /**
    * Speak one sentence of the plan, and say whether there was one.
    *

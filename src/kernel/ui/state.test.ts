@@ -575,6 +575,7 @@ describe('a control that sends something that is not a number', () => {
    */
   const table: readonly [string, (v: number) => Action, (s: AppState) => number][] = [
     ['reading rate', (v) => ({ type: 'setReadingRate', rate: v }), (s) => s.readingRate],
+    ['reading volume', (v) => ({ type: 'setReadingVolume', volume: v }), (s) => s.readingVolume],
     ['sentence gap', (v) => ({ type: 'setSentenceGap', ms: v }), (s) => s.sentenceGapMs],
     ['paragraph gap', (v) => ({ type: 'setParagraphGap', ms: v }), (s) => s.paragraphGapMs],
   ]
@@ -671,6 +672,7 @@ describe('bootState with remembered preferences', () => {
          defaults (150 and 600) for the same reason. */
       readingVoice: { en: 'com.apple.voice.premium.en-US.Ava' },
       readingRate: 1.25,
+      readingVolume: 40,
       /* OFF ITS DEFAULT (false) for the same reason as the two pauses: a boolean
          that happens to equal the default is exactly what a dropped field looks
          like, so seeding it would prove nothing. */
@@ -1034,6 +1036,27 @@ describe('the voice a reader chooses, and the speeds beside it', () => {
       }
     },
   )
+})
+
+describe('the reading volume, from a control', () => {
+  const set = (volume: number): AppState => reducer(initialState, { type: 'setReadingVolume', volume })
+
+  it('starts at full volume', () => {
+    expect(initialState.readingVolume).toBe(100)
+  })
+
+  it('stores what is in range and clamps what is not', () => {
+    /* A second door into the same value, the one the settings validator does
+       not guard: see `setReadingRate`. */
+    expect(set(40).readingVolume).toBe(40)
+    expect(set(0).readingVolume).toBe(0)
+    expect(set(250).readingVolume).toBe(100)
+    expect(set(-1).readingVolume).toBe(0)
+  })
+
+  it('refuses a value that is not a number', () => {
+    expect(set(Number.NaN)).toBe(initialState)
+  })
 })
 
 /*

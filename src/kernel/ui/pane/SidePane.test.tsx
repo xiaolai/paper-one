@@ -327,6 +327,7 @@ describe('what the Voice group is handed', () => {
         pane: 'settings',
         lastPane: 'settings',
         readingRate: 1.5,
+        readingVolume: 40,
         sentenceGapMs: 500,
         paragraphGapMs: 900,
       },
@@ -338,6 +339,13 @@ describe('what the Voice group is handed', () => {
     const steps = screen.getAllByRole('img').map((pips) => pips.getAttribute('aria-label'))
     expect(steps).toEqual(expect.arrayContaining(['Step 5 of 8', 'Step 4 of 6']))
     expect(steps.filter((label) => label === 'Step 4 of 6'), 'both gaps').toHaveLength(2)
+    expect((screen.getByRole('slider', { name: 'Reading volume' }) as HTMLInputElement).value).toBe('40')
+  })
+
+  it('sends the volume to the reducer', () => {
+    const dispatch = voiceRows()
+    fireEvent.change(screen.getByRole('slider', { name: 'Reading volume' }), { target: { value: '30' } })
+    expect(dispatch).toHaveBeenCalledWith({ type: 'setReadingVolume', volume: 30 })
   })
 
   it('writes a picked voice under the book’s own language', () => {

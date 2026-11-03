@@ -900,6 +900,14 @@
   background: transparent;
 }
 
+/* The reading volume. `<input type="range">` for what `.scrub` in the title bar
+   gives for it: the keyboard, the accessibility tree and the pointer handling come
+   free, and the thumb and track are the platform's. */
+.volume {
+  width: calc(var(--control-lg) * 2);
+  accent-color: var(--accent);
+}
+
 .stepper {
   display: flex;
   align-items: center;
