@@ -132,6 +132,33 @@ describe('parseRecord', () => {
     expect(parseRecord('[1,2,3]')).toBeNull()
   })
 
+  /* Valid JSON that is not an object is no record: reading a field of it
+   * would crash on `null`, and answer a book of nothing for the rest. */
+  it('refuses JSON that is not an object', () => {
+    for (const raw of ['', 'null', '"Moby-Dick"', '42', 'true']) expect(parseRecord(raw), raw).toBeNull()
+  })
+
+  it('drops a text field that is not a string', () => {
+    const parsed = parseRecord(JSON.stringify({ title: 42, author: 'A', sortAs: true, publisher: { name: 'P' } }))!
+    expect(parsed.title).toBe('')
+    expect(parsed).not.toHaveProperty('sortAs')
+    expect(parsed).not.toHaveProperty('publisher')
+  })
+
+  it('keeps the sort key, series place and publication date under their own names', () => {
+    const parsed = parseRecord(JSON.stringify({ title: 'T', author: 'A', sortAs: 'Moby', seriesIndex: 2, published: '1851' }))!
+    expect(parsed.sortAs).toBe('Moby')
+    expect(parsed.seriesIndex).toBe(2)
+    expect(parsed.published).toBe('1851')
+  })
+
+  /* JSON cannot write NaN, but an exponent past the double range parses to
+   * Infinity, and a series place is only ever a finite number. */
+  it('drops a series place that is not a finite number', () => {
+    expect(parseRecord('{"title":"T","author":"A","seriesIndex":1e999}')).not.toHaveProperty('seriesIndex')
+    expect(parseRecord(JSON.stringify({ title: 'T', author: 'A', seriesIndex: '3' }))).not.toHaveProperty('seriesIndex')
+  })
+
   /* A `subjects` that is not an array of strings crashes the shelf the moment
    * it renders — the same trust boundary the flat store needed. */
   it('drops a field of the wrong type rather than passing it through', () => {
@@ -1165,6 +1192,24 @@ describe('the work identifier', () => {
     expect(parseRecord(JSON.stringify({ title: 'x', author: '', metaSchema: 99 }))?.metaSchema).toBe(META_SCHEMA)
     expect(parseRecord(JSON.stringify({ title: 'x', author: '', metaSchema: -1 }))).not.toHaveProperty('metaSchema')
     expect(parseRecord(JSON.stringify({ title: 'x', author: '', metaSchema: 'soon' }))).not.toHaveProperty('metaSchema')
+  })
+
+  it('keeps a parse time of zero or more and drops a negative one', () => {
+    /* A negative "parse time" claims a parse that never happened; dropped, the
+       record reads as never parsed, which a backfill will put right. */
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', parsedAt: 0 }))?.parsedAt).toBe(0)
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', parsedAt: 5 }))?.parsedAt).toBe(5)
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', parsedAt: -1 }))).not.toHaveProperty('parsedAt')
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '' }))).not.toHaveProperty('parsedAt')
+  })
+
+  it('keeps an id and an identifier of exactly the field bound, and drops one a character longer', () => {
+    const at = 'a'.repeat(MAX_RECORD_FIELD)
+    const over = 'a'.repeat(MAX_RECORD_FIELD + 1)
+    expect(parseRecord(JSON.stringify({ title: 'x', author: '', bookId: at, identifier: at }))).toMatchObject({ bookId: at, identifier: at })
+    const dropped = parseRecord(JSON.stringify({ title: 'x', author: '', bookId: over, identifier: over }))
+    expect(dropped).not.toHaveProperty('bookId')
+    expect(dropped).not.toHaveProperty('identifier')
   })
 })
 

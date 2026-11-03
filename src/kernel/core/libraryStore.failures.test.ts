@@ -65,6 +65,28 @@ function world(ids: readonly string[], titles: Record<string, string> = {}) {
    existing library, which is a migration rather than a fix and is not a call
    this test can make. What it can do is make a regression loud: if two rows
    ever share a folder, the guards above are guarding nothing. */
+/* A write queued under a name the book is leaving follows it to the folder
+   it has when the write runs. Rekeyed round a ring and back to `a`, the old
+   `a`→`b` alias outlived the move home: the walk from `c` went `a`, `b`, back
+   to `c`, and stopped there, at a folder that was gone, and the write was
+   dropped. */
+describe('a book rekeyed round a ring and back to its first name', () => {
+  it('lands a write queued under a name it passed through', async () => {
+    const { fs, library } = world(['book_a'])
+    await expect(library.rekeyBook('book_a', 'book_b')).resolves.toBe('moved')
+    await expect(library.rekeyBook('book_b', 'book_c')).resolves.toBe('moved')
+    const home = library.rekeyBook('book_c', 'book_a')
+    // Asked while the shelf still says `book_c`, so it runs after the move home.
+    const write = library.update('book_c', (record) => ({ ...record, position: 'after' }))
+    await expect(home).resolves.toBe('moved')
+    await write
+    const raw = fs.store.get(`${BOOKS_DIR}/book_a/book.json`)
+    expect(JSON.parse(new TextDecoder().decode(raw!))).toMatchObject({ bookId: 'book_a', position: 'after' })
+    expect([...fs.store.keys()].filter((key) => !key.startsWith(`${BOOKS_DIR}/book_a/`))).toEqual([INDEX_FILE])
+    expect(library.lastFailure()).toBeNull()
+  })
+})
+
 describe('two ids that name one folder are one book', () => {
   it('does not put a second row on the shelf for a folder already held', async () => {
     const { library } = world([])

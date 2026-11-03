@@ -68,7 +68,9 @@ describe('a position tick', () => {
     /* ONE marker write for the period, at full, however many ticks. */
     const markers = fs.synced().filter((one) => one.path === INDEX_DIRTY_FILE)
     expect(markers).toEqual([{ path: INDEX_DIRTY_FILE, level: 'full', kind: 'write' }])
-    expect(await readDirtyMarker(fs)).toMatchObject({ version: 1, books: ['book_a'] })
+    /* The generation the period began at: the first tick's, counted up from
+       nothing, as Calibre's `dirtied_sequence` is. */
+    expect(await readDirtyMarker(fs)).toMatchObject({ version: 1, generation: 1, books: ['book_a'] })
     expect(recordOn(fs, 'book_a').position).toBe('p3')
     expect(library.getSnapshot().find((one) => one.bookId === 'book_a')?.position).toBe('p3')
   })
@@ -110,6 +112,102 @@ describe('a position tick', () => {
     await library.flushIndex()
     await queue.idle()
     expect(fs.writes(INDEX_FILE)).toBe(1)
+  })
+
+  /* The marker is APPENDED on the index key, so a flush asked for while the
+     marker is still being written runs after it, and the flush's clear is
+     the last word. Written on a key of its own, the marker landed after the
+     flush had cleared it, and stood beside a current index naming a book
+     that nothing was behind. */
+  it('is cleared by a flush asked for while its marker is still being written', async () => {
+    const ids = ['book_a']
+    const fs = fakeFs(seeded(ids))
+    let gate: (() => void) | null = null
+    const stalled = new Promise<void>((resolve) => {
+      gate = resolve
+    })
+    let stalls = 0
+    const gated: IndexFs = {
+      ...fs,
+      rename: async (from, to) => {
+        if (to === INDEX_DIRTY_FILE && stalls++ === 0) await stalled
+        await fs.rename(from, to)
+      },
+    }
+    const queue = writeQueue()
+    const library = createLibrary({ fs: gated, queue, initial: ids.map((id) => row(id)) })
+
+    const tick = library.rememberPosition('book_a', 'p1', 0.1)
+    /* Let the tick write its record and reach the stalled marker. */
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(stalls).toBe(1)
+    const flush = library.flushIndex()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    gate!()
+    await Promise.all([tick, flush])
+    await queue.idle()
+
+    expect(indexOn(fs)?.books[0]?.position).toBe('p1')
+    expect(fs.store.has(INDEX_DIRTY_FILE)).toBe(false)
+  })
+
+  /* One throttle per period. A timer armed over one still pending orphans
+     the first, which then fires inside the NEXT period and flushes it early. */
+  it('arms one throttle for a period, however many ticks land in it', async () => {
+    const { fs, queue, library } = world(['book_a'])
+    await library.rememberPosition('book_a', 'p1', 0.1)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await library.rememberPosition('book_a', 'p2', 0.2)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(1)
+
+    await library.rememberPosition('book_a', 'p3', 0.3)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(1)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(2)
+    expect(indexOn(fs)?.books[0]?.position).toBe('p3')
+  })
+
+  /* A flush on demand ends the period, throttle and all. Left armed, the old
+     timer swallowed the next tick's arming and then flushed that tick half a
+     period early. */
+  it('starts a fresh throttle after a flush on demand', async () => {
+    const { fs, queue, library } = world(['book_a'])
+    await library.rememberPosition('book_a', 'p1', 0.1)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await library.flushIndex()
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(1)
+
+    await library.rememberPosition('book_a', 'p2', 0.2)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(1)
+    await vi.advanceTimersByTimeAsync(INDEX_FLUSH_MS / 2)
+    await queue.idle()
+    expect(fs.writes(INDEX_FILE)).toBe(2)
+    expect(indexOn(fs)?.books[0]?.position).toBe('p2')
+  })
+
+  /* A browser's `setTimeout` answers with a number, which has no `unref`. */
+  it('arms its throttle where a timer is a bare number, as in a browser', async () => {
+    const { fs, queue, library } = world(['book_a'])
+    const armed: (() => void)[] = []
+    vi.stubGlobal('setTimeout', (run: () => void) => armed.push(run))
+    try {
+      await library.rememberPosition('book_a', 'p1', 0.1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(armed).toHaveLength(1)
+    armed[0]!()
+    await queue.idle()
+    expect(indexOn(fs)?.books[0]?.position).toBe('p1')
   })
 })
 
@@ -175,9 +273,10 @@ describe('the next launch', () => {
     await flush
     await queue.idle()
 
-    /* The index installed the older world, and the marker says so. */
+    /* The index installed the older world, and the marker says so — at the
+       generation the second tick moved it to. */
     expect(indexOn(fs)?.books[0]?.position).toBe('p2')
-    expect(await readDirtyMarker(fs)).toMatchObject({ books: ['book_a'] })
+    expect(await readDirtyMarker(fs)).toMatchObject({ generation: 2, books: ['book_a'] })
 
     /* The crash before the next timer. */
     const shelf = await loadShelf(fs)
@@ -365,6 +464,38 @@ describe('a subscriber hears once per change', () => {
     library.subscribe(heard)
     await library.patch('book_1', { rating: 3 })
     expect(heard).toHaveBeenCalledTimes(1)
+  })
+
+  it('names the shelf when a subscriber throws, and still tells the rest', async () => {
+    const { library } = world(['book_1'])
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const heard = vi.fn()
+    library.subscribe(() => {
+      throw new Error('a panel that fails')
+    })
+    library.subscribe(heard)
+    try {
+      await library.patch('book_1', { rating: 3 })
+      expect(heard).toHaveBeenCalledTimes(1)
+      expect(said).toHaveBeenCalledWith('Paper: a library subscriber threw while being notified', expect.any(Error))
+    } finally {
+      said.mockRestore()
+    }
+  })
+
+  /* A write that lands after its row was taken off the shelf — the reader
+     rated a book and removed it before the rating reached the disk. The
+     landed record has no row left to correct, so it is not given one, and
+     the rating is not reported as a failure. */
+  it('corrects no row, and reports nothing, when a write lands for a book already taken off', async () => {
+    const { queue, library } = world(['book_1', 'book_2'])
+    const rated = library.patch('book_1', { rating: 3 })
+    const removed = library.remove('book_1')
+    await expect(rated).resolves.toBeUndefined()
+    await removed
+    await queue.idle()
+    expect(library.getSnapshot().map((one) => one.bookId)).toEqual(['book_2'])
+    expect(library.lastFailure()).toBeNull()
   })
 })
 

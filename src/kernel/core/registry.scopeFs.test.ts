@@ -145,6 +145,10 @@ describe('the circle’s two reviewed write shapes', () => {
     await expect(scoped.mkdir('books/book_abc/shared.json')).rejects.toThrow(/may only mkdir/u)
     await expect(scoped.removeDir('books/book_abc')).rejects.toThrow(/may only removeDir under "circle\/"/u)
     await expect(scoped.removeDir('books/book_abc/circle')).rejects.toThrow(/may only removeDir/u)
+    /* The two parents and nothing that merely contains or begins with one. */
+    for (const path of ['public/books/book_abc', 'public/books/book_abc/circle', 'books/book_abc/circle_old', 'books/book_abc/circle/aa11']) {
+      await expect(scoped.mkdir(path)).rejects.toThrow(/may only mkdir/u)
+    }
     const sync = scopeFs(withoutAtomic as unknown as NonNullable<KernelServices['fs']>, 'sync')!
     await expect(sync.mkdir('books/book_abc')).rejects.toThrow(/may only mkdir under "sync\/"/u)
   })

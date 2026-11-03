@@ -6,6 +6,7 @@ import type { BookMeta, ReaderPosition } from '../core/bookMeta'
 import type { MutationRecorder } from '../core/ports'
 import type { SelectionSnapshot } from './reader/session'
 import { META_SCHEMA, folderOf } from '../core/bookFolder'
+import { legacyBookIdFor } from '../core/idMigration'
 import { bookIdFor } from '../core/marks'
 import { fakeFs } from '../core/indexFsFake.testkit'
 import { composeCapabilities, kernelApi } from '../core/registry'
@@ -1255,6 +1256,52 @@ describe('what the window files while a book is open', () => {
         'the dropped book’s bytes were never kept',
       ).toBe(true)
     })
+  })
+})
+
+describe('a book whose cards were filed under the previous scheme', () => {
+  /* `bookIdFor` hashes the content now; a card made before that carries the id
+     `legacyBookIdFor` computes, and the intake carries it across when the book
+     next opens. */
+  const card = (bookId: string) => ({
+    id: 'c-whale',
+    bookId,
+    kind: 'Idea' as const,
+    body: 'The whale is the book',
+    answer: '',
+    source: 'Loomings',
+    cfi: null,
+    createdAt: 1,
+  })
+  const filedUnder = (services: ReturnType<typeof createKernelServices>) =>
+    services.cards.getSnapshot().all.map((one) => one.bookId)
+
+  it('carries them to the id the book has now when it opens', async () => {
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    const legacy = await legacyBookIdFor(new File([BYTES], 'content.epub'))
+    expect(legacy, 'the two schemes gave this book one id, so nothing here moves').not.toBe(moby.bookId)
+    const { services } = await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    await act(() => services.cards.add(card(legacy)))
+    await open('Moby-Dick')
+    await eventually(() => expect(filedUnder(services), 'the card stayed under the old id').toEqual([moby.bookId]))
+  })
+
+  it('carries them in the services the window holds now', async () => {
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    const legacy = await legacyBookIdFor(new File([BYTES], 'content.epub'))
+    const fs = fakeFs(moby.files) as unknown as IndexFs
+    const signal = new AbortController().signal
+    const first = createKernelServices({ fs, storage: null, initialBooks: [moby.row] })
+    const { rerender } = render(
+      <App services={first} fs={fs} composition={await composeCapabilities([], kernelApi(first), signal)} />,
+    )
+    await settle()
+    const second = createKernelServices({ fs, storage: null, initialBooks: [moby.row] })
+    await act(() => second.cards.add(card(legacy)))
+    rerender(<App services={second} fs={fs} composition={await composeCapabilities([], kernelApi(second), signal)} />)
+    await settle()
+    await open('Moby-Dick')
+    await eventually(() => expect(filedUnder(second), 'the card stayed under the old id').toEqual([moby.bookId]))
   })
 })
 

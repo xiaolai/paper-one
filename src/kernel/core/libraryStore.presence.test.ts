@@ -46,6 +46,24 @@ describe('a re-add of a removed book', () => {
     expect(await fs.exists('trash/book_a')).toBe(false)
   })
 
+  /* THE SPARSE PATH HAS NO BRACKET of its own: an import over a row already
+     on the shelf answers before the full add's `before` hook, so the flip of
+     a register still saying `removed` is its only word on the matter. */
+  it('marks the register live when an import lands on a row it calls removed', async () => {
+    const fs = fakeFs({ 'books/book_a/book.json': JSON.stringify({ bookId: 'book_a', ...rec('A') }) })
+    await writePresence(fs, { book_a: { state: 'removed', at: t(900) } })
+    let wall = 1_000
+    const library = createLibrary({
+      fs,
+      queue: writeQueue(),
+      initial: [{ bookId: 'book_a', title: 'A', author: 'A', hasContent: true }],
+      recorder: spyRecorder().recorder,
+      clock: () => t(++wall),
+    })
+    expect(await library.add('book_a', rec('A'), true)).toBe('added')
+    expect((await readPresence(fs))['book_a']).toEqual({ state: 'live', at: t(1_001) })
+  })
+
   it('records only the record for a book the register never removed', async () => {
     const { spy, library } = world()
     expect(await library.add('book_a', rec('A'))).toBe('added')

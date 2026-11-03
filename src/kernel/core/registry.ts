@@ -519,41 +519,46 @@ function stronglyConnectedComponents(nodes: readonly string[], edges: ReadonlyMa
   const onStack = new Set<string>()
   const stack: string[] = []
   const components: string[][] = []
+  const work: { node: string; rest: Iterator<string> }[] = []
   let counter = 0
 
-  const visit = (node: string) => {
+  /* Numbering a node and giving it a frame are one step: a node with a
+     frame and no number would be popped from `stack` looking for itself,
+     and never found. Every node has an entry in `edges`: `checkRequires`
+     sets one per id and refuses a target that is not an id. */
+  const enter = (node: string) => {
     index.set(node, counter)
     low.set(node, counter)
     counter++
     stack.push(node)
     onStack.add(node)
+    work.push({ node, rest: edges.get(node)![Symbol.iterator]() })
   }
 
   for (const root of nodes) {
     if (index.has(root)) continue
-    visit(root)
-    const work: { node: string; next: number }[] = [{ node: root, next: 0 }]
+    enter(root)
     while (work.length > 0) {
-      const frame = work[work.length - 1] as { node: string; next: number }
-      const successors = edges.get(frame.node) ?? []
-      if (frame.next < successors.length) {
-        const next = successors[frame.next++] as string
+      const frame = work[work.length - 1] as { node: string; rest: Iterator<string> }
+      /* An iterator, not a position compared with a length: a frame asks
+         for its next successor and is told when there is none, so there is
+         no bound to get wrong by one. */
+      const step = frame.rest.next()
+      if (!step.done) {
+        const next = step.value
         if (!index.has(next)) {
-          visit(next)
-          work.push({ node: next, next: 0 })
+          enter(next)
         } else if (onStack.has(next)) {
           low.set(frame.node, Math.min(low.get(frame.node) ?? 0, index.get(next) ?? 0))
         }
         continue
       }
       if (low.get(frame.node) === index.get(frame.node)) {
-        const component: string[] = []
-        let member: string
-        do {
-          member = stack.pop() as string
-          onStack.delete(member)
-          component.push(member)
-        } while (member !== frame.node)
+        /* Everything above the root on `stack`, taken in one cut: a member
+           at a time, looking for the root, would never stop if it were not
+           there. */
+        const component = stack.splice(stack.lastIndexOf(frame.node))
+        for (const member of component) onStack.delete(member)
         components.push(component)
       }
       work.pop()
@@ -810,7 +815,6 @@ const EMPTY_STATUSES: readonly BookStatus[] = Object.freeze([])
 const EMPTY_MARK_CONTROLS: readonly MarkControl[] = Object.freeze([])
 const EMPTY_CLIENTS: readonly ClientContribution[] = Object.freeze([])
 const EMPTY_SERVICES: ReadonlyMap<string, ServiceContribution> = new Map()
-const EMPTY_SERVICE_ROWS: readonly ServiceContribution[] = Object.freeze([])
 
 /**
  * A contributed list, arranged: by `order` (unset last), then registration.
@@ -1003,7 +1007,10 @@ export async function composeCapabilities(
         ),
       ),
       clients: Object.freeze((cap.clients ?? []).map((client) => Object.freeze({ ...client }))),
-      services: capServices.get(cap.id) ?? EMPTY_SERVICE_ROWS,
+      /* Every capability has its row in `capServices`, made above from the
+         same list `ordered` is drawn from, so there is no absent row to
+         default. (A fallback stood here that no composition could reach.) */
+      services: capServices.get(cap.id) as readonly ServiceContribution[],
       /* ⚠️ **THE RECORD IS COPIED, NOT JUST THE ARRAY.** Every other line here
        * freezes the array and keeps the contributed objects, which is right
        * for the ones the kernel only reads. An overlay is different: its two
@@ -1117,14 +1124,14 @@ export async function composeCapabilities(
      * through `peer`, so starting it without one would fail later, further from
      * the cause. Registration order is topological, so a dependency has always
      * been decided by the time this runs. */
-    const missing = (cap.requires ?? []).find((id) => failed.has(id))
+    const missing = cap.requires?.find((id) => failed.has(id))
     if (missing !== undefined) {
       skip(cap.id, 'requires-failed', new Error(`capability "${cap.id}" requires "${missing}", which did not compose`), missing)
       continue
     }
     /* AFTER THE FAILURE CHECK, so a capability with one requirement failed and
        another off reads as what is actually wrong. */
-    const absent = (cap.requires ?? []).find((id) => leftOut.has(id))
+    const absent = cap.requires?.find((id) => leftOut.has(id))
     if (absent !== undefined) {
       leaveOut(cap.id, { state: 'needs', on: absent })
       continue

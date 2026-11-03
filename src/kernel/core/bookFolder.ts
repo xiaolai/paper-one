@@ -552,8 +552,8 @@ const MAX_TAGS = 4096
 
 const text = (v: unknown, limit = MAX_FIELD): string | undefined =>
   typeof v === 'string' && v ? v.slice(0, limit) : undefined
-const num = (v: unknown): number | undefined =>
-  typeof v === 'number' && Number.isFinite(v) ? v : undefined
+// `Number.isFinite` answers false for anything that is not a number, without coercing it.
+const num = (v: unknown): number | undefined => (Number.isFinite(v) ? (v as number) : undefined)
 const list = (v: unknown, limit = MAX_LIST): readonly string[] | undefined => {
   if (!Array.isArray(v)) return undefined
   const clean = v
@@ -717,10 +717,10 @@ function capRegisters(clock: Record<string, TagClockEntry>): TagClock {
  * memory — the correction phase 3's audit forced, kept.
  */
 export function parseRecord(raw: string | null): BookRecord | null {
-  if (!raw) return null
   let parsed: unknown
   try {
-    parsed = JSON.parse(raw)
+    // An absent file reads as the JSON text `null`, refused below with every other non-object.
+    parsed = JSON.parse(String(raw))
   } catch {
     return null
   }
@@ -796,7 +796,10 @@ function bookMetaOf(r: Record<string, unknown>): Partial<BookRecord> & Pick<Book
 
 /** A finite number that is not negative, or `undefined` — never one moved. */
 function nonNegative(value: number | undefined): number | undefined {
-  return value === undefined || value < 0 ? undefined : value
+  /* No separate "absent" clause: absent is not negative, and is handed back as
+     it came. Spelled as one, it was a question no answer could tell from its
+     removal, which a mutation sweep found (2026-11-02). */
+  return (value ?? 0) < 0 ? undefined : value
 }
 
 /** A stored schema number, clamped to what this build can have written. */

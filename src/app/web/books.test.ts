@@ -143,6 +143,15 @@ describe('parseRows', () => {
   it('refuses a format it does not know', () => {
     expect(parseRows([{ bookId: 'a', format: 'epub' }])[0]?.format).toBe('epub')
     expect(parseRows([{ bookId: 'a', format: 'docx' }])[0]?.format).toBeNull()
+    expect(parseRows([{ bookId: 'a', format: '' }])[0]?.format).toBeNull()
+  })
+
+  it('knows every format the kernel’s rows can send', () => {
+    /* `services/rows.ts`' `BookRowFormat`, spelled out: a format this client
+       forgot reads as unknown, and the shelf draws that book with no format. */
+    for (const format of ['epub', 'pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz', 'bin'] as const) {
+      expect(parseRows([{ bookId: 'a', format }])[0]?.format, format).toBe(format)
+    }
   })
 
   it('keeps only the strings out of a list, rather than the list or nothing', () => {

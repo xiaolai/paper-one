@@ -98,6 +98,26 @@ const place = (): NewMark =>
     chapter: 'Ch. 1',
   })
 
+/**
+ * Turn the microtask queue until `ready`, and fail when it never is.
+ *
+ * ⚠️ **A BARE `while (...) await Promise.resolve()` NEVER LETS A TIMER RUN**, so
+ * a scan that never started span it for ever: the test's own deadline is a timer
+ * too, and the run hung rather than failing. A mutation sweep made exactly that
+ * scan (`loadAll` that never scans) and the file did not come back. Everything
+ * the store does here is promises over a fake disk, so the state arrives within
+ * twenty turns (measured: every test here passes at a limit of 20) or not at
+ * all, and the limit is set far past that so a slower runner is never mistaken
+ * for a scan that never ran.
+ */
+const SPIN_LIMIT = 10_000
+const spinUntil = async (ready: () => boolean, what: string): Promise<void> => {
+  for (let turn = 0; !ready(); turn += 1) {
+    if (turn === SPIN_LIMIT) throw new Error(`${what} never happened`)
+    await Promise.resolve()
+  }
+}
+
 /** What `loadAllNow` refused with: the test fails if it answered instead. */
 const refusal = (store: MarkStore): Promise<MarksScanFailed> =>
   store.loadAllNow().then(
@@ -221,7 +241,7 @@ describe('every mark, for something that is about to write a file', () => {
         /* The export waits for pending writes first, so its scan starts a little
            after the call. The test is about a scan that starts after that one. */
         const scanStarted = async () => {
-          while (listings === 0) await Promise.resolve()
+          await spinUntil(() => listings > 0, 'the export listing the shelf')
         }
         return { fs, gated, open, scanStarted }
       }
@@ -301,9 +321,9 @@ describe('every mark, for something that is about to write a file', () => {
           else if (all.length > 0) once('landed')
         })
         const answer = store.loadAllNow().finally(() => order.push('answered'))
-        while (listings === 0) await Promise.resolve()
+        await spinUntil(() => listings > 0, 'the export listing the shelf')
         const panel = store.loadAll()
-        while (listings < 2 || reads === 0) await Promise.resolve()
+        await spinUntil(() => listings >= 2 && reads > 0, 'the panel listing the shelf while the export reads')
         letRead()
         for (let tick = 0; tick < ticks; tick++) await Promise.resolve()
         letFail()

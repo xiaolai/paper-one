@@ -1,5 +1,6 @@
 import { MAX_RECORD_FIELD, MAX_RECORD_POSITION, MAX_REVIEW } from './bookFolder'
 import { CONTENT_EXTENSIONS } from './bookVault'
+import { deepFreeze } from './deepFreeze'
 import { CARD_KINDS, MAX_CARD_TEXT } from './cards'
 import { MARK_KINDS, MARK_TINTS, MAX_MARK_NOTE, MAX_MARK_TEXT } from './marks'
 import { TAG_MAX } from './tags'
@@ -1156,62 +1157,32 @@ export type ServiceName = (typeof TABLE)[number]['name']
  * is exported from the kernel's public entry, so any module loaded before
  * `buildServices()` could have rewritten a destructive service's grant to a
  * reading one, or renamed a service, and nothing would have noticed: the
- * derived `SERVICE_NAMES` and `BY_NAME` are built from the same objects and
+ * derived `SERVICE_NAMES` and `serviceDescriptor` read the same objects and
  * would have agreed with the tampered version.
  *
  * Freezing is shallow by default, so this walks: descriptors, their `input`
  * arrays and each field, and `output`. Frozen in place rather than copied,
- * so `BY_NAME` and the row identities stay the same objects the handlers are
- * typed against.
+ * so the row identities stay the same objects the handlers are typed against.
  */
-/**
- * ⚠️ **EXPORTED FOR ITS NULL GUARD, WHICH NOTHING IN THE TABLE REACHES.**
- * `typeof null === 'object'`, so without the first clause a null field would
- * fall through to `Object.getOwnPropertyNames(null)` and throw at import — and
- * no row carries one today, which is exactly why no test that walks
- * `SERVICE_TABLE` can reach it. Measured: that mutant survives while every
- * other one in this function fails to LOAD the module. Asked directly, it is
- * one assertion.
- *
- * Internal otherwise — nothing but `SERVICE_TABLE` should call it.
- */
-export function deepFreeze<T>(value: T): T {
-  if (value === null || typeof value !== 'object') return value
-  for (const key of Object.getOwnPropertyNames(value)) {
-    deepFreeze((value as Record<string, unknown>)[key])
-  }
-  return Object.freeze(value)
-}
-
-/* ⚠️ **FIVE OF THIS FUNCTION'S MUTANTS CANNOT BE SCORED BY STRYKER'S VITEST
-   RUNNER, AND THAT IS MEASURED RATHER THAN ASSUMED.** It runs at module scope,
-   so a mutant that breaks it throws while the module is IMPORTED — and a suite
-   that fails to load fails no test, which the runner reads as `Survived`.
-   Measured 2026-09-25, each mutant applied by hand and the suite run:
-
-   | mutant | what happened |
-   |---|---|
-   | the body emptied | module did not load |
-   | the whole guard `false` | module did not load |
-   | `\|\|` for `&&` | module did not load |
-   | `typeof value !== 'object'` `false` | module did not load |
-   | the by-name map's arrow | module did not load |
-   | **`value === null` `false`** | **genuinely survived** — hence the export above |
-
-   The four `deepFreeze` ones are also covered by four live cases that DO fail
-   when the function stops freezing, so the behaviour is tested; what cannot be
-   done is reading that off a report. `AGENTS.md` records the runner's limit. */
+/* ⚠️ **FROZEN BY A FUNCTION FROM ANOTHER MODULE, ON PURPOSE.** `deepFreeze`
+   lived here, and this call runs at module scope, so every mutant that broke it
+   threw while this module was IMPORTED: a suite that fails to load fails no
+   test, and Stryker's vitest runner reads that as `Survived`. Five of its
+   mutants could be neither killed nor told from survivors, measured by hand
+   2026-09-25 and again 2026-11-02. In `deepFreeze.ts` its own test asks it
+   directly and each one fails a test. */
 export const SERVICE_TABLE: readonly ServiceDescriptor[] = deepFreeze(TABLE)
 
 /** Names, in table order. */
 export const SERVICE_NAMES: readonly ServiceName[] = Object.freeze(TABLE.map((one) => one.name))
 
-const BY_NAME: ReadonlyMap<string, ServiceDescriptor> = new Map(SERVICE_TABLE.map((one) => [one.name, one]))
-
 /** The descriptor for a name, or null — the router's `unknown-service` and the
  *  CLI's "did you mean" both start here. */
 export function serviceDescriptor(name: string): ServiceDescriptor | null {
-  return BY_NAME.get(name) ?? null
+  /* A walk of the table, not an index built when this module loads: a mutant
+     of that index's arrow threw at import, which reads as a survivor for the
+     reason above. The table holds a few dozen rows. */
+  return SERVICE_TABLE.find((one) => one.name === name) ?? null
 }
 
 /** Every service on a noun, in table order. The CLI's per-noun help. */

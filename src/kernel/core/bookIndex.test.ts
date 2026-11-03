@@ -80,6 +80,32 @@ describe('scanBooks', () => {
   })
 })
 
+/* AT MOST `SCAN_WIDTH` (16) FOLDERS IN FLIGHT. The pool exists to overlap
+   round-trips without opening one per book at once; a pool as wide as the
+   library is no pool. */
+describe('the scan of a large library', () => {
+  it('reads at most sixteen folders at once, and more than one', async () => {
+    const files: Record<string, string> = {}
+    for (let i = 0; i < 40; i++) files[`${BOOKS_DIR}/book_${i}/book.json`] = record(`Book ${i}`)
+    const base = fakeFs(files)
+    let inFlight = 0
+    let most = 0
+    const fs: IndexFs = {
+      ...base,
+      readDir: async (path) => {
+        if (path === BOOKS_DIR) return base.readDir(path)
+        inFlight += 1
+        most = Math.max(most, inFlight)
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        inFlight -= 1
+        return base.readDir(path)
+      },
+    }
+    expect(await scanBooks(fs)).toHaveLength(40)
+    expect(most).toBe(16)
+  })
+})
+
 describe('parseIndex', () => {
   it('reads a cache back', () => {
     const raw = JSON.stringify({ version: 2, books: [{ bookId: 'a', title: 'T', author: 'A' }] })
@@ -296,6 +322,15 @@ describe('loadShelf', () => {
     expect((await loadShelf(fs)).books).toHaveLength(1)
   })
 
+  /* A FILE BESIDE THE FOLDERS IS NOT A FOLDER. The trust check lists only
+     directories, so a snapshot that took in a stray file would disagree with
+     every later listing and rescan on every launch. */
+  it('trusts the cache after a rescan when a loose file sits among the books', async () => {
+    const fs = fakeFs({ ...twoBooks, [`${BOOKS_DIR}/.DS_Store`]: 'x' })
+    expect((await loadShelf(fs)).rescanned).toBe(true)
+    expect((await loadShelf(fs)).rescanned).toBe(false)
+  })
+
   it('leaves a usable cache behind after a rescan', async () => {
     const fs = fakeFs(twoBooks)
     await loadShelf(fs)
@@ -429,6 +464,16 @@ describe('a library whose records will not read', () => {
       [`${BOOKS_DIR}/book_a/book.json`]: 'half a write',
       [`${BOOKS_DIR}/book_b/book.json`]: 'also broken',
     })
+    await expect(scanBooks(fs)).rejects.toThrow('could not be read')
+  })
+
+  /* A RECORD THAT WILL NOT PARSE IS UNREADABLE, whatever `exists` says
+   * afterwards. `gone` is for a folder the walk could not read at all; a
+   * parse failure answered there would drop the book from the count, and a
+   * library of damaged records would come back as an empty shelf. */
+  it('counts a record that will not parse as unreadable without asking whether its folder is gone', async () => {
+    const base = fakeFs({ [`${BOOKS_DIR}/book_a/book.json`]: 'half a write' })
+    const fs: IndexFs = { ...base, exists: async (path) => path !== `${BOOKS_DIR}/book_a` && base.exists(path) }
     await expect(scanBooks(fs)).rejects.toThrow('could not be read')
   })
 
@@ -879,6 +924,52 @@ describe('scanAllMarks', () => {
     const unreadable: string[] = []
     expect(await scanAllMarks(moving, (folder) => unreadable.push(folder))).toEqual([])
     expect(unreadable).toEqual(['book_a'])
+  })
+
+  /* A disk that refuses every `exists`, for the cases where the question that
+     decides whether a book is passed over cannot be answered. */
+  const refusingExists = (fs: IndexFs, refused: (path: string) => boolean): IndexFs => ({
+    ...fs,
+    exists: async (path) => {
+      if (refused(path)) throw new Error('EACCES')
+      return fs.exists(path)
+    },
+  })
+
+  it('names a book whose marks file it cannot ask about, rather than passing it over', async () => {
+    const fs = fakeFs({ [`${BOOKS_DIR}/book_b/book.json`]: '{}' })
+    const unreadable: string[] = []
+    const scan = scanAllMarks(
+      refusingExists(fs, (path) => path.endsWith('/marks.json')),
+      (folder) => unreadable.push(folder),
+    )
+    expect(await scan).toEqual([])
+    expect(unreadable).toEqual(['book_b'])
+  })
+
+  it('names a book with no marks file whose folder it cannot ask about', async () => {
+    const fs = fakeFs({ [`${BOOKS_DIR}/book_b/book.json`]: '{}' })
+    const unreadable: string[] = []
+    const scan = scanAllMarks(
+      refusingExists(fs, (path) => path === `${BOOKS_DIR}/book_b`),
+      (folder) => unreadable.push(folder),
+    )
+    expect(await scan).toEqual([])
+    expect(unreadable).toEqual(['book_b'])
+  })
+
+  it('reads only folders, so a stray file beside the books is never named', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/marks.json`]: JSON.stringify([1]),
+      [`${BOOKS_DIR}/.DS_Store`]: '',
+    })
+    const unreadable: string[] = []
+    const scan = scanAllMarks(
+      refusingExists(fs, () => true),
+      (folder) => unreadable.push(folder),
+    )
+    expect(await scan).toEqual([{ folder: 'book_a', rows: [1] }])
+    expect(unreadable).toEqual([])
   })
 
   it('throws when the library itself will not list', async () => {

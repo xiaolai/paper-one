@@ -401,6 +401,22 @@ describe('a capability saying what happened', () => {
     /* A slot still held would refuse this with "already bound". */
     expect(() => services.bindNotifier(() => {})).not.toThrow()
   })
+
+  it('reaches the line through the services the window holds now, and gives the old ones back their slot', async () => {
+    const signal = new AbortController().signal
+    const first = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    const { rerender } = render(
+      <App services={first} fs={null} composition={await composeCapabilities([], kernelApi(first), signal)} />,
+    )
+    await settle()
+    const second = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    rerender(<App services={second} fs={null} composition={await composeCapabilities([], kernelApi(second), signal)} />)
+    await settle()
+    act(() => second.notify('Said through the second.'))
+    expect(screen.getByText('Said through the second.')).toBeTruthy()
+    /* A slot the window still held would refuse this with "already bound". */
+    expect(() => first.bindNotifier(() => {})).not.toThrow()
+  })
 })
 
 describe('what a contributed screen is handed', () => {
@@ -2389,6 +2405,50 @@ describe('the Settings panel, as the window hands it over', () => {
     fireEvent.click(row)
     expect(services.settings.get(pluginsOff), 'the switch did not reach the settings App holds').toEqual(['switchable'])
     expect(screen.getByText('Quit and reopen Paper to finish turning this off.')).toBeTruthy()
+  })
+
+  /* WHAT THIS RUN LAUNCHED WITH is read off the composition's `standing`, and
+     the reopen line is the difference between it and the switch. */
+  const SWITCHABLE = { id: 'switchable', toggle: { title: 'Some feature', summary: 'What it does.' } }
+  const optionalFeatures = async () => {
+    await runCommand('Settings', 'Open Settings')
+    fireEvent.click(screen.getByRole('button', { name: /Optional features/u }))
+    return screen.getByRole('switch', { name: 'Some feature' })
+  }
+
+  it('asks for no reopen over a feature this run launched without, until it is switched back on', async () => {
+    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    services.settings.set(pluginsOff, ['switchable'])
+    const composition = await composeCapabilities([SWITCHABLE], kernelApi(services), new AbortController().signal, {
+      switchedOff: new Set(['switchable']),
+    })
+    render(<App services={services} fs={null} composition={composition} />)
+    await settle()
+    const row = await optionalFeatures()
+    expect(row.getAttribute('aria-checked')).toBe('false')
+    expect(screen.queryByText(/Quit and reopen Paper/u), 'a feature that launched off was taken to be running').toBeNull()
+    fireEvent.click(row)
+    expect(screen.getByText('Quit and reopen Paper to finish turning this on.')).toBeTruthy()
+  })
+
+  it('measures the switch against the composition the window holds now', async () => {
+    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    const signal = new AbortController().signal
+    const { rerender } = render(
+      <App services={services} fs={null} composition={await composeCapabilities([SWITCHABLE], kernelApi(services), signal)} />,
+    )
+    await settle()
+    fireEvent.click(await optionalFeatures())
+    expect(screen.getByText('Quit and reopen Paper to finish turning this off.')).toBeTruthy()
+    /* Composed again with the feature off, as the reopen would compose it:
+       the switch and the launch agree, so there is nothing left to finish. */
+    const relaunched = await composeCapabilities([SWITCHABLE], kernelApi(services), signal, {
+      switchedOff: new Set(['switchable']),
+    })
+    rerender(<App services={services} fs={null} composition={relaunched} />)
+    await settle()
+    expect(screen.getByRole('switch', { name: 'Some feature' }).getAttribute('aria-checked')).toBe('false')
+    expect(screen.queryByText(/Quit and reopen Paper/u), 'the switches still measured the first launch').toBeNull()
   })
 })
 

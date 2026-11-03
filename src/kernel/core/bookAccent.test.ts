@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bookAccent, bookHue, rowHue } from './bookAccent'
+import { bookAccent, bookHue, coverTintFor, rowHue } from './bookAccent'
 
 /** The two shapes `bookIdFor` actually produces. */
 const fileId = (hex: string) => `file:${hex}`
@@ -89,5 +89,21 @@ describe('rowHue', () => {
 
   it('spreads ids that differ by a character across the wheel', () => {
     expect(new Set(ids.map(rowHue)).size).toBeGreaterThan(100)
+  })
+})
+
+describe('coverTintFor', () => {
+  const TINTS = ['var(--tint-a)', 'var(--tint-b)', 'var(--tint-c)', 'var(--tint-d)', 'var(--tint-e)']
+
+  it('gives a book the same tint every time', () => {
+    for (const id of hexIds(50)) expect(coverTintFor(id)).toBe(coverTintFor(id))
+  })
+
+  /* All five, and nothing else. A shelf drawn from fewer — a tint dropped from
+   * the palette, or every book falling back to the first — would still give each
+   * book a stable colour, so stability alone cannot tell. */
+  it('reaches every one of the five theme tints and no other value', () => {
+    const seen = new Set(hexIds(200).map(coverTintFor))
+    expect([...seen].sort()).toEqual(TINTS)
   })
 })

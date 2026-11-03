@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  deepFreeze,
   GRANT_FAMILIES,
   SERVICE_AUDIENCES,
   SERVICE_GRANTS,
@@ -333,9 +332,11 @@ describe('the table is frozen, and reachable by name', () => {
   /* ⚠️ **SIX MUTANTS SAT ON `deepFreeze` AND THE BY-NAME INDEX, AND THE MERGE
    * BASE COULD DECIDE NONE OF THEM** — its report marks each `static`, and a
    * static mutant that throws while the module loads is reported `Survived` by
-   * Stryker's vitest runner because the suite fails no test. So they were
-   * neither authorised nor billed; the gate's own instruction is to settle them
-   * by killing them here. */
+   * Stryker's vitest runner because the suite fails no test. Asserting them
+   * here could not change that, since a broken freeze never let this file
+   * load: `deepFreeze` now has its own module and test, and the lookup walks
+   * the table instead of an index built at import (2026-11-02). These cases
+   * hold the table to what both give it. */
   it('freezes the rows, their arrays and their nested fields', () => {
     const row = SERVICE_TABLE[0]
     expect(row).toBeDefined()
@@ -351,20 +352,6 @@ describe('the table is frozen, and reachable by name', () => {
     for (const value of nested) expect(Object.isFrozen(value)).toBe(true)
   })
 
-  it('leaves a null field alone rather than walking its properties', () => {
-    /* ⚠️ **`typeof null === 'object'`**, so without the null clause this falls
-     * through to `Object.getOwnPropertyNames(null)` and throws — at IMPORT,
-     * because the table is frozen at module scope. No row carries a null field
-     * today, which is why nothing that walks `SERVICE_TABLE` reaches it, and
-     * why that one mutant survives where every other one in the function stops
-     * the module loading. Asked directly instead. */
-    expect(deepFreeze(null)).toBeNull()
-    const holding = { a: null, b: { c: null } }
-    expect(() => deepFreeze(holding)).not.toThrow()
-    expect(Object.isFrozen(holding)).toBe(true)
-    expect(Object.isFrozen(holding.b)).toBe(true)
-  })
-
   it('leaves a primitive alone rather than trying to freeze it', () => {
     /* The guard's own job: `Object.freeze` on a string is harmless and on
      * `null` it throws in older engines, but the branch exists so the RECURSION
@@ -376,10 +363,9 @@ describe('the table is frozen, and reachable by name', () => {
   })
 
   it('answers a descriptor for every name in the table, and null for anything else', () => {
-    /* ⚠️ **THE INDEX IS BUILT BY ONE `map` WHOSE ARROW WAS A SURVIVOR.**
-     * Returning `undefined` from it makes every entry `[undefined, undefined]`,
-     * so the map holds one key and every real lookup answers null — the
-     * router's `unknown-service` for every service the app has. */
+    /* Every row by its own name, because a lookup that matched on anything
+     * else, or on nothing, answers the router's `unknown-service` — or another
+     * service's descriptor — for a service the app has. */
     for (const row of SERVICE_TABLE) {
       expect(serviceDescriptor(row.name), row.name).toBe(row)
     }
