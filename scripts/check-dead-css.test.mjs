@@ -103,6 +103,25 @@ describe('what a file that holds none carries', () => {
   })
 })
 
+/*
+ * A holder is filled in the order the file names it, so `t` takes `c`, then `a`, then
+ * `b`, one round each. The round that hands it `b` holds no name the round before did
+ * not: a walk that stopped at the first round with no new holder would stop one short,
+ * and miss that `t.both` reads a stylesheet with no `.both` in it.
+ */
+describe('a holder that takes another stylesheet in a later round', () => {
+  it('reads from it as well', () => {
+    const root = fixture({
+      'src/A.module.css': '.both { color: red; }\n',
+      'src/B.module.css': '.other { color: red; }\n',
+      'src/C.module.css': '.both { color: red; }\n',
+      'src/X.tsx':
+        "import a from './A.module.css'\nimport b from './B.module.css'\nimport c from './C.module.css'\ndeclare const flag: boolean\nconst t = flag ? c : s\nexport const f = () => t.both\nconst s = flag ? a : r\nconst r = b\n",
+    })
+    expect(undefinedClasses(root).map((u) => `${u.file}: ${u.name}`)).toEqual(['src/X.tsx: both'])
+  })
+})
+
 describe('what the gate reports', () => {
   it('finds a rule no source names', () => {
     const root = fixture({
