@@ -209,5 +209,25 @@ describe('the P2P switch across one run', () => {
       expect(pending).toEqual([true, false])
       expect(answers).toEqual([false])
     })
+
+    /* `writing` is one span over every write still unfinished, so a second write
+       queued behind the first neither opens a new span nor closes the first one. */
+    it('tells a writing subscriber once when overlapping writes begin, and once when the last ends', async () => {
+      const { started, write } = held()
+      const p2p = createP2pSwitch(true, write)
+      const pending: boolean[] = []
+      p2p.subscribeWriting(() => pending.push(p2p.writing()))
+
+      const off = p2p.set(false)
+      const on = p2p.set(true)
+      expect(pending).toEqual([true])
+      started[0]!.land()
+      await off
+      expect(pending, 'a write is still queued').toEqual([true])
+      await vi.waitFor(() => expect(started).toHaveLength(2))
+      started[1]!.land()
+      await on
+      expect(pending).toEqual([true, false])
+    })
   })
 })
