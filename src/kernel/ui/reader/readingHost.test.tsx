@@ -141,6 +141,35 @@ describe('a value from the store', () => {
     view.unmount()
     expect(() => store.publish(hosted(true))).not.toThrow()
   })
+
+  it('is right on the first render, not only after the layout effect', () => {
+    /* A first render with nothing in it is what `useState`'s initialiser is
+       there to prevent: the layout effect would correct it before paint, but a
+       consumer that renders nothing on `null` would have rendered nothing. */
+    const store = createHostStore()
+    store.publish(hosted(true))
+    const seen: unknown[] = []
+    function Recorder() {
+      const value = useHosted(store, speakingOf)
+      seen.push(value)
+      return null
+    }
+    render(<Recorder />)
+    expect(seen[0]).toBe(true)
+  })
+
+  it('follows a different store when it is handed one', () => {
+    const one = createHostStore()
+    one.publish(hosted(true))
+    const two = createHostStore()
+    two.publish(hosted(false))
+    const view = render(<Reader store={one} />)
+    expect(screen.getByRole('status').textContent).toBe('true')
+    view.rerender(<Reader store={two} />)
+    expect(screen.getByRole('status').textContent).toBe('false')
+    act(() => two.publish(hosted(true)))
+    expect(screen.getByRole('status').textContent, 'and listens to it').toBe('true')
+  })
 })
 
 
@@ -159,7 +188,13 @@ const NO_FACTS: Omit<BookFacts, 'doc' | 'sectionTexts'> = {
  * What `App` does with the host: the surface committed by the parent, the host
  * first among its children, and the auto-advance reading the pace.
  */
-function mount(first: Document | null, walk: BookFacts['sectionTexts'] = async () => ({ sections: [], complete: true })) {
+function mount(
+  first: Document | null,
+  walk: BookFacts['sectionTexts'] = async () => ({ sections: [], complete: true }),
+  /* An object, so that `{}` can say "never chosen": an `undefined` argument
+     would take a default. */
+  start: { readonly notes?: boolean } = { notes: false },
+) {
   const say = vi.fn()
   const store = createHostStore()
   const api: { driver: SurfaceDriver | null; autoAdvance: AutoAdvance | null } = { driver: null, autoAdvance: null }
@@ -167,7 +202,7 @@ function mount(first: Document | null, walk: BookFacts['sectionTexts'] = async (
   const paging = { next: () => {}, prev: () => {} }
   function Parent() {
     const [doc, setDoc] = useState(first)
-    const [notes, setNotes] = useState(false)
+    const [notes, setNotes] = useState(start.notes)
     const [generation, setGeneration] = useState(1)
     set.doc = setDoc
     set.notes = setNotes
@@ -187,7 +222,7 @@ function mount(first: Document | null, walk: BookFacts['sectionTexts'] = async (
       <>
         <ReadingHost
           context={{ sectionKey: doc, surface: driver.surface }}
-          prefs={{ notesAloud: notes }}
+          prefs={notes === undefined ? {} : { notesAloud: notes }}
           engine={null}
           audiobook={{
             available: true,
@@ -307,6 +342,15 @@ describe('an export through the surface', () => {
     act(() => set.notes?.(true))
     await act(async () => audiobook()?.run())
     expect(held.seen.skip).toEqual({ notes: true })
+    await act(async () => held.finish(true))
+  })
+
+  it('leaves the notes out when the reader has never chosen', async () => {
+    /* The voice's own default: `skipOf` reads an unset choice as no notes. */
+    const held = heldWalk()
+    const { audiobook } = mount(page('Words.'), held.walk, {})
+    await act(async () => audiobook()?.run())
+    expect(held.seen.skip).toEqual({ notes: false })
     await act(async () => held.finish(true))
   })
 
