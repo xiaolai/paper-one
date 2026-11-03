@@ -10877,6 +10877,7 @@
     "src/kernel/ui/pane/Settings.test.tsx > the voice the picker shows > says no high-quality voice is available, and offers none below the floor",
     "src/kernel/ui/pane/Settings.test.tsx > the voice the picker shows > says the platform will choose when the engine has listed nothing yet",
     "src/kernel/ui/pane/Settings.test.tsx > the voice the picker shows > says what Automatic means, not what the reader already chose",
+    "src/kernel/ui/pane/Settings.test.tsx > the voice the picker shows > sets the volume in a static row, like the steppers around it",
     "src/kernel/ui/pane/Settings.test.tsx > the voice the picker shows > shows Automatic, naming the voice it means, for a voice the machine no longer has",
     "src/kernel/ui/pane/Settings.test.tsx > the voice the picker shows > shows a stored pack voice, and falls through to Automatic once the pack has gone",
     "src/kernel/ui/pane/Settings.test.tsx > the voice the picker shows > shows the stored voice when it is one the reading will use",
