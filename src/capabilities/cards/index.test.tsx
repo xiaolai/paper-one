@@ -92,6 +92,12 @@ describe('the cards, switched off', () => {
     expect(`${cards.toggle?.title} ${cards.toggle?.summary}`).not.toMatch(/plugin|capability/i)
   })
 
+  /* The row in Optional features is the reader's only account of what the switch
+     does, so it says what Off takes away and what it keeps. */
+  it('says on its switch what turning it off does', () => {
+    expect(cards.toggle?.summary).toMatch(/\bOff, the control is gone, and the cards you made stay\b/u)
+  })
+
   it('leaves no panel and no control, and is not a failure', async () => {
     const { composition } = await launch(new Set(['cards']))
     expect(composition.panes).toEqual([])

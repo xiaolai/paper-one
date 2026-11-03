@@ -97,6 +97,12 @@ describe('the rows', () => {
     expect(archives.toggle?.title).toBe('Archives')
     expect(`${archives.toggle?.title} ${archives.toggle?.summary}`).not.toMatch(/plugin|capability/iu)
   })
+
+  /* The row in Optional features is the reader's only account of what the switch
+     does, so it says what Off takes away and what it leaves. */
+  it('says on its switch what turning it off does', () => {
+    expect(archives.toggle?.summary).toMatch(/\bOff, those commands are gone\b/u)
+  })
 })
 
 describe('a round trip through the kernel it was given', () => {
