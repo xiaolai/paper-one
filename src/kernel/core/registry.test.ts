@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Capability } from './capability'
-import { composeCapabilities, isCapabilityId, kernelApi, resolvePaneId } from './registry'
+import { composeCapabilities, isCapabilityId, KERNEL_DEFAULT_PANE, kernelApi, resolvePaneId } from './registry'
 import { createKernelServices } from './services'
 
 /**
@@ -36,6 +36,10 @@ describe('resolvePaneId', () => {
     expect(resolvePaneId('pane', ['pane'], 'library')).toBe('library')
     expect(resolvePaneId('example:pane', ['example:pane'], 'library')).toBe('example:pane')
   })
+
+  it('opens the contents panel by default', () => {
+    expect(KERNEL_DEFAULT_PANE).toBe('toc')
+  })
 })
 
 describe('a disposed composition', () => {
@@ -50,6 +54,18 @@ describe('a disposed composition', () => {
     expect(composition.bookStatuses).toHaveLength(1)
     composition.dispose()
     expect(composition.bookStatuses).toEqual([])
+  })
+
+  it('leaves no other list behind either', async () => {
+    const services = createKernelServices({ fs: null, storage: null })
+    const composition = await composeCapabilities([], kernelApi(services), new AbortController().signal)
+    composition.dispose()
+    expect(composition.panes).toEqual([])
+    expect(composition.overlays).toEqual([])
+    expect(composition.screens).toEqual([])
+    expect(composition.settings).toEqual([])
+    expect(composition.bookActions).toEqual([])
+    expect(composition.clients).toEqual([])
   })
 })
 

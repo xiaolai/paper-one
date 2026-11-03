@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Capability, ServiceContribution } from './capability'
-import { composeCapabilities, isCapabilityId, KERNEL_DEFAULT_PANE, kernelApi } from './registry'
+import { composeCapabilities, kernelApi } from './registry'
 import { createKernelServices } from './services'
 
 /**
@@ -184,41 +184,6 @@ describe('every contribution, checked and then bound', () => {
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('could not report'), expect.anything())
     spy.mockRestore()
     composition.dispose()
-  })
-})
-
-describe('a status, once the composition is gone', () => {
-  it('is no longer offered', async () => {
-    const bookStatuses = [{ id: 'circle:status', subscribe: () => () => {}, of: () => ({ label: 'reading' }) }] as const
-    const composition = await composeCapabilities([{ id: 'circle', bookStatuses }], api(), signal())
-    expect(composition.bookStatuses).toHaveLength(1)
-    composition.dispose()
-    expect(composition.bookStatuses).toEqual([])
-  })
-
-  it('leaves no other list behind either', async () => {
-    const composition = await composeCapabilities([], api(), signal())
-    composition.dispose()
-    expect(composition.panes).toEqual([])
-    expect(composition.overlays).toEqual([])
-    expect(composition.screens).toEqual([])
-    expect(composition.settings).toEqual([])
-    expect(composition.bookActions).toEqual([])
-    expect(composition.clients).toEqual([])
-  })
-})
-
-describe('the names the registry reserves', () => {
-  it('refuses an id that only ends like a capability id', () => {
-    expect(isCapabilityId('1circle')).toBe(false)
-  })
-
-  it('keeps the kernel’s own id from a capability', async () => {
-    await expect(composeCapabilities([{ id: 'kernel' }], api(), signal())).rejects.toThrow(/kernel/u)
-  })
-
-  it('opens the contents panel by default', () => {
-    expect(KERNEL_DEFAULT_PANE).toBe('toc')
   })
 })
 

@@ -180,13 +180,8 @@ describe('the reviewed shapes, edge by edge', () => {
     expect(fs.writeAtomic).not.toHaveBeenCalled()
   })
 
-  it('refuses a folder with anything before or after the reviewed shape', async () => {
-    const circleFs = rawFs()
-    const circle = scopeFs(circleFs, 'circle')!
-    for (const path of ['x/books/b', 'x/books/b/circle', 'books/b/circle/x']) {
-      await expect(circle.mkdir(path)).rejects.toThrow(/may only mkdir/u)
-    }
-    expect(circleFs.mkdir).not.toHaveBeenCalled()
+  /* The circle's two parents are held edge by edge in its own describe above. */
+  it('refuses a public folder with anything before the reviewed shape', async () => {
     const publicFs = rawFs()
     await expect(scopeFs(publicFs, 'public')!.mkdir('x/books/b')).rejects.toThrow(/may only mkdir/u)
     expect(publicFs.mkdir).not.toHaveBeenCalled()
