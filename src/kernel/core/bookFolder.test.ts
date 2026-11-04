@@ -27,6 +27,8 @@ import {
   updateBook,
   writeBook,
 } from './bookFolder'
+import { scopeFs } from './registry'
+import type { KernelServices } from './services'
 import {
   CIRCLE_DIR,
   OWN_LISTS_DIR,
@@ -1339,9 +1341,25 @@ describe('where the circle’s files live — WI-23.C3 and E1', () => {
     expect(circlePathIn('book:a', person)).toBe(`books/book_a/circle/${person}.json`)
     expect(sharedPathIn('book:a')).toBe('books/book_a/shared.json')
     expect(publicPathIn('book:a')).toBe('books/book_a/public.jsonl')
-    expect(PUBLIC_DIR).toBe('public')
     /* A hostile person id stays inside its one segment. */
     expect(circlePathIn('book:a', '../x').split('/')).toHaveLength(4)
+  })
+})
+
+describe('the public layer’s own folder', () => {
+  /* What the public layer keeps that is about no one book (the reader's
+   * decisions about voices) lives under `PUBLIC_DIR`. A capability may write
+   * only under its own id, so that folder is one the public capability's
+   * scoped filesystem lets it write, and the write reaches the disk at the
+   * path it was given. */
+  it('is a folder the public capability may write in', async () => {
+    const written: string[] = []
+    const fs = { writeFile: async (path: string) => void written.push(path) } as unknown as NonNullable<KernelServices['fs']>
+    const scoped = scopeFs(fs, 'public')!
+    await expect(scoped.writeFile(`${PUBLIC_DIR}/voices.json`, new Uint8Array([1]))).resolves.toBeUndefined()
+    expect(written).toEqual(['public/voices.json'])
+    /* And no other capability may write there. */
+    await expect(scopeFs(fs, 'circle')!.writeFile(`${PUBLIC_DIR}/voices.json`, new Uint8Array([1]))).rejects.toThrow(/may only writeFile under "circle\/"/u)
   })
 })
 
