@@ -389,6 +389,7 @@ describe('the screens a capability contributed', () => {
     const library = screen.getByRole('button', { name: 'Library' })
     const circle = screen.getByRole('button', { name: 'Circle' })
     expect(library.getAttribute('aria-pressed'), 'the shelf is where the reader is').toBe('true')
+    expect(library.getAttribute('data-on'), 'drawn lit, not only announced').toBe('true')
     expect(circle.getAttribute('aria-pressed')).toBe('false')
 
     fireEvent.click(circle)
@@ -399,6 +400,7 @@ describe('the screens a capability contributed', () => {
     const dispatch = draw({ state: { screen: 'circle:circle', chromeOn: true }, screens })
     const library = screen.getByRole('button', { name: 'Library' })
     expect(library.getAttribute('aria-pressed')).toBe('false')
+    expect(library.getAttribute('data-on')).toBe('false')
     fireEvent.click(library)
     expect(dispatch).toHaveBeenCalledWith({ type: 'goScreen', screen: 'library' })
   })
@@ -422,14 +424,20 @@ describe('the pane toggle, and the palette', () => {
        the state a case has to ask for. */
     const closed = draw({ state: { screen: 'library', chromeOn: true, pane: null } })
     const open = screen.getByRole('button', { name: 'Open pane' })
+    /* Its own label, not the title standing in for one: an empty aria-label
+       would still be named by the title, and only the attribute tells. */
+    expect(open.getAttribute('aria-label')).toBe('Open pane')
     expect(open.getAttribute('aria-pressed')).toBe('false')
+    expect(open.getAttribute('data-on'), 'drawn dark, not only announced').toBe('false')
     fireEvent.click(open)
     expect(closed).toHaveBeenCalledWith({ type: 'togglePane' })
 
     cleanup()
     draw({ state: { screen: 'library', chromeOn: true, pane: 'toc' } })
     const close = screen.getByRole('button', { name: 'Close pane' })
+    expect(close.getAttribute('aria-label')).toBe('Close pane')
     expect(close.getAttribute('aria-pressed')).toBe('true')
+    expect(close.getAttribute('data-on'), 'drawn lit, not only announced').toBe('true')
   })
 
   it('opens the palette, and says when it is open', () => {
@@ -528,6 +536,7 @@ describe('the Listen control, in each state it can be in', () => {
     })
     expect(listen().getAttribute('title')).toBe('Read this chapter aloud')
     expect(listen().hasAttribute('disabled')).toBe(false)
+    expect(listen().getAttribute('data-disabled'), 'drawn as pressable too').toBe('false')
     expect(listen().getAttribute('aria-pressed'), 'it is a verb, not a state').toBe('false')
     fireEvent.click(listen())
     expect(started).toEqual([1])
