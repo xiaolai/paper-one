@@ -245,6 +245,10 @@ describe('parseRecord', () => {
     expect(isContentHash('CD'.repeat(32))).toBe(false)
     expect(isContentHash('cd'.repeat(31))).toBe(false)
     expect(isContentHash(`${'cd'.repeat(32)}\n`)).toBe(false)
+    /* Anchored at both ends: a digest with anything before it, or one digit
+       past it, is not one. */
+    expect(isContentHash(`x${'cd'.repeat(32)}`)).toBe(false)
+    expect(isContentHash(`${'cd'.repeat(32)}c`)).toBe(false)
     expect(isContentHash(['cd'.repeat(32)])).toBe(false)
     expect(isContentHash({ toString: () => 'cd'.repeat(32) })).toBe(false)
     expect(isContentHash(null)).toBe(false)
