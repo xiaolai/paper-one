@@ -36,6 +36,14 @@ describe('resolvePaneId', () => {
     expect(resolvePaneId('pane', ['pane'], 'library')).toBe('library')
     expect(resolvePaneId('example:pane', ['example:pane'], 'library')).toBe('example:pane')
   })
+
+  /* The default is asserted by what it does, not by the name it holds: it is
+     a kernel pane, so it resolves to itself against a composition that lists
+     nothing, whatever fallback the caller names. */
+  it('falls back by default to a kernel pane, which resolves to itself with nothing composed', () => {
+    const fallback = resolvePaneId('gone:pane', [])
+    expect(resolvePaneId(fallback, [], 'library')).toBe(fallback)
+  })
 })
 
 describe('a disposed composition', () => {
