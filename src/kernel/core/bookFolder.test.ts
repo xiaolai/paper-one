@@ -1341,6 +1341,17 @@ describe('where the circle’s files live — WI-23.C3 and E1', () => {
   })
 })
 
+describe('a book id with nothing to name a folder by', () => {
+  /* `folderOf('')` was `books/`, and `trashBook(fs, '')` then renamed the
+     whole library into the trash. An empty id is refused by name; any other
+     id is one segment, even one with no alphanumeric character in it. */
+  it('is refused, rather than naming the library itself', () => {
+    expect(() => folderOf('')).toThrow('bookFolder: a book id must have at least one alphanumeric character')
+    expect(() => circlePathIn('book:a', '')).toThrow(/at least one alphanumeric character/u)
+    expect(folderOf('_')).toBe('books/_')
+  })
+})
+
 describe('the reader’s own opinion through the two merges — WI-23.B3, one row each', () => {
   const opinion = () => ({ status: { state: 'reading' as const, at: hlcOf(1) }, rating: 4 as const, ratingAt: hlcOf(2), review: { text: 'r', at: hlcOf(3) } })
 
