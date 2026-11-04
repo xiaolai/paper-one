@@ -59,6 +59,21 @@ describe('a disposed composition', () => {
     composition.dispose()
     expect(composition.bookStatuses).toEqual([])
   })
+
+  it('answers every contributed list with an empty one', async () => {
+    const services = createKernelServices({ fs: null, storage: null })
+    const composition = await composeCapabilities([], kernelApi(services), new AbortController().signal)
+    composition.dispose()
+    expect(composition.panes).toEqual([])
+    expect(composition.screens).toEqual([])
+    expect(composition.overlays).toEqual([])
+    expect(composition.settings).toEqual([])
+    expect(composition.bookActions).toEqual([])
+    expect(composition.bookStatuses).toEqual([])
+    expect(composition.markControls).toEqual([])
+    expect(composition.clients).toEqual([])
+    expect(composition.services.size).toBe(0)
+  })
 })
 
 describe('a requires cycle', () => {
