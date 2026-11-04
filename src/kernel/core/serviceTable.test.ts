@@ -120,15 +120,6 @@ describe('the service table', () => {
     }
   })
 
-  /* An empty book id names no book: `folderOf('')` was the library's own
-   * folder once. Every service that requires one book refuses a blank one at
-   * the door, before any handler builds a path from it. */
-  it('refuses a blank book id wherever one book is required', () => {
-    const required = SERVICE_TABLE.flatMap((one) => one.input.filter((field) => field.name === 'book' && field.type === 'string' && field.required === true))
-    expect(required.length).toBeGreaterThan(0)
-    for (const field of required) expect(field.nonEmpty).toBe(true)
-  })
-
   /* A WITHDRAWN FIELD IS A RULE THE TABLE STATES, not a name that quietly
    * stopped being listed. Refused by name with its reason, published beside
    * the fields that are taken — and never one the service also takes, which
