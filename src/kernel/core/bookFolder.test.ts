@@ -30,12 +30,17 @@ import {
 import {
   CIRCLE_DIR,
   OWN_LISTS_DIR,
+  PUBLIC_DIR,
+  circleFolderIn,
+  circlePathIn,
   ownListPathIn,
   personFolderIn,
   personListPathIn,
   personListsDirIn,
   personShelfPathIn,
+  publicPathIn,
   relationshipPathIn,
+  sharedPathIn,
 } from './bookFolder'
 
 /**
@@ -1322,6 +1327,17 @@ describe('where the circle’s files live — WI-23.C3 and E1', () => {
     expect(personFolderIn('../books').split('/')).toHaveLength(2)
     expect(ownListPathIn('../x').split('/')).toHaveLength(3)
     expect(personListPathIn('p/q', 'r/s').split('/')).toHaveLength(4)
+  })
+
+  it('names the circle’s and the public layer’s files in a book’s folder, beside circle/ and never in it', () => {
+    const person = 'ab'.repeat(32)
+    expect(circleFolderIn('book:a')).toBe('books/book_a/circle')
+    expect(circlePathIn('book:a', person)).toBe(`books/book_a/circle/${person}.json`)
+    expect(sharedPathIn('book:a')).toBe('books/book_a/shared.json')
+    expect(publicPathIn('book:a')).toBe('books/book_a/public.jsonl')
+    expect(PUBLIC_DIR).toBe('public')
+    /* A hostile person id stays inside its one segment. */
+    expect(circlePathIn('book:a', '../x').split('/')).toHaveLength(4)
   })
 })
 
