@@ -186,6 +186,13 @@ export interface PeerWire {
    * outright there.
    */
   setLocalRole(role: PeerRole): Promise<void>
+  /** The reader's P2P switch — see the plugin's `p2p.rs`. Starts nothing. */
+  p2pOn(): Promise<boolean>
+  /**
+   * Off closes what is running before it answers; on applies at the next launch.
+   * A rejection means the answer never arrived, and says nothing of the transport.
+   */
+  setP2p(on: boolean): Promise<P2pAnswer>
   dataRoot(): Promise<string>
 
   listPeers(): Promise<readonly WirePeer[]>
@@ -654,6 +661,16 @@ function subscription<T>(registrations: Registrations, event: string, fn: (paylo
   }
 }
 
+/** The plugin's `SwitchAnswer`: three facts, because none implies another. */
+export interface P2pAnswer {
+  /** This run refuses transport work from now on, and its close is under way. */
+  readonly closed: boolean
+  /** Why the choice was not recorded, or null when it is durable. */
+  readonly recordError: unknown
+  /** What the switch's file reads now, or null when nothing could be read from it. A failed record can have landed. */
+  readonly fileSaysOn: boolean | null
+}
+
 /** The real wire: every method one `invoke`, every listener one `listen`. */
 export function tauriWire(): PeerWire {
   const registrations: Registrations = { attaching: new Set(), firstFailure: undefined }
@@ -661,6 +678,8 @@ export function tauriWire(): PeerWire {
     status: () => invoke(command('peer_status')),
     localRole: () => invoke(command('peer_local_role')),
     setLocalRole: (role) => invoke(command('peer_set_local_role'), { role }),
+    p2pOn: () => invoke(command('peer_p2p_on')),
+    setP2p: (on) => invoke(command('peer_set_p2p'), { on }),
     dataRoot: () => invoke(command('paper_data_root')),
 
     listPeers: () => invoke(command('peer_list_peers')),

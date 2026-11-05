@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import type { SettingsSection } from '../../core/capability'
+import { useState, useSyncExternalStore } from 'react'
+import type { PaneContribution, SettingsSection } from '../../core/capability'
 import {
   BRIGHTNESS,
   CONTRAST,
@@ -15,7 +15,7 @@ import {
   stepAt,
   stepIndexOf,
 } from '../../core/metrics'
-import { PANE_TITLES, THEMES } from '../panes'
+import { THEMES } from '../panes'
 
 /* A settings section is about no book — no section reads the context, so what
    it holds cannot be seen.
@@ -54,10 +54,11 @@ import {
   SEPARATIONS,
   SIDES,
   TABLE_FITS,
-  UNFINISHED_PANE_IDS,
   settingsSectionOffered,
 } from '../../core/uiTypes'
 import { PaneBand } from './PaneBand'
+import type { PluginSwitches } from '../../core/pluginSwitches'
+import type { Standing } from '../../core/registry'
 import { PaneGroup } from './PaneGroup'
 import { engineVoiceFor, installedPacksFor, packVoiceOf, qualify, unqualify } from '../reader/engineVoice'
 import { bestVoice, chosenVoice, voiceFor, voiceGroups, voiceKey, type ReadableTier, type VoiceFacts } from '../reader/voiceChoice'
@@ -104,6 +105,7 @@ const GROUP = {
   figures: 'figures',
   page: 'page',
   voice: 'voice',
+  optionalFeatures: 'optionalFeatures',
   /* ⚠️ **NO COLON, AND THESE WERE `developer:unfinished`.** A colon is the
      CONTRIBUTED-pane and contributed-section convention — `<capability>:<name>`
      — and these ids share one open/closed list with the sections a capability
@@ -233,6 +235,17 @@ export interface SettingsProps {
    * Devices went.
    */
   missing?: readonly { readonly id: string }[] | undefined
+  /**
+   * What the reader may switch off, and the switches: see `OptionalFeatures`.
+   * Absent on a host with nothing to switch, and the group is not drawn.
+   */
+  optionalFeatures?: OptionalFeaturesProps | undefined
+  /**
+   * The capabilities' panels that call themselves unfinished, for the Developer
+   * band's rows. Passed whether or not developer options are on, because whether
+   * a capability's SETTINGS are offered depends on it either way.
+   */
+  unfinishedPanes?: readonly Pick<PaneContribution, 'id' | 'label'>[]
   /**
    * Whether anything chosen here will still be chosen next launch.
    *
@@ -618,6 +631,78 @@ function SelectRow({
  * the label alone so it does not change under the reader's finger; the value
  * stays on screen for the readers who read it there.
  */
+/** The row a capability gets in "Optional features", if it gets one. */
+const hasRow = (one: Standing): boolean => one.toggle !== undefined || one.follows !== undefined
+
+interface OptionalFeaturesProps {
+  readonly standing: readonly Standing[]
+  readonly switches: PluginSwitches
+}
+
+/** The words a reader knows another row by, for "Needs …". */
+const rowTitle = (one: Standing | undefined): string | undefined => one?.toggle?.title ?? one?.follows?.title
+
+/**
+ * Why a switched-on row is not running, when the row itself cannot say.
+ *
+ * `off` says nothing here because the switch already does, and `failed` says
+ * nothing because the band's "not running" line does.
+ */
+function standingNote(one: Standing, standing: readonly Standing[]): string | null {
+  if (one.state === 'unavailable') return 'Not available on this device.'
+  if (one.state !== 'needs') return null
+  const needed = rowTitle(standing.find((other) => other.id === one.on))
+  return needed === undefined ? 'Needs another part of Paper that is off.' : `Needs ${needed}.`
+}
+
+/** One switch. Its own component so each row subscribes to its own answer. */
+function OptionalFeature({
+  one,
+  toggle,
+  standing,
+  switches,
+}: OptionalFeaturesProps & { readonly one: Standing; readonly toggle: NonNullable<Standing['toggle']> }) {
+  const off = useSyncExternalStore(switches.subscribe, () => switches.isOff(one.id))
+  const needsReopen = useSyncExternalStore(switches.subscribe, () => switches.needsReopen(one.id))
+  const note = standingNote(one, standing)
+  return (
+    <>
+      <ToggleRow label={toggle.title} on={!off} onChange={(on) => switches.set(one.id, !on)} />
+      <p className={styles.groupHint}>{toggle.summary}</p>
+      {note !== null && <p className={styles.groupHint}>{note}</p>}
+      {/* The sentence `DevicesPane` says about the P2P switch, because this is the
+          same fact about a switch of the same kind. */}
+      {needsReopen && <p className={styles.groupHint}>Quit and reopen Paper to finish turning this {off ? 'off' : 'on'}.</p>}
+    </>
+  )
+}
+
+/**
+ * The group's rows, drawn from `Composition.standing` alone.
+ *
+ * ⚠️ **NO CAPABILITY IS NAMED HERE, AND `pnpm residue:check` FAILS IF ONE IS.** A
+ * capability brings its own words on `toggle` or `follows`, so one created later
+ * gets its row by declaring them, and one cut from the build takes its row along.
+ */
+function OptionalFeatures({ standing, switches }: OptionalFeaturesProps) {
+  return (
+    <>
+      <p className={styles.groupHint}>Turning one off keeps what it saved on this device.</p>
+      {/* `hasRow`, spelled out so the type narrows: a row with neither draws nothing. */}
+      {standing.map((one) =>
+        one.toggle ? (
+          <OptionalFeature key={one.id} one={one} toggle={one.toggle} standing={standing} switches={switches} />
+        ) : one.follows ? (
+          <div key={one.id} className={styles.settingRow}>
+            <span style={ROW_LABEL}>{one.follows.title}</span>
+            <span className={styles.settingValue}>Follows {one.follows.switch}</span>
+          </div>
+        ) : null,
+      )}
+    </>
+  )
+}
+
 function ToggleRow({
   label,
   on,
@@ -660,6 +745,8 @@ export function Settings({
   offered,
   sections,
   missing,
+  optionalFeatures,
+  unfinishedPanes = [],
   narration,
   persistent = true,
   onTheme,
@@ -717,9 +804,10 @@ export function Settings({
      developer options off, where the list is never read, so a fallback here
      could not be told from none. */
   const offeredSections = sections.filter((section) =>
-    settingsSectionOffered(section, developer !== undefined, developer?.hidden),
+    settingsSectionOffered(section, developer !== undefined, developer?.hidden, unfinishedPanes),
   )
-  const appBandDrawn = offeredSections.length > 0 || (missing ?? []).length > 0
+  const optionalRowsDrawn = optionalFeatures !== undefined && optionalFeatures.standing.some(hasRow)
+  const appBandDrawn = offeredSections.length > 0 || (missing ?? []).length > 0 || optionalRowsDrawn
   const [faceMenuOpen, setFaceMenuOpen] = useState(false)
   /* ONE MECHANISM FOR EVERY GROUP, the kernel's own and the contributed ones
      alike. There were three — a boolean for Light, a boolean for Spacing, and
@@ -1273,7 +1361,7 @@ export function Settings({
       {/* Only with something to hold — see `appBandDrawn`. */}
       {appBandDrawn && (
       <PaneBand title="The app">
-      {/* ⚠️ **FILTERED, AND IT NEVER WAS.** `UNFINISHED_PANE_IDS` hid the
+      {/* ⚠️ **FILTERED, AND IT NEVER WAS.** The unfinished list hid the
           deleted companion's PANEL and left its settings section in front of
           every reader — settings for a surface they cannot open. The rule is
           derived from that one list rather than restated here; see
@@ -1296,6 +1384,19 @@ export function Settings({
             </ContributionBoundary>
           </PaneGroup>
         ))}
+
+      {/* THE WORDS ARE "OPTIONAL FEATURES", NOT PLUGINS, because `core/capability.ts`
+          already records that plugin vocabulary means nothing to a reader. */}
+      {optionalRowsDrawn && (
+        <PaneGroup
+          title="Optional features"
+          group={GROUP.optionalFeatures}
+          open={groupOpen(GROUP.optionalFeatures)}
+          onToggle={() => toggleGroup(GROUP.optionalFeatures)}
+        >
+          <OptionalFeatures standing={optionalFeatures.standing} switches={optionalFeatures.switches} />
+        </PaneGroup>
+      )}
 
       {/* INSIDE THE BAND, not after it. These name a capability that failed to
           start, so they belong with the capabilities' own sections — floating
@@ -1320,29 +1421,32 @@ export function Settings({
           construction rather than about reading or about a capability. */}
       {developer && (
         <PaneBand title="Developer">
-          <PaneGroup
-            title="Unfinished panels"
-            open={groupOpen(GROUP.developerPanels)}
-            onToggle={() => toggleGroup(GROUP.developerPanels)}
-          >
-            <p className={styles.groupHint}>
-              These panels are drawn but do not yet answer what they promise. They are hidden from
-              every reader who has not turned developer options on.
-            </p>
-            {/* `ToggleRow` WITH THE SHELF'S OWN WORDS — `SHOWN_HIDDEN`, the
-                labels the scrollbar row uses. The question here is the same
-                one ("is this drawn?") and answering it with On/Off would give
-                the reader two vocabularies for one idea. */}
-            {UNFINISHED_PANE_IDS.map((id) => (
-              <ToggleRow
-                key={id}
-                label={PANE_TITLES[id]}
-                on={!developer.hidden.includes(id)}
-                onChange={(on) => developer.onSetHidden(id, !on)}
-                labels={SHOWN_HIDDEN}
-              />
-            ))}
-          </PaneGroup>
+          {/* NOTHING TO SWITCH, NO GROUP: a build without the panel has no row to put here. */}
+          {unfinishedPanes.length > 0 && (
+<PaneGroup
+              title="Unfinished panels"
+              open={groupOpen(GROUP.developerPanels)}
+              onToggle={() => toggleGroup(GROUP.developerPanels)}
+            >
+              <p className={styles.groupHint}>
+                These panels are drawn but do not yet answer what they promise. They are hidden from
+                every reader who has not turned developer options on.
+              </p>
+              {/* `ToggleRow` WITH THE SHELF'S OWN WORDS — `SHOWN_HIDDEN`, the
+                  labels the scrollbar row uses. The question here is the same
+                  one ("is this drawn?") and answering it with On/Off would give
+                  the reader two vocabularies for one idea. */}
+              {unfinishedPanes.map(({ id, label }) => (
+                <ToggleRow
+                  key={id}
+                  label={label}
+                  on={!developer.hidden.includes(id)}
+                  onChange={(on) => developer.onSetHidden(id, !on)}
+                  labels={SHOWN_HIDDEN}
+                />
+              ))}
+            </PaneGroup>
+          )}
 
           <PaneGroup
             title="Diagnostics"

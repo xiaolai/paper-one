@@ -15,6 +15,8 @@ import {
   READING_STEPS,
   SPACING,
 } from '../../core/metrics'
+import { createPluginSwitches } from '../../core/pluginSwitches'
+import { createSettingsStore, SETTINGS_STORAGE_KEY, SETTINGS_VERSION } from '../../core/settings'
 import { offeredFaces } from '../../core/typefaces'
 import type { VoicePack } from '../../core/ports'
 import styles from './SidePane.module.css'
@@ -600,7 +602,7 @@ describe('the two bands', () => {
 
   /**
    * ⚠️ **THE PANEL SHOWED SETTINGS FOR A PANEL THE READER COULD NOT OPEN.**
-   * `UNFINISHED_PANE_IDS` hid the deleted companion's pane and never touched
+   * The unfinished-panel rule hid the deleted companion's pane and never touched
    * its settings section, which sat in The app band from the day the
    * capability contributed it. A section configuring a surface that is not
    * offered is worse than either half alone: it is evidence the feature is
@@ -612,21 +614,28 @@ describe('the two bands', () => {
    * one shares its engine would take a working control away. `peer:devices` is
    * in the same assertion for that.
    */
-  it('hides an unfinished capability’s settings, and only that capability’s', () => {
-    const both = [section('cards:study', 'Study'), section('peer:devices', 'Devices')]
-    const { props } = full({ sections: both })
-    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
-    expect(bandOf('Devices', container)).toBe('The app')
-    expect(bandOf('Study', container)).toBeNull()
+  it('hides the settings of a capability whose own panel calls itself unfinished, until that panel is offered', () => {
+    const both = [section('deck:study', 'Study'), section('peer:devices', 'Devices')]
+    const unfinishedPanes = [{ id: 'deck:panel', label: 'Deck' }]
+    const off = render(<Settings {...(full({ sections: both, unfinishedPanes }).props as ComponentProps<typeof Settings>)} />)
+    expect(bandOf('Devices', off.container)).toBe('The app')
+    expect(bandOf('Study', off.container)).toBeNull()
+    cleanup()
 
-    /* One chord later it is there, which is what makes the line above about
-       the gate rather than about the section having been dropped. */
-    const { props: dev } = full({
-      sections: both,
-      developer: { hidden: [], onSetHidden: () => {}, recording: false },
-    })
-    const revealed = render(<Settings {...(dev as ComponentProps<typeof Settings>)} />)
-    expect(bandOf('Study', revealed.container)).toBe('The app')
+    const on = render(
+      <Settings
+        {...(full({ sections: both, unfinishedPanes, developer: { hidden: [], onSetHidden: () => {}, recording: false } }).props as ComponentProps<typeof Settings>)}
+      />,
+    )
+    expect(bandOf('Study', on.container)).toBe('The app')
+    cleanup()
+
+    const hidden = render(
+      <Settings
+        {...(full({ sections: both, unfinishedPanes, developer: { hidden: ['deck:panel'], onSetHidden: () => {}, recording: false } }).props as ComponentProps<typeof Settings>)}
+      />,
+    )
+    expect(bandOf('Study', hidden.container)).toBeNull()
   })
 
   /* ⚠️ **A SECTION COULD DECLARE ITSELF UNFINISHED, AND TWO CASES HERE COVERED
@@ -920,7 +929,7 @@ describe('the Page group holds exactly the rows its host can act on', () => {
  * ⚠️ **DEVELOPER OPTIONS, and the band that exists only while they are on.**
  * ⌘⌃⌥D is the only way in, so nothing here offers it; what IS here is which
  * unfinished panels are drawn, and whether diagnostics are being recorded.
- * `UNFINISHED_PANE_IDS` names the rows, so these are Companion and Cards.
+ * The composition's own unfinished panels name the rows.
  */
 describe('developer options', () => {
   const developer = (over: Record<string, unknown> = {}) => ({ hidden: [], onSetHidden: vi.fn(), recording: false, ...over })
@@ -934,14 +943,10 @@ describe('developer options', () => {
     expect(screen.queryByRole('button', { name: 'Unfinished panels' })).toBeNull()
   })
 
-  /* ⚠️ **TWO PANELS WERE LISTED HERE**, so the row for one and the row for the
-     other each said a different thing and the pair pinned both. `companion` is
-     deleted, so `UNFINISHED_PANE_IDS` holds one id and the band draws one row;
-     both STATES are still asserted, by rendering the row hidden and then
-     shown. */
   it('list each unfinished panel as shown or hidden, and a press asks for the other', () => {
     const onSetHidden = vi.fn()
-    const { props } = full({ developer: developer({ hidden: ['cards'], onSetHidden }) })
+    const unfinishedPanes = [{ id: 'cards:deck', label: 'Cards' }]
+    const { props } = full({ unfinishedPanes, developer: developer({ hidden: ['cards:deck'], onSetHidden }) })
     const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
     expect(captions(container)).toEqual(['Reading', 'Developer'])
     open('Unfinished panels')
@@ -956,7 +961,7 @@ describe('developer options', () => {
     fireEvent.click(hidden)
     cleanup()
 
-    const { props: shownProps } = full({ developer: developer({ hidden: [], onSetHidden }) })
+    const { props: shownProps } = full({ unfinishedPanes, developer: developer({ hidden: [], onSetHidden }) })
     render(<Settings {...(shownProps as ComponentProps<typeof Settings>)} />)
     open('Unfinished panels')
     const shown = screen.getByRole('switch', { name: 'Cards' })
@@ -964,9 +969,33 @@ describe('developer options', () => {
     fireEvent.click(shown)
 
     expect(onSetHidden.mock.calls).toEqual([
-      ['cards', false],
-      ['cards', true],
+      ['cards:deck', false],
+      ['cards:deck', true],
     ])
+  })
+
+  /* A BUILD WITHOUT THE PANEL HAS NO ROW TO PUT THERE, and a heading over nothing
+     is a band that says the feature exists. */
+  it('draw no group of unfinished panels when the composition has none', () => {
+    const { props } = full({ developer: developer() })
+    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    expect(captions(container)).toEqual(['Reading', 'Developer'])
+    expect(screen.queryByRole('button', { name: 'Unfinished panels' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Diagnostics' })).not.toBeNull()
+  })
+
+  it('list a capability’s unfinished panel by its label, and a press names its id', () => {
+    const onSetHidden = vi.fn()
+    const { props } = full({
+      unfinishedPanes: [{ id: 'deck:panel', label: 'Deck' }],
+      developer: developer({ hidden: ['deck:panel'], onSetHidden }),
+    })
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    open('Unfinished panels')
+    const row = screen.getByRole('switch', { name: 'Deck' })
+    expect([row.getAttribute('aria-checked'), valueOf(row)]).toEqual(['false', 'Hidden'])
+    fireEvent.click(row)
+    expect(onSetHidden.mock.calls).toEqual([['deck:panel', false]])
   })
 
   /* REPORTED, NOT OFFERED: recording is a file read at boot, so the panel says
@@ -995,7 +1024,8 @@ describe('developer options', () => {
       { id: 'cards:study', title: 'Study', render: () => null },
       { id: 'peer:devices', title: 'Devices', render: () => null },
     ]
-    const { props } = full({ sections, developer: developer({ hidden: ['cards'] }) })
+    const unfinishedPanes = [{ id: 'cards:deck', label: 'Cards' }]
+    const { props } = full({ sections, unfinishedPanes, developer: developer({ hidden: ['cards:deck'] }) })
     render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
     expect(screen.queryByRole('button', { name: 'Study' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Devices' })).not.toBeNull()
@@ -1050,7 +1080,10 @@ describe('a container with nothing in it', () => {
   /* NOR FOR SECTIONS THIS READER IS NOT OFFERED — an unfinished panel's, with
      developer options off, is filtered before the band is decided. */
   it('draws none when every section is one this reader is not offered', () => {
-    const { props } = full({ sections: [{ id: 'cards:study', title: 'Study', render: () => null }] })
+    const { props } = full({
+      sections: [{ id: 'cards:study', title: 'Study', render: () => null }],
+      unfinishedPanes: [{ id: 'cards:deck', label: 'Cards' }],
+    })
     const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
     expect(captions(container)).toEqual(['Reading'])
   })
@@ -1463,5 +1496,150 @@ describe('the voice the picker shows', () => {
     cleanup()
     const gone = pickerFor({ en: 'kokoro:af_bella' }, [compact], [{ ...englishPack, installed: false }])
     expect(gone.selectedOptions[0]?.textContent).toBe('None — no high-quality voice is available here')
+  })
+})
+
+describe('Optional features', () => {
+  const TOGGLE = { title: 'Some feature', summary: 'What it does.' }
+  const holding = (off: readonly string[]) => {
+    const kept = new Map([[SETTINGS_STORAGE_KEY, JSON.stringify({ version: SETTINGS_VERSION, values: { 'kernel.pluginsOff': off } })]])
+    return { getItem: (key: string) => kept.get(key) ?? null, setItem: (key: string, value: string) => void kept.set(key, value) }
+  }
+  const switches = (launchedOff: readonly string[] = [], stored: readonly string[] = launchedOff) =>
+    createPluginSwitches(new Set(launchedOff), createSettingsStore({ storage: holding(stored) }))
+
+  const open = () => fireEvent.click(screen.getByRole('button', { name: /Optional features/ }))
+
+  it('draws no group when nothing can be switched, and no band for it', () => {
+    const { props } = full()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'fixed', state: 'on' }], switches: switches() }} />)
+    expect(screen.queryByText('Optional features')).toBeNull()
+    expect(screen.queryByText('The app')).toBeNull()
+  })
+
+  it('draws a switch from the standing alone, with the words the row brought', () => {
+    const { props } = full()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'on' }], switches: switches() }} />)
+    expect(screen.getByText('The app')).toBeTruthy()
+    open()
+    expect(screen.getByRole('switch', { name: 'Some feature' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByText('What it does.')).toBeTruthy()
+  })
+
+  it('writes the choice and asks for the reopen, in the words the P2P switch uses', () => {
+    const { props } = full()
+    const held = switches()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'on' }], switches: held }} />)
+    open()
+    expect(screen.queryByText(/Quit and reopen Paper/)).toBeNull()
+    fireEvent.click(screen.getByRole('switch', { name: 'Some feature' }))
+    expect(held.isOff('one')).toBe(true)
+    expect(screen.getByRole('switch', { name: 'Some feature' }).getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByText('Quit and reopen Paper to finish turning this off.')).toBeTruthy()
+    /* Back to what this run launched on: nothing is left to finish. */
+    fireEvent.click(screen.getByRole('switch', { name: 'Some feature' }))
+    expect(screen.queryByText(/Quit and reopen Paper/)).toBeNull()
+  })
+
+  it('says turning on, for one this run launched without', () => {
+    const { props } = full()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'off' }], switches: switches(['one']) }} />)
+    open()
+    fireEvent.click(screen.getByRole('switch', { name: 'Some feature' }))
+    expect(screen.getByText('Quit and reopen Paper to finish turning this on.')).toBeTruthy()
+  })
+
+  it('draws a capability that follows another switch as words, with no switch of its own', () => {
+    const { props } = full()
+    const follows = { title: 'Follower', switch: 'That switch' }
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', follows, state: 'unavailable' }], switches: switches() }} />)
+    open()
+    expect(screen.getByText('Follower')).toBeTruthy()
+    expect(screen.getByText('Follows That switch')).toBeTruthy()
+    expect(screen.queryByRole('switch', { name: 'Follower' })).toBeNull()
+  })
+
+  it('names what a switched-on row is waiting for, by its words and never its id', () => {
+    const { props } = full()
+    const standing = [
+      { id: 'dep-id', toggle: { title: 'The dependency', summary: 's' }, state: 'off' },
+      { id: 'one', toggle: TOGGLE, state: 'needs', on: 'dep-id' },
+    ] as const
+    render(<Settings {...props} optionalFeatures={{ standing, switches: switches(['dep-id']) }} />)
+    open()
+    expect(screen.getByText('Needs The dependency.')).toBeTruthy()
+  })
+
+  it('does not name an id when what it needs has no row', () => {
+    const { props } = full()
+    const standing = [
+      { id: 'dep-id', state: 'unavailable' },
+      { id: 'one', toggle: TOGGLE, state: 'needs', on: 'dep-id' },
+    ] as const
+    render(<Settings {...props} optionalFeatures={{ standing, switches: switches() }} />)
+    open()
+    expect(screen.getByText('Needs another part of Paper that is off.')).toBeTruthy()
+    expect(screen.queryByText(/dep-id/)).toBeNull()
+  })
+
+  it('names the row it waits for, not merely the first one listed', () => {
+    const { props } = full()
+    const standing = [
+      { id: 'first', toggle: { title: 'The first one', summary: 's' }, state: 'on' },
+      { id: 'dep-id', toggle: { title: 'The dependency', summary: 's' }, state: 'off' },
+      { id: 'one', toggle: TOGGLE, state: 'needs', on: 'dep-id' },
+    ] as const
+    render(<Settings {...props} optionalFeatures={{ standing, switches: switches(['dep-id']) }} />)
+    open()
+    expect(screen.getByText('Needs The dependency.')).toBeTruthy()
+    expect(screen.queryByText('Needs The first one.')).toBeNull()
+  })
+
+  it('does not name an id when what it needs is not listed at all', () => {
+    const { props } = full()
+    const standing = [{ id: 'one', toggle: TOGGLE, state: 'needs', on: 'gone' }] as const
+    render(<Settings {...props} optionalFeatures={{ standing, switches: switches() }} />)
+    open()
+    expect(screen.getByText('Needs another part of Paper that is off.')).toBeTruthy()
+    expect(screen.queryByText(/gone/)).toBeNull()
+  })
+
+  it('says nothing under a running switch but what it does', () => {
+    const { props } = full()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'on' }], switches: switches() }} />)
+    open()
+    const body = screen.getByText(/^Turning one off/).parentElement
+    expect([...(body?.querySelectorAll('p') ?? [])].map((p) => p.textContent)).toEqual([
+      'Turning one off keeps what it saved on this device.',
+      'What it does.',
+    ])
+  })
+
+  it('draws no row for a capability with neither a switch nor one it follows, beside one that has a switch', () => {
+    const { props } = full()
+    const standing = [
+      { id: 'fixed', state: 'on' },
+      { id: 'one', toggle: TOGGLE, state: 'on' },
+    ] as const
+    render(<Settings {...props} optionalFeatures={{ standing, switches: switches() }} />)
+    open()
+    expect(screen.getByRole('switch', { name: 'Some feature' })).toBeTruthy()
+    expect(screen.queryByText(/^Follows/)).toBeNull()
+  })
+
+  it('says when this device cannot have it', () => {
+    const { props } = full()
+    render(<Settings {...props} optionalFeatures={{ standing: [{ id: 'one', toggle: TOGGLE, state: 'unavailable' }], switches: switches() }} />)
+    open()
+    expect(screen.getByText('Not available on this device.')).toBeTruthy()
+  })
+
+  /* OFF AND NEEDS ARE NOT FAILURES, so they do not come with the failure's line. */
+  it('draws no "not running" line for anything left out on purpose', () => {
+    const { props } = full()
+    const standing = [{ id: 'one', toggle: TOGGLE, state: 'off' }] as const
+    render(<Settings {...props} missing={[]} optionalFeatures={{ standing, switches: switches(['one']) }} />)
+    open()
+    expect(screen.queryByText(/not running/)).toBeNull()
   })
 })

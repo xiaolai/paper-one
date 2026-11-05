@@ -1096,6 +1096,17 @@ describe('settings sections', () => {
 describe('resolvePaneId — a persisted lastPane naming an absent pane', () => {
   const known = ['example:pane', 'sync:status']
 
+  /* The Cards panel was the kernel's `cards` and is the capability's
+     `cards:deck`. A remembered old name opens it where it is composed, and
+     falls back like any other id where it is not. */
+  it("reads a remembered 'cards' as the panel's present name, wherever that panel is composed", () => {
+    expect(resolvePaneId('cards', ['cards:deck'])).toBe('cards:deck')
+    expect(resolvePaneId('cards', ['example:pane', 'cards:deck'], 'library')).toBe('cards:deck')
+    expect(resolvePaneId('cards', known, 'library')).toBe('library')
+    expect(resolvePaneId('cards', [])).toBe(KERNEL_DEFAULT_PANE)
+    expect(resolvePaneId('cards:deck', ['cards:deck'])).toBe('cards:deck')
+  })
+
   it('falls back to the kernel default for a contributed id nobody composed', () => {
     expect(resolvePaneId('companion-old:pane', known)).toBe(KERNEL_DEFAULT_PANE)
     /* ⚠️ **THE CONSTANT, NOT THE NAME IT HAPPENS TO HOLD.** This spelled
@@ -1107,7 +1118,7 @@ describe('resolvePaneId — a persisted lastPane naming an absent pane', () => {
   })
 
   /* ⚠️ **AND THE DEFAULT MUST BE A PANEL EVERY READER IS OFFERED.** It was
-     `companion`, which `UNFINISHED_PANE_IDS` now hides from anyone who has not
+     `companion`, which the unfinished-panel rule hid from anyone who has not
      turned developer options on — so an unknown stored id resolved to a panel
      the rail refuses to draw. `ui/state.ts`'s `defaultPaneFor` answers the same
      question for the reducer and was moved; this one was missed, which is what
@@ -1380,5 +1391,21 @@ describe('overlays — the fourth contribution type (WI-22.D1)', () => {
     expect(composition.overlays).toHaveLength(1)
     composition.dispose()
     expect(composition.overlays).toEqual([])
+  })
+})
+
+describe('the P2P switch reaches every capability that only works over P2P', () => {
+  /* `sync` stays composed because it also holds the clock and the journal, and
+     runs local-only without a port. Everything else that requires `peer` is
+     P2P and nothing else, so a new one that forgot the switch fails here. */
+  it.each([
+    ['desktop', desktop],
+    ['ios', ios],
+    ['android', android],
+  ] as const)('%s', (_name, composition) => {
+    const uncovered = composition
+      .filter((cap) => cap.requires?.includes('peer') && cap.id !== 'sync' && cap.available === undefined)
+      .map((cap) => cap.id)
+    expect(uncovered).toEqual([])
   })
 })

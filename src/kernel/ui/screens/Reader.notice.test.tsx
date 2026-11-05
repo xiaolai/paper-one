@@ -94,11 +94,9 @@ const marks = (): MarksView =>
     scanning: false,
     scanFailed: false,
     add: vi.fn(),
-    addMany: vi.fn(),
     remove: vi.fn(),
     update: vi.fn(),
     loadAll: vi.fn(),
-    loadAllNow: vi.fn(async () => []),
   }) as unknown as MarksView
 
 const marking = (): Marking =>

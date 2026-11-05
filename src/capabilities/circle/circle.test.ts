@@ -8,14 +8,8 @@ import { NO_LIST_HELD,
   type ForeignFile,
   type LaneFor,
 } from './lib/store'
-import {
-  circlePathIn,
-  hlcOf,
-  type ForeignEntry,
-  type IndexFs,
-  type ResolveResult,
-  type WriteQueue,
-} from '../../kernel'
+import { circlePathIn, hlcOf, type IndexFs, type ResolveResult, type WriteQueue } from '../../kernel'
+import { type ForeignEntry } from './lib/foreign'
 import { personListPathIn, personListsDirIn, personShelfPathIn } from '../../kernel'
 import { NOTHING_SHARED, heldListIdsOf, readHeldList, readHeldShelf, writeHeldList, writeHeldShelf } from './lib/store'
 /* ⚠️ THROUGH THE TESTKIT ENTRY, not the module. `kernel-testkit-in-tests-only`
@@ -806,7 +800,10 @@ describe('through the real composition', () => {
        is supplied by hand, so a composition that no longer ASKS for `peer`
        still gets it, and no test read the label a reader sees on the rail. */
     expect(circle.requires).toEqual(['peer'])
-    expect(circle.screens?.map((one) => [one.id, one.label])).toEqual([['circle:circle', 'Circle']])
+    expect(circle.screens?.map((one) => [one.id, one.label, one.icon])).toEqual([['circle:circle', 'Circle', 'people']])
+    /* And the line Settings draws where a switch would be: the circle has no
+       switch of its own, so it is named under the one that governs it. */
+    expect(circle.follows?.title).toBe('Circle')
 
     /* A STUB `peer`, because `circle` declares it in `requires` and the real
        one binds a Tauri plugin this test has no business starting. What is
@@ -844,7 +841,7 @@ describe('the share control contribution — WI-23.A1', () => {
     /* A row rendered before `start`, or after `dispose`, must not hold a port
        into a filesystem the run no longer owns. The control draws nothing
        for a null port, which is the honest rendering. */
-    const element = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as {
+    const element = shareControl()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as {
       readonly props: { readonly port: unknown; readonly mark: { readonly id: string } }
     }
     expect(element.props.port).toBeNull()
@@ -866,14 +863,14 @@ describe('the share control contribution — WI-23.A1', () => {
       } as never,
       new AbortController().signal,
     ) as { dispose(): void }
-    const during = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }
+    const during = shareControl()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as { readonly props: { readonly port: unknown } }
     expect(during.props.port).not.toBeNull()
     /* ONE port per run: two rows share it, so the effect each keys on it
        does not re-read the store on every render. */
-    const again = shareControl()?.render({ id: 'm2', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }
+    const again = shareControl()?.render({ id: 'm2', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as { readonly props: { readonly port: unknown } }
     expect(again.props.port).toBe(during.props.port)
     disposable.dispose()
-    const after = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }
+    const after = shareControl()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as { readonly props: { readonly port: unknown } }
     expect(after.props.port).toBeNull()
   })
 
@@ -895,7 +892,7 @@ describe('the share control contribution — WI-23.A1', () => {
       new AbortController().signal,
     ) as { dispose(): void }
     try {
-      const element = shareControl()?.render({ id: 'm1', bookId: BOOK } as never) as {
+      const element = shareControl()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as {
         readonly props: { readonly port: { state(mark: unknown): Promise<unknown>; share(mark: unknown, note: boolean): Promise<void> } }
       }
       const mark = { id: 'm1', bookId: BOOK, text: 'q', prefix: '', suffix: '', chapter: '', note: '' }
@@ -1632,9 +1629,9 @@ describe('the disposer on the kernel’s stack — round 3 #97', () => {
     )
     expect(cleanups).toHaveLength(1)
     const control = () => circle.markControls?.find((one) => one.id === 'circle:share')
-    expect((control()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }).props.port).not.toBeNull()
+    expect((control()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as { readonly props: { readonly port: unknown } }).props.port).not.toBeNull()
     cleanups[0]!()
-    expect((control()?.render({ id: 'm1', bookId: BOOK } as never) as { readonly props: { readonly port: unknown } }).props.port).toBeNull()
+    expect((control()?.render({ id: 'm1', bookId: BOOK } as never, { noteAsWritten: (mark) => mark }) as { readonly props: { readonly port: unknown } }).props.port).toBeNull()
   })
 })
 

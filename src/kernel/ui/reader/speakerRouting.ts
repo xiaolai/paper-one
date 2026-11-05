@@ -25,7 +25,7 @@
 
 import type { VoicePack } from '../../core/ports'
 import { engineVoiceFor } from './engineVoice'
-import type { SpeakPrefs } from './speech'
+import type { SpeakPrefs } from './speaker'
 
 /** What the reading needs of a speaker, whichever one it is. */
 export interface SpeakerLike {

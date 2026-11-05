@@ -1,4 +1,4 @@
-import { Globe, Users } from 'lucide-react'
+import { Globe, Layers, Users } from 'lucide-react'
 import type { ContributionIcon } from '../core/capability'
 
 /**
@@ -29,4 +29,5 @@ import type { ContributionIcon } from '../core/capability'
 export const CONTRIBUTION_ICONS: Record<ContributionIcon, typeof Users> = {
   people: Users,
   globe: Globe,
+  layers: Layers,
 }

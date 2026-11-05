@@ -3,7 +3,7 @@ import type { Highlight } from './marks'
 import type { Diagnostics, SettingsStore } from './ports'
 import type { KernelServices } from './services'
 import type { ContributedPaneId, ContributedScreenId, PaneId, Screen } from './uiTypes'
-import type { OverlayContribution } from './circle/overlay'
+import type { OverlayContribution } from './overlay'
 
 /* Re-exported so a capability author reaches one module for the whole
    contribution vocabulary, the way `PaneContribution` is declared here. */
@@ -14,7 +14,7 @@ export type {
   ResolvePort,
   ResolveResult,
   ResolvedPassage,
-} from './circle/overlay'
+} from './overlay'
 
 /**
  * The contribution API — what a capability IS to the kernel.
@@ -107,6 +107,12 @@ export interface PaneContext {
    * link that opens nothing is the control this repository refuses to draw.
    */
   readonly openBook?: (bookId: string) => void
+  /**
+   * Go to a place in one of the reader's books — the jump every kernel panel
+   * makes, so it enters the stack and raises "← Back to". Offered in the side
+   * pane where the host has a jump stack, absent where it has none.
+   */
+  readonly goTo?: (target: { bookId: string; cfi: string }) => void
 }
 
 /**
@@ -137,6 +143,8 @@ export type ContributionIcon =
   | 'people'
   /** Anybody at all — published, public, the open network. */
   | 'globe'
+  /** A stack of made things: a deck. */
+  | 'layers'
 
 /**
  * A pane in the side pane, contributed by a capability.
@@ -155,6 +163,16 @@ export interface PaneContribution {
   readonly icon: ContributionIcon
   readonly screens: readonly Screen[]
   readonly order?: number
+  /**
+   * A panel that draws and does not yet answer what it promises.
+   *
+   * ⚠️ **WITHOUT THIS A MOVED PANEL REACHES EVERY READER.** A contributed pane
+   * fits wherever `screens` says, for everybody. Set, the rail, the palette and
+   * the reducer offer it only with developer options on and only while it has
+   * not been hidden there — `contributionOffered` is the rule, and the Developer
+   * band lists it by `label`.
+   */
+  readonly unfinished?: boolean
   readonly render: PaneRenderer
 }
 
@@ -288,7 +306,34 @@ export interface MarkControl {
   /** `<capability>:<name>`, like a pane — so an id says who owns it. */
   readonly id: `${string}:${string}`
   /** The element for THIS mark — a highlight, never a companion annotation. Called on every render of the row. */
-  render(mark: Highlight): unknown
+  render(mark: Highlight, tools: MarkControlTools): unknown
+  /**
+   * Where on the row. Absent is under the note; `'actions'` is the row's own
+   * action buttons, beside delete, for a control that is one icon and not a
+   * sentence.
+   */
+  readonly place?: 'actions'
+  /**
+   * A line over the list, for something every row's control has in common and
+   * no row should repeat. Null draws nothing. Not drawn while the list is empty,
+   * since then no control is there for it to be about.
+   */
+  notice?(): unknown
+}
+
+/** What the marks panel knows about a row and the row's `mark` cannot say. */
+export interface MarkControlTools {
+  /**
+   * This mark with the note the reader last typed, whether or not the store has
+   * answered yet.
+   *
+   * ⚠️ **READ AT THE CLICK, NOT THE RENDER (#128).** The pointer going down on a
+   * control blurs the note editor, which saves, and that write lands only after
+   * the click. So the mark the control was drawn with holds the OLD note at the
+   * moment a press reads it, and whatever it builds from `mark.note` loses the
+   * words the reader just typed. Only the panel holds what was written.
+   */
+  noteAsWritten(mark: Highlight): Highlight
 }
 
 export interface BookAction {
@@ -408,6 +453,43 @@ export interface Capability {
   readonly id: string
   /** Ids of the capabilities this one needs; absent means none. */
   readonly requires?: readonly string[]
+  /**
+   * Asked at composition, before `start`: a `false` leaves this capability out
+   * of this run and is not a failure for it. One that throws is a failure, and
+   * the capability is left out too.
+   *
+   * A DEPENDANT READS AS `needs`, NOT AS A FAILURE. It said otherwise until the
+   * reader could switch things off: a dependant was skipped as `requires-failed`
+   * and logged as an error, although nothing had gone wrong. See `Standing`.
+   */
+  available?(): boolean | Promise<boolean>
+  /**
+   * PRESENCE MEANS THE READER MAY SWITCH THIS OFF, under "Optional features".
+   *
+   * The words are the capability's, because the kernel draws the row and may not
+   * name what it is drawing (`pnpm residue:check`). They are for a reader, so
+   * neither says plugin nor capability: a jigsaw word means nothing to somebody
+   * reading a book, which is `ContributionIcon`'s point too.
+   *
+   * A switch takes effect at the next launch, because no per-capability teardown
+   * exists and the app composes once. Off, `start` and `available` are never
+   * called and the capability contributes nothing; what it saved stays on disk.
+   *
+   * ⚠️ **ONLY WITH NOTHING NON-SWITCHABLE REQUIRING IT, AND ONLY WHEN OFF MEANS
+   * OFF.** A switch held in JS cannot stop what a crate began in its Rust `setup`,
+   * so a capability whose crate does work there may not have one. Both rules are
+   * in `app/optionalFeatures.contract.test.ts`.
+   */
+  readonly toggle?: { readonly title: string; readonly summary: string }
+  /**
+   * NOT SWITCHABLE HERE, AND THE READER IS TOLD WHICH SWITCH GOVERNS IT.
+   *
+   * Data rather than an id the kernel recognises, for `toggle`'s reason. `title`
+   * is what the row is called and `switch` is the name the governing switch shows
+   * the reader; the kernel writes the sentence around them. A capability has this
+   * or `toggle`, never both, which the same contract test holds.
+   */
+  readonly follows?: { readonly title: string; readonly switch: string }
   readonly panes?: readonly PaneContribution[]
   /** Whole screens — see `ScreenContribution`. */
   readonly screens?: readonly ScreenContribution[]
@@ -429,7 +511,7 @@ export interface Capability {
    * line `panes` does not cross — a pane renders into a slot the kernel owns.
    *
    * Every annotation carries a `ResolvedCfi`, so a passage that did not anchor
-   * in THIS build cannot be handed over at all. See `core/circle/overlay.ts`.
+   * in THIS build cannot be handed over at all. See `core/overlay.ts`.
    */
   readonly overlays?: readonly OverlayContribution[]
   /**
@@ -458,6 +540,9 @@ export interface Capability {
    * Called whether or not the capability started: it is a question about
    * module state, not about a live registration, and a capability that failed
    * to start may still have opened something.
+   *
+   * THE ONE EXCEPTION IS A CAPABILITY THE READER SWITCHED OFF, which never began
+   * anything to wait for. See `withoutSwitchedOff` in `registry.ts`.
    */
   quiesce?(): Promise<void>
 }

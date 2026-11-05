@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { VOICE_DECISIONS_PATH, writeQueue, type IndexFs, type VoiceBinding } from '../../../kernel'
-import { MAX_DECISIONS, decisionsFrom, voiceDecisionsPortOver, type VoiceDecisionsPort } from './voicePort'
+import { writeQueue, type IndexFs } from '../../../kernel'
+import { type VoiceBinding } from './binding'
+import { MAX_DECISIONS, VOICE_DECISIONS_PATH, decisionsFrom, voiceDecisionsPortOver, type VoiceDecisionsPort } from './voicePort'
 
 const VOICE = 'ab'.repeat(32)
 const OTHER = 'cd'.repeat(32)
@@ -68,6 +69,12 @@ const voices = (count: number): string[] => Array.from({ length: count }, (_, i)
 /** A stored decisions file, with every collection empty unless given. */
 const storedWith = (over: Record<string, unknown>): string =>
   JSON.stringify({ v: 1, bindings: [], blockedVoices: [], blockedPeople: [], ...over })
+
+describe('where the decisions live', () => {
+  it('keeps them at public/voices.json, because a library on disk already has them there', () => {
+    expect(VOICE_DECISIONS_PATH).toBe('public/voices.json')
+  })
+})
 
 describe('decisionsFrom — the stored file, read back', () => {
   it.each([

@@ -1,12 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  CAPABILITY_UI,
-  messageOf,
-  offersShare,
-  offersUnshare,
-  shareAbsentBecause,
-  type Highlight,
-} from '../../../kernel'
+import { CAPABILITY_UI, messageOf, type Highlight } from '../../../kernel'
+import { offersShare, offersUnshare, shareAbsentBecause } from '../lib/foreign'
+import { useP2pLive } from '../../peer'
 import type { SharePort, ShareState } from '../lib/sharing'
 
 /**
@@ -36,6 +31,7 @@ export interface ShareControlProps {
 }
 
 export function ShareControl({ mark, port }: ShareControlProps) {
+  const p2pLive = useP2pLive()
   const [state, setState] = useState<ShareState | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
   const [trouble, setTrouble] = useState<string | null>(null)
@@ -96,7 +92,7 @@ export function ShareControl({ mark, port }: ShareControlProps) {
   /* Stryker disable next-line ConditionalExpression: with no port nothing
      ever sets `state`, so the check two lines down returns for it too. This
      one exists so `port` narrows for the handlers below. */
-  if (port === null) return null
+  if (port === null || !p2pLive) return null
 
   if (failure !== null) {
     return <p className={CAPABILITY_UI.hint}>Paper could not read what you have shared. {failure}</p>

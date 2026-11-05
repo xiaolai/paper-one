@@ -17,7 +17,6 @@ import type { DiagnosticLog } from '../core/diagnosticsLog'
 import { createOpenRollback } from './openRollback'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
 import { useImportRun } from './hooks/useImportRun'
-import { useArchives } from './hooks/useArchives'
 import { requestWindowClose, useWindowClose } from './hooks/useWindowClose'
 import { takeOpened, type OpenRequests } from './openedFiles'
 import { closePrepare } from './closeWindow'
@@ -25,6 +24,7 @@ import { openExternal } from './openExternal'
 import { hasOpenLayer, readerTakesInput, screenJump, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
 import type { KernelServices } from '../core/services'
+import { createPluginSwitches } from '../core/pluginSwitches'
 import type { Composition } from '../core/registry'
 import { useBook } from './hooks/useBook'
 import { useBookIntake } from './hooks/useBookIntake'
@@ -32,7 +32,6 @@ import { useEnrichment } from './hooks/useEnrichment'
 import { flushBeforeClose, onBeforeClose, onBeforeDrain, settleBeforeDrain } from '../core/beforeClose'
 import { useFileDrop, type DropHaul } from './hooks/useFileDrop'
 import { useLibrary } from './hooks/useLibrary'
-import { useCards } from './hooks/useCards'
 import { useMarks } from './hooks/useMarks'
 import { useMarking } from './hooks/useMarking'
 import { useBookmarking } from './hooks/useBookmarking'
@@ -259,7 +258,6 @@ export function App({
    * folder goes through the ONE queue the services share — see
    * `createKernelServices` — which is what gives the close something to hold for. */
   const marks = useMarks(services.marks, book.bookId)
-  const cards = useCards(services.cards)
   const marking = useMarking(book, marks)
   /* Beside marking, not inside it. Marking acts on a selection and
    * bookmarking acts on a place — see `useBookmarking`. */
@@ -789,6 +787,12 @@ export function App({
     // Stryker disable next-line ArrayDeclaration: `useOccasion`'s `raise` is built from an empty list, so this one and an empty one rebuild the callback equally often — never.
     [raiseNotice],
   )
+  /* A capability's sentence reaches the same line the kernel's own do. An effect
+     with its disposer, so a window that goes away hands the slot back. */
+  useEffect(() => {
+    const bound = services.bindNotifier(setImportNotice)
+    return () => bound.dispose()
+  }, [services, setImportNotice])
   /* The audiobook export, reachable from the command palette and nowhere else —
      see `useAudiobook` for why that is the whole surface for now. */
   const audiobookSource = useMemo(
@@ -889,7 +893,10 @@ export function App({
   const { bookId, meta, source, cover } = book
 
   const { rekey: rekeyMarks } = marks
-  const { rekey: rekeyCards } = cards
+  const rekeyCards = useCallback(
+    (from: string, to: string) => void services.cards.rekey(from, to).catch(() => {}),
+    [services.cards],
+  )
 
   /* Taking a book in — the bytes, the identity migration and the record, in one
    * ordered sequence. It was four pieces of this component: two refs, a layout
@@ -1300,12 +1307,6 @@ export function App({
     const timer = setTimeout(() => setNotice(null), NOTICE_MS)
     return () => clearTimeout(timer)
   }, [notice])
-
-  /* THE READER'S FILING AND THEIR MARGINALIA, out to a file and back — see
-   * `useArchives`. Four handlers and a hundred and seventy lines of the same
-   * errand (pick, plan, write, say what happened), none of which touches the
-   * position, the screen or the keyboard map this component coordinates. */
-  const archives = useArchives({ library, marks, cards, notice: setImportNotice })
 
   const addFolder = useCallback(
     () => {
@@ -2004,6 +2005,17 @@ export function App({
    * builds that have an index. It is a stable function reference either way —
    * the port is made once by the capability. */
   const passageIndex = services.passages()
+  /* HERE AND NOT IN THE PANEL, for `createP2pSwitch`'s reason: Settings unmounts
+     when it closes, and the answer this run launched on has to outlive that. The
+     launch's answer is read off `standing`, so it is the one that was composed. */
+  const pluginSwitches = useMemo(
+    () =>
+      createPluginSwitches(
+        new Set(composition.standing.filter((one) => one.state === 'off').map((one) => one.id)),
+        services.settings,
+      ),
+    [composition.standing, services.settings],
+  )
 
   const openPassage = useOpenPassage({
     fs,
@@ -2162,10 +2174,6 @@ export function App({
         editTags: readingBook ? openTags : null,
         jumpBack: jumps.canBack ? jumps.back : null,
         jumpForward: jumps.canForward ? jumps.forward : null,
-        /* NULL WHERE THE BUILD CANNOT DO IT — the palette omits the row
-           rather than offering one that would refuse. `useArchives` decides,
-           because it is what knows. */
-        exportMarks: archives.exportMarks,
         /* Handed over whole, with no rule spelled here: `reachable` is the rule
            and `buildCommands` is what reads it, because a rule spelled in `App` is
            a rule nothing measures — no test renders this file and reads the
@@ -2176,9 +2184,6 @@ export function App({
            that would be refused. */
         ...(audiobook ? { exportAudiobook: audiobook } : {}),
         onDuplicate: onDuplicateCommand,
-        importMarks: archives.importMarks,
-        exportTags: archives.exportTags,
-        importTags: archives.importTags,
         /* The same faces the settings panel offers — see `offeredFaces`. */
         faces: offeredHere,
         state,
@@ -2223,11 +2228,9 @@ export function App({
        on every relocation — a dependency that held by accident and would have
        stopped holding the moment the hook's inputs changed. */
     /* AND THE SAME OMISSION AGAIN, twice over. `jumps` supplies both jump
-       commands and their availability; the four archive callbacks close over
-       `library.books`, `marks` and `cards`. None was listed, so the palette
-       could offer a jump the stack no longer has, or export a library snapshot
-       taken several imports ago — a stale command is worse than a missing one
-       because it looks like it worked. */
+       commands and their availability. It was not listed, so the palette could
+       offer a jump the stack no longer has — a stale command is worse than a
+       missing one because it looks like it worked. */
     [
       state,
       dispatch,
@@ -2242,7 +2245,6 @@ export function App({
       openTags,
       composition,
       jumps,
-      archives,
       markSelection,
       closeBook,
       /* ⚠️ **READ AT LINE 1934 AND OMITTED HERE.** `running` and `run` both change
@@ -2438,10 +2440,6 @@ export function App({
         hasBook: readingBook !== null,
         canJumpBack: jumps.canBack,
         canJumpForward: jumps.canForward,
-        /* THE DIGITS READ THIS. An unfinished panel's digit has to be as dead
-           as a digit for a panel this screen has not got — see `AccelContext`. */
-        developer: state.developer,
-        hiddenPanes: state.hiddenPanes,
         /* Who took this key's first press — see `pressTaken`, and `taken`. */
         pressTaken: event.repeat && taken.current === pressed,
       })
@@ -2542,8 +2540,9 @@ export function App({
     state.pane,
     /* ⚠️ **THREE OF THE FOUR LAYERS WERE LISTED AND `trashOpen` WAS NOT**, so
        closing the trash alone left the handler holding the previous layer state.
-       This array has already been bitten twice by the same shape — see the digits
-       note and the tint note below — so the fix is not a fourth entry.
+       This array has already been bitten twice by the same shape — the digits,
+       which read developer options while Cards had ⌘4, and the tint note below —
+       so the fix is not a fourth entry.
 
        The handler never reads an individual layer: they reach it only through
        `hasOpenLayer(state)`, and through `readerTakesInput`, which calls the same
@@ -2553,13 +2552,6 @@ export function App({
        from. */
     anyLayerOpen,
     state.stepIdx,
-    /* ⚠️ THE DIGITS READ THESE, AND THEY WERE MISSING — the same defect the
-       tint note below records, on the day developer options landed. The handler
-       went on closing over the visibility rules as they were when the effect
-       last ran, so ⌘4 stayed dead for a whole render after Cards was revealed,
-       and stayed live after it was hidden. */
-    state.developer,
-    state.hiddenPanes,
     /* ⌘D MARKS IN THE COLOUR THE BAR IS SHOWING, and `state.markTint` and
        `state.markStyle` were missing here — so the handler went on closing over
        whichever tint was current when the effect last ran. Change the colour in
@@ -2709,7 +2701,6 @@ export function App({
             marks={marks}
             bookmarking={bookmarking}
             platform={platform}
-            cards={cards}
             onGoTo={jumpTo}
             onDeleteMark={marking.unmark}
             markFocus={marking.focus}
@@ -2743,6 +2734,7 @@ export function App({
               sections: composition.settings,
               missing: composition.failures,
               persistent: settingsPersistent,
+              optionalFeatures: { standing: composition.standing, switches: pluginSwitches },
             }}
             /* ⚠️ **SUPPLIED UNCONDITIONALLY — AND THIS SAID "ONLY WHILE
                DEVELOPER OPTIONS ARE ON"**, the contract `SidePaneProps.developer`

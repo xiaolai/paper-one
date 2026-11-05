@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { marksPathIn, recordPath } from './bookFolder'
+import { folderOf, marksPathIn, recordPath } from './bookFolder'
 import { fakeFs } from './indexFsFake.testkit'
-import { createMarkStore } from './markStore'
+import { MarksScanFailed, createMarkStore } from './markStore'
 import { bookmarkFrom, createMark, type Mark, type NewMark } from './marks'
 import { writeQueue } from './writeQueue'
 import { resolvedCfiForTesting } from './resolvedCfi.testkit'
@@ -356,6 +356,10 @@ describe('the mark store splits bookmarks from annotations', () => {
     /* Armed only around the scan, and consumed by its first read — the write's
        own read of the same file must not wait on a gate only it could open. */
     let gate: Promise<void> | null = null
+    let reached = () => {}
+    const scanHeld = new Promise<void>((resolve) => {
+      reached = resolve
+    })
     const fs = {
       ...real,
       readFile: async (path: string) => {
@@ -363,6 +367,7 @@ describe('the mark store splits bookmarks from annotations', () => {
         if (gate && path.endsWith('marks.json')) {
           const wait = gate
           gate = null
+          reached()
           await wait
         }
         return bytes
@@ -375,6 +380,15 @@ describe('the mark store splits bookmarks from annotations', () => {
 
     gate = held
     const scan = marks.loadAll()
+    /* THE SCAN HOLDS THE GATE BEFORE THE WRITE STARTS, or the write's own read
+       takes it and waits on a release that comes after it: a scan that never
+       read anything hung here until the test's deadline instead of failing. */
+    await Promise.race([
+      scanHeld,
+      Promise.resolve(scan).then(() => {
+        throw new Error('the scan finished without reading a marks file')
+      }),
+    ])
     await marks.add(highlight({ text: 'second', cfi: 'epubcfi(/6/4!/4/2,/1:40,/1:48)' }))
     release()
     await scan
@@ -398,7 +412,7 @@ describe('the mark store splits bookmarks from annotations', () => {
  * and written a valid archive containing nothing — and reported success. The
  * reader does not find out until the day they need it.
  *
- * `useMarks.loadAllNow` is the fix: it scans and hands the rows straight back,
+ * `loadAllNow` is the fix: it scans and hands the rows straight back,
  * with no render in the path. This is the assertion beside it, because a fix
  * removes today's failure and only an assertion stops it returning while still
  * looking green.
@@ -749,5 +763,344 @@ describe('carrying marks onto a new book id', () => {
       'the mark was listed under the new book AND under the book that no longer exists',
     ).toEqual([NEW])
     expect(marks.getSnapshot().all.map((one) => one.id)).toEqual(['m1'])
+  })
+
+  /* The other half: the rename has not happened, so the marks are still only in
+     the old book's folder, and the new book's file is written from them. */
+  it('carries the marks still in the old folder into the new book, under the new id', async () => {
+    const OLD = 'file:old'
+    const NEW = 'book:new'
+    const fs = libraryWith(NEW)
+    fs.store.set(marksPathIn(OLD), new TextEncoder().encode(JSON.stringify([{ ...highlight(), id: 'm1', bookId: OLD }])))
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+
+    await marks.rekey(OLD, NEW)
+
+    expect((await marks.forBook(NEW)).map((one) => [one.id, one.bookId])).toEqual([['m1', NEW]])
+    const written = JSON.parse(new TextDecoder().decode(fs.store.get(marksPathIn(NEW))!)) as Mark[]
+    expect(written.map((one) => [one.id, one.bookId])).toEqual([['m1', NEW]])
+  })
+
+  /* A file that is there and will not read is not "no marks": resolving would say
+     the migration happened while the reader's marks stayed behind. */
+  it('rejects, and moves nothing, when the old folder holds marks that will not read', async () => {
+    const OLD = 'file:old'
+    const NEW = 'book:new'
+    const fs = libraryWith(NEW)
+    fs.store.set(marksPathIn(OLD), new TextEncoder().encode('{"not":"a list"}'))
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(marks.rekey(OLD, NEW)).rejects.toThrow(`could not read the marks under ${OLD}`)
+      expect(logged).toHaveBeenCalledWith('Paper: could not read the marks under the old book id', expect.any(Error))
+    } finally {
+      logged.mockRestore()
+    }
+    expect(fs.store.has(marksPathIn(NEW))).toBe(false)
+    expect(new TextDecoder().decode(fs.store.get(marksPathIn(OLD))!)).toBe('{"not":"a list"}')
+  })
+})
+
+/**
+ * WHAT A FAILED WRITE LEAVES BEHIND, and what clears it.
+ *
+ * `persistent` is the reader's one signal that what they see is what is kept.
+ * A write that fails turns it off and records the book; a later write that
+ * lands does not turn it back on, because it was computed from a file without
+ * the lost edit; a read of the book does, because that is the screen agreeing
+ * with the disk again. A backup refuses while any of it is unsettled.
+ */
+describe('a write that failed', () => {
+  const OTHER = 'book:def'
+  const library = (files: Record<string, string> = {}) =>
+    fakeFs({
+      [recordPath(BOOK)]: JSON.stringify({ bookId: BOOK, title: 'A', author: 'B' }),
+      [recordPath(OTHER)]: JSON.stringify({ bookId: OTHER, title: 'C', author: 'D' }),
+      ...files,
+    })
+  /** The disk refuses the next write of this book's marks file, once. */
+  const refuseNextWrite = (fs: ReturnType<typeof library>, bookId: string) => {
+    const write = fs.writeFile
+    let refuse = true
+    fs.writeFile = async (path, bytes) => {
+      if (refuse && path.startsWith(marksPathIn(bookId))) {
+        refuse = false
+        throw new Error('EIO: the disk is full')
+      }
+      return write(path, bytes)
+    }
+  }
+  const elsewhere = () => highlight({ bookId: OTHER, text: 'elsewhere', cfi: 'epubcfi(/6/4!/4/2,/1:60,/1:68)' })
+  /** What `loadAllNow` refused with; the test fails if it answered. */
+  const refusal = (marks: ReturnType<typeof createMarkStore>) =>
+    marks.loadAllNow().then(
+      () => {
+        throw new Error('it answered')
+      },
+      (cause: unknown) => {
+        if (cause instanceof MarksScanFailed) return cause
+        throw cause
+      },
+    )
+
+  it('is not hidden by a later write that lands, for this book or another', async () => {
+    const fs = library()
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    await marks.open(BOOK)
+    refuseNextWrite(fs, BOOK)
+    await expect(marks.add(highlight())).rejects.toThrow('the disk is full')
+    expect(marks.getSnapshot().persistent).toBe(false)
+
+    await marks.add(elsewhere())
+    expect(marks.getSnapshot().persistent, 'a write that landed hid the one that did not').toBe(false)
+  })
+
+  it('is cleared by reading the book again', async () => {
+    const fs = library()
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    await marks.open(BOOK)
+    refuseNextWrite(fs, BOOK)
+    await expect(marks.add(highlight())).rejects.toThrow('the disk is full')
+    await marks.open(BOOK)
+    expect(marks.getSnapshot().persistent, 'the read agreed with the disk and still said it was not saving').toBe(true)
+  })
+
+  it('is cleared by a read even when that read finds a damaged file, and the next write that lands says so', async () => {
+    const fs = library({ [marksPathIn(OTHER)]: '{"not": "a list"}' })
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    await marks.open(BOOK)
+    refuseNextWrite(fs, BOOK)
+    await expect(marks.add(highlight())).rejects.toThrow('the disk is full')
+    await marks.open(OTHER)
+    /* NON-VACUOUS: the damaged read leaves the flag where the failure put it. */
+    expect(marks.getSnapshot().unreadable).toBe(true)
+    expect(marks.getSnapshot().persistent).toBe(false)
+
+    await marks.add(highlight())
+    expect(marks.getSnapshot().persistent, 'a write that landed after the read did not say it was saving').toBe(true)
+  })
+
+  it('that fails while a read is in flight keeps the read from calling it saved', async () => {
+    const fs = library({ [marksPathIn(BOOK)]: '[]' })
+    const read = fs.readFile
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let reached = () => {}
+    const reading = new Promise<void>((resolve) => {
+      reached = resolve
+    })
+    let gate = false
+    fs.readFile = async (path) => {
+      const bytes = await read(path)
+      if (gate && path === marksPathIn(BOOK)) {
+        gate = false
+        reached()
+        await held
+      }
+      return bytes
+    }
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    gate = true
+    const opening = marks.open(BOOK)
+    await reading
+    /* Another book's lane, so it runs while the open's read is held. */
+    refuseNextWrite(fs, OTHER)
+    await expect(marks.add(elsewhere())).rejects.toThrow('the disk is full')
+    release()
+    await opening
+    expect(marks.getSnapshot().persistent, 'the read landed over a write that had just failed').toBe(false)
+  })
+
+  it('refuses a backup while its mark is held nowhere but the failure', async () => {
+    const fs = library()
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    refuseNextWrite(fs, OTHER)
+    /* Not the open book and nothing scanned: memory does not hold the mark, so
+       only the failure itself can say the disk is missing it. */
+    await expect(marks.add(elsewhere())).rejects.toThrow('the disk is full')
+    expect(await refusal(marks)).toMatchObject({ damaged: [], unsaved: [folderOf(OTHER)] })
+  })
+
+  /* AFTER THE FLAG IS CLEARED by reading another book, memory still holds the
+     lost mark in the cross-book list; the backup compares that with the disk. */
+  const lostThenMovedOn = async (fs: ReturnType<typeof library>) => {
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    await marks.loadAll()
+    await marks.open(BOOK)
+    const lost = highlight({ text: 'lost' })
+    refuseNextWrite(fs, BOOK)
+    await expect(marks.add(lost)).rejects.toThrow('the disk is full')
+    await marks.open(OTHER)
+    expect(marks.getSnapshot().persistent).toBe(true)
+    return { marks, lost }
+  }
+
+  it('refuses a backup once the flag is cleared, and keeps the mark it found unsaved on the list', async () => {
+    const { marks, lost } = await lostThenMovedOn(library())
+    expect(await refusal(marks)).toMatchObject({ damaged: [], unsaved: [folderOf(BOOK)] })
+    expect(
+      marks.getSnapshot().all.map((mark) => mark.id),
+      'the scan replaced the list and the mark only memory held was not put back',
+    ).toEqual([lost.id])
+  })
+
+  it('counts a book whose folder cannot be checked as still there', async () => {
+    /* The book's file is there, so the scan reads it and never asks after the folder. */
+    const fs = library({ [marksPathIn(BOOK)]: '[]' })
+    const { marks } = await lostThenMovedOn(fs)
+    const exists = fs.exists
+    fs.exists = async (path) => {
+      if (path === folderOf(BOOK)) throw new Error('EACCES: the folder would not answer')
+      return exists(path)
+    }
+    expect(await refusal(marks)).toMatchObject({ unsaved: [folderOf(BOOK)] })
+  })
+})
+
+describe('a store with no disk', () => {
+  it('answers a backup with nothing, rather than refusing it as a failed scan', async () => {
+    const marks = createMarkStore({ fs: null, queue: writeQueue() })
+    await expect(marks.loadAllNow()).resolves.toEqual([])
+    await marks.loadAll()
+    expect(marks.getSnapshot().scanFailed).toBe(false)
+  })
+})
+
+/**
+ * THE READ OF ONE BOOK, AND THE CROSS-BOOK LIST.
+ *
+ * Once a scan has put a book in the list, a read of that book is the newer
+ * fact and replaces its rows there; the other books' rows stay. A book the list
+ * does not hold is not added by a read: the list is what a scan found.
+ */
+describe('reading a book the cross-book list holds', () => {
+  const OTHER = 'book:def'
+  const library = () =>
+    fakeFs({
+      [recordPath(BOOK)]: JSON.stringify({ bookId: BOOK, title: 'A', author: 'B' }),
+      [recordPath(OTHER)]: JSON.stringify({ bookId: OTHER, title: 'C', author: 'D' }),
+      [marksPathIn(BOOK)]: JSON.stringify([highlight({ text: 'before' })]),
+      [marksPathIn(OTHER)]: JSON.stringify([highlight({ bookId: OTHER, text: 'other' })]),
+    })
+  const listed = (marks: ReturnType<typeof createMarkStore>) =>
+    marks
+      .getSnapshot()
+      .all.map((mark) => `${mark.bookId} ${mark.text}`)
+      .sort()
+
+  it('replaces that book’s rows with what the read found, and keeps every other book’s', async () => {
+    const fs = library()
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    await marks.loadAll()
+    expect(listed(marks)).toEqual([`${BOOK} before`, `${OTHER} other`])
+    /* Changed on disk behind the store — another window, a sync. */
+    fs.store.set(marksPathIn(BOOK), new TextEncoder().encode(JSON.stringify([highlight({ text: 'after' })])))
+    await marks.open(BOOK)
+    expect(listed(marks)).toEqual([`${BOOK} after`, `${OTHER} other`])
+  })
+
+  it('adds no book the scan did not find', async () => {
+    const fs = library()
+    fs.store.delete(marksPathIn(BOOK))
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    await marks.loadAll()
+    expect(listed(marks)).toEqual([`${OTHER} other`])
+    fs.store.set(marksPathIn(BOOK), new TextEncoder().encode(JSON.stringify([highlight({ text: 'after' })])))
+    await marks.open(BOOK)
+    expect(listed(marks), 'a read put a book into a list no scan had found it in').toEqual([`${OTHER} other`])
+  })
+
+  it('leaves a list nothing has scanned empty', async () => {
+    const marks = createMarkStore({ fs: library(), queue: writeQueue() })
+    await marks.open(BOOK)
+    expect(marks.getSnapshot().current.map((mark) => mark.text)).toEqual(['before'])
+    expect(marks.getSnapshot().all, 'a read filled a list nothing had scanned').toEqual([])
+  })
+})
+
+describe('the cross-book scan', () => {
+  const OTHER = 'book:def'
+  const record = (bookId: string) => JSON.stringify({ bookId, title: 'A', author: 'B' })
+  const listed = (marks: ReturnType<typeof createMarkStore>) =>
+    marks
+      .getSnapshot()
+      .all.map((mark) => `${mark.bookId} ${mark.text}`)
+      .sort()
+
+  it('names the book holding a row it refused, and that book alone, and says so once for the library', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fs = fakeFs({
+        [recordPath(BOOK)]: record(BOOK),
+        [recordPath(OTHER)]: record(OTHER),
+        [marksPathIn(BOOK)]: JSON.stringify([highlight(), { not: 'a mark' }]),
+        [marksPathIn(OTHER)]: JSON.stringify([highlight({ bookId: OTHER, text: 'fine' })]),
+      })
+      const marks = createMarkStore({ fs, queue: writeQueue() })
+      await expect(marks.loadAllNow()).rejects.toMatchObject({ damaged: [folderOf(BOOK)], unsaved: [] })
+      expect(warn).toHaveBeenCalledWith('Paper: 1 mark(s) in the library could not be read and were kept aside')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('keeps memory’s rows for a book written during it, and the scan’s rows for every other book, once each', async () => {
+    const real = fakeFs({
+      [recordPath(BOOK)]: record(BOOK),
+      [recordPath(OTHER)]: record(OTHER),
+      [marksPathIn(OTHER)]: JSON.stringify([highlight({ bookId: OTHER, text: 'other' })]),
+    })
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let reached = () => {}
+    const scanHeld = new Promise<void>((resolve) => {
+      reached = resolve
+    })
+    let gate = false
+    const fs = {
+      ...real,
+      readFile: async (path: string) => {
+        const bytes = await real.readFile(path)
+        if (gate && path === marksPathIn(OTHER)) {
+          gate = false
+          reached()
+          await held
+        }
+        return bytes
+      },
+    }
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    /* A first scan, so the list already holds the other book when the second runs. */
+    await marks.loadAll()
+    await marks.open(BOOK)
+    gate = true
+    const scan = marks.loadAll()
+    await scanHeld
+    await marks.add(highlight({ text: 'during' }))
+    release()
+    await scan
+    expect(listed(marks)).toEqual([`${BOOK} during`, `${OTHER} other`])
+  })
+
+  it('that fails leaves nothing of an earlier scan behind, and the next one answers whole', async () => {
+    const fs = fakeFs({
+      [recordPath(BOOK)]: record(BOOK),
+      [marksPathIn(BOOK)]: JSON.stringify([highlight({ text: 'kept' })]),
+    })
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    await marks.loadAll()
+    expect(listed(marks)).toEqual([`${BOOK} kept`])
+    const readDir = fs.readDir
+    fs.readDir = async () => {
+      throw new Error('EIO: the books directory would not list')
+    }
+    await marks.loadAll()
+    expect(marks.getSnapshot().all).toEqual([])
+    fs.readDir = readDir
+    expect((await marks.loadAllNow()).map((mark) => mark.text)).toEqual(['kept'])
   })
 })

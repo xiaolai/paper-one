@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CAPABILITY_UI, isWellFormed, messageOf, standingOf, type VoiceDecisions } from '../../../kernel'
+import { CAPABILITY_UI, messageOf } from '../../../kernel'
+import { isWellFormed, standingOf, type VoiceDecisions } from '../lib/binding'
 import type { VoiceDecisionsPort } from '../lib/voicePort'
 
 /**

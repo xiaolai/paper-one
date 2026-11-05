@@ -53,7 +53,7 @@ import { Reader } from './Reader'
  * geometry as plain arithmetic. `.dependency-cruiser.cjs` allows this one
  * module to the browser client, with that reason written beside the rule. */
 import { applyMetrics } from '../../kernel/core/metrics'
-import { Cards, Library, installFatalHandlers } from '../../kernel/ui/browser'
+import { Library, installFatalHandlers } from '../../kernel/ui/browser'
 import { browserSettings } from './settings'
 import type { BookAction, Capability, IndexedBook } from '../../kernel'
 
@@ -74,7 +74,7 @@ import type { BookAction, Capability, IndexedBook } from '../../kernel'
  *
  * ## What this build is, today
  *
- * The gate, the shelf, a book, and four tabs. It asks whether this browser is
+ * The gate, the shelf, a book, and three tabs. It asks whether this browser is
  * connected, shows six digits if not, lists the library over one channel and
  * opens a book over the same one.
  *
@@ -85,7 +85,7 @@ import type { BookAction, Capability, IndexedBook } from '../../kernel'
  *
  * **It is a reader and not the app**, and what that now means precisely:
  * settings live in this browser's own storage rather than the desktop's
- * reducer; marks and cards are READ over the channel and never written, because
+ * reducer; marks are READ over the channel and never written, because
  * a browser session holds a read grant; and there is no reading aloud, no
  * ruler, and no local library — every book's bytes stay on the shelf.
  */
@@ -429,10 +429,10 @@ function ShelfList({
   // Stryker disable next-line ArrayDeclaration: `Shelf` draws this only once its link is set, and the link is never replaced while it is mounted, so the first binding is the only one either way.
   const covers = useMemo(() => remoteCovers(link), [link])
 
-  /* THE SHELF'S NOTES AND CARDS — `useRemoteStores`, which builds one of each
-     per channel and disposes them with it. A store outliving its channel goes
-     on refreshing over a socket that has closed. */
-  const { marks, cards, cardRows } = useRemoteStores(link)
+  /* THE SHELF'S NOTES — `useRemoteStores`, which builds a store per channel and
+     disposes it with the channel. A store outliving its channel goes on
+     refreshing over a socket that has closed. */
+  const { marks } = useRemoteStores(link)
 
   /* THE READER'S PREFERENCES, for the Settings tab. One store, like `positions`. */
   const prefs = useRef<ReturnType<typeof browserSettings> | null>(null)
@@ -541,22 +541,6 @@ function ShelfList({
               bookStatuses={[]}
             />
           </div>
-        </div>
-      )}
-
-      {tab === 'cards' && (
-        <div className={`${styles.stage} ${styles.screen}`}>
-          <h1 className={styles.screenTitle}>Cards</h1>
-          {cards !== null && (
-            <Cards
-              /* NO `discard`: `card.remove` is `card:write` and this session
-                 holds only `readingGrant`, so passing one would draw a delete
-                 button that removes the card, is refused, and puts it back. */
-              cards={{ all: cardRows, persistent: cards.persistent }}
-              bookId={reading?.bookId ?? null}
-              onShelf={() => false}
-            />
-          )}
         </div>
       )}
 

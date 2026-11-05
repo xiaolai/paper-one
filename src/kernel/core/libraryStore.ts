@@ -39,7 +39,7 @@ import {
   type RestoreOutcome,
 } from './bookTrash'
 import { hlcOf, type Hlc } from './hlc'
-import type { ReadingState, Stars } from './circle/log'
+import type { ReadingState, Stars } from './readingState'
 import { normalizeTag, tagKey } from './library'
 import { NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type HashPort, type MutationRecorder } from './ports'
 import { PRESENCE_KEY, notePresence, readPresence } from './presence'
@@ -769,10 +769,19 @@ export function createLibrary({
   const lanes = new Map<string, string>()
   const rekeyed = new Map<string, string>()
 
-  /** A map followed to its end, cycle-safe. */
+  /**
+   * A map followed to its end, cycle-safe.
+   *
+   * The only cycle either map can hold is a lane aliased onto itself, after a
+   * book is rekeyed back to a name it left: `rekeyed` drops the destination's
+   * alias on every move, and `lanes` points a name at the end of a walk. A
+   * self-loop ends where it starts whether or not the start is counted as
+   * seen, so it is not: the start pre-seeded was a difference no walk could
+   * show, which a mutation sweep found (2026-11-02).
+   */
   const follow = (start: string, map: ReadonlyMap<string, string>): string => {
     let at = start
-    const seen = new Set([at])
+    const seen = new Set<string>()
     for (;;) {
       const next = map.get(at)
       if (next === undefined || seen.has(next)) return at
@@ -883,7 +892,9 @@ export function createLibrary({
    * interleaving (round 2, #4). */
   const dirty = new Set<string>()
   let generation = 0
-  let flushTimer: ReturnType<typeof setTimeout> | null = null
+  /* UNDEFINED, not null, when disarmed: `clearTimeout` takes `undefined`, so
+   * a flush can disarm without first asking whether anything is armed. */
+  let flushTimer: ReturnType<typeof setTimeout> | undefined
   let flushing: Promise<void> | null = null
 
   /**
@@ -929,9 +940,9 @@ export function createLibrary({
   }
 
   const armFlush = () => {
-    if (flushTimer !== null) return
+    if (flushTimer !== undefined) return
     flushTimer = setTimeout(() => {
-      flushTimer = null
+      flushTimer = undefined
       void flushIndex().catch((cause: unknown) => console.error('Paper: could not save the shelf index', cause))
     }, INDEX_FLUSH_MS)
     /* A timer must not keep a Node process — `paper` — alive for a flush
@@ -940,10 +951,8 @@ export function createLibrary({
   }
 
   const flushIndex: Library['flushIndex'] = () => {
-    if (flushTimer !== null) {
-      clearTimeout(flushTimer)
-      flushTimer = null
-    }
+    clearTimeout(flushTimer)
+    flushTimer = undefined
     if (!fs || dirty.size === 0) return Promise.resolve()
     /* ONE IN FLIGHT: a blur and a drain a moment apart share the rewrite
      * rather than queueing two. */
@@ -1615,6 +1624,12 @@ export function createLibrary({
         /* AND THE PATH FOLLOWS THE BOOK from here on: a write enqueued under
          * the old id before the rename lands in the new folder when its turn
          * comes — see `rekeyed`. */
+        /* AND `to` IS LIVE AGAIN, so whatever it once pointed at is stale. A
+         * book rekeyed back to a name it had left (`a`→`b`, then `b`→`a`)
+         * kept `a`→`b` beside the new `b`→`a`, and the walk from `a` stopped
+         * at `b`, a folder that had gone: every write under the book's own id
+         * was dropped (2026-11-02). With this, `rekeyed` holds no cycle. */
+        rekeyed.delete(to)
         rekeyed.set(from, to)
         const moved = await readBook(target, to)
         if (moved) await recorded(recorder, to, 'record', () => writeBook(target, to, moved))

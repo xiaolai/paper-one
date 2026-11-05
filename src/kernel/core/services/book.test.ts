@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { IndexFs } from '../bookIndex'
 import { fakeFs } from '../fakeFs.testkit'
 import { createKernelServices } from '../services'
-import { bookAdd, bookPosition, bookRestore, bookSet } from './book'
+import { bookAdd, bookList, bookPosition, bookRestore, bookSet } from './book'
 
 /**
  * ⚠️ **THE FOLDER CAN CHANGE HANDS BETWEEN THE CHECK AND THE ACT.**
@@ -227,5 +227,22 @@ describe('book.position — the narrow door', () => {
   it('refuses a book that is not here, by name', async () => {
     const { at } = shelf()
     await expect(at({ book: 'book_zz', position: 'epubcfi(/6/2)' })).rejects.toMatchObject({ code: 'not-found' })
+  })
+})
+
+describe('book.list since — a delta by either stamp', () => {
+  /* Coarse on purpose: a row is in the delta when it was added or opened at
+     or past `since`, and a row touched by neither is not. */
+  it('lists a row added or opened at or past since, and no other', async () => {
+    const book = (bookId: string, addedAt: number, openedAt?: number) => ({ bookId, title: bookId, author: '', addedAt, ...(openedAt === undefined ? {} : { openedAt }) })
+    const services = createKernelServices({
+      fs: fakeFs({}),
+      storage: null,
+      initialBooks: [book('old', 1, 9), book('added', 10), book('opened', 1, 10), book('never', 1)],
+    })
+    const rows: string[] = []
+    const context = { peer: '', signal: new AbortController().signal, input: (async function* () {})() }
+    for await (const page of bookList({ services })({ since: 10 }, context)) rows.push(...page.map((row) => row.bookId))
+    expect(rows.sort()).toEqual(['added', 'opened'])
   })
 })

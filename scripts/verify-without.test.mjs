@@ -126,6 +126,48 @@ describe('which capabilities the proof runs on', () => {
     expect(proved).toEqual([])
     expect(errs.join()).toContain('unknown argument')
   })
+
+  /* `--list` IS WHAT CI'S MATRIX IS BUILT FROM: one job per removable
+     capability, so the list a job proves is the tree's own answer, never a
+     hand-typed id. It must print exactly the ids `main` would prove, as JSON
+     `fromJSON` can read, and prove none of them itself. */
+  it('lists, as one line of JSON, exactly the capabilities it would prove, and proves none', () => {
+    const proved = []
+    const lines = []
+    const code = main(['--list'], { prove: (id) => (proved.push(id), { code: 0, dir: '' }), out: (l) => lines.push(l), err: () => {} })
+    expect(code).toBe(0)
+    expect(proved).toEqual([])
+    expect(lines).toEqual([`${JSON.stringify(removable)}\n`])
+  })
+})
+
+/* AN EMPTY ANSWER IS A REFUSAL ON EVERY PATH. With no capability removable, a
+   matrix built from `--list` would have no job in it — and a job that never ran
+   reads, on a pull request, much like one that passed. */
+describe('a tree with nothing removable', () => {
+  for (const argv of [[], ['--list'], ['--keep']]) {
+    it(`refuses ${JSON.stringify(argv)} with 2, names why, and proves nothing`, () => {
+      const proved = []
+      const lines = []
+      const errs = []
+      const code = main(argv, {
+        prove: (id) => (proved.push(id), { code: 0, dir: '' }),
+        out: (l) => lines.push(l),
+        err: (l) => errs.push(l),
+        removable: () => [],
+      })
+      expect(code).toBe(2)
+      expect(proved).toEqual([])
+      expect(lines).toEqual([])
+      expect(errs.join()).toContain('no capability can be removed from this tree')
+    })
+  }
+
+  it('still proves one that is named, because naming it is the override', () => {
+    const proved = []
+    expect(main(['circle'], { prove: (id) => (proved.push(id), { code: 0, dir: '' }), out: () => {}, err: () => {}, removable: () => [] })).toBe(0)
+    expect(proved).toEqual(['circle'])
+  })
 })
 
 describe('copyTree', () => {
@@ -208,6 +250,7 @@ describe('copyTree', () => {
       ['boundaries', 'pnpm', ['boundaries']],
       ['architecture:check', 'pnpm', ['architecture:check']],
       ['compositions:check', 'pnpm', ['compositions:check']],
+      ['residue:check', 'pnpm', ['residue:check']],
       ['test', 'pnpm', ['test']],
       ['build', 'pnpm', ['build']],
       ['build:ios', 'pnpm', ['build:ios']],
@@ -466,6 +509,15 @@ describe('parseArgs and the CLI', () => {
   it('takes no id at all, and still reads --keep', () => {
     expect(parseArgs([])).toEqual({ keep: false })
     expect(parseArgs(['--keep'])).toEqual({ keep: true })
+  })
+
+  /* `--list` proves nothing, so an id or `--keep` beside it would be an
+     instruction silently ignored — refused instead, in either order. */
+  it('reads --list alone, and refuses it beside anything else', () => {
+    expect(parseArgs(['--list'])).toEqual({ list: true })
+    for (const argv of [['--list', 'circle'], ['circle', '--list'], ['--list', '--keep'], ['--keep', '--list'], ['--list', '--list']]) {
+      expect(parseArgs(argv), JSON.stringify(argv)).toEqual({ error: '--list takes no other argument' })
+    }
   })
 })
 
@@ -772,6 +824,32 @@ describe('the workflow names a capability that can actually be removed', () => {
   it('runs the deletion proof at all', () => {
     // A scanner that matches nothing passes every assertion below it.
     expect(stepsIn(WORKFLOW).length).toBeGreaterThan(0)
+  })
+
+  /* THE ID CI PROVES IS THE TREE'S OWN ANSWER, ONE JOB EACH. The step names no
+     id — the cases above hold that — so what it proves is whatever the matrix
+     hands it, and the matrix has to be built from `--list`, or a hand-written
+     list could come back one level up, where the checks above cannot see it.
+     Read as lines of each job's block, as `verify.yml` is written: two spaces a
+     level, block style. */
+  it('proves, one job each, exactly the capabilities `--list` names', () => {
+    const lines = readFileSync(WORKFLOW, 'utf8').split('\n').filter((line) => !/^\s*#/.test(line))
+    const job = (id) => {
+      const from = lines.indexOf(`  ${id}:`)
+      expect(from, `verify.yml has a job called ${id}`).toBeGreaterThan(-1)
+      const to = lines.findIndex((line, at) => at > from && /^ {0,2}\S/.test(line))
+      return lines.slice(from + 1, to === -1 ? undefined : to).map((line) => line.trim())
+    }
+    const plan = job('deletion-plan')
+    expect(plan).toContain('capabilities=$(node scripts/verify-without.mjs --list)')
+    expect(plan).toContain('echo "capabilities=$capabilities" >> "$GITHUB_OUTPUT"')
+    expect(plan).toContain('capabilities: ${{ steps.list.outputs.capabilities }}')
+    const proof = job('deletion')
+    expect(proof).toContain('needs: deletion-plan')
+    expect(proof).toContain('capability: ${{ fromJSON(needs.deletion-plan.outputs.capabilities) }}')
+    expect(proof, 'one capability that cannot be removed must not cancel the proof of the others').toContain('fail-fast: false')
+    expect(proof).toContain('CAPABILITY: ${{ matrix.capability }}')
+    expect(proof).toContain('run: pnpm verify:without "$CAPABILITY"')
   })
 
   /* THE SCANNER IS HELD TO ITS OWN CLAIM. Every shape it says it ignores is

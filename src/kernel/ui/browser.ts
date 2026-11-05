@@ -107,10 +107,6 @@ export type { Place } from '../core/jumpStack'
  * the geometry by attribute and reuses the rest. */
 export { OverlaySheet } from './overlays/OverlaySheet'
 
-/* THE DECK. Its `cards` prop was narrowed to the three members it reads, so a
- * host with `card.list` and no `CardStorage` can mount it. */
-export { Cards } from './pane/Cards'
-
 /* THE NOTE IN PLACE. `ReaderSession` intercepts a footnote link, renders the
  * note into its own view, and parks that view off screen until a host says
  * where to put it — so a host that never says leaves footnote links doing

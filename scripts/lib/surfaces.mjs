@@ -24,9 +24,11 @@ import ts from 'typescript'
  * what is true is that this reader does not look inside a factory, and a
  * factory can build ids conditionally or from its context, so reading the
  * literals would report a list the app may never produce. Seven is therefore
- * right and "ten minus two" was wrong arithmetic. **No capability contributes
- * commands today**, so this is a latent gap, recorded rather than papered over
- * by pretending the seam is unreadable in principle.
+ * right and "ten minus two" was wrong arithmetic. **`archives` contributes
+ * commands** (its four are built only where a file dialog exists, which is the
+ * very case above), so their ids are in no surface list. That gap is real and
+ * recorded here rather than papered over by pretending the seam is unreadable in
+ * principle; `capabilities/archives/index.test.ts` pins those ids instead.
  */
 export const CONTRIBUTION_SEAMS = Object.freeze([
   'panes',
@@ -203,12 +205,13 @@ const INCLUDED = Object.freeze([
   'acceptFormats',
 ])
 
-const EXCLUDED = Object.freeze({
+/* Exported so that "a reason per field" is held by `surfaces.test.mjs` rather
+   than by review: a reason emptied to `''` reads as a decision and is none. */
+export const EXCLUDED = Object.freeze({
   readingSteps: 'fourteen integers; a document containing "15" proves nothing about whether the size ladder is described',
   paneShortcuts: 'carries a ⌘ glyph and a pane id already covered by `panes`',
   readerStyles: 'a subset of `markStyles`',
   allFaces: 'a superset of `bundledFaces` whose extra members are probed at runtime and may legitimately never be described',
-  unfinishedPanes: 'a subset of `panes`',
   capabilities: 'walked separately below, seam by seam',
 })
 

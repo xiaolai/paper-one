@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { CAPABILITY_UI, inlineQrSvg } from '../../../kernel'
+import { CAPABILITY_UI } from '../../../kernel'
+import { inlineQrSvg } from '../../peer'
 import type { Pairing } from './usePairing'
 
 /**

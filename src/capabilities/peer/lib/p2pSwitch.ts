@@ -1,0 +1,95 @@
+import { notifyAll } from '../../../kernel'
+import type { P2pAnswer } from './wire'
+
+/**
+ * What the reader sees the switch called, here and on every row that follows it.
+ * One spelling, because "Follows Peer-to-peer" has to name a switch that exists.
+ */
+export const P2P_SWITCH_TITLE = 'Peer-to-peer'
+
+/**
+ * The reader's P2P switch for one run of the app.
+ *
+ * Lives here rather than in the pane's state because Settings unmounts the pane
+ * when it closes: a choice held in the component reads the launch's answer on
+ * reopening, while the file says otherwise.
+ */
+export interface P2pSwitch {
+  /** The answer this run composed around; the screens follow it until a relaunch. */
+  readonly launchedOn: boolean
+  /** The current answer, including a change made in this run: what the switch's file reads, once a write has been asked. */
+  readonly chosen: () => boolean
+  /** Whether what this run is doing still differs from the answer. Settled when `writing` ends. */
+  readonly needsReopen: () => boolean
+  /** One write at a time, in the order asked: the last one asked is the answer. */
+  readonly set: (on: boolean) => Promise<void>
+  /** Whether a write has not finished, which can outlast the pane that asked. */
+  readonly writing: () => boolean
+  /** Told when an answer lands, which can be after the pane that asked has gone, or when this run's transport closes though the write was refused. */
+  readonly subscribe: (listener: () => void) => () => void
+  /** Told when `writing` changes, a refused write included. */
+  readonly subscribeWriting: (listener: () => void) => () => void
+}
+
+export function createP2pSwitch(launchedOn: boolean, write: (on: boolean) => Promise<P2pAnswer>): P2pSwitch {
+  let chosen = launchedOn
+  /* Off closes the transport for the rest of the run, so a run that started on
+     and went off cannot get it back by going on again: only a launch can. */
+  let closed = false
+  const listeners = new Set<() => void>()
+  const writingListeners = new Set<() => void>()
+  /* The close behind an Off can take seconds, so writes can overlap, and each
+     records its answer as it lands. Unserialized, an older Off finishing after a
+     newer On showed Off while the file said on. */
+  let unfinished = 0
+  let latest: Promise<void> = Promise.resolve()
+  return {
+    launchedOn,
+    chosen: () => chosen,
+    needsReopen: () => chosen !== launchedOn || closed,
+    set: (on) => {
+      const ahead = latest
+      const queued = unfinished > 0
+      unfinished += 1
+      if (!queued) notifyAll(writingListeners, 'P2P switch writing')
+      const landed = (async () => {
+        if (queued) await ahead.catch(() => {})
+        /* Only what the plugin says it did. A rejection is no answer: it can come
+           before the plugin ran, with the endpoints still serving. */
+        const answer = await write(on)
+        const justClosed = launchedOn && answer.closed && !closed
+        if (justClosed) closed = true
+        if (answer.recordError !== null) {
+          /* A FAILED WRITE CAN HAVE LANDED: the sync after the rename is what failed,
+             and the file says the new word to the doors now and to the next launch
+             unless the power goes first. Whether it would survive that cannot be known,
+             so the row reads what the file reads and the rejection says it may not last.
+             Nothing read from the file, nothing is known, and the row stays.
+
+             And the transport can have closed whatever the record did: what runs on it
+             has to stop whatever the disk said. */
+          const moved = answer.fileSaysOn !== null && answer.fileSaysOn !== chosen
+          if (answer.fileSaysOn !== null) chosen = answer.fileSaysOn
+          if (justClosed || moved) notifyAll(listeners, 'P2P switch')
+          throw answer.recordError
+        }
+        chosen = on
+        notifyAll(listeners, 'P2P switch')
+      })().finally(() => {
+        unfinished -= 1
+        if (unfinished === 0) notifyAll(writingListeners, 'P2P switch writing')
+      })
+      latest = landed
+      return landed
+    },
+    writing: () => unfinished > 0,
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    subscribeWriting: (listener) => {
+      writingListeners.add(listener)
+      return () => writingListeners.delete(listener)
+    },
+  }
+}

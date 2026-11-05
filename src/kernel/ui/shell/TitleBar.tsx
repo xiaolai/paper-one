@@ -52,9 +52,8 @@ const LIGHTS = ['var(--tl-red)', 'var(--tl-amber)', 'var(--tl-green)'] as const
  * press re-opened Contents rather than closing it, and the control named one
  * destination while performing another.
  *
- * That also falsifies what `UNFINISHED_PANE_IDS` says about itself — "the only
- * edit required" to ship a panel — for as long as a surface reads the list
- * without reading the rule. Everything here asks the rule.
+ * Calling a panel unfinished only holds for as long as no surface reads a list
+ * of panels without reading the rule. Everything here asks the rule.
  */
 const TITLEBAR_PANES: readonly { key: KernelPaneId; Icon: typeof ListTree }[] = [
   { key: 'toc', Icon: ListTree },

@@ -8,7 +8,11 @@ import { tauriWire } from './wire'
 const listeners = new Map<string, (event: { payload: unknown }) => void>()
 let attach: (event: string) => Promise<() => void> = () => Promise.resolve(() => {})
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(() => Promise.resolve(null)) }))
+const invoke = vi.hoisted(() =>
+  vi.fn((_command: string, _args?: unknown): Promise<unknown> => Promise.resolve(null)),
+)
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn((event: string, fn: (event: { payload: unknown }) => void) => {
     listeners.set(event, fn)
@@ -129,5 +133,20 @@ describe('the wire’s registrations, held to the letter', () => {
     await expect(failing.whenListening!()).rejects.toThrow(/no peer:\/\/session-closed/u)
     for (const name of names) expect(listeners.has(name)).toBe(true)
     spy.mockRestore()
+  })
+})
+
+describe('the P2P switch on the Tauri wire', () => {
+  it('asks the plugin what the switch reads, and hands back its answer', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(true)
+    await expect(tauriWire().p2pOn()).resolves.toBe(true)
+    expect(vi.mocked(invoke)).toHaveBeenLastCalledWith('plugin:peer|peer_p2p_on')
+  })
+
+  it('tells the plugin which way it was set, and hands back what it answered', async () => {
+    const answer = { closed: true, recordError: null, fileSaysOn: false }
+    vi.mocked(invoke).mockResolvedValueOnce(answer)
+    await expect(tauriWire().setP2p(false)).resolves.toBe(answer)
+    expect(vi.mocked(invoke)).toHaveBeenLastCalledWith('plugin:peer|peer_set_p2p', { on: false })
   })
 })

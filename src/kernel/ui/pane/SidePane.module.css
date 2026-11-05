@@ -58,6 +58,33 @@
   color: var(--ink);
 }
 
+/* WORK UNDER WAY, in the one row that does not move when it starts or stops.
+   It fades in late so that a scan that lands at once shows nothing at all. Under
+   reduced motion the global rule stops the turning after its one quick cycle,
+   and what is left is the same mark, still. */
+.paneBusy {
+  display: inline-flex;
+  margin-inline-start: var(--space-6);
+  color: var(--muted);
+  animation: paneBusyIn var(--motion-popover) 200ms both;
+}
+
+.paneBusy svg {
+  animation: paneBusyTurn 1s linear infinite;
+}
+
+@keyframes paneBusyIn {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes paneBusyTurn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /*
  * THE PANE SCROLLS WITHOUT RESERVING A LANE FOR SAYING SO.
  *
@@ -111,6 +138,10 @@
   padding: 0 var(--space-6) var(--space-12);
   font-size: var(--text-small);
   color: var(--muted);
+}
+
+.panelMeta:empty {
+  display: none;
 }
 
 .filters {
@@ -313,6 +344,8 @@
   width: 100%;
   text-align: start;
   padding: var(--space-12) var(--space-14);
+  /* The bar below, then one em of room after it. */
+  padding-inline-start: calc(var(--space-4) + var(--track-w) + var(--rule-room));
   margin-bottom: var(--space-8);
   border: 1px solid transparent;
   border-radius: var(--radius-card);
@@ -324,11 +357,9 @@
   background: var(--wash);
 }
 
-/* THE MARK'S OWN TINT, down the leading edge. A reader who marks agreements in
- * green and questions in purple has categorised the passages; a list of notes
- * that shows none of it makes them re-open each one to find out which is which.
- * A bar rather than a tinted row: the row's background is spoken for, and two
- * meanings on one surface is one meaning nobody can read. */
+/* A COLOUR OF THE ROW'S OWN, down the leading edge — see `rowHue`, which writes
+ * `--note-hue`. Saturation and lightness are `bookAccent`'s, for its reason: every
+ * hue lands at the same weight on every theme, and Night needs a lighter one. */
 .note::before {
   content: '';
   position: absolute;
@@ -336,15 +367,11 @@
   inset-inline-start: var(--space-4);
   width: var(--track-w);
   border-radius: var(--radius-pill);
-  background: var(--mark-yellow-rule);
+  background: hsl(var(--note-hue) 46% 52%);
 }
 
-.note[data-tint='green']::before {
-  background: var(--mark-green-rule);
-}
-
-.note[data-tint='purple']::before {
-  background: var(--mark-purple-rule);
+[data-theme='night'] .note::before {
+  background: hsl(var(--note-hue) 42% 62%);
 }
 
 /* The marked passage, and the control that jumps to it. */
@@ -455,14 +482,6 @@
   background: var(--wash);
 }
 
-.noteKind {
-  font-size: var(--text-caption);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--track-caps);
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
 /* --- bookmarks -------------------------------------------------------- */
 
 /* A bookmark row is the note row's shape, and it borrows the whole of it —
@@ -470,12 +489,10 @@
  * the parts of a row in this pane, not anything specific to an annotation, and
  * a second set under other names would be the same rules drifting apart.
  *
- * ONE THING HAS TO GO, and it is the tint bar. `.note::before` paints the
- * mark's own colour down the leading edge and falls back to yellow for a row
- * that carries none — so a list of bookmarks, which carry none by
- * construction, came out as a column of yellow rules saying something about
- * marks that were not there. Suppressed by attribute rather than by a rival
- * class, so the row keeps every other rule automatically. */
+ * ONE THING HAS TO GO, and it is the colour bar: a place is not a passage, and
+ * this row has always been told apart from a mark's by going without. Suppressed
+ * by attribute rather than by a rival class, so the row keeps every other rule
+ * automatically. */
 .note[data-place='true']::before {
   display: none;
 }
@@ -504,6 +521,18 @@
   color: var(--ink-2);
 }
 
+/* The remembered opening line. It is there to confirm the place, not to be read
+   — the reader has the whole page one click away — so it is clamped rather than
+   allowed to set the height of every row. */
+.placeLine {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  padding-top: var(--space-4);
+}
+
 /* --- search ---------------------------------------------------------- */
 
 .searchField {
@@ -515,6 +544,39 @@
   padding: 0 var(--space-12);
   border-radius: var(--radius-pill);
   background: var(--wash);
+}
+
+/* A bare input inside the pill its parent draws: the pill is the control, and
+   this only carries the text. */
+.searchInput {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--text-ui);
+  color: var(--ink);
+}
+
+.searchInput::placeholder {
+  color: var(--muted);
+}
+
+/* ⚠️ **LIGHT THE PILL, NOT THE BARE INPUT INSIDE IT.** The global ring drew itself
+   around the input's own box, a square-cornered 21px strip inside a 34px pill.
+   A text field matches `:focus-visible` after a click as well as from the
+   keyboard, so a click lights the pill too: the reader is about to type, and the
+   ring says where. The offset is inset, as for
+   `.noteInput`: on a filled pill the global two pixels land outside the fill. */
+.searchField:has(:focus-visible) {
+  outline: var(--focus-ring);
+  outline-offset: -1px;
+}
+
+/* The container shows focus — see above. Dropping the input's own ring is only
+   safe because of that rule, which is why the two sit together. */
+.searchInput:focus {
+  outline: none;
 }
 
 .result {
@@ -1137,6 +1199,14 @@
  * heading means it stays true if either changes. */
 .groupBody {
   padding-inline-start: calc(var(--icon-control) + var(--space-6));
+}
+
+/* A sentence about the group, in the rows' own inset. */
+.groupHint {
+  margin: 0;
+  padding: var(--space-6) var(--space-10);
+  font-size: var(--text-small);
+  color: var(--muted);
 }
 
 .groupToggle {

@@ -243,7 +243,15 @@ describe('loadCoverageOptions', () => {
       'scripts/**/*.mjs',
     ])
     expect(Object.keys(options.thresholds)).toEqual(
-      expect.arrayContaining(['lines', 'statements', 'functions', 'branches', 'src/kernel/core/**', 'scripts/lib/**']),
+      expect.arrayContaining([
+        'lines',
+        'statements',
+        'functions',
+        'branches',
+        'src/kernel/core/**',
+        'src/capabilities/**',
+        'scripts/lib/**',
+      ]),
     )
     expect(options.reportsDirectory).toBe('./coverage')
   })

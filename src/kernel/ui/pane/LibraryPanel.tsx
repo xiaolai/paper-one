@@ -552,23 +552,24 @@ export function LibraryPanel({
               heading rather than a row: there is nothing to scope to, and a
               dead control wearing a live one's clothes is worse than a label.
               Shipped as the default view, not behind a preference — a reader
-              who never types a slash sees exactly the flat list they had. */}
-          {tagTree(mine).map((group) =>
-            group.children.length === 0 ? (
-              group.self && row(group.self)
-            ) : (
-              <div key={`g:${tagKey(group.prefix)}`} className={styles.tagGroup}>
-                {group.self ? (
-                  row(group.self)
-                ) : (
-                  <div className={styles.tagGroupHead}>{group.prefix}</div>
-                )}
-                <div className={styles.tagGroupChildren}>
-                  {group.children.map((child) => row(child, tagLeaf(child.tag)))}
-                </div>
+              who never types a slash sees exactly the flat list they had.
+              ⚠️ ONE SHAPE FOR EVERY GROUP, members or none. A tag with no
+              children used to be drawn bare and one with children inside its
+              group, so gaining or losing a first child swapped the tag's row
+              for a new one and threw away a rename half typed into it. An
+              empty member list draws nothing. */}
+          {tagTree(mine).map((group) => (
+            <div key={`g:${tagKey(group.prefix)}`}>
+              {group.self ? (
+                row(group.self)
+              ) : (
+                <div className={styles.tagGroupHead}>{group.prefix}</div>
+              )}
+              <div className={styles.tagGroupChildren}>
+                {group.children.map((child) => row(child, tagLeaf(child.tag)))}
               </div>
-            ),
-          )}
+            </div>
+          ))}
 
           {/* UNTAGGED — books with none of the reader's own tags, within the
               view. Where every cleanup starts. Listed under the reader's tags

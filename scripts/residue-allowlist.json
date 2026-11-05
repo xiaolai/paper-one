@@ -1,0 +1,194 @@
+{
+  "note": "Every place the kernel names a capability, and why. See scripts/check-residue.mjs. A row leaves when its reason does; the gate fails on a stale one.",
+  "rows": [
+    {
+      "id": "circle",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "/circle",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves circle's on-disk path inside a book folder; on-disk paths may not change"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "/circle/",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves circle's on-disk path inside a book folder; on-disk paths may not change"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "/public.jsonl",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves public's on-disk path inside a book folder; on-disk paths may not change"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "circle/${…}",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves circle's namespace under the data root for what is held about a person; on-disk paths may not change"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "circle/lists",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves circle's namespace under the data root for the reader's own published lists; on-disk paths may not change"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/bookFolder.ts",
+      "match": "circle/lists/${…}.json",
+      "count": 1,
+      "reason": "The folder layout is the kernel's, and it reserves circle's namespace under the data root for the reader's own published lists; on-disk paths may not change"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/foreignAnnotation.ts",
+      "match": "circle: an annotation with no publication cannot be keyed",
+      "count": 1,
+      "reason": "An error message prefixed with the name of the capability that first drew annotations; changing it is not this move and it names no behaviour of circle"
+    },
+    {
+      "id": "sync",
+      "file": "src/kernel/core/presence.ts",
+      "match": "sync:presence",
+      "count": 1,
+      "reason": "Removal writes this register before the trash rename, and behind a port a missed write could resurrect a deleted book; stays in the kernel (plan, What stays)"
+    },
+    {
+      "id": "sync",
+      "file": "src/kernel/core/presence.ts",
+      "match": "sync/removed.json",
+      "count": 1,
+      "reason": "Removal writes this register before the trash rename, and behind a port a missed write could resurrect a deleted book; stays in the kernel (plan, What stays)"
+    },
+    {
+      "id": "circle",
+      "file": "src/kernel/core/registry.ts",
+      "match": "circle:",
+      "count": 1,
+      "reason": "Confinement: the rule for circle's writable paths is the kernel's so a capability cannot widen its own confinement (plan, What stays: REVIEWED_WRITES)"
+    },
+    {
+      "id": "public",
+      "file": "src/kernel/core/registry.ts",
+      "match": "public:",
+      "count": 1,
+      "reason": "Confinement: the rule for public's writable paths is the kernel's so a capability cannot widen its own confinement (plan, What stays: REVIEWED_WRITES)"
+    },
+    {
+      "id": "passages",
+      "file": "src/kernel/core/services.ts",
+      "match": "passages:",
+      "count": 1,
+      "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
+    },
+    {
+      "id": "passages",
+      "file": "src/kernel/core/services/passage.ts",
+      "match": "services.passages",
+      "count": 1,
+      "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
+    },
+    {
+      "id": "passages",
+      "file": "src/kernel/ui/App.tsx",
+      "match": "passages:",
+      "count": 1,
+      "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
+    },
+    {
+      "id": "passages",
+      "file": "src/kernel/ui/App.tsx",
+      "match": "services.passages",
+      "count": 1,
+      "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
+    },
+    {
+      "id": "voices",
+      "file": "src/kernel/ui/App.tsx",
+      "match": "voices:",
+      "count": 2,
+      "reason": "A field naming reader voices in the reading settings, which belong to read-aloud in the kernel until Phase 5"
+    },
+    {
+      "id": "voices",
+      "file": "src/kernel/ui/reader/voiceChoice.ts",
+      "match": "voices:",
+      "count": 1,
+      "reason": "A field naming a tier's system voices in read-aloud code, ordinary vocabulary and not the voices capability; moves in Phase 5"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/cardStore.ts",
+      "match": "./cards",
+      "count": 1,
+      "reason": "The card store stays the kernel's (D2): cards still sync, journal and read from an archive with the panel gone"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/serviceTable.ts",
+      "match": "./cards",
+      "count": 1,
+      "reason": "The card.* services and card:* grants stay the kernel's (D2)"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/services/card.ts",
+      "match": "../cards",
+      "count": 1,
+      "reason": "The card.* services and card:* grants stay the kernel's (D2)"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/services/card.ts",
+      "match": "services.cards",
+      "count": 4,
+      "reason": "The card.* services and card:* grants stay the kernel's (D2)"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/services/rows.ts",
+      "match": "../cards",
+      "count": 1,
+      "reason": "The card.* services and card:* grants stay the kernel's (D2)"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/uiTypes.ts",
+      "match": "cards:deck",
+      "count": 1,
+      "reason": "A stored 'cards' panel name is read as the panel's present name, or a panel the reader hid reappears; harmless with no such panel composed"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/index.ts",
+      "match": "./core/cards",
+      "count": 2,
+      "reason": "The entry hands capabilities the card store's vocabulary, which stays the kernel's (D2)"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/ui/App.tsx",
+      "match": "services.cards",
+      "count": 2,
+      "reason": "Rekeying a book's cards when its id changes stays the kernel's, with the store (D2)"
+    },
+    {
+      "id": "peer",
+      "file": "src/kernel/core/envelope.ts",
+      "match": "peer:",
+      "count": 2,
+      "reason": "The envelope's word for the device at the other end of a frame, carried in a service's context; it is protocol vocabulary and does not reach the capability"
+    },
+    {
+      "id": "cards",
+      "file": "src/kernel/core/services.ts",
+      "match": "cards:",
+      "count": 1,
+      "reason": "The card store, which stays in the kernel when the Cards panel moves out (D2)"
+    }
+  ]
+}

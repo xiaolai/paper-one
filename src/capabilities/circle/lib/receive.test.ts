@@ -3,20 +3,12 @@ import { sha512 } from '@noble/hashes/sha2.js'
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js'
 import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
-import {
-  SKEW_MS,
-  WIRE_VERSION,
-  canonicalJson,
-  fold,
-  foldList,
-  makeHlc,
-  resolved,
-  signedBytes,
-  type Entry,
-  type Page,
-  type WorkClaim,
-  compareEntries,
-} from '../../../kernel'
+import { canonicalJson, makeHlc } from '../../../kernel'
+import { SKEW_MS } from './identity'
+import { WIRE_VERSION, signedBytes, type Page } from './page'
+import { fold, resolved, type Entry, compareEntries } from './log'
+import { foldList } from './list'
+import { type WorkClaim } from './workClaim'
 import { pageCrypto } from './crypto'
 import {
   applyEntries,

@@ -1,17 +1,7 @@
-import {
-  claimFor,
-  FIRST_EPOCH, drawsEntry,
-  drawsOverlays,
-  indexKeys,
-  matchWork,
-  READING_STATES,
-  type Hlc,
-  type ReadingState,
-  type Relationship,
-  type ShelvedWork,
-  type Stars,
-  type WorkClaim,
-} from '../../../kernel'
+import { READING_STATES, type Hlc, type ReadingState, type Stars } from '../../../kernel'
+import { claimFor, indexKeys, matchWork, type WorkClaim } from './workClaim'
+import { FIRST_EPOCH, drawsEntry, drawsOverlays, type Relationship } from './relationshipState'
+import { type ShelvedWork } from './log'
 import { bookVia, claimOf, indexOf, workDigest, type BookLike } from './exchange'
 import type { ForeignFile } from './store'
 

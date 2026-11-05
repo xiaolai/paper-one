@@ -1,14 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  Speaker,
-  collectText,
-  offsetIn,
-  placeOf,
-  speechAvailable,
-  textAtPoint,
-  wordLengthAt,
-} from './speech'
+import { Speaker, speechAvailable, wordLengthAt } from './speaker'
+import { collectText, offsetIn, placeOf, textAtPoint } from './speech'
 import { FakeSynth, FakeUtterance } from './speechSynth.testkit'
 import type { HostRect } from './coordinates'
 

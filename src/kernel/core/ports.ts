@@ -336,6 +336,24 @@ export interface SpokenSkip {
   readonly why: string
 }
 
+/** What to read into a file, and where. See `SpeechEnginePort.renderFile`. */
+export interface SpeechFileRequest {
+  readonly packId: string
+  readonly voiceId: string
+  readonly text: string
+  /** A multiplier on the engine's own speed; 1 is its default. */
+  readonly rate?: number
+  /** An absolute path. A failed write leaves nothing there. */
+  readonly path: string
+}
+
+/** What a file written by `renderFile` holds, apart from the samples. */
+export interface RenderedFile {
+  readonly sampleRate: number
+  /** What the engine refused to say: a chapter with less in it than its text. */
+  readonly skipped: readonly SpokenSkip[]
+}
+
 export interface SpokenAudio {
   /** 16-bit mono PCM, little-endian, at `sampleRate`. */
   readonly pcm: Uint8Array
@@ -368,6 +386,55 @@ export interface ClipUsage {
   readonly bytes: number
   readonly budget: number
   readonly clips: number
+}
+
+/**
+ * What a listener has chosen to hear, for the parts that are theirs to choose.
+ *
+ * ONE FIELD, because one entry in the skippability vocabulary is content this
+ * app currently suppresses. EPUB Media Overlays names a dozen more — `sidebar`,
+ * `marginalia`, `table`, `list` — and none of those is suppressed here at all,
+ * so there is nothing for a preference to govern yet. A field per spec entry
+ * would be twelve switches over one behaviour.
+ */
+export interface SpeechSkipPrefs {
+  /** Read a footnote or endnote BODY where the book leaves one on the page. */
+  readonly notes: boolean
+}
+
+/** One section's readable text, as `ReaderSession.sectionTexts` answers it. */
+export interface SectionText {
+  readonly index: number
+  /** The table of contents' own label for this section, where it has one. */
+  readonly title: string | null
+  readonly text: string
+  /**
+   * A digest of the section's CANONICAL text — see `clipKey.textDigest`.
+   *
+   * Carried so the export can ask the rendered-reading store for audio the reader
+   * has already heard, instead of rendering the chapter a second time.
+   */
+  readonly textDigest: string
+}
+
+/**
+ * What a walk of the spine's text produced, and whether it finished.
+ *
+ * ⚠️ **`complete` EXISTS BECAUSE A PARTIAL WALK USED TO BE INDISTINGUISHABLE FROM
+ * A WHOLE ONE.** `sectionTexts` stops when the book closes, is replaced, or the
+ * caller asks — and it returned a bare array either way, so the audiobook export
+ * shipped a truncated book as a finished one. That is the same failure
+ * `narrate_render` records for an empty buffer mid-stream: a complete-looking file
+ * with a fraction of the book in it, and no error anywhere.
+ *
+ * `reanchorUnplaced` in this same class already answers this way, and its comment
+ * gives the rule: *"Nothing was looked at, so nothing has been established."* A
+ * walk that did not finish has established nothing about the sections it never
+ * reached.
+ */
+export interface SectionTextWalk {
+  readonly sections: readonly SectionText[]
+  readonly complete: boolean
 }
 
 /**
@@ -408,6 +475,23 @@ export interface SpeechEnginePort {
    * something needs it rather than a parameter to leave lying here.
    */
   render(request: SpeechRequest): Promise<SpokenAudio>
+  /**
+   * Read some text aloud into a file at a path the caller names.
+   *
+   * ⚠️ **NOT `render` WITH A DESTINATION: NOTHING IS KEPT.** The clip store holds
+   * what a reader has HEARD, and a ten-hour book is 6.2 GB against a 5 GB budget,
+   * so an export that rendered into it would evict its own earlier chapters
+   * before the muxer read them. This writes to the caller's scratch file and
+   * touches no clip.
+   *
+   * ⚠️ **OPTIONAL, AND ONLY UNTIL IT HAS A CALLER.** The export still reaches the
+   * same command directly (`audiobookTauri.ts`) until the narration capability
+   * takes it over, and nothing reads this before then. Required, it would change
+   * every fake of this port in the tests, including the reading proof's, on the
+   * step whose proof is that test bodies did not change. Its first caller makes
+   * it required.
+   */
+  renderFile?(request: SpeechFileRequest): Promise<RenderedFile>
   /**
    * The rendered section already on disk, or `null` the first time.
    *
@@ -816,4 +900,18 @@ export interface SettingsStore {
   readonly persistent: boolean
   /** Every stored value by key. A new object after each change, else the same one. */
   getSnapshot(): Readonly<Record<string, unknown>>
+}
+
+/**
+ * What travels in a public annotation: the quote and its neighbours, never an
+ * anchor. A port type because the kernel's `PrivateAudience` slot answers with
+ * these, between `public` and `circle`, which do not depend on each other.
+ */
+export interface PublicPassage {
+  readonly quote: string
+  readonly prefix: string
+  readonly suffix: string
+  readonly chapter: string
+  /** The reader's own words, when they chose to publish them. */
+  readonly note?: string
 }

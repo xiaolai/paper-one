@@ -22,20 +22,7 @@
  * here instead, where the reason can be said.
  */
 
-/** One section's readable text, as `ReaderSession.sectionTexts` answers it. */
-export interface SectionText {
-  readonly index: number
-  /** The table of contents' own label for this section, where it has one. */
-  readonly title: string | null
-  readonly text: string
-  /**
-   * A digest of the section's CANONICAL text — see `clipKey.textDigest`.
-   *
-   * Carried so the export can ask the rendered-reading store for audio the reader
-   * has already heard, instead of rendering the chapter a second time.
-   */
-  readonly textDigest: string
-}
+import type { SectionText } from '../../core/ports'
 
 /** A chapter to render: what to say, and what to call it. */
 export interface ChapterPlan {

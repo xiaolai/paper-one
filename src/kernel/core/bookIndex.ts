@@ -284,15 +284,13 @@ const SCAN_WIDTH = 16
  * Run `work` over every item, at most `width` in flight.
  *
  * Results keep the ITEMS' order, not completion order — the walk is concurrent,
- * what it produces is not allowed to be. `null` is "nothing came of this item",
- * so a worker can decline without a slot going missing.
+ * what it produces is not allowed to be. Every item gets the answer its own
+ * worker gave, so a worker that can decline says so in its own type (`null`
+ * for the marks walk), and one that always answers is read without a guard.
  */
-async function pooledMap<T, R>(
-  items: readonly T[],
-  width: number,
-  work: (item: T) => Promise<R | null>,
-): Promise<(R | null)[]> {
-  const results: (R | null)[] = new Array<R | null>(items.length).fill(null)
+async function pooledMap<T, R>(items: readonly T[], width: number, work: (item: T) => Promise<R>): Promise<R[]> {
+  // Stryker disable next-line ArrayDeclaration: both callers pass SCAN_WIDTH, so at least one worker runs and every index below items.length is assigned before this returns; an unsized array ends identical.
+  const results: R[] = new Array<R>(items.length)
   let cursor = 0
   const worker = async () => {
     for (;;) {
@@ -458,15 +456,15 @@ async function scanShelf(fs: IndexFs): Promise<{ books: IndexedBook[]; folders: 
   const entries = await listBooksDir(fs)
   const walked = entries.filter((entry) => entry.isDirectory).map((entry) => entry.name)
   const outcomes = await pooledMap(walked, SCAN_WIDTH, (name) => scanFolder(fs, name))
-  const books = outcomes.flatMap((one) => (one?.kind === 'book' ? [one.book] : []))
+  const books = outcomes.flatMap((one) => (one.kind === 'book' ? [one.book] : []))
   /* ONLY WHAT THE SCAN COULD LOOK AT. A `gone` folder is left out of the
    * snapshot — see `FolderScan` — so a folder this scan failed to see keeps
    * the cache distrusted rather than agreeing its books away. */
-  const folders = walked.filter((_name, at) => outcomes[at]?.kind !== 'gone')
+  const folders = walked.filter((_name, at) => outcomes[at]!.kind !== 'gone')
   /* Folders whose record IS THERE and would not read — as distinct from one
    * that simply has no record yet, which is a half-written import and is
    * correctly skipped. */
-  const unreadable = outcomes.filter((one) => one?.kind === 'unreadable').length
+  const unreadable = outcomes.filter((one) => one.kind === 'unreadable').length
   /* EVERY RECORD UNREADABLE IS NOT AN EMPTY LIBRARY. One damaged book costs
    * that book — the rule `scanFolder` is written around, and the right one.
    * But a whole library that will not read is the state where the shelf says
@@ -730,6 +728,7 @@ export async function writeIndex(
    * folders offers nothing to carry, and the field stays absent as before. */
   let kept = folders
   if (!kept) {
+    // Stryker disable next-line ArrowFunction: previous is read only through previous?.folders, where null and undefined both skip the carry, so no caller can tell them apart.
     const previous = await readIndex(fs).catch(() => null)
     if (previous?.folders) {
       const owned = new Set(previous.books.map((one) => folderNameOf(one.bookId)))
@@ -752,12 +751,22 @@ export async function writeIndex(
  * where nobody did.
  *
  * A book whose marks will not read contributes none rather than failing the
- * scan: one damaged book should cost that book's notes, not the pane.
+ * scan: one damaged book should cost that book's notes, not the pane. Something
+ * that writes those notes elsewhere needs to know they were left out, which is
+ * what `onUnreadable` tells it: the folder of a file that is there and would not
+ * read. A book with no marks file is not one; an `exists` that fails proves
+ * nothing, so it counts as there.
+ *
+ * EACH BOOK'S ROWS WITH ITS FOLDER, because a row that will not validate is found
+ * after this returns, and what was left out has to be said by book.
  *
  * This is the shape a SQLite index would eventually replace — and replacing it
  * would change nothing above, because the folders stay the truth either way.
  */
-export async function scanAllMarks(fs: IndexFs): Promise<unknown[]> {
+export async function scanAllMarks(
+  fs: IndexFs,
+  onUnreadable?: (folder: string) => void,
+): Promise<readonly { readonly folder: string; readonly rows: readonly unknown[] }[]> {
   /* ABSENT AND UNREADABLE, distinguished — `listBooksDir` is that rule, held
    * in common with the shelf scan and the trust check. Resolving with `[]` for
    * both used to mean this function could not fail, so the caller's `.catch`
@@ -772,14 +781,28 @@ export async function scanAllMarks(fs: IndexFs): Promise<unknown[]> {
     entries.filter((entry) => entry.isDirectory),
     SCAN_WIDTH,
     async (entry) => {
+      const path = `${BOOKS_DIR}/${entry.name}/marks.json`
       try {
-        const bytes = await fs.readFile(`${BOOKS_DIR}/${entry.name}/marks.json`)
+        const bytes = await fs.readFile(path)
         const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes))
-        return Array.isArray(parsed) ? parsed : null
+        if (Array.isArray(parsed)) return { folder: entry.name, rows: parsed as unknown[] }
       } catch {
-        return null
+        /* THE FOLDER GONE TOO MEANS IT MOVED OR WENT AFTER THE LISTING, not that
+           this book has no marks: a rekey's rename carries them to a name this
+           walk did not list. An `exists` that fails proves neither, so the book
+           is named. Both questions share this one catch: each used to answer a
+           failure with its own `() => false`, which a condition reads exactly
+           as it reads `undefined`, so a mutation sweep could tell neither from
+           its mutant (2026-11-02). */
+        try {
+          if (!(await fs.exists(path)) && (await fs.exists(`${BOOKS_DIR}/${entry.name}`))) return null
+        } catch {
+          /* named below */
+        }
       }
+      onUnreadable?.(entry.name)
+      return null
     },
   )
-  return marks.flatMap((one) => one ?? [])
+  return marks.filter((one) => one !== null)
 }

@@ -549,7 +549,7 @@ const MINE_FILE: &str = "circle-mine.json";
 
 /// How long a minted delegation runs. The ceiling `sign_delegation` enforces.
 ///
-/// The same ninety days `src/kernel/core/circle/identity.ts` names as
+/// The same ninety days `src/capabilities/circle/lib/identity.ts` names as
 /// `DELEGATION_MS`; expiry is the real revocation, and the two sides of the
 /// app have to agree about how long it takes.
 pub const DELEGATION_MS: i64 = 90 * 24 * 60 * 60 * 1000;

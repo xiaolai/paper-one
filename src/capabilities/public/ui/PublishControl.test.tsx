@@ -1,9 +1,17 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PUBLIC_LINKS_DISCLOSURE, disclosureFor, linksVoiceToPerson, type PublicPassage } from '../../../kernel'
+import { type PublicPassage } from '../../../kernel'
+import { PUBLIC_LINKS_DISCLOSURE, disclosureFor, linksVoiceToPerson } from '../lib/publish'
 import type { PublishPublicPort } from '../lib/publishPort'
 import { PublishControl } from './PublishControl'
+
+const live = vi.hoisted(() => ({ now: true }))
+
+vi.mock('../../peer', async (original) => ({
+  ...(await original<typeof import('../../peer')>()),
+  useP2pLive: () => live.now,
+}))
 
 /**
  * The publish control — WI-26.4's surface.
@@ -16,7 +24,10 @@ import { PublishControl } from './PublishControl'
  * the rule passed throughout. What was missing was a test of the WIRING.
  */
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  live.now = true
+})
 
 const PASSAGE: PublicPassage = { quote: 'Call me Ishmael', prefix: '', suffix: '', chapter: 'Loomings' }
 
@@ -35,6 +46,19 @@ const portWith = (over: Partial<PublishPublicPort> = {}): PublishPublicPort =>
 const button = (name: string | RegExp) => screen.queryByRole('button', { name })
 
 describe('the publish control', () => {
+  it('draws nothing once the P2P switch has closed the transport', () => {
+    live.now = false
+    render(<PublishControl bookId="book:1" passage={PASSAGE} port={portWith()} />)
+    expect(screen.queryByText('Say this publicly')).toBeNull()
+    expect(button('Publish…')).toBeNull()
+  })
+
+  it('draws nothing when there is no port to publish through, even with the transport open', () => {
+    render(<PublishControl bookId="book:1" passage={PASSAGE} port={null} />)
+    expect(screen.queryByText('Say this publicly')).toBeNull()
+    expect(button('Publish…')).toBeNull()
+  })
+
   it('publishes nothing on the first click — the disclosure is a step', async () => {
     const port = portWith()
     render(<PublishControl bookId="book:1" passage={PASSAGE} port={port} />)
@@ -73,6 +97,16 @@ describe('the publish control', () => {
 
   /* A build with no circle composed — every phone — passes nothing, and empty
      is the TRUE answer there rather than a default standing in for one. */
+  /* The port decides the wording for each audience; this control's part is to
+     ask about the one it publishes to, which is everyone. */
+  it('asks the port what publishing to anyone discloses', async () => {
+    const disclosure = (audience: string) => (audience === 'public' ? 'Seen by anyone at all.' : 'Seen by someone else.')
+    render(<PublishControl bookId="book:1" passage={PASSAGE} port={portWith({ disclosure })} />)
+    button('Publish…')?.click()
+    await waitFor(() => expect(screen.queryByText('Seen by anyone at all.')).not.toBeNull())
+    expect(screen.queryByText('Seen by someone else.')).toBeNull()
+  })
+
   it('shows the plain disclosure when no circle is composed', async () => {
     render(<PublishControl bookId="book:1" passage={PASSAGE} port={portWith()} />)
     button('Publish…')?.click()
@@ -165,6 +199,26 @@ describe('the publish control', () => {
       screen.queryByText(/Published\. It cannot be recalled/u),
       'a passage nobody published was reported as published',
     ).toBeNull()
+  })
+
+  /* The circle's answer was about the passage it was asked for. Moving to
+     another passage forgets it, so the next disclosure waits for its own
+     answer rather than being drawn, and offered, from the last one's. */
+  it('waits for the circle again after the passage changes', async () => {
+    let answers = 0
+    const sharedWithCircle = () =>
+      (answers += 1) === 1 ? Promise.resolve([{ ...PASSAGE }]) : new Promise<readonly PublicPassage[]>(() => {})
+    const other: PublicPassage = { quote: 'somewhere else', prefix: '', suffix: '', chapter: 'Two' }
+    const port = portWith()
+    const view = render(<PublishControl bookId="book:1" passage={PASSAGE} port={port} sharedWithCircle={sharedWithCircle} />)
+    button('Publish…')?.click()
+    await waitFor(() => expect(screen.queryByText(new RegExp(PUBLIC_LINKS_DISCLOSURE, 'u'))).not.toBeNull())
+
+    view.rerender(<PublishControl bookId="book:1" passage={other} port={port} sharedWithCircle={sharedWithCircle} />)
+    await waitFor(() => expect(button('Publish…')).not.toBeNull())
+    button('Publish…')?.click()
+    await waitFor(() => expect(screen.queryByText(/Checking what you have already shared/u)).not.toBeNull())
+    expect(button('Publish to anyone')?.hasAttribute('disabled'), 'offered from the last passage’s answer').toBe(true)
   })
 
   it('keeps a listener’s failure out of the publication’s error report', async () => {

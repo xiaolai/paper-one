@@ -167,10 +167,24 @@ describe('developer options, by behaviour', () => {
     const on = reducer(reading, { type: 'toggleDeveloper' })
     expect(on).toEqual({ ...reading, developer: true })
 
-    const opened = reducer(on, { type: 'openPane', pane: 'cards' })
-    expect(opened).toEqual({ ...on, pane: 'cards', lastPane: 'cards' })
+    const unfinished = [{ id: 'cards:deck', screens: ['reader'], unfinished: true }] as const
+    const opened = reducer(on, { type: 'openPane', pane: 'cards:deck' }, unfinished)
+    expect(opened).toEqual({ ...on, pane: 'cards:deck', lastPane: 'cards:deck' })
 
-    expect(reducer(opened, { type: 'toggleDeveloper' })).toEqual({ ...reading, developer: false })
+    expect(reducer(opened, { type: 'toggleDeveloper' }, unfinished)).toEqual({ ...reading, developer: false })
+  })
+
+  /* TWO CONTRIBUTED PANELS, the finished one first, so the panel remembered is
+     asked about by its own id and not answered for by whichever comes first. */
+  it('forget a remembered unfinished panel when they turn off, whatever else is contributed', () => {
+    const panes = [
+      { id: 'board:panel', screens: ['reader'] },
+      { id: 'cards:deck', screens: ['reader'], unfinished: true },
+    ] as const
+    const opened = at({ screen: 'reader', pane: 'cards:deck', lastPane: 'cards:deck', developer: true })
+    expect(reducer(opened, { type: 'toggleDeveloper' }, panes)).toEqual(
+      at({ screen: 'reader', pane: 'toc', lastPane: 'toc', developer: false }),
+    )
   })
 
   it('leave a closed pane closed either way', () => {
@@ -180,21 +194,21 @@ describe('developer options, by behaviour', () => {
 
   it('hide a panel once, and are the same state when the list already says so', () => {
     const on = at({ screen: 'reader', pane: 'toc', lastPane: 'toc', developer: true })
-    const hidden = reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: true })
-    expect(hidden).toEqual({ ...on, hiddenPanes: ['cards'] })
-    expect(reducer(hidden, { type: 'setPaneHidden', pane: 'cards', hidden: true })).toBe(hidden)
-    expect(reducer(on, { type: 'setPaneHidden', pane: 'cards', hidden: false })).toBe(on)
+    const hidden = reducer(on, { type: 'setPaneHidden', pane: 'cards:deck', hidden: true })
+    expect(hidden).toEqual({ ...on, hiddenPanes: ['cards:deck'] })
+    expect(reducer(hidden, { type: 'setPaneHidden', pane: 'cards:deck', hidden: true })).toBe(hidden)
+    expect(reducer(on, { type: 'setPaneHidden', pane: 'cards:deck', hidden: false })).toBe(on)
   })
 
   /* TWO IDS, so showing one is visibly not "clear the list". `hiddenPanes` is
      `readonly string[]` rather than `PaneId[]` — a remembered id may name a
      panel this build no longer has — which is why `dev` serves here even though
      it is not itself an unfinished panel, and why the pair used to be
-     `['cards', 'companion']` and typechecked long after `companion` stopped
+     `['cards', 'companion']`, and typechecked long after `companion` stopped
      being a pane at all. */
   it('show one hidden panel again and leave the others hidden', () => {
-    const both = at({ screen: 'reader', pane: 'toc', lastPane: 'toc', developer: true, hiddenPanes: ['cards', 'dev'] })
-    expect(reducer(both, { type: 'setPaneHidden', pane: 'cards', hidden: false })).toEqual({
+    const both = at({ screen: 'reader', pane: 'toc', lastPane: 'toc', developer: true, hiddenPanes: ['cards:deck', 'dev'] })
+    expect(reducer(both, { type: 'setPaneHidden', pane: 'cards:deck', hidden: false })).toEqual({
       ...both,
       hiddenPanes: ['dev'],
     })
@@ -359,8 +373,8 @@ describe('which panel fits where, by behaviour', () => {
   })
 
   it('reads an audience that does not say as one with developer options off', () => {
-    expect(paneFits('reader', 'cards')).toBe(false)
-    expect(paneFits('reader', 'cards', { developer: true })).toBe(true)
+    expect(paneFits('reader', 'dev')).toBe(false)
+    expect(paneFits('reader', 'dev', { developer: true })).toBe(true)
   })
 
   it('fits no kernel panel on a screen a capability owns', () => {

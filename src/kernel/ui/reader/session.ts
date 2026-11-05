@@ -4,8 +4,8 @@ import { directionOf } from './direction'
 import { collectText } from './speech'
 import { textDigest } from './clipKey'
 import { canonicalTextOf } from './passageText'
-import { DEFAULT_SPEECH_SKIP, type SpeechSkipPrefs } from './speechSkip'
-import type { SectionText } from './audiobook'
+import type { SectionText, SectionTextWalk, SpeechSkipPrefs } from '../../core/ports'
+import { DEFAULT_SPEECH_SKIP } from './speechSkip'
 import { refuseBookScripts, stripScripts } from './bookScripts'
 import { suppressEmptyGeneratedContent } from './generatedContent'
 import { isEnlargeable, markFigures } from './markFigures'
@@ -486,26 +486,6 @@ export interface SessionNavigator {
        reverse. One value, from `SpeakPrefs`, down both paths. */
     skip?: SpeechSkipPrefs,
   ) => Promise<SectionTextWalk>
-}
-
-/**
- * What a walk of the spine's text produced, and whether it finished.
- *
- * ⚠️ **`complete` EXISTS BECAUSE A PARTIAL WALK USED TO BE INDISTINGUISHABLE FROM
- * A WHOLE ONE.** `sectionTexts` stops when the book closes, is replaced, or the
- * caller asks — and it returned a bare array either way, so the audiobook export
- * shipped a truncated book as a finished one. That is the same failure
- * `narrate_render` records for an empty buffer mid-stream: a complete-looking file
- * with a fraction of the book in it, and no error anywhere.
- *
- * `reanchorUnplaced` in this same class already answers this way, and its comment
- * gives the rule: *"Nothing was looked at, so nothing has been established."* A
- * walk that did not finish has established nothing about the sections it never
- * reached.
- */
-export interface SectionTextWalk {
-  readonly sections: readonly SectionText[]
-  readonly complete: boolean
 }
 
 export interface SessionDeps {

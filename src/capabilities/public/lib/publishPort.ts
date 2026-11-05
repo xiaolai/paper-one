@@ -1,18 +1,6 @@
-import {
-  notifyAll,
-  disclosureFor,
-  isContentHash,
-  linksVoiceToPerson,
-  mayPublish,
-  mintNote,
-  mintPublicationId,
-  mintUnnote,
-  sealPublic,
-  type Audience,
-  type IndexedBook,
-  type Library,
-  type PublicPassage,
-} from '../../../kernel'
+import { notifyAll, isContentHash, type IndexedBook, type Library, type PublicPassage } from '../../../kernel'
+import { disclosureFor, linksVoiceToPerson, mayPublish, type Audience } from './publish'
+import { mintNote, mintPublicationId, mintUnnote, sealPublic } from './envelope'
 import type { SharePort, VoicePort } from '../../peer'
 
 /**

@@ -26,6 +26,8 @@ to circle pages, so neither key can be made to sign the other's.
 #### This default permission set includes the following:
 
 - `allow-peer-status`
+- `allow-peer-p2p-on`
+- `allow-peer-set-p2p`
 - `allow-peer-local-role`
 - `allow-peer-set-local-role`
 - `allow-paper-data-root`
@@ -501,6 +503,32 @@ Denies the peer_local_role command without any pre-configured scope.
 <tr>
 <td>
 
+`peer:allow-peer-p2p-on`
+
+</td>
+<td>
+
+Enables the peer_p2p_on command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-p2p-on`
+
+</td>
+<td>
+
+Denies the peer_p2p_on command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `peer:allow-peer-page-sign`
 
 </td>
@@ -910,6 +938,32 @@ Enables the peer_set_local_role command without any pre-configured scope.
 <td>
 
 Denies the peer_set_local_role command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-set-p2p`
+
+</td>
+<td>
+
+Enables the peer_set_p2p command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-set-p2p`
+
+</td>
+<td>
+
+Denies the peer_set_p2p command without any pre-configured scope.
 
 </td>
 </tr>

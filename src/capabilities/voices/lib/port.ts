@@ -10,7 +10,9 @@ import type {
   ClipUsage,
   ClipsEvicted,
   InstallProgress,
+  RenderedFile,
   SpeechEnginePort,
+  SpeechFileRequest,
   SpeechRequest,
   SpokenAudio,
   SpokenClip,
@@ -24,6 +26,7 @@ import {
   packOf,
   pcmOfWav,
   progressOf,
+  renderedFileOf,
   usageOf,
   type ClipRow,
 } from './rows'
@@ -219,6 +222,19 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
         evicted: clip.evicted,
         clipPath: clip.path,
       }
+    },
+
+    async renderFile(request: SpeechFileRequest): Promise<RenderedFile> {
+      return renderedFileOf(
+        await wire.renderFile({
+          pack: request.packId,
+          voice: request.voiceId,
+          text: request.text,
+          /* `null` and not absent, as `queryOf` sends it: see the wire's test. */
+          rate: request.rate ?? null,
+          path: request.path,
+        }),
+      )
     },
 
     /**

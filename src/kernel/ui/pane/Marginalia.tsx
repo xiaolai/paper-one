@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
   Asterisk,
   /* Aliased: `Bookmark` is also the record type this file is largely about,
@@ -6,12 +6,11 @@ import {
   Bookmark as BookmarkIcon,
   BookOpen,
   Highlighter,
-  Layers,
   LibraryBig,
   PenLine,
   Trash2,
 } from 'lucide-react'
-import { cardFromMark } from '../../core/cards'
+import { rowHue } from '../../core/bookAccent'
 import {
   compareMarks,
   isPlaced,
@@ -37,12 +36,27 @@ import { ICON, type Platform } from '../../core/metrics'
 const UNPLACED_TITLE = 'From another edition of this book — Paper has not found this passage here yet.'
 import { onBeforeClose } from '../../core/beforeClose'
 import { relativeTime } from '../../core/relativeTime'
-import type { CardsView } from '../hooks/useCards'
-import type { MarkControl } from '../../core/capability'
+import type { MarkControl, MarkControlTools } from '../../core/capability'
 
 /* The context a mark control's contribution is drawn under: the open book, which the control's own render never reads — it is handed the mark. */
 // Stryker disable next-line ObjectLiteral,ArrowFunction: no control reads the context, so what it holds — or that it is nothing — cannot be seen.
 const controlContext = (bookId: string | null): { readonly bookId: string | null } => ({ bookId })
+
+/**
+ * A control's line over the list, or nothing.
+ *
+ * THE WRAPPER IS ALWAYS HERE, and `.panelMeta:empty` is what stops it being a
+ * blank line: a notice is free to be a component that subscribes to its store and
+ * draws nothing while there is nothing to say, so whether anything was drawn is
+ * not known at this level.
+ */
+function ControlNotice({ id, notice, bookId }: { readonly id: string; readonly notice: () => unknown; readonly bookId: string | null }) {
+  return (
+    <div className={styles.panelMeta} data-mark-control-notice={id}>
+      <ContributionBody id={id} render={() => notice()} context={controlContext(bookId)} />
+    </div>
+  )
+}
 
 /**
  * Whether an annotation carries a note the reader can see.
@@ -57,12 +71,6 @@ const hasNote = (mark: { readonly note: string }): boolean => mark.note.trim() !
 /** §11: say what happened and what to do. A store that has quietly stopped saving looks exactly like one that works. */
 const NOT_SAVING = "Marginalia is not being saved — this device's storage is unavailable."
 
-/**
- * The same sentence for the cards this panel makes — their own store and their
- * own flag (`CardsView.persistent`), which the panel could not see (#132).
- */
-const NOT_SAVING_CARDS = "Cards you make are not being saved — this device's storage is unavailable."
-
 /** The one sentence for a marks file that would not read, wherever it stands. */
 const UNREADABLE_MARKS =
   "This book's marks file could not be read. It is left as it is, and marks made now are not being saved over it."
@@ -73,8 +81,12 @@ const UNREADABLE_MARKS =
 export const SCAN_FAILED_MARKS = 'Your marks could not be read'
 /** What to do about a failed scan, wherever it is said. */
 const SCAN_FAILED_NEXT = 'Nothing on disk has been changed. Close and reopen the panel to try again.'
-/** The cross-book scan is still running — over an empty panel or above a partial list (#130). */
-const SCANNING_MARKS = 'Reading your marks…'
+/**
+ * The cross-book scan is still running — in words where nothing is listed, and
+ * as the name of the mark beside the pane's title, which stands over a partial
+ * list too (#130).
+ */
+export const SCANNING_MARKS = 'Reading your marks…'
 import type { MarksView } from '../hooks/useMarks'
 import { comboFor } from '../panes'
 import { FilterChips } from './FilterChips'
@@ -682,22 +694,6 @@ export interface MarginaliaProps {
      * book is a single call, so a browser host's `loadAll` is cheap. */
     readonly loadAll: MarksView['loadAll']
   }
-  /**
-   * Where a mark becomes a made thing — §15's line between note and card.
-   *
-   * OPTIONAL, AND ABSENT MEANS THE CONTROL IS NOT DRAWN. `make` is synchronous
-   * and hands a `Card` straight back; a host whose cards live behind a channel
-   * cannot answer that shape, and a stub returning a fabricated card would put
-   * a made thing on screen that the shelf never received.
-   */
-  /* `make`, and whether what it writes is kept — the whole `CardsView` coupled
-   * it to card state and verbs it never reads.
-   *
-   * ⚠️ `persistent` WAS NARROWED AWAY WITH THEM, and it is not state this panel
-   * never reads: `make` lets its write go and reports a refusal only through
-   * that flag, and the Cards panel that draws it is not offered to a reader. So
-   * a card made here that was never saved was said nowhere (#132). */
-  cards?: Pick<CardsView, 'make' | 'persistent'> | undefined
   /** The open book, so its marks can be shown first. Null when none is open. */
   bookId: string | null
   /**
@@ -776,7 +772,6 @@ export interface MarginaliaProps {
 
 export function Marginalia({
   marks,
-  cards,
   bookId,
   onDelete,
   onDeleteBookmark,
@@ -876,6 +871,7 @@ export function Marginalia({
     const kept = written.current.get(mark.id)
     return kept !== undefined && kept.behind.has(mark.note.trim()) ? { ...mark, note: kept.note } : mark
   }
+  const controlTools: MarkControlTools = { noteAsWritten }
   useEffect(() => {
     for (const [id, kept] of written.current) {
       const mark = everything.find((one) => one.id === id)
@@ -1087,15 +1083,12 @@ export function Marginalia({
         </div>
       )}
 
-      {/* THE SCAN, SAID ABOVE WHAT IS LISTED AS WELL AS OVER NOTHING (#129,
-          #130). Kept to the nothing-at-all branch, a running scan let a partial
-          list pass for the whole of it. Running wins over failed, as it does in
-          that branch: a scan under way is the newer answer. */}
-      {marks.scanning && (
-        <div className={styles.panelMeta}>
-          <span>{SCANNING_MARKS}</span>
-        </div>
-      )}
+      {/* A FAILED SCAN, SAID ABOVE WHAT IS LISTED AS WELL AS OVER NOTHING (#129).
+          A running one is not said here (#130): a row for it pushed the list
+          down and pulled it back each time the panel opened. `SidePane` marks it
+          beside the title, which does not move.
+          Running wins over failed, as it does in the nothing-at-all branch: a
+          scan under way is the newer answer. */}
       {marks.scanFailed && !marks.scanning && (
         <div className={styles.panelMeta}>
           <span>
@@ -1104,12 +1097,17 @@ export function Marginalia({
         </div>
       )}
 
-      {/* HERE, because this is where cards are made, above the rows that make
-          them (#122, #132). */}
-      {cards !== undefined && !cards.persistent && (
-        <div className={styles.panelMeta}>
-          <span>{NOT_SAVING_CARDS}</span>
-        </div>
+      {/* ABOVE THE ROWS THAT DRAW THE CONTROL, and not over a panel with none:
+          there is nothing there for it to be about. The class is the one the
+          two lines above draw in. */}
+      {markControls?.flatMap((control) =>
+        control.notice === undefined
+          ? []
+          : [
+              <ContributionBoundary key={control.id} label="A mark control" id={control.id} resetKey={control.id}>
+                <ControlNotice id={control.id} notice={control.notice} bookId={bookId} />
+              </ContributionBoundary>,
+            ],
       )}
 
       {/* BOTH AXES ON ONE LINE, with a rule between them.
@@ -1144,9 +1142,16 @@ export function Marginalia({
         )}
       </div>
 
-      {/* NOT WHILE THE LIST IS UNFINISHED OR UNREAD — the line above says which,
-          and "No notes yet." under it would claim an answer nobody has yet
-          (#129, #130). */}
+      {/* NOT WHILE THE LIST IS UNFINISHED OR UNREAD — "No notes yet." would claim
+          an answer nobody has yet (#129, #130). Said in words here, because
+          nothing below can be moved by it, and the title's mark alone over an
+          empty filter reads as the marks having been lost. A failed scan is
+          said by the line above. */}
+      {shown.length === 0 && marks.scanning && (
+        <div className={styles.empty}>
+          <div className={styles.emptyBody}>{SCANNING_MARKS}</div>
+        </div>
+      )}
       {shown.length === 0 && !marks.scanning && !marks.scanFailed && (
         <div className={styles.empty}>
           <div className={styles.emptyBody}>
@@ -1173,11 +1178,9 @@ export function Marginalia({
           }}
           className={styles.note}
           data-kind={mark.kind}
-          /* A bookmark carries no tint, and `.note::before` falls back to
-             yellow for a row without one — so a place row would have grown a
-             gold rule meaning nothing. `data-place` suppresses it. */
+          /* A bookmark draws no colour bar — `data-place` suppresses it. */
           data-place={isBookmark(mark) ? 'true' : undefined}
-          data-tint={isBookmark(mark) ? undefined : mark.tint}
+          {...(isBookmark(mark) ? {} : { style: { '--note-hue': rowHue(mark.id) } as CSSProperties })}
           data-focused={mark.id === revealed}
         >
           {/* THE WORK, on rows that are not from the open book. Above whatever
@@ -1247,10 +1250,10 @@ export function Marginalia({
               is the capability's own, narrowed by `renderContribution` the
               way a contributed pane is; the kernel supplies the mark and
               never learns what the control does. */}
-          {markControls?.map((control) => (
+          {markControls?.filter((control) => control.place === undefined).map((control) => (
             <div key={control.id} data-mark-control={control.id}>
               <ContributionBoundary label="A mark control" id={control.id} resetKey={control.id}>
-                <ContributionBody id={control.id} render={() => control.render(mark)} context={controlContext(bookId)} />
+                <ContributionBody id={control.id} render={() => control.render(mark, controlTools)} context={controlContext(bookId)} />
               </ContributionBoundary>
             </div>
           ))}
@@ -1258,21 +1261,15 @@ export function Marginalia({
           <div className={styles.noteSource}>
             <span>{mark.chapter || 'Unknown chapter'}</span>
             <span className={styles.rowActions}>
-              {/* Notes stay raw; cards are made. This is the only place the
-                  one becomes the other, which is what keeps the distinction
-                  §15 draws visible rather than nominal. */}
-              {cards !== undefined && (
-                <button
-                  type="button"
-                  className={styles.noteDelete}
-                  aria-label="Make a card"
-                  title="Make a card"
-                  /* THE NOTE AS WRITTEN HERE, not as the row last heard it — see `written` (#128). */
-                  onClick={() => cards.make(cardFromMark(noteAsWritten(mark)))}
-                >
-                  <Layers size={ICON.inline} strokeWidth={ICON.stroke} />
-                </button>
-              )}
+              {/* A CAPABILITY'S ICON AMONG THE ROW'S OWN, ahead of the bin, so
+                  the destructive one stays where the hand expects it. */}
+              {markControls?.filter((control) => control.place === 'actions').map((control) => (
+                <span key={control.id} data-mark-control={control.id}>
+                  <ContributionBoundary label="A mark control" id={control.id} resetKey={control.id}>
+                    <ContributionBody id={control.id} render={() => control.render(mark, controlTools)} context={controlContext(bookId)} />
+                  </ContributionBoundary>
+                </span>
+              ))}
               {/* Not drawn without `onDelete` — see the prop. A disabled bin
                   would claim the mark is deletable and merely not now. */}
               {onDelete && (

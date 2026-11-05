@@ -6,7 +6,6 @@ import { initialState } from '../state'
 import type { Book } from '../hooks/useBook'
 import type { SearchHit } from '../hooks/useBook'
 import type { MarksView } from '../hooks/useMarks'
-import type { CardsView } from '../hooks/useCards'
 import type { Bookmarking } from '../hooks/useBookmarking'
 import type { TagPrefsStore } from '../hooks/useTagPrefs'
 
@@ -73,13 +72,13 @@ const marksView = () =>
  * The pane in the reader, on one panel, with only what that panel reads varied.
  *
  * `developerOptions` because an UNFINISHED panel — `cards` — is offered, and so
- * drawn, only with developer options on (`UNFINISHED_PANE_IDS`).
+ * drawn, only with developer options on.
  */
 function draw({
   developerOptions = false,
   ...over
 }: Partial<SidePaneProps> & {
-  pane: 'search' | 'cards' | 'library' | 'marginalia' | 'settings'
+  pane: 'search' | 'dev' | 'library' | 'marginalia' | 'settings'
   developerOptions?: boolean
 }) {
   const onGoTo = vi.fn()
@@ -90,7 +89,6 @@ function draw({
     marks: marksView(),
     bookmarking: { remove: vi.fn() } as unknown as Bookmarking,
     platform: 'macos',
-    cards: { all: [] } as unknown as CardsView,
     onGoTo,
     onDeleteMark: vi.fn(),
     markFocus: null,
@@ -145,9 +143,9 @@ describe('the search panel', () => {
  */
 describe('a pane asked for that this reader is not offered', () => {
   it('shows the screen’s own default, as the rail does', () => {
-    draw({ pane: 'cards' })
+    draw({ pane: 'dev' })
     /* The pane's TITLE, which is the one thing every panel puts on screen. */
-    expect(screen.queryByText('Cards')).toBeNull()
+    expect(screen.queryByText('Developer')).toBeNull()
     expect(screen.getByText('Contents')).not.toBeNull()
   })
 })

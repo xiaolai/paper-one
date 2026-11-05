@@ -1,4 +1,4 @@
-import { claimFor, indexKeys, matchWork, type ClaimSource, type WorkClaim } from '../../../kernel'
+import { claimFor, indexKeys, matchWork, type ClaimSource, type WorkClaim } from './workClaim'
 import { pageCrypto } from './crypto'
 import {
   CIRCLE_PROTO,
@@ -13,7 +13,7 @@ import {
 import { DEFAULT_BOUNDS, pagesFor, wireBytesOf, type Bounds, type Publisher, type SharedFile } from './publish'
 import { liveShelfRows, shelfPagesFor, type ShelfFile } from './shelf'
 import { base64Of } from './base64'
-import { SHELF_WORK, listWork } from '../../../kernel'
+import { SHELF_WORK, listWork } from './workClaim'
 import { listPagesFor, type ListFile } from './lists'
 import { COVER_CHUNK_BYTES, MAX_ANSWER_CHARS, MAX_PAGES_PER_ANSWER, parseCoverRequest, parseListsRequest, type CoverAnswer } from './protocol'
 import { MAX_COVER_BYTES } from '../../../kernel'

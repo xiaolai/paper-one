@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { CAPABILITY_UI, messageOf } from '../../../kernel'
+import { useP2pLive } from '../../peer'
 import type { PublicPassage } from '../../../kernel'
 import type { Published, PublishPublicPort } from '../lib/publishPort'
 
@@ -58,7 +59,9 @@ export interface PublishControlProps {
 }
 
 export function PublishControl({ bookId, passage, sharedWithCircle, port, onPublished }: PublishControlProps) {
+  const p2pLive = useP2pLive()
   const [asked, setAsked] = useState(false)
+  // Stryker disable next-line BooleanLiteral: `belongsTo` starts null, so the reset below runs during the first render and sets `busy` to false before anything is committed
   const [busy, setBusy] = useState(false)
   const [trouble, setTrouble] = useState<string | null>(null)
   const [done, setDone] = useState(false)
@@ -122,7 +125,7 @@ export function PublishControl({ bookId, passage, sharedWithCircle, port, onPubl
     }
   }, [asked, sharedWithCircle])
 
-  if (port === null) return null
+  if (port === null || !p2pLive) return null
 
   if (done) {
     return (

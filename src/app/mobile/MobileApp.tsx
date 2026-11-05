@@ -1,12 +1,10 @@
 import { useState, useSyncExternalStore } from 'react'
 import {
-  Cards,
   Library,
   coverIn,
   resolvePlatform,
   tauriVaultFs,
   useAppPalette,
-  useCards,
   useLibrary,
   usePrefersDark,
 } from '../../kernel/ui/mobile'
@@ -75,7 +73,6 @@ export function MobileApp({
   const [tab, setTab] = useState<Tab>('library')
   const [query, setQuery] = useState('')
   const library = useLibrary(services.library)
-  const cards = useCards(services.cards)
   const [platform] = useState(resolvePlatform)
 
   /* THE SETTINGS ARE READ THROUGH THE STORE, NOT COPIED INTO STATE. The store
@@ -171,19 +168,6 @@ export function MobileApp({
               bookStatuses={composition.bookStatuses}
             />
           </div>
-        </div>
-      )}
-      {tab === 'cards' && (
-        <div className={`${styles.stage} ${styles.screen}`}>
-          <h1 className={styles.screenTitle}>Cards</h1>
-          <Cards
-            cards={{
-              all: cards.all,
-              persistent: cards.persistent,
-              discard: cards.discard,
-            }}
-            bookId={null}
-          />
         </div>
       )}
       {tab === 'settings' && (

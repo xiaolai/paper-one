@@ -1,19 +1,6 @@
-import {
-  BOOKS_DIR,
-  admitsAnotherBook,
-  folderOf,
-  isContentExtension,
-  isContentHash,
-  mayPublishNotes,
-  notifyAll,
-  offerAbsentBecause,
-  offerabilityOf,
-  planShareImport,
-  type IndexedBook,
-  type Library,
-  type PublicOfferability,
-  type ShareImport,
-} from '../../../kernel'
+import { BOOKS_DIR, folderOf, isContentExtension, isContentHash, notifyAll, type IndexedBook, type Library } from '../../../kernel'
+import { admitsAnotherBook } from './bounds'
+import { mayPublishNotes, offerAbsentBecause, offerabilityOf, planShareImport, type PublicOfferability, type ShareImport } from './publicShare'
 import type { SharedBook, SharePort, ShareService } from '../../peer'
 
 /**

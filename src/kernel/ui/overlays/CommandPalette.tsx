@@ -29,7 +29,7 @@ export interface CommandPaletteProps {
    *
    * ⚠️ **OPTIONAL SO THE OFFER AND THE ACTION CANNOT COME APART.** The sentence
    * below ("Press Enter to take it to the companion") was rendered
-   * unconditionally while `companion` sat in `UNFINISHED_PANE_IDS`, so for
+   * unconditionally while `companion` was an unfinished panel, so for
    * every ordinary reader Enter dismissed the palette and `paneFor` redirected
    * the open to Contents: a promise about a panel that cannot be reached,
    * followed by an unrelated panel. Making this optional means the promise is

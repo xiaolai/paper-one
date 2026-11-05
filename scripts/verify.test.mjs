@@ -50,6 +50,7 @@ describe('the steps', () => {
          `test:coverage` everywhere. */
       'ledger:check',
       'boundaries',
+      'residue:check',
       'test:projects',
       'test:ledger',
       'typecheck',
@@ -102,6 +103,43 @@ describe('the steps', () => {
       STEPS.map((s) => s.name).indexOf('cargo test --workspace'),
     )
     expect(STEPS.find((s) => s.name === 'docs:rust-notices --check').args).toEqual(['docs:rust-notices', '--check'])
+  })
+})
+
+describe('the command each step runs', () => {
+  /* THE NAMES ARE NOT THE COMMANDS. Every assertion above reads `name`, and the
+     runner spawns `cmd` and `args` — so a step could keep its name and run
+     nothing (`cmd: ''`, `args: []`) with every name check still green. This
+     pins what each step actually executes, and which one discards stdout. */
+  it('is the pnpm script or cargo invocation the step is named for, and only the metadata step is quiet', () => {
+    const cargo = '--manifest-path src-tauri/Cargo.toml'
+    expect(STEPS.map((s) => [s.cmd, ...s.args].join(' '))).toEqual([
+      'pnpm architecture:check',
+      'pnpm compositions:check',
+      'pnpm css:check',
+      'pnpm css:tokens',
+      'pnpm browser:check',
+      'pnpm directives:check',
+      'pnpm ledger:check',
+      'pnpm boundaries',
+      'pnpm residue:check',
+      'pnpm test:projects',
+      'pnpm test:ledger',
+      'pnpm typecheck',
+      'pnpm test:coverage',
+      'pnpm build',
+      'pnpm build:web',
+      'pnpm build:cli',
+      `cargo metadata --locked --format-version 1 ${cargo}`,
+      `cargo fmt ${cargo} --all -- --check`,
+      `cargo clippy ${cargo} --workspace --all-targets -- -D warnings`,
+      `cargo test ${cargo} --workspace --all-targets -- --test-threads=1`,
+      'pnpm docs:rust-notices --check',
+    ])
+    /* `quiet` discards the child's stdout, which for `cargo metadata` is a JSON
+       blob nobody reads; on any other step it would hide the gate's output. */
+    expect(STEPS.filter((s) => s.quiet === true).map((s) => s.name)).toEqual(['cargo metadata --locked'])
+    expect(STEPS.filter((s) => s.quiet !== undefined).map((s) => s.name)).toEqual(['cargo metadata --locked'])
   })
 })
 

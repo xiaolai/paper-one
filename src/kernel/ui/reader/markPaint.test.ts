@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { DrawAnnotationDetail, View } from 'foliate-js/view.js'
-import { foreignWeight } from '../../core/circle/foreign'
+import { foreignWeight } from '../../core/foreignAnnotation'
 import { resolvedCfiForTesting } from '../../core/resolvedCfi.testkit'
 import {
   attachForeign,

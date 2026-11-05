@@ -18,7 +18,7 @@ import {
   type ServiceHandler,
   type Setting,
 } from '../../kernel'
-import { peerPort, readRole, registerSyncNow, type PeerPort } from '../peer'
+import { p2pAvailable, peerPort, readRole, registerSyncNow, watchP2p, type PeerPort } from '../peer'
 import { createClock, ensureDeviceId, isHlc } from './lib/clock'
 import { createBackfill } from './lib/backfill'
 import { stampMeasured, unstampUnlessVerified } from './lib/coverStamps'
@@ -30,7 +30,17 @@ import { bindRole, bindScheduler, currentRole, syncNow, syncStatus, unbindRole, 
 import { createDownloads, describeDownload } from './lib/downloads'
 import { describeArrival, dropArrival, readArrivals, recordArrival, type Arrival } from './lib/arrivals'
 import { createSyncScheduler, type SyncOutcome, type SyncScheduler } from './lib/scheduler'
-import { describeRefusal, describeSession, refusalKind, type RefusalNames, type SessionRefusal } from './lib/status'
+import {
+  describeRefusal,
+  describeSession,
+  isLinkClosure,
+  P2P_CLOSED_DETAIL,
+  P2P_OFF_DETAIL,
+  refusalKind,
+  saysMoreThanClosure,
+  type RefusalNames,
+  type SessionRefusal,
+} from './lib/status'
 import { createStorageModel, dropDownloadSize, recordDownloadSize, type StorageModel } from './ui/storageModel'
 import { StoragePane } from './ui/StoragePane'
 
@@ -203,6 +213,13 @@ async function withShelf<T>(task: (channel: SyncChannel) => Promise<T>): Promise
 }
 
 /**
+ * Set once the reader changes the P2P switch in this run; its sentence then
+ * stands. It belongs to the runtime in `running`: one that is claiming the slot
+ * starts clear, and one that no longer holds it neither sets nor clears this.
+ */
+let switchedOff: string | null = null
+
+/**
  * The names a refusal sentence needs, from the runtime that is up: the
  * shelf's pairing name (IPC, so best-effort — a status line that could not
  * ask is worded without the name rather than not set), and a book's title.
@@ -224,7 +241,7 @@ async function refusalNames(): Promise<RefusalNames> {
  * hardware the reader may not own. The kind decides the sentence; the
  * shelf's own name and the book's title go where they belong.
  */
-async function degrade(refusal: SessionRefusal, owner: typeof running): Promise<void> {
+async function degrade(thrown: unknown, owner: typeof running, book?: string): Promise<void> {
   /* OWNED BY THE RUNTIME THAT WAS UP WHEN THE WORK BEGAN — the caller's own,
    * not whichever runtime holds the slot now. `refusalNames` asks the plugin
    * for the shelf's name, which is IPC, and a teardown or a restart lands
@@ -239,11 +256,14 @@ async function degrade(refusal: SessionRefusal, owner: typeof running): Promise<
    * and painted over it. The press is what owns the sentence. */
   const names = await refusalNames()
   if (running !== owner) return
+  /* The connection the reader just closed fails whatever was on it, and "isn't
+     reachable" would be the wrong reason. Decided by what failed rather than by
+     which action it was: a download's own local write has nothing to do with
+     that connection either, and its sentence is the only sign of it. */
+  if (switchedOff !== null && isLinkClosure(thrown)) return
+  const refusal: SessionRefusal = { kind: refusalKind(thrown), message: messageOf(thrown), book }
   syncStatus.set({ state: 'degraded', detail: describeRefusal(refusal, names) })
 }
-
-/** A thrown value as the refusal it is — the book added by a caller that has one. */
-const refusalOf = (thrown: unknown): SessionRefusal => ({ kind: refusalKind(thrown), message: messageOf(thrown) })
 
 /* IN FLIGHT, BY BOOK. The corner mark on the card and the Download item in
    the menu both run this, and neither disables itself while it works — so a
@@ -483,6 +503,18 @@ async function integrityPass(
   return { ok: findings.length === 0, findings, notes }
 }
 
+/** What the status says once the reader changed the P2P switch in this run. */
+const switchDetail = (on: boolean): string => (on ? P2P_CLOSED_DETAIL : P2P_OFF_DETAIL)
+
+/** Why this run will never sync, in the words the Storage pane shows. */
+async function unwiredDetail(hasFilesystem: boolean): Promise<string> {
+  if (!hasFilesystem) return 'No filesystem in a browser tab'
+  /* The peer capability counts a switch it cannot read as off; so does this. */
+  // Stryker disable next-line ArrowFunction: `on` is read only as the condition below, where `undefined` reads exactly as `false`
+  const on = await p2pAvailable().catch(() => false)
+  return on ? 'Peer plugin unavailable' : 'Peer-to-peer is off'
+}
+
 export const sync: Capability = {
   id: 'sync',
   requires: ['peer'],
@@ -572,7 +604,7 @@ export const sync: Capability = {
       when: (book) => currentRole() === 'satchel' && book.hasContent !== true,
       run: (bookId) => {
         const owner = running
-        return downloadAction(bookId).catch((thrown: unknown) => degrade({ ...refusalOf(thrown), book: bookId }, owner))
+        return downloadAction(bookId).catch((thrown: unknown) => degrade(thrown, owner, bookId))
       },
     },
     {
@@ -601,7 +633,7 @@ export const sync: Capability = {
         return removeDownloadAction(bookId).catch((thrown: unknown) =>
           /* Content that stayed put must not look removed — same signal as a
            * failed download. */
-          degrade({ ...refusalOf(thrown), book: bookId }, owner),
+          degrade(thrown, owner, bookId),
         )
       },
     },
@@ -642,6 +674,7 @@ export const sync: Capability = {
        the teardown hands one back without asking whether a role was bound. */
     let boundRole: object = {}
     let stopped = false
+    let unwatchP2p = (): void => {}
 
     const step = (label: string, fn: () => void): void => {
       try {
@@ -659,6 +692,9 @@ export const sync: Capability = {
       // Stryker disable next-line StringLiteral,CallExpression: a listener left on the signal can only call this again, and it returns above.
       signal.removeEventListener('abort', stop)
       step('scheduler', () => scheduler?.stop())
+      /* `switchedOff` is left as it is: every reader needs a runtime that holds
+         the slot, and the next one to claim it starts it clear. */
+      step('p2p-watch', () => unwatchP2p())
       /* A stopped scheduler ignores `syncNow`, so the slot still holding one
        * changes nothing a caller can see — this lets it go. */
       // Stryker disable next-line StringLiteral,BlockStatement,CallExpression: see above; and `unbindScheduler` does not throw.
@@ -962,6 +998,7 @@ export const sync: Capability = {
       })
       myRunning = { port, ledger, shelfPeer, shelfName, titleOf, coverCache, fs, writes: services.writes, lane: services.library.lane }
       running = myRunning
+      switchedOff = null
       myStorageModel = createStorageModel({
         services,
         coverCache,
@@ -993,6 +1030,7 @@ export const sync: Capability = {
            * them — so "sync now" there is a request with nobody to make it
            * of, and saying so beats returning `started: true` for nothing. */
           if (role !== 'satchel') return { started: false, detail: 'a shelf answers satchels; it does not dial them' }
+          if (switchedOff !== null) return { started: false, detail: switchedOff }
           syncNow()
           return { started: true, detail: null }
         },
@@ -1104,6 +1142,10 @@ export const sync: Capability = {
              * re-reads ownership on the near side of the last await. */
             const names = await refusalNames()
             if (running !== owner) return 'ok'
+            /* The switch's sentence stands over a session with nothing else to
+               say, and gives way to a book it could not move. */
+            // Stryker disable next-line StringLiteral: the switch's watcher stops this runtime's scheduler before it sets `switchedOff`, and a stopped scheduler arms nothing from what a session answers.
+            if (switchedOff !== null && !saysMoreThanClosure(summary)) return 'ok'
             syncStatus.set({
               state: 'ok',
               detail: describeSession(summary, names),
@@ -1118,7 +1160,7 @@ export const sync: Capability = {
             })
             // Stryker disable next-line StringLiteral: the scheduler reads every outcome but `ok` as a failure.
             if (running !== owner) return 'failed'
-            await degrade(refusalOf(thrown), owner)
+            await degrade(thrown, owner)
             /* THE OUTCOME IS WHAT ARMS THE NEXT TICK, and it is the half that
                made `retryable: true` a promise nothing kept: `groupRefusal`
                ends the session on a retryable refusal by design, and until the
@@ -1207,7 +1249,23 @@ export const sync: Capability = {
        * journals nothing and the UI says so instead of pretending. */
       myStorageModel = createStorageModel({ services, coverCache: null, status: syncStatus, removeDownload: null })
       storageModel = myStorageModel
-      syncStatus.set({ state: 'idle', detail: fs ? 'Peer plugin unavailable' : 'No filesystem in a browser tab' })
+      const detail = await unwiredDetail(Boolean(fs))
+      /* Ownership, because stopped says nothing of a newer runtime that came up
+         during that await and is reporting its own sessions. */
+      if (!stopped && storageModel === myStorageModel) syncStatus.set({ state: 'idle', detail })
+    }
+
+    /* OFF CLOSES THE TRANSPORT FOR THE REST OF THE RUN, so the schedule stops
+       with it: every tick would only flash "Syncing…" and write a warning. A
+       run with no transport watches too: the line it set above is about the
+       switch, and that line has to follow it. */
+    if (!stopped) {
+      unwatchP2p = watchP2p((on) => {
+        scheduler?.stop()
+        if (running !== myRunning) return
+        switchedOff = switchDetail(on)
+        syncStatus.set({ state: 'idle', detail: switchedOff })
+      })
     }
 
     api.diagnostics.info('sync.started', { wired: running !== null })

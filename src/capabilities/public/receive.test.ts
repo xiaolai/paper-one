@@ -1,15 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import {
-  DEFAULT_LIFETIME_MS,
-  PUBLIC_VERSION,
-  canonicalJson,
-  publicPathIn,
-  publicSignedBytes,
-  writeQueue,
-  type CapabilityContext,
-  type IndexedBook,
-  type PublicEnvelope,
-} from '../../kernel'
+import { canonicalJson, publicPathIn, writeQueue, type CapabilityContext, type IndexedBook } from '../../kernel'
+import { DEFAULT_LIFETIME_MS, PUBLIC_VERSION, publicSignedBytes, type PublicEnvelope } from './lib/envelope'
 import { fakeFs } from '../../kernel/testkit'
 
 /**
@@ -68,7 +59,12 @@ vi.mock('./lib/crypto', () => ({
     verify: (_key: string, message: string, sig: string) => sig === SIG_HOISTED && accepted.has(message),
   },
 }))
+/* The peer-to-peer switch as `p2pAvailable` reads it, which this capability
+   follows rather than having a switch of its own. */
+const p2p = vi.hoisted(() => ({ on: true }))
 vi.mock('../peer', () => ({
+  P2P_SWITCH_TITLE: 'Peer-to-peer',
+  p2pAvailable: () => Promise.resolve(p2p.on),
   sharePort: () => ({
     offered: () => Promise.resolve([]),
     offerBytes: () => Promise.resolve(),
@@ -133,6 +129,42 @@ function paneProps(): Record<string, unknown> {
   const element = pane.render({ bookId: 'book:1' } as never) as { props: Record<string, unknown> }
   return element.props
 }
+
+describe('what the app is offered', () => {
+  it('is public sharing, which asks for the peer and has no switch of its own', () => {
+    /* Every value here is a fact the composition or a reader meets: `requires`
+       is what makes the composition start `peer` first, and `follows` is the
+       line Settings draws under the peer-to-peer switch that governs this. */
+    expect(publicSharing.id).toBe('public')
+    expect(publicSharing.requires).toEqual(['peer'])
+    expect(publicSharing.follows).toEqual({ title: 'Public sharing', switch: 'Peer-to-peer' })
+  })
+
+  it('is available exactly while peer-to-peer is', async () => {
+    try {
+      p2p.on = false
+      await expect(publicSharing.available!()).resolves.toBe(false)
+      p2p.on = true
+      await expect(publicSharing.available!()).resolves.toBe(true)
+    } finally {
+      p2p.on = true
+    }
+  })
+
+  it('puts one publish control on a mark’s row, and one pane in the reader', () => {
+    expect(publicSharing.markControls?.map((one) => one.id)).toEqual(['public:publish'])
+    expect(publicSharing.panes?.map((one) => [one.id, one.label, one.icon, [...one.screens], one.order])).toEqual([
+      ['public:book', 'Publish', 'globe', ['reader'], 20],
+    ])
+  })
+
+  it('hears no voices on a book while it is not running, rather than failing to answer', async () => {
+    /* The pane asks on opening a book; drawn before `start` or after a
+       teardown, the honest answer is nobody, and it must still be an answer. */
+    const heardOn = paneProps()['heardOn'] as (bookId: string) => Promise<readonly string[]>
+    await expect(heardOn('book:1')).resolves.toEqual([])
+  })
+})
 
 describe('the receiving half', () => {
   it('asks a provider, keeps what verifies, and tells the overlay', async () => {

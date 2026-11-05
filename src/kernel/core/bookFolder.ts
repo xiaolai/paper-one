@@ -33,7 +33,7 @@ import { extensionFor, isMissingFile } from './bookVault'
 import { isFormat, type Format, type NamedSource } from './formats'
 import { compareHlc, hlcOf, isHlc, type Hlc } from './hlc'
 import { TAG_MAX, normalizeTag, tagKey } from './tags'
-import { READING_STATES, STARS, type ReadingState, type Stars } from './circle/log'
+import { READING_STATES, STARS, type ReadingState, type Stars } from './readingState'
 
 export const BOOKS_DIR = 'books'
 export const TRASH_DIR = 'trash'
@@ -197,7 +197,7 @@ export interface BookRecord {
    * files — and foliate has been parsing this all along while `recordFromMeta`
    * dropped it on the floor.
    *
-   * `workKey.ts` is what turns it into something comparable. Read that before
+   * The circle capability's `lib/workKey.ts` is what turns it into something comparable. Read that before
    * comparing two of these directly: one build declares an ISBN-10 and another
    * the ISBN-13 for the same work, and as strings they do not match.
    */
@@ -467,17 +467,6 @@ export const CIRCLE_DIR = 'circle'
  * reader's decisions about voices. */
 export const PUBLIC_DIR = 'public'
 
-/**
- * The reader's own decisions about voices — which belong to people they know,
- * and which they have stopped hearing. WI-26.5.
- *
- * ⚠️ **LOCAL, AND NEVER PUBLISHED.** A binding says *"this pseudonym is my
- * friend"*, which is the one fact the whole phase exists to keep off the wire.
- * It is written here, read here, and has no publisher.
- */
-export const VOICE_DECISIONS_PATH = `${PUBLIC_DIR}/voices.json`
-/** The reader's OWN shelf as published — the publisher's store for the shelf log. */
-export const OWN_SHELF_PATH = `${CIRCLE_DIR}/shelf.json`
 /** Everything held about one person that is not about a book. */
 export const personFolderIn = (personId: string): string => `${CIRCLE_DIR}/${safeId(personId)}`
 /** A friend's shelf, as this device holds it. */
@@ -563,8 +552,8 @@ const MAX_TAGS = 4096
 
 const text = (v: unknown, limit = MAX_FIELD): string | undefined =>
   typeof v === 'string' && v ? v.slice(0, limit) : undefined
-const num = (v: unknown): number | undefined =>
-  typeof v === 'number' && Number.isFinite(v) ? v : undefined
+// `Number.isFinite` answers false for anything that is not a number, without coercing it.
+const num = (v: unknown): number | undefined => (Number.isFinite(v) ? (v as number) : undefined)
 const list = (v: unknown, limit = MAX_LIST): readonly string[] | undefined => {
   if (!Array.isArray(v)) return undefined
   const clean = v
@@ -728,10 +717,10 @@ function capRegisters(clock: Record<string, TagClockEntry>): TagClock {
  * memory — the correction phase 3's audit forced, kept.
  */
 export function parseRecord(raw: string | null): BookRecord | null {
-  if (!raw) return null
   let parsed: unknown
   try {
-    parsed = JSON.parse(raw)
+    // An absent file reads as the JSON text `null`, refused below with every other non-object.
+    parsed = JSON.parse(String(raw))
   } catch {
     return null
   }
@@ -807,7 +796,10 @@ function bookMetaOf(r: Record<string, unknown>): Partial<BookRecord> & Pick<Book
 
 /** A finite number that is not negative, or `undefined` — never one moved. */
 function nonNegative(value: number | undefined): number | undefined {
-  return value === undefined || value < 0 ? undefined : value
+  /* No separate "absent" clause: absent is not negative, and is handed back as
+     it came. Spelled as one, it was a question no answer could tell from its
+     removal, which a mutation sweep found (2026-11-02). */
+  return (value ?? 0) < 0 ? undefined : value
 }
 
 /** A stored schema number, clamped to what this build can have written. */

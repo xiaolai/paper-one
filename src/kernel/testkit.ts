@@ -33,6 +33,10 @@ export { BOOKS_ONLY_BYTES, LIBRARY_FIXTURE, LIBRARY_FIXTURE_BYTES } from './core
    boundary rule that keeps it from becoming one. */
 export { resolvedCfiForTesting } from './core/resolvedCfi.testkit'
 
+/* Three builds of one work, for a capability that has to reach one answer from
+   all of them. */
+export { BUILD_IDS, CORPUS_BUILDS, CORPUS_PASSAGES, type BuildId } from './core/markCorpus.testkit'
+
 /* The error a promise rejected with, for the assertion `rejects.toThrow()`
    cannot make. That module's header carries the measurement: the pattern form
    passes on a rejection of `undefined`, so neither form can tell a refusal from

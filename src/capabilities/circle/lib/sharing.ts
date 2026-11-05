@@ -1,10 +1,6 @@
-import {
-  shareAbsentBecause,
-  type Annotation,
-  type Hlc,
-  type Passage,
-  type Publishability,
-} from '../../../kernel'
+import { type Annotation, type Hlc } from '../../../kernel'
+import { shareAbsentBecause, type Publishability } from './foreign'
+import { type Passage } from './log'
 import { share, unshare, type Publication, type SharedFile } from './publish'
 import { createListeners } from './listeners'
 

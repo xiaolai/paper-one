@@ -3,6 +3,9 @@ import {
   DEFAULT_FLUSH_MS,
   DIAGNOSTICS_FILE,
   DIAGNOSTICS_SWITCH,
+  SETTINGS_STORAGE_KEY,
+  SETTINGS_VERSION,
+  STORE_FILE,
   hlcOf,
   onBeforeClose,
   onBeforeDrain,
@@ -374,12 +377,14 @@ describe('the launch sequence, run', () => {
     expect(app.fs).not.toBeNull()
     expect(await app.composition.services.get('shelf.status')?.handler({}, ASKED)).toMatchObject({ books: 1, bytes: expect.any(Number) })
     expect(await app.services.sizes()?.contentBytes('book_b')).toBe('bytes'.length)
+    expect(app.services.files?.available).toBe(true)
   })
 
   it('has no filesystem and no file outside Tauri, and still records what it is told', async () => {
     const app = await launch({ tauri: false })
 
     expect(app).toMatchObject({ fs: null, shelfUnread: false, bootNotice: null, bookCount: 0, onDiagnosticsCleared: null })
+    expect(app.services.files?.available).toBe(false)
     app.services.diagnostics.warn('launch.probe', { at: 'outside' })
     expect(app.diagnosticLog?.entries().map((one) => one.event)).toContain('launch.probe')
   })
@@ -516,6 +521,38 @@ describe('the launch sequence, run', () => {
     } finally {
       offDrain()
     }
+  })
+})
+
+describe('what the reader switched off, at a launch', () => {
+  const OFF = { title: 'A feature', summary: 'What it does.' }
+  const storedOff = (ids: readonly string[]) => ({
+    ...LIBRARY,
+    [STORE_FILE]: JSON.stringify({ [SETTINGS_STORAGE_KEY]: JSON.stringify({ version: SETTINGS_VERSION, values: { 'kernel.pluginsOff': ids } }) }),
+  })
+
+  it('composes without it, from the store, and quits without waiting on its tail', async () => {
+    const order: string[] = []
+    const start = vi.fn(() => ({ dispose: () => {} }))
+    const one = await launch({
+      files: storedOff(['probe']),
+      capabilities: [
+        { id: 'probe', toggle: OFF, start, quiesce: async () => void order.push('quiesce:off') },
+        { id: 'other', toggle: OFF, quiesce: async () => void order.push('quiesce:on') },
+      ],
+    })
+    await armed()
+
+    expect(start).not.toHaveBeenCalled()
+    expect(one.composition.standing.map((row) => [row.id, row.state])).toEqual([
+      ['probe', 'off'],
+      ['other', 'on'],
+    ])
+    expect(one.composition.failures).toEqual([])
+
+    shell.heard.get(SHUTDOWN_EVENT)?.()
+    await vi.waitFor(() => expect(shell.emitted).toEqual([SHUTDOWN_DONE_EVENT]))
+    expect(order).toEqual(['quiesce:on'])
   })
 })
 

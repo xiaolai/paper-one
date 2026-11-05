@@ -118,30 +118,6 @@ export interface KernelCommandContext {
    */
   editTags: (() => void) | null
   /**
-   * Write the reader's tags to a file, and read one back — null where there is
-   * no filesystem to write to.
-   *
-   * IN THE PALETTE rather than in the toolbar or the Library panel, and the
-   * panel is the tempting place. Backing up is not tag MANAGEMENT: a reader
-   * looking at the panel is filing books, and a pair of file-dialog rows beside
-   * the tags they are sorting is a second subject in the same surface. It is
-   * also the rarest action here — done once, or after something went wrong —
-   * which is exactly what the palette is for.
-   */
-  exportTags: (() => void) | null
-  importTags: (() => void) | null
-  /**
-   * The reader's marginalia, out to a file and back.
-   *
-   * BESIDE THE TAG PAIR and for the same reason they are here rather than in a
-   * panel: backing up is not annotation MANAGEMENT. A reader looking at
-   * Marginalia is reading their notes, and a pair of file-dialog rows in that
-   * surface is a second subject. It is also a rare action — done once, or
-   * after something went wrong — which is what the palette is for.
-   */
-  exportMarks: (() => void) | null
-  importMarks: (() => void) | null
-  /**
    * Turn the book by itself, or stop.
    *
    * NO ROW RATHER THAN A DISABLED ONE, the rule the jump pair below states: the
@@ -192,14 +168,14 @@ export interface KernelCommandContext {
    * and a pane is not a command (2026-09-13 audit). Omitted, the kernel's
    * panels are alone, which is right for a host with no composition.
    */
-  contributedPanes?: readonly Pick<PaneContribution, 'id' | 'label' | 'screens'>[]
+  contributedPanes?: readonly Pick<PaneContribution, 'id' | 'label' | 'screens' | 'unfinished'>[]
 }
 
 /**
  * Every kernel command for this moment, then the composition's.
  *
  * ONE LONG FUNCTION, KEPT AS ONE. An audit named it a god procedure — panels,
- * reading, appearance, books, archives, navigation and contributions in 440
+ * reading, appearance, books, navigation and contributions in 440
  * lines — and said that ordering changes had already broken it. That half was
  * true and is fixed where it lived: the order no longer decides the palette's
  * grouping (`contiguous`), and the archive rows are a table. What remains is a
@@ -529,66 +505,6 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
       keywords: 'trash deleted removed restore undo recover bin',
       run: () => ctx.dispatch({ type: 'toggleLayer', layer: 'trashOpen' }),
     })
-  }
-
-  /**
-   * The four archive rows, each offered only where the host can do it.
-   *
-   * ⚠️ **FOUR COPIES OF ONE SKELETON — `if (ctx.x) { const run = ctx.x;
-   * commands.push({ … group: 'Library', run }) }` — AND NOW ONE LOOP OVER A
-   * TABLE.** They differed in id, label and keywords only, so the parts that are
-   * a decision — which group they file under, and that an absent handler means
-   * an absent row — were written four times and could be edited in one. The
-   * per-row reasons stay beside the rows they explain.
-   */
-  const archive: readonly {
-    readonly handler: (() => void) | null | undefined
-    readonly id: string
-    readonly label: string
-    readonly keywords: string
-  }[] = [
-    {
-      handler: ctx.exportMarks,
-      id: 'marks:export',
-      /* NAMES BOTH THINGS IT WRITES, because a reader looking for a way out
-         does not know whether Paper calls a card marginalia. */
-      label: 'Export your marks and cards…',
-      keywords: 'mark note card highlight annotation backup save export file json markdown archive',
-    },
-    {
-      handler: ctx.importMarks,
-      id: 'marks:import',
-      /* "Merge" in the label, exactly as the tag import says it, and it is the
-         reassurance rather than the description: an import never removes a
-         mark, so restoring an old file cannot silently undo a month of
-         reading. */
-      label: 'Import marks from a file… (merge)',
-      keywords: 'mark note card highlight annotation restore load import merge file json archive backup',
-    },
-    {
-      handler: ctx.exportTags,
-      id: 'tags:export',
-      label: 'Export your tags…',
-      keywords: 'tag backup save export file json archive',
-    },
-    {
-      handler: ctx.importTags,
-      id: 'tags:import',
-      /* "Merge" in the label, because that is what it does and the word is the
-         reassurance: an import never removes a tag, so restoring an old file
-         cannot silently undo a month of filing.
-
-         ⚠️ THE LABEL NEVER CARRIED IT. This comment, the marks import's
-         "exactly as the tag import says it" and a test titled "says merge in
-         the import label" all promised the word from the day this row was
-         written, and the test read the keywords. Added — and the test now reads
-         the label — by the 2026-09-13 audit. */
-      label: 'Import tags from a file… (merge)',
-      keywords: 'tag restore load import merge file json archive backup',
-    },
-  ]
-  for (const { handler, ...row } of archive) {
-    if (handler) commands.push({ ...row, group: 'Library', run: handler })
   }
 
   commands.push({

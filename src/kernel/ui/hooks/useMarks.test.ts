@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { marksPathIn, recordPath } from '../../core/bookFolder'
+import { folderOf, marksPathIn, recordPath } from '../../core/bookFolder'
+import { hlcOf } from '../../core/hlc'
 import { fakeFs } from '../../core/indexFsFake.testkit'
-import { createMarkStore, type MarkSnapshot, type MarkStore } from '../../core/markStore'
+import { MarksScanFailed, createMarkStore, type MarkSnapshot, type MarkStore } from '../../core/markStore'
 import {
   bookmarkFrom,
   createMark,
@@ -14,7 +15,7 @@ import {
 } from '../../core/marks'
 import { resolvedCfiForTesting } from '../../core/resolvedCfi.testkit'
 import { writeQueue } from '../../core/writeQueue'
-import { MarksScanFailed, useMarks } from './useMarks'
+import { useMarks } from './useMarks'
 
 /**
  * ⚠️ THE ASSERTION THAT STOPS AN EMPTY BACKUP COMING BACK — the second half.
@@ -97,6 +98,38 @@ const place = (): NewMark =>
     chapter: 'Ch. 1',
   })
 
+/**
+ * Turn the microtask queue until `ready`, and fail when it never is.
+ *
+ * ⚠️ **A BARE `while (...) await Promise.resolve()` NEVER LETS A TIMER RUN**, so
+ * a scan that never started span it for ever: the test's own deadline is a timer
+ * too, and the run hung rather than failing. A mutation sweep made exactly that
+ * scan (`loadAll` that never scans) and the file did not come back. Everything
+ * the store does here is promises over a fake disk, so the state arrives within
+ * twenty turns (measured: every test here passes at a limit of 20) or not at
+ * all, and the limit is set far past that so a slower runner is never mistaken
+ * for a scan that never ran.
+ */
+const SPIN_LIMIT = 10_000
+const spinUntil = async (ready: () => boolean, what: string): Promise<void> => {
+  for (let turn = 0; !ready(); turn += 1) {
+    if (turn === SPIN_LIMIT) throw new Error(`${what} never happened`)
+    await Promise.resolve()
+  }
+}
+
+/** What `loadAllNow` refused with: the test fails if it answered instead. */
+const refusal = (store: MarkStore): Promise<MarksScanFailed> =>
+  store.loadAllNow().then(
+    () => {
+      throw new Error('it answered')
+    },
+    (cause: unknown) => {
+      if (cause instanceof MarksScanFailed) return cause
+      throw cause
+    },
+  )
+
 describe('every mark, for something that is about to write a file', () => {
   it('refuses to answer at all when the scan failed', async () => {
     const store = createMarkStore({ fs: unlistableShelf(), queue: writeQueue() })
@@ -105,11 +138,419 @@ describe('every mark, for something that is about to write a file', () => {
     await act(async () => {
       /* THE ONE OUTCOME WORTH REFUSING is this resolving with `[]`: an empty
          answer becoming a file on disk, over the backup it was replacing. */
-      await expect(result.current.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+      await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
     })
     /* And the store still says so, for the panel that draws rather than
        writes — the two readings of one scan must not disagree. */
     expect(result.current.scanFailed).toBe(true)
+  })
+
+  /* ONE DAMAGED BOOK COSTS THE PANE THAT BOOK'S NOTES, and that is right for a
+     pane. A backup that left them out would say nothing, and the file is not
+     read again until the day the reader needs it. */
+  describe('when one book in the library will not read', () => {
+    const OTHER = 'book:other'
+    /** A healthy book's marks on disk, and `damage` done to another book's. */
+    const damaged = async (damage: (fs: ReturnType<typeof shelf>) => ReturnType<typeof shelf>) => {
+      const fs = shelf()
+      fs.store.set(recordPath(OTHER), new TextEncoder().encode('{}'))
+      fs.store.set(marksPathIn(OTHER), new TextEncoder().encode('[]'))
+      const writer = createMarkStore({ fs, queue: writeQueue() })
+      await writer.open(BOOK)
+      await writer.addMany(BOOK, [createMark(highlight())])
+      return createMarkStore({ fs: damage(fs), queue: writeQueue() })
+    }
+    const refusingOther = (fs: ReturnType<typeof shelf>) => ({
+      ...fs,
+      readFile: async (path: string) => {
+        if (path === marksPathIn(OTHER)) throw new Error('the disk will not answer')
+        return fs.readFile(path)
+      },
+    })
+    const writing = (bytes: string) => (fs: ReturnType<typeof shelf>) => {
+      fs.store.set(marksPathIn(OTHER), new TextEncoder().encode(bytes))
+      return fs
+    }
+
+    it.each([
+      ['will not parse', writing('not json')],
+      ['holds something that is not a list', writing('{"marks":[]}')],
+      ['will not read', refusingOther],
+      [
+        'will not read, and nobody can say whether it is there',
+        (fs: ReturnType<typeof shelf>) => ({
+          ...refusingOther(fs),
+          exists: async (path: string) => {
+            if (path === marksPathIn(OTHER)) throw new Error('the disk will not answer')
+            return fs.exists(path)
+          },
+        }),
+      ],
+    ])('refuses to answer when its file %s', async (_name, damage) => {
+      const store = await damaged(damage)
+      const { result } = renderHook(() => useMarks(store, BOOK))
+
+      await act(async () => {
+        const cause = await refusal(store)
+        /* Named, or the reader has a refusal and nothing to act on. */
+        expect(cause.damaged).toEqual([folderOf(OTHER)])
+        expect(cause.unsaved).toEqual([])
+      })
+      /* The panel's reading of the same scan is untouched: the book that did
+         read is drawn, and the shelf is not said to have failed. */
+      expect(result.current.scanFailed).toBe(false)
+      expect(result.current.all.map((mark) => mark.bookId)).toEqual([BOOK])
+    })
+
+    /* The panel keeps the row aside and draws the rest, which is right for a
+       panel. A backup would lose that mark without a word. */
+    it('refuses to answer when a file holds a row that will not validate', async () => {
+      const store = await damaged((fs) => {
+        const row = { ...createMark(highlight()), id: 'refused-row', bookId: OTHER, sectionIndex: -1 }
+        fs.store.set(marksPathIn(OTHER), new TextEncoder().encode(JSON.stringify([row])))
+        return fs
+      })
+      const { result } = renderHook(() => useMarks(store, BOOK))
+
+      await act(async () => {
+        /* The row may name no book at all: it is the folder it was in that is said. */
+        expect((await refusal(store)).damaged).toEqual([folderOf(OTHER)])
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+      })
+      expect(result.current.scanFailed).toBe(false)
+      expect(result.current.all.map((mark) => mark.bookId)).toEqual([BOOK])
+    })
+
+    /* Two scans let go together land one after the other, and the later one's
+       `publish` runs before the earlier one's caller resumes: reading the shared
+       snapshot there answered a complete scan with the partial scan's rows. */
+    describe('and a panel scan overlaps the one about to write', () => {
+      const overlapping = () => {
+        const fs = shelf()
+        let open = () => {}
+        const held = new Promise<void>((resolve) => (open = resolve))
+        let listings = 0
+        const gated = {
+          ...fs,
+          readDir: async (path: string) => {
+            listings += 1
+            await held
+            return fs.readDir(path)
+          },
+        }
+        /* The export waits for pending writes first, so its scan starts a little
+           after the call. The test is about a scan that starts after that one. */
+        const scanStarted = async () => {
+          await spinUntil(() => listings > 0, 'the export listing the shelf')
+        }
+        return { fs, gated, open, scanStarted }
+      }
+
+      it('answers with its own rows when the panel scan loses a book', async () => {
+        const { fs, gated, open, scanStarted } = overlapping()
+        fs.store.set(recordPath(OTHER), new TextEncoder().encode('{}'))
+        const writer = createMarkStore({ fs, queue: writeQueue() })
+        await writer.open(BOOK)
+        await writer.addMany(BOOK, [createMark(highlight())])
+        let reads = 0
+        const store = createMarkStore({
+          fs: {
+            ...gated,
+            readFile: async (path: string) => {
+              if (path === marksPathIn(BOOK) && ++reads === 2) return new TextEncoder().encode('not json')
+              return fs.readFile(path)
+            },
+          },
+          queue: writeQueue(),
+        })
+
+        const answer = store.loadAllNow()
+        await scanStarted()
+        const panel = store.loadAll()
+        open()
+        await expect(answer).resolves.toHaveLength(1)
+        await panel
+      })
+
+      /* A SCAN THAT FAILS OUTRIGHT EMPTIES THE SHARED LIST AND RAISES THE SHARED FLAG,
+         and the window where that hurts is a few ticks wide: after one scan's result
+         lands, before its caller resumes. Nothing outside can stand in it, so the
+         second result is let go one tick later on each pass. The orders asserted at
+         the two ends are what say the walk crossed the whole window, however many
+         ticks a later change makes of it. */
+      const WALK = 60
+      const crossing = async (ticks: number, failing: 'export' | 'panel') => {
+        const fs = shelf()
+        const writer = createMarkStore({ fs, queue: writeQueue() })
+        await writer.open(BOOK)
+        await writer.addMany(BOOK, [createMark(highlight())])
+        let letRead = () => {}
+        let letFail = () => {}
+        const reading = new Promise<void>((resolve) => (letRead = resolve))
+        const refusing = new Promise<void>((resolve) => (letFail = resolve))
+        let listings = 0
+        let reads = 0
+        const store = createMarkStore({
+          fs: {
+            ...fs,
+            readDir: async (path: string) => {
+              listings += 1
+              if (listings === (failing === 'export' ? 1 : 2)) {
+                await refusing
+                throw new Error('the shelf will not read')
+              }
+              return fs.readDir(path)
+            },
+            readFile: async (path: string) => {
+              if (path === marksPathIn(BOOK)) {
+                reads += 1
+                await reading
+              }
+              return fs.readFile(path)
+            },
+          },
+          queue: writeQueue(),
+        })
+        const order: string[] = []
+        const once = (event: string) => {
+          if (!order.includes(event)) order.push(event)
+        }
+        store.subscribe(() => {
+          const { all, scanFailed } = store.getSnapshot()
+          if (scanFailed) once('failed')
+          else if (all.length > 0) once('landed')
+        })
+        const answer = store.loadAllNow().finally(() => order.push('answered'))
+        await spinUntil(() => listings > 0, 'the export listing the shelf')
+        const panel = store.loadAll()
+        await spinUntil(() => listings >= 2 && reads > 0, 'the panel listing the shelf while the export reads')
+        letRead()
+        for (let tick = 0; tick < ticks; tick++) await Promise.resolve()
+        letFail()
+        const settled = await answer.then(
+          (rows) => ({ rows: rows.length }),
+          (cause: unknown) => ({ refused: cause }),
+        )
+        await panel
+        return { settled, order }
+      }
+
+      it('answers with its own rows when the panel scan fails outright, wherever that lands', async () => {
+        const orders: string[][] = []
+        for (let ticks = 0; ticks < WALK; ticks++) {
+          const { settled, order } = await crossing(ticks, 'panel')
+          expect(settled, `the panel's failure, ${ticks} ticks after the export's read`).toEqual({ rows: 1 })
+          orders.push(order)
+        }
+        expect(orders.at(0), 'the walk starts too late to cross the window').toEqual(['failed', 'landed', 'answered'])
+        expect(orders.at(-1), 'the walk ends too soon to cross the window').toEqual(['landed', 'answered', 'failed'])
+      })
+
+      it('refuses on its own failure when the panel scan lands, wherever that lands', async () => {
+        const orders: string[][] = []
+        for (let ticks = 0; ticks < WALK; ticks++) {
+          const { settled, order } = await crossing(ticks, 'export')
+          expect(settled, `the export's failure, ${ticks} ticks after the panel's read`).toEqual({ refused: new MarksScanFailed() })
+          orders.push(order)
+        }
+        expect(orders.at(0)?.[0], 'the walk starts too late to cross the window').toBe('failed')
+        expect(orders.at(-1), 'the walk ends too soon to cross the window').toEqual(['landed', 'failed', 'answered'])
+      })
+    })
+
+    /* A mark is on the screen the moment it is made and on the disk some time
+       later, and the scan reads the disk: without the wait, the export left out
+       the mark the reader had just made, and called the backup done. */
+    describe('and a mark is still being written', () => {
+      const writing = () => {
+        const fs = shelf()
+        let open: (failure?: Error) => void = () => {}
+        const held = new Promise<void>((resolve, reject) => {
+          open = (failure) => (failure ? reject(failure) : resolve())
+        })
+        const store = createMarkStore({
+          fs: {
+            ...fs,
+            writeFile: async (path: string, bytes: Uint8Array) => {
+              await held
+              return fs.writeFile(path, bytes)
+            },
+          },
+          queue: writeQueue(),
+        })
+        return { store, open }
+      }
+
+      it('waits for the write, and answers with the mark', async () => {
+        const { store, open } = writing()
+        await store.open(BOOK)
+        const saving = store.add(createMark(highlight()))
+        const answer = store.loadAllNow()
+        open()
+        await saving
+        await expect(answer).resolves.toHaveLength(1)
+      })
+
+      it('refuses when the write fails: a backup may not leave out a mark on the screen', async () => {
+        const { store, open } = writing()
+        await store.open(BOOK)
+        const saving = store.add(createMark(highlight()))
+        const answer = store.loadAllNow()
+        open(new Error('disk full'))
+        await expect(saving).rejects.toThrow('disk full')
+        await expect(answer).rejects.toBeInstanceOf(MarksScanFailed)
+        /* Its file is healthy, so this one is not called damaged: removing a book
+           whose only trouble is one lost edit would cost the reader all the rest. */
+        expect(await refusal(store)).toMatchObject({ damaged: [], unsaved: [folderOf(BOOK)] })
+        expect(store.getSnapshot().persistent).toBe(false)
+      })
+
+      it('goes on refusing after the failure, and answers once the book is read again', async () => {
+        const { store, open } = writing()
+        await store.open(BOOK)
+        const saving = store.add(createMark(highlight()))
+        open(new Error('disk full'))
+        await expect(saving).rejects.toThrow('disk full')
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+
+        await store.open(BOOK)
+        await expect(store.loadAllNow()).resolves.toEqual([])
+      })
+    })
+
+    describe('and the store holds a mark the disk does not', () => {
+      const losing = async () => {
+        const fs = shelf()
+        fs.store.set(marksPathIn(BOOK), new TextEncoder().encode('[]'))
+        const control = { unreadable: false }
+        const store = createMarkStore({
+          fs: {
+            ...fs,
+            writeFile: () => Promise.reject(new Error('disk full')),
+            readFile: async (path: string) => {
+              if (control.unreadable && path === marksPathIn(BOOK)) {
+                control.unreadable = false
+                throw new Error('EIO')
+              }
+              return fs.readFile(path)
+            },
+          },
+          queue: writeQueue(),
+        })
+        await store.open(BOOK)
+        await expect(store.add(createMark(highlight()))).rejects.toThrow('disk full')
+        return { fs, store, control }
+      }
+
+      it('refuses when reopening the book would not read, which cleared the failure', async () => {
+        const { store, control } = await losing()
+        control.unreadable = true
+        await store.open(BOOK)
+        expect(store.getSnapshot().persistent).toBe(false)
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+      })
+
+      it('refuses after another book opens, however often it is asked', async () => {
+        const { store } = await losing()
+        await store.open(OTHER)
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+        /* Not the flag, cleared by opening OTHER, and it still names the right book. */
+        expect(await refusal(store)).toMatchObject({ damaged: [], unsaved: [folderOf(BOOK)] })
+      })
+
+      it('answers once that book reads back, when the screen agrees with the disk', async () => {
+        const { store } = await losing()
+        await store.open(OTHER)
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+        await store.open(BOOK)
+        await expect(store.loadAllNow()).resolves.toEqual([])
+      })
+    })
+
+    it('does not call a removed book a lost mark', async () => {
+      const fs = shelf()
+      const store = createMarkStore({ fs, queue: writeQueue() })
+      await store.open(BOOK)
+      await store.add(createMark(highlight()))
+      await store.open(null)
+      await fs.removeDir(folderOf(BOOK))
+      await expect(store.loadAllNow()).resolves.toEqual([])
+    })
+
+    it('does not call a mark lost when the disk holds a newer copy of it', async () => {
+      const fs = shelf()
+      const store = createMarkStore({ fs, queue: writeQueue() })
+      await store.open(BOOK)
+      await store.add(createMark(highlight()))
+      const [held] = store.getSnapshot().current
+      const newer = { ...held, note: 'written elsewhere', updatedAt: hlcOf(Date.now() + 86_400_000) }
+      fs.store.set(marksPathIn(BOOK), new TextEncoder().encode(JSON.stringify([newer])))
+      await expect(store.loadAllNow()).resolves.toHaveLength(1)
+    })
+
+    it('refuses when a book is rekeyed under the scan, rather than reading it as no marks', async () => {
+      const fs = shelf()
+      const at = marksPathIn(BOOK)
+      fs.store.set(at, new TextEncoder().encode(JSON.stringify([createMark(highlight())])))
+      const folder = at.slice(0, at.lastIndexOf('/'))
+      const store = createMarkStore({
+        fs: {
+          ...fs,
+          /* The move lands after the listing named the old folder, before its read. */
+          readFile: async (path: string) => {
+            if (path === at) await fs.rename(folder, `${folder}-rekeyed`)
+            return fs.readFile(path)
+          },
+        },
+        queue: writeQueue(),
+      })
+      expect((await refusal(store)).damaged).toEqual([folder])
+    })
+
+    it('names every book it left out, and only those', async () => {
+      const THIRD = 'book:third'
+      const store = await damaged((fs) => {
+        fs.store.set(recordPath(THIRD), new TextEncoder().encode('{}'))
+        fs.store.set(marksPathIn(THIRD), new TextEncoder().encode('not json'))
+        fs.store.set(marksPathIn(OTHER), new TextEncoder().encode('not json'))
+        return fs
+      })
+      expect([...(await refusal(store)).damaged].sort()).toEqual([folderOf(OTHER), folderOf(THIRD)].sort())
+    })
+
+    it('still folds an id two books share, read as one library', async () => {
+      const fs = shelf()
+      const mark = createMark(highlight())
+      fs.store.set(recordPath(OTHER), new TextEncoder().encode('{}'))
+      fs.store.set(marksPathIn(BOOK), new TextEncoder().encode(JSON.stringify([mark])))
+      fs.store.set(marksPathIn(OTHER), new TextEncoder().encode(JSON.stringify([mark])))
+      const store = createMarkStore({ fs, queue: writeQueue() })
+      await expect(store.loadAllNow()).resolves.toHaveLength(1)
+    })
+
+    it('answers again once the file reads', async () => {
+      const fs = shelf()
+      fs.store.set(marksPathIn(OTHER), new TextEncoder().encode('not json'))
+      const store = createMarkStore({ fs, queue: writeQueue() })
+      await act(async () => {
+        await expect(store.loadAllNow()).rejects.toBeInstanceOf(MarksScanFailed)
+      })
+
+      fs.store.set(marksPathIn(OTHER), new TextEncoder().encode('[]'))
+
+      await act(async () => {
+        await expect(store.loadAllNow()).resolves.toEqual([])
+      })
+    })
+
+    it('answers for a book that has no marks file at all', async () => {
+      const fs = shelf()
+      const store = createMarkStore({ fs, queue: writeQueue() })
+
+      await act(async () => {
+        await expect(store.loadAllNow()).resolves.toEqual([])
+      })
+    })
   })
 
   it('hands back both classes when the scan lands', async () => {
@@ -125,7 +566,7 @@ describe('every mark, for something that is about to write a file', () => {
 
     let everyMark: readonly { kind: string }[] = []
     await act(async () => {
-      everyMark = await result.current.loadAllNow()
+      everyMark = await store.loadAllNow()
     })
     /* BOTH CLASSES. They share a file and are split at the snapshot, and an
        archive of one half is a backup that silently drops the other. */
@@ -214,7 +655,7 @@ describe('every mark, for something that is about to write a file', () => {
 
     let everyMark: readonly unknown[] = ['not asked']
     await act(async () => {
-      everyMark = await result.current.loadAllNow()
+      everyMark = await store.loadAllNow()
     })
     expect(everyMark).toEqual([])
     expect(result.current.scanFailed).toBe(false)
@@ -222,11 +663,10 @@ describe('every mark, for something that is about to write a file', () => {
 
   it('names a failed scan as the failure it is, for the catch that branches on it', async () => {
     const store = createMarkStore({ fs: unlistableShelf(), queue: writeQueue() })
-    const { result } = renderHook(() => useMarks(store, BOOK))
 
     let cause: unknown = null
     await act(async () => {
-      cause = await result.current.loadAllNow().then(
+      cause = await store.loadAllNow().then(
         () => null,
         (thrown: unknown) => thrown,
       )
@@ -234,6 +674,8 @@ describe('every mark, for something that is about to write a file', () => {
     expect(cause).toBeInstanceOf(MarksScanFailed)
     expect((cause as Error).name).toBe('MarksScanFailed')
     expect((cause as Error).message).toBe("the library's marks could not be read")
+    /* No book is to blame when the library will not list, and none may be named. */
+    expect(cause).toMatchObject({ damaged: [], unsaved: [] })
   })
 
   /* WHAT `unsaved` HOLDS WHILE A RETRY IS OUT. Only an ANSWER moves it: a write
@@ -265,8 +707,8 @@ describe('every mark, for something that is about to write a file', () => {
 
 const SAVE_FAILED = "Paper: could not save that book's marks"
 
-/* ⚠️ A WRITE LET GO IS STILL A WRITE SOMEBODY MUST HEAR ABOUT. Every verb but
-   `addMany` hands its promise on or drops it, so the log is the one trace a
+/* ⚠️ A WRITE LET GO IS STILL A WRITE SOMEBODY MUST HEAR ABOUT. Every verb hands
+   its promise on or drops it, so the log is the one trace a
    refused remove, place or note leaves beside `persistent`. */
 describe('a refused write', () => {
   it('is logged with what refused it, for a verb whose promise is let go', async () => {
@@ -377,45 +819,6 @@ describe('the open book’s marks', () => {
     await settled()
     expect(result.current.current.map((mark) => mark.text)).toEqual(['Six months at sea'])
     expect(result.current.ready).toBe(true)
-  })
-})
-
-describe('a batch of marks for one book', () => {
-  it('is written whole, each draft minted into a mark', async () => {
-    const store = createMarkStore({ fs: shelf(), queue: writeQueue() })
-    const { result } = renderHook(() => useMarks(store, BOOK))
-
-    await act(async () => {
-      await result.current.addMany(BOOK, [highlight(), place()])
-    })
-
-    const written = await store.forBook(BOOK)
-    expect(written.map((mark) => [mark.kind, mark.text]).sort()).toEqual([
-      ['bookmark', 'Call me Ishmael'],
-      ['highlight', 'Ishmael'],
-    ])
-    expect(written.every((mark) => typeof mark.id === 'string' && mark.id !== '')).toBe(true)
-  })
-
-  it('is refused whole when it holds a draft of another book', async () => {
-    /* The store writes the batch under the book it is NAMED for, so a draft
-       carrying another id would land in this book's file owned by that one. */
-    const store = createMarkStore({ fs: shelf(), queue: writeQueue() })
-    const { result } = renderHook(() => useMarks(store, BOOK))
-
-    let refused: unknown = null
-    await act(async () => {
-      refused = await result.current
-        .addMany(BOOK, [highlight(), { ...highlight(), bookId: 'book:elsewhere' }])
-        .then(
-          () => null,
-          (cause: unknown) => cause,
-        )
-    })
-
-    expect(refused).toBeInstanceOf(Error)
-    expect((refused as Error).message).toBe('addMany for book:abc was handed a draft belonging to book:elsewhere')
-    expect(await store.forBook(BOOK), 'part of a refused batch was written').toEqual([])
   })
 })
 

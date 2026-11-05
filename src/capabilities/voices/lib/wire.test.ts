@@ -43,6 +43,7 @@ describe('the voices wire', () => {
       'readClip',
       'release',
       'remove',
+      'renderFile',
       'stop',
     ])
   })
@@ -85,6 +86,8 @@ describe('the voices wire', () => {
       'plugin:voices|voices_clip_render',
       { ask: query, text: '春天' },
     ])
+    const file = { pack: 'chinese-qwen', voice: 'Vivian', text: '春天', rate: null, path: '/scratch/chapter-3.wav' }
+    expect(await called(() => wire.renderFile(file))).toEqual(['plugin:voices|voices_render_file', file])
     /* A null rate is the reader having chosen none, and it must cross as null
        rather than be dropped: the plugin reads an absent rate as the pack's
        own default, which is a different reading from the one asked for. */

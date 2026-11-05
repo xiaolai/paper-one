@@ -12,7 +12,7 @@
 
 import type { DrawAnnotationDetail, View } from 'foliate-js/view.js'
 import type { ResolvedCfi } from './reanchor'
-import { foreignWeight, type OverlayAudience } from '../../core/circle/foreign'
+import { foreignWeight, type OverlayAudience } from '../../core/foreignAnnotation'
 import {
   ANNOTATION_KINDS,
   MARK_STYLES,

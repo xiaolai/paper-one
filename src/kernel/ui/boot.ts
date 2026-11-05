@@ -47,6 +47,9 @@ export { libraryFs } from '../core/bookFiles'
  * it. This entry is already Tauri-bound by design and is the root's second
  * door, which is the same reason `libraryFs` sits on the line above. */
 export { tauriSizePort } from '../core/bookSizesTauri'
+/* The same again: the dialog plugin on the browser-safe entry would cost it the
+   browser. A capability reaches this through `services.files`. */
+export { tauriFilePicker } from './pickedFilesTauri'
 export { loadShelf } from '../core/bookIndex'
 export { migrateToFolders, summariseMigration } from '../core/migrateToFolders'
 export { installFatalHandlers } from '../core/reportFatal'

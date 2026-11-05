@@ -18,7 +18,7 @@ import type {
 } from './capability'
 import type { SettingsStore } from './ports'
 import type { KernelServices } from './services'
-import { isKernelPaneId, type ContributedPaneId, type PaneId } from './uiTypes'
+import { isKernelPaneId, presentPaneName, type ContributedPaneId, type PaneId } from './uiTypes'
 
 /**
  * The registry: a set of capabilities becomes ONE composition.
@@ -111,6 +111,36 @@ export interface CapabilityFailure {
   readonly because?: string
 }
 
+/**
+ * Where one capability stands in this run — see `Composition.standing`.
+ *
+ * - `on`: it started.
+ * - `off`: the reader switched it off.
+ * - `unavailable`: its `available` answered `false`.
+ * - `needs`: something it requires is off, unavailable or itself needs something.
+ *   `on` is that direct requirement.
+ * - `failed`: it is in `Composition.failures`. `because` is the requirement at
+ *   fault, when the failure was not its own.
+ *
+ * ONLY THE LAST IS A FAILURE, and that is why this is not a field on
+ * `CapabilityFailure`. Those four are states a reader or a device chose, so they
+ * log no error and draw no "not running" line.
+ *
+ * `toggle` and `follows` ride here so the settings pane can draw the group from
+ * this list alone, and the kernel names no capability to do it.
+ */
+export type Standing = {
+  readonly id: string
+  readonly toggle?: Capability['toggle']
+  readonly follows?: Capability['follows']
+} & (
+  | { readonly state: 'on' }
+  | { readonly state: 'off' }
+  | { readonly state: 'unavailable' }
+  | { readonly state: 'needs'; readonly on: string }
+  | { readonly state: 'failed'; readonly because?: string }
+)
+
 export interface Composition extends Contributions, Disposable {
   /** Capability ids in registration order — those that STARTED. */
   readonly order: readonly string[]
@@ -125,6 +155,13 @@ export interface Composition extends Contributions, Disposable {
    * depended on when a capability was skipped because a dependency failed.
    */
   readonly failures: readonly CapabilityFailure[]
+  /**
+   * Every listed capability and where it stands, in registration order, whether
+   * or not it started. `order` is the `on` rows and `failures` the `failed` ones.
+   * True of this run, so a disposed composition still answers it, as it does
+   * `order` and `failures`.
+   */
+  readonly standing: readonly Standing[]
   /**
    * Take everything down: every capability's `Disposable`, in reverse
    * registration order, and every registry emptied. Idempotent. Throws an
@@ -403,8 +440,7 @@ export function scopeStorage(storage: KernelServices['storage'], capId: string):
  * and was moved off Companion the day Companion became unfinished; this one was
  * not, so `resolvePaneId` still resolved an unknown stored id to a panel most
  * readers are not shown. Two defaults for one decision is how half a change
- * lands — see `UNFINISHED_PANE_IDS`, which is the list that made Companion
- * unfinished, and `defaultPaneFor`, which carries the reasoning for Contents.
+ * lands — see `defaultPaneFor`, which carries the reasoning for Contents.
  *
  * It stays HERE rather than importing that function: `registry.ts` is core and
  * React-free, `defaultPaneFor` takes a screen this resolver does not have, and
@@ -423,8 +459,9 @@ export const KERNEL_DEFAULT_PANE: PaneId = 'toc'
  */
 export function resolvePaneId(id: unknown, known: Iterable<string>, fallback: PaneId = KERNEL_DEFAULT_PANE): PaneId {
   if (isKernelPaneId(id)) return id
-  if (typeof id === 'string' && id.includes(':')) {
-    for (const candidate of known) if (candidate === id) return id as ContributedPaneId
+  const present = presentPaneName(id)
+  if (typeof present === 'string' && present.includes(':')) {
+    for (const candidate of known) if (candidate === present) return present as ContributedPaneId
   }
   return fallback
 }
@@ -482,41 +519,46 @@ function stronglyConnectedComponents(nodes: readonly string[], edges: ReadonlyMa
   const onStack = new Set<string>()
   const stack: string[] = []
   const components: string[][] = []
+  const work: { node: string; rest: Iterator<string> }[] = []
   let counter = 0
 
-  const visit = (node: string) => {
+  /* Numbering a node and giving it a frame are one step: a node with a
+     frame and no number would be popped from `stack` looking for itself,
+     and never found. Every node has an entry in `edges`: `checkRequires`
+     sets one per id and refuses a target that is not an id. */
+  const enter = (node: string) => {
     index.set(node, counter)
     low.set(node, counter)
     counter++
     stack.push(node)
     onStack.add(node)
+    work.push({ node, rest: edges.get(node)![Symbol.iterator]() })
   }
 
   for (const root of nodes) {
     if (index.has(root)) continue
-    visit(root)
-    const work: { node: string; next: number }[] = [{ node: root, next: 0 }]
+    enter(root)
     while (work.length > 0) {
-      const frame = work[work.length - 1] as { node: string; next: number }
-      const successors = edges.get(frame.node) ?? []
-      if (frame.next < successors.length) {
-        const next = successors[frame.next++] as string
+      const frame = work[work.length - 1] as { node: string; rest: Iterator<string> }
+      /* An iterator, not a position compared with a length: a frame asks
+         for its next successor and is told when there is none, so there is
+         no bound to get wrong by one. */
+      const step = frame.rest.next()
+      if (!step.done) {
+        const next = step.value
         if (!index.has(next)) {
-          visit(next)
-          work.push({ node: next, next: 0 })
+          enter(next)
         } else if (onStack.has(next)) {
           low.set(frame.node, Math.min(low.get(frame.node) ?? 0, index.get(next) ?? 0))
         }
         continue
       }
       if (low.get(frame.node) === index.get(frame.node)) {
-        const component: string[] = []
-        let member: string
-        do {
-          member = stack.pop() as string
-          onStack.delete(member)
-          component.push(member)
-        } while (member !== frame.node)
+        /* Everything above the root on `stack`, taken in one cut: a member
+           at a time, looking for the root, would never stop if it were not
+           there. */
+        const component = stack.splice(stack.lastIndexOf(frame.node))
+        for (const member of component) onStack.delete(member)
         components.push(component)
       }
       work.pop()
@@ -762,6 +804,8 @@ function snapshotOf(services: readonly ServiceContribution[] | undefined, capabi
 }
 
 const NOTHING: Disposable = { dispose: () => {} }
+/** `Omit` over each member of a union, which plain `Omit` flattens away. */
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 const EMPTY_PANES: readonly PaneContribution[] = Object.freeze([])
 const EMPTY_OVERLAYS: readonly OverlayContribution[] = Object.freeze([])
 const EMPTY_SCREENS: readonly ScreenContribution[] = Object.freeze([])
@@ -771,7 +815,6 @@ const EMPTY_STATUSES: readonly BookStatus[] = Object.freeze([])
 const EMPTY_MARK_CONTROLS: readonly MarkControl[] = Object.freeze([])
 const EMPTY_CLIENTS: readonly ClientContribution[] = Object.freeze([])
 const EMPTY_SERVICES: ReadonlyMap<string, ServiceContribution> = new Map()
-const EMPTY_SERVICE_ROWS: readonly ServiceContribution[] = Object.freeze([])
 
 /**
  * A contributed list, arranged: by `order` (unset last), then registration.
@@ -849,6 +892,40 @@ export interface CompositionOptions {
    * connection to what its side actually calls.
    */
   readonly clients?: readonly ClientContribution[]
+  /**
+   * The ids the reader switched off, read from the settings store by the root.
+   *
+   * An id with no `toggle` is ignored, so a hand-edited settings file cannot
+   * switch off something the rules say must run. See `isSwitchedOff`.
+   */
+  readonly switchedOff?: ReadonlySet<string>
+}
+
+/**
+ * Whether the reader's list turns this capability off.
+ *
+ * ⚠️ **THE `toggle` IS PART OF THE ANSWER, NOT ONLY THE LIST.** The list is a
+ * value in a file a person can edit, and it outlives a capability losing its
+ * switch. If `sync` could be listed, the recorder would stay a no-op and every
+ * write would go unjournalled, on the word of one stale string.
+ */
+function isSwitchedOff(cap: Pick<Capability, 'id' | 'toggle'>, switchedOff: ReadonlySet<string> | undefined): boolean {
+  return cap.toggle !== undefined && switchedOff?.has(cap.id) === true
+}
+
+/**
+ * The list with the switched-off capabilities taken out, for the quit handshake.
+ *
+ * `quiesce` is read from the STATIC list rather than the composition, because the
+ * handshake is armed before composition finishes (`shutdownDepsOf`). So the skip
+ * cannot be read from `standing`, and this applies the same rule `composeCapabilities`
+ * does, to the same set, at the point the root still holds them both.
+ */
+export function withoutSwitchedOff<T extends Pick<Capability, 'id' | 'toggle'>>(
+  caps: readonly T[],
+  switchedOff: ReadonlySet<string>,
+): readonly T[] {
+  return caps.filter((cap) => !isSwitchedOff(cap, switchedOff))
 }
 
 /**
@@ -918,11 +995,22 @@ export async function composeCapabilities(
        * after the check. */
       markControls: Object.freeze(
         (cap.markControls ?? []).map((control) =>
-          Object.freeze({ id: control.id, render: control.render.bind(control) }),
+          /* NAMED FIELD BY NAMED FIELD, so a field added to the seam and left out
+             here is lost in the app and in nothing below this line: `place` and
+             `notice` were, until the capability that uses them went through it. */
+          Object.freeze({
+            id: control.id,
+            render: control.render.bind(control),
+            ...(control.place === undefined ? {} : { place: control.place }),
+            ...(control.notice === undefined ? {} : { notice: control.notice.bind(control) }),
+          }),
         ),
       ),
       clients: Object.freeze((cap.clients ?? []).map((client) => Object.freeze({ ...client }))),
-      services: capServices.get(cap.id) ?? EMPTY_SERVICE_ROWS,
+      /* Every capability has its row in `capServices`, made above from the
+         same list `ordered` is drawn from, so there is no absent row to
+         default. (A fallback stood here that no composition could reach.) */
+      services: capServices.get(cap.id) as readonly ServiceContribution[],
       /* ⚠️ **THE RECORD IS COPIED, NOT JUST THE ARRAY.** Every other line here
        * freezes the array and keeps the contributed objects, which is right
        * for the ones the kernel only reads. An overlay is different: its two
@@ -958,6 +1046,30 @@ export async function composeCapabilities(
   let disposed = false
   const failures: CapabilityFailure[] = []
   const failed = new Set<string>()
+  /* OFF, UNAVAILABLE, OR NEEDING ONE OF THOSE. Apart from `failed` because a
+     dependant of these is not a failure: nothing went wrong. */
+  const leftOut = new Set<string>()
+  /* One row per capability, pushed as the loop below decides it, so the list is
+     in registration order. The words are copied here, before any `start` runs,
+     for the reason `snapshot` gives above. */
+  const standing: Standing[] = []
+  const words = new Map(
+    ordered.map((cap) => [
+      cap.id,
+      Object.freeze({
+        id: cap.id,
+        ...(cap.toggle ? { toggle: Object.freeze({ title: cap.toggle.title, summary: cap.toggle.summary }) } : {}),
+        ...(cap.follows ? { follows: Object.freeze({ title: cap.follows.title, switch: cap.follows.switch }) } : {}),
+      }),
+    ] as const),
+  )
+  const stand = (id: string, state: DistributiveOmit<Standing, 'id' | 'toggle' | 'follows'>): void => {
+    standing.push(Object.freeze({ ...words.get(id), id, ...state }))
+  }
+  const leaveOut = (id: string, state: DistributiveOmit<Standing, 'id' | 'toggle' | 'follows'>): void => {
+    leftOut.add(id)
+    stand(id, state)
+  }
 
   const started: { id: string; disposable: Disposable }[] = []
   const rollback = (cause: unknown, id: string, why: string, extra: readonly unknown[] = []): never => {
@@ -982,6 +1094,7 @@ export async function composeCapabilities(
   const skip = (id: string, kind: CapabilityFailure['kind'], error: unknown, because?: string): void => {
     failed.add(id)
     failures.push(Object.freeze({ id, kind, error, ...(because === undefined ? {} : { because }) }))
+    stand(id, { state: 'failed', ...(because === undefined ? {} : { because }) })
     /* The report must not become a second failure: a diagnostics port that
        throws here would leave the capabilities already started with nobody
        to dispose them. */
@@ -999,16 +1112,42 @@ export async function composeCapabilities(
 
   for (const cap of ordered) {
     if (signal.aborted) rollback(undefined, cap.id, 'was not started: the composition was aborted')
+    /* FIRST, ahead of its requirements: a reader who turned this off has not lost
+       it to a dependency that failed, and `available` is not asked about
+       something nobody wants this run. */
+    if (isSwitchedOff(cap, options.switchedOff)) {
+      leaveOut(cap.id, { state: 'off' })
+      continue
+    }
     /* A DEPENDENCY THAT DID NOT COMPOSE TAKES ITS DEPENDANTS WITH IT. `requires`
      * is a declared need, not a preference: `sync` reaches the peer transport
      * through `peer`, so starting it without one would fail later, further from
      * the cause. Registration order is topological, so a dependency has always
      * been decided by the time this runs. */
-    const missing = (cap.requires ?? []).find((id) => failed.has(id))
+    const missing = cap.requires?.find((id) => failed.has(id))
     if (missing !== undefined) {
       skip(cap.id, 'requires-failed', new Error(`capability "${cap.id}" requires "${missing}", which did not compose`), missing)
       continue
     }
+    /* AFTER THE FAILURE CHECK, so a capability with one requirement failed and
+       another off reads as what is actually wrong. */
+    const absent = cap.requires?.find((id) => leftOut.has(id))
+    if (absent !== undefined) {
+      leaveOut(cap.id, { state: 'needs', on: absent })
+      continue
+    }
+    try {
+      if (cap.available && !(await cap.available())) {
+        leaveOut(cap.id, { state: 'unavailable' })
+        continue
+      }
+    } catch (cause) {
+      skip(cap.id, 'start-failed', cause)
+      continue
+    }
+    /* AGAIN, ACROSS THAT AWAIT: the check at the top of this loop was made before
+       `available` was asked, and an abort during it must not start anything. */
+    if (signal.aborted) rollback(undefined, cap.id, 'was not started: the composition was aborted')
     /* This capability's disposer stack: each resource it acquires registers
      * its own teardown through `onCleanup`. Run in reverse, it undoes a
      * half-finished `start` (so a throw leaves nothing) and, harmlessly
@@ -1107,6 +1246,7 @@ export async function composeCapabilities(
             },
           }
     started.push({ id: cap.id, disposable: disposeCap })
+    stand(cap.id, { state: 'on' })
     /* The signal may have aborted WHILE this `start` was awaiting. This
      * capability is fully started, but the composition's lifetime is over —
      * unwind everything (including this one) rather than hand back a
@@ -1142,6 +1282,7 @@ export async function composeCapabilities(
   ])
   const frozenOrder = Object.freeze(startedOrdered.map((cap) => cap.id))
   const frozenFailures = Object.freeze([...failures])
+  const frozenStanding = Object.freeze([...standing])
 
   /* Every capability that composed has started, so every delegating service
    * handler's target is ready: serve the composed services through the bound host (the peer
@@ -1158,6 +1299,7 @@ export async function composeCapabilities(
   const composition: Composition = {
     order: frozenOrder,
     failures: frozenFailures,
+    standing: frozenStanding,
     get panes() {
       return disposed ? EMPTY_PANES : panes
     },

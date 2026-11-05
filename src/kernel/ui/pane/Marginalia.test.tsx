@@ -2,13 +2,13 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Marginalia } from './Marginalia'
+import { rowHue } from '../../core/bookAccent'
 import styles from './SidePane.module.css'
 import { flushBeforeClose } from '../../core/beforeClose'
 import { MAX_MARK_NOTE, type Annotation, type Bookmark, type Mark } from '../../core/marks'
-import type { MarkControl } from '../../core/capability'
+import type { MarkControl, MarkControlTools } from '../../core/capability'
 import { useMarks, type MarksView } from '../hooks/useMarks'
 import type { MarkSnapshot, MarkStore } from '../../core/markStore'
-import type { CardsView } from '../hooks/useCards'
 import type { JumpTarget } from '../hooks/useJumps'
 
 /**
@@ -72,8 +72,14 @@ function marksView(over: Partial<MarksView> = {}): MarksView {
   } as unknown as MarksView
 }
 
-const cardsView = (): CardsView =>
-  ({ all: [], persistent: true, make: vi.fn(), remove: vi.fn(), rekey: vi.fn() }) as unknown as CardsView
+/** A control that does what a capability's would: read the note as written, at the press. */
+const cardControl = (make: (made: { kind: string; body: string }) => void): MarkControl => ({
+  id: 'test:card',
+  place: 'actions',
+  render: (mark, tools: MarkControlTools) => (
+    <button type="button" aria-label="Make a card" onClick={() => make({ kind: 'Idea', body: tools.noteAsWritten(mark).note.trim() })} />
+  ),
+})
 
 /** The panel, with only the props these assertions care about varied. */
 function draw(over: {
@@ -104,7 +110,6 @@ function draw(over: {
         scanFailed: over.scanFailed ?? false,
         persistent: over.persistent ?? true,
       }))}
-      cards={cardsView()}
       bookId="open-book"
       onDelete={vi.fn()}
       onDeleteBookmark={vi.fn()}
@@ -128,6 +133,25 @@ const listed = () => rowsDrawn().map((row) => row.querySelector('button')?.textC
 
 /** Whether the chip of that name is the one on. */
 const chipOn = (name: string) => screen.getByRole('button', { name }).getAttribute('aria-pressed')
+
+describe('the colour bar', () => {
+  const hue = (row: HTMLElement) => row.style.getPropertyValue('--note-hue')
+
+  it('is the row’s own on a mark, whatever its tint, and absent from a bookmark', () => {
+    draw({
+      all: [ANNOTATION({ id: 'm1', tint: 'green' }), ANNOTATION({ id: 'm2', tint: 'green', text: 'another' })],
+      allBookmarks: [BOOKMARK()],
+    })
+    const [first, second, place] = [
+      rowsDrawn().find((row) => row.textContent?.includes('call me ishmael'))!,
+      rowsDrawn().find((row) => row.textContent?.includes('another'))!,
+      rowsDrawn().find((row) => row.dataset['place'] === 'true')!,
+    ]
+    expect(hue(first)).toBe(String(rowHue('m1')))
+    expect(hue(second)).toBe(String(rowHue('m2')))
+    expect(hue(place)).toBe('')
+  })
+})
 
 describe('a row from the open book', () => {
   it('is enabled and jumps to its own place', () => {
@@ -304,7 +328,6 @@ describe('a focus request', () => {
     const props = (rows: readonly Annotation[], request: typeof focus) => (
       <Marginalia
         marks={view(rows)}
-        cards={cardsView()}
         bookId="open-book"
         onDelete={vi.fn()}
         onDeleteBookmark={vi.fn()}
@@ -536,7 +559,6 @@ describe('a contributed mark control', () => {
     render(
       <Marginalia
         marks={marksView({ all: [ANNOTATION({ id: 'm1' }), ANNOTATION({ id: 'm2', text: 'the whale' })] })}
-        cards={cardsView()}
         bookId="open-book"
         platform="macos"
         markControls={[control]}
@@ -552,7 +574,6 @@ describe('a contributed mark control', () => {
     render(
       <Marginalia
         marks={marksView({ allBookmarks: [BOOKMARK({ id: 'b1' })] })}
-        cards={cardsView()}
         bookId="open-book"
         platform="macos"
         markControls={[control]}
@@ -566,7 +587,6 @@ describe('a contributed mark control', () => {
     render(
       <Marginalia
         marks={marksView({ all: [ANNOTATION({ id: 'm1' })] })}
-        cards={cardsView()}
         bookId="open-book"
         platform="macos"
       />,
@@ -1114,7 +1134,7 @@ describe('a card made straight after writing a note', () => {
     const at = (current: string) => (
       <Marginalia
         marks={marksView({ all: [ANNOTATION({ id: 'm1', bookId: 'other-book', note: current })] })}
-        cards={{ make, persistent: true } as unknown as CardsView}
+        markControls={[cardControl(make)]}
         bookId="open-book"
         platform="macos"
         focus={{ id: 'm1', edit: true, nonce: 1 }}
@@ -1189,7 +1209,7 @@ describe('a card made straight after writing a note', () => {
             ANNOTATION({ id: 'm1', bookId: 'other-book', note: 'the old note', createdAt: 2 }),
           ],
         })}
-        cards={{ make, persistent: true } as unknown as CardsView}
+        markControls={[cardControl(make)]}
         bookId="open-book"
         platform="macos"
         now={1}
@@ -1214,7 +1234,7 @@ describe('a card made straight after writing a note', () => {
     const at = (rows: readonly Annotation[]) => (
       <Marginalia
         marks={marksView({ all: rows })}
-        cards={{ make, persistent: true } as unknown as CardsView}
+        markControls={[cardControl(make)]}
         bookId="open-book"
         platform="macos"
         now={1}
@@ -1255,11 +1275,17 @@ describe('the cross-book scan, beside what is already listed', () => {
     expect(screen.queryByText(/^No marginalia/u)).toBeNull()
   })
 
-  it('says it is still reading beside the marks it has, and calls no filter empty until it is done', () => {
+  /* NO LINE ABOVE THE LIST, because a row that comes and goes above the rows
+     moves every one of them twice in a scan. The pane's title says it instead:
+     `SidePane.behaviour.test.tsx` holds that half. */
+  it('puts no line above the marks it has while reading, and calls no filter empty until it is done', () => {
     panel({ all: [ANNOTATION()], scanning: true })
-    expect(screen.getByText('Reading your marks…')).not.toBeNull()
+    expect(screen.queryByText('Reading your marks…')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Notes' }))
     expect(screen.queryByText(/^No notes/u)).toBeNull()
+    /* Nothing listed under this filter, so there is nothing to push down, and a
+       blank panel would read as the marks having been lost. */
+    expect(screen.getByText('Reading your marks…')).not.toBeNull()
   })
 
   it('says neither once the scan has landed', () => {
@@ -1268,38 +1294,6 @@ describe('the cross-book scan, beside what is already listed', () => {
     expect(screen.queryByText(/could not be read/u)).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Notes' }))
     expect(screen.getByText(/^No notes/u)).not.toBeNull()
-  })
-})
-
-/**
- * ⚠️ **A CARD THAT WAS NOT SAVED WAS NOT SAID, HERE.** The panel took `make`
- * alone, so the one surface that makes cards could not see `persistent`, and
- * the Cards panel, which can, is not offered to a reader at all (#122, #132).
- */
-describe('cards that are not being saved', () => {
-  const notice = /Cards you make are not being saved/u
-  const panel = (cards?: { persistent: boolean }) =>
-    render(
-      <Marginalia
-        marks={marksView({ all: [ANNOTATION()] })}
-        {...(cards ? { cards: { make: vi.fn(), ...cards } as unknown as CardsView } : {})}
-        bookId="open-book"
-        platform="macos"
-      />,
-    )
-
-  it('is said where cards are made, over the marks', () => {
-    panel({ persistent: false })
-    expect(screen.getByText(notice)).not.toBeNull()
-  })
-
-  it('is not said while cards save, nor by a host that makes none', () => {
-    panel({ persistent: true })
-    expect(screen.queryByText(notice)).toBeNull()
-    cleanup()
-
-    panel()
-    expect(screen.queryByText(notice)).toBeNull()
   })
 })
 
@@ -1437,7 +1431,7 @@ describe('a row’s parts', () => {
     expect(screen.getByText('Unknown chapter')).not.toBeNull()
   })
 
-  it('offers a card only where cards are made, and deletes the row’s own mark', () => {
+  it('draws no card control of its own, and deletes the row’s own mark', () => {
     const onDelete = vi.fn()
     render(<Marginalia marks={marksView({ all: [ANNOTATION()] })} bookId="open-book" platform="macos" onDelete={onDelete} />)
     expect(screen.queryByRole('button', { name: 'Make a card' })).toBeNull()
@@ -1970,5 +1964,102 @@ describe('a note editor, while its writes are out', () => {
     saveNow()
     flushBeforeClose()
     expect(written(), 'an editor that had gone went on writing').toEqual(['refused at the close'])
+  })
+})
+
+describe('what a mark control is given', () => {
+  it('draws one placed among the actions in the row’s action buttons and not under the note', () => {
+    draw({
+      all: [ANNOTATION()],
+      markControls: [
+        { id: 'cap:under', render: () => <button type="button">under</button> },
+        { id: 'cap:action', place: 'actions', render: () => <button type="button">action</button> },
+      ],
+    })
+    const action = screen.getByRole('button', { name: 'action' })
+    const under = screen.getByRole('button', { name: 'under' })
+    /* The row's source line holds the actions, and the under-the-note control is
+       above that line. */
+    expect(action.closest('[data-mark-control]')?.getAttribute('data-mark-control')).toBe('cap:action')
+    expect(action.closest('[data-mark-control]')?.parentElement?.className).toMatch(/rowActions/u)
+    expect(under.closest('[data-mark-control]')?.parentElement?.className ?? '').not.toMatch(/rowActions/u)
+  })
+
+  it('keeps a placed control from taking the row with it when it throws', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    draw({
+      all: [ANNOTATION()],
+      markControls: [{ id: 'cap:action', place: 'actions', render: () => { throw new Error('port gone') } }],
+    })
+    expect(screen.getByText(/A mark control could not be drawn/u)).toBeTruthy()
+    expect(rowFor('call me ishmael')).toBeTruthy()
+    spy.mockRestore()
+  })
+
+  /* #128, HELD AT THE SEAM: a control moved out of this file must still read the
+     words the reader just typed, before the store has answered. */
+  it('hands over the note just written, before the list has caught up with it', () => {
+    let noted: string | undefined
+    const control: MarkControl = {
+      id: 'cap:note',
+      place: 'actions',
+      render: (mark, tools) => (
+        <button type="button" onClick={() => { noted = tools.noteAsWritten(mark).note }}>
+          press
+        </button>
+      ),
+    }
+    const at = (current: string) => (
+      <Marginalia
+        marks={marksView({ all: [ANNOTATION({ id: 'm1', bookId: 'other-book', note: current })] })}
+        bookId="open-book"
+        platform="macos"
+        focus={{ id: 'm1', edit: true, nonce: 1 }}
+        markControls={[control]}
+      />
+    )
+    const view = render(at('the old note'))
+    const field = screen.getByPlaceholderText('Write a note')
+    fireEvent.change(field, { target: { value: 'the new note' } })
+    fireEvent.blur(field)
+    fireEvent.click(screen.getByRole('button', { name: 'press' }))
+    expect(noted).toBe('the new note')
+    /* And a later note from elsewhere wins, once the row has moved on. */
+    view.rerender(at('from another device'))
+    fireEvent.click(screen.getByRole('button', { name: 'press' }))
+    expect(noted).toBe('from another device')
+  })
+
+  it('draws a notice once over the list, however many rows, and not over an empty one', () => {
+    const control: MarkControl = { id: 'cap:note', render: () => null, notice: () => <span>not saving</span> }
+    draw({ all: [ANNOTATION(), ANNOTATION({ id: 'm2', text: 'another passage' })], markControls: [control] })
+    expect(screen.getAllByText('not saving')).toHaveLength(1)
+    cleanup()
+    draw({ all: [ANNOTATION()], markControls: [control] })
+    expect(document.querySelector('[data-mark-control-notice]')?.getAttribute('data-mark-control-notice')).toBe('cap:note')
+    cleanup()
+    draw({ markControls: [control] })
+    expect(screen.queryByText('not saving')).toBeNull()
+  })
+
+  it('draws no notice for a control with none, or one that answers nothing', () => {
+    draw({ all: [ANNOTATION()] })
+    const bare = document.body.textContent
+    cleanup()
+    draw({ all: [ANNOTATION()], markControls: [{ id: 'cap:note', render: () => null }] })
+    expect(document.querySelector('[data-mark-control-notice]')).toBeNull()
+    /* Nothing at all in its place, not merely no notice. */
+    expect(document.body.textContent).toBe(bare)
+    cleanup()
+    draw({ all: [ANNOTATION()], markControls: [{ id: 'cap:note', render: () => null, notice: () => null }] })
+    expect(document.querySelector('[data-mark-control-notice]')?.childElementCount).toBe(0)
+  })
+
+  it('keeps a throwing notice from taking the panel with it', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    draw({ all: [ANNOTATION()], markControls: [{ id: 'cap:note', render: () => null, notice: () => { throw new Error('gone') } }] })
+    expect(screen.getByText(/A mark control could not be drawn/u)).toBeTruthy()
+    expect(rowFor('call me ishmael')).toBeTruthy()
+    spy.mockRestore()
   })
 })

@@ -157,8 +157,10 @@ a:hover {
   background: var(--accent-line, #DDE2EA);
 }
 
-/* §07: focus is on :focus-visible only, so pointer users never see it, and it
- * sits outside the element rather than replacing the border.
+/* §07: focus is on :focus-visible only, so pointer users never see it on a
+ * button, and it sits outside the element rather than replacing the border. A
+ * text field is the exception: browsers match :focus-visible there after a click
+ * too, because the reader is about to type.
  *
  * THE OFFSET CARRIES A PRECONDITION, and it is stated here because a control
  * that breaks it fails silently — the ring still draws, in the wrong place, and
@@ -225,8 +227,7 @@ a:hover {
  * problem today. A field that gains a border later gains this with it.
  *
  * `:focus-visible`, not `:focus`, so it tracks §07 exactly — the border is
- * hidden only when the ring that replaces it is actually being drawn. A pointer
- * user, who never sees the ring, never loses the border either. */
+ * hidden only when the ring that replaces it is actually being drawn. */
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {

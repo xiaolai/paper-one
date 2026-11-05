@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
+import { isValidElement, type ReactElement } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { buildDeps, passages } from './index'
 import type { PassageIndex } from './lib/port'
+import { PassagesPane } from './ui/PassagesPane'
 import type { CapabilityContext, Disposable, IndexedBook, PaneContext, PassagesPort } from '../../kernel'
 
 /** What a contributed settings section is told when it is drawn. */
@@ -123,8 +125,25 @@ describe('what the app is offered', () => {
     expect(section?.order).toBe(16)
   })
 
-  it('draws something rather than nothing', () => {
-    expect(passages.settings?.[0]?.render(DRAWN)).not.toBeNull()
+  it('draws the passages pane over one port, made once, rather than nothing', () => {
+    /* `not.toBeNull()` alone passed a render that returned `undefined`. The
+     * section is the pane, over a port that is the SAME one each time it is
+     * drawn — it outlives a teardown, so a fresh one per draw would be a panel
+     * that forgets what it was showing. */
+    const first = passages.settings?.[0]?.render(DRAWN)
+    const second = passages.settings?.[0]?.render(DRAWN)
+    expect(isValidElement(first)).toBe(true)
+    expect((first as ReactElement).type).toBe(PassagesPane)
+    const port = ((first as ReactElement).props as { port: unknown }).port
+    expect(port).toEqual(expect.objectContaining({ pending: expect.any(Function) }))
+    expect(((second as ReactElement).props as { port: unknown }).port).toBe(port)
+  })
+
+  it('tells the reader what the switch does, in the words of the toggle', () => {
+    expect(passages.toggle?.title).toBe('Library search')
+    expect(passages.toggle?.summary).toBe(
+      'Searches every book on your shelf. Off, Search looks in the open book, and the index stays on this device.',
+    )
   })
 
   it('contributes no pane, no screen and no command', () => {

@@ -27,6 +27,8 @@ to circle pages, so neither key can be made to sign the other's.
 """
 permissions = [
     "allow-peer-status",
+    "allow-peer-p2p-on",
+    "allow-peer-set-p2p",
     "allow-peer-local-role",
     "allow-peer-set-local-role",
     "allow-paper-data-root",

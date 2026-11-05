@@ -35,6 +35,25 @@ describe('a mark control, through the composition', () => {
     expect(composition.markControls).toEqual([])
   })
 
+  it('keeps where a control sits and what it has to say, bound to the control', async () => {
+    const composition = await composeCapabilities(
+      [withControls([{ ...control(), place: 'actions', prefix: 'said', notice() { return (this as unknown as { prefix: string }).prefix } } as MarkControl])],
+      api(),
+      signal(),
+    )
+    const [drawn] = composition.markControls
+    expect(drawn?.place).toBe('actions')
+    const { notice } = drawn!
+    expect(notice?.()).toBe('said')
+    composition.dispose()
+  })
+
+  it('adds neither to a control that declared neither', async () => {
+    const composition = await composeCapabilities([withControls([control()])], api(), signal())
+    expect(Object.keys(composition.markControls[0]!).sort()).toEqual(['id', 'render'])
+    composition.dispose()
+  })
+
   it('hands the row the capability its element, with the mark it asked about', async () => {
     /* The renderer is bound and copied at composition, the way a screen's
        is, so the value the row receives is the capability's own answer. */
@@ -44,7 +63,7 @@ describe('a mark control, through the composition', () => {
       api(),
       signal(),
     )
-    const rendered = composition.markControls[0]!.render({ id: 'm1' } as never)
+    const rendered = composition.markControls[0]!.render({ id: 'm1' } as never, { noteAsWritten: (mark) => mark })
     expect(rendered).toBe('drawn')
     expect(seen).toEqual(['m1'])
     composition.dispose()

@@ -1,9 +1,9 @@
 import { useMemo } from 'react'
 import {
   Highlighter,
-  Layers,
   LibraryBig,
   List,
+  LoaderCircle,
   Search,
   Settings as SettingsIcon,
   Wrench,
@@ -20,13 +20,11 @@ import { contributionFits, defaultPaneFor, paneFits, setReadingStyle, type AppDi
 import type { Book } from '../hooks/useBook'
 import type { Annotation } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
-import type { CardsView } from '../hooks/useCards'
 import type { MarksView } from '../hooks/useMarks'
 import type { Bookmarking } from '../hooks/useBookmarking'
 import { Contents } from './Contents'
 import { LibraryPanel, type LibraryPanelProps } from './LibraryPanel'
-import { Cards } from './Cards'
-import { Marginalia } from './Marginalia'
+import { Marginalia, SCANNING_MARKS } from './Marginalia'
 import { SearchPanel } from './SearchPanel'
 import { DevPane } from './DevPane'
 import type { DiagnosticLog } from '../../core/diagnosticsLog'
@@ -69,7 +67,6 @@ import type { VoiceFacts } from '../reader/voiceChoice'
 const RAIL_ENTRIES = [
   { id: 'toc', Icon: List },
   { id: 'marginalia', Icon: Highlighter },
-  { id: 'cards', Icon: Layers },
   { id: 'search', Icon: Search },
   { id: 'library', Icon: LibraryBig },
   { id: 'settings', Icon: SettingsIcon },
@@ -114,7 +111,6 @@ export interface SidePaneProps {
   bookmarking: Bookmarking
   /** Which keyboard this reader has — the Marginalia panel teaches ⌘B/Ctrl+B. */
   platform: Platform
-  cards: CardsView
   /**
    * What the developer surfaces need, when they are drawn.
    *
@@ -194,9 +190,9 @@ export interface SidePaneProps {
    * state, as one prop — same reason as `library`, and picked from
    * `SettingsProps` for the same reason: `offered`, the contributed `sections`
    * (WI-C.5), the capabilities that are `missing`, whether a choice is
-   * `persistent`.
+   * `persistent`, and the `optionalFeatures` a reader may switch.
    */
-  settings: Readonly<Pick<SettingsProps, 'offered' | 'sections' | 'missing' | 'persistent'>>
+  settings: Readonly<Pick<SettingsProps, 'offered' | 'sections' | 'missing' | 'persistent' | 'optionalFeatures'>>
   /**
    * The panes the composed capabilities contributed. They take the rail
    * AFTER the kernel's, in the composition's order, on the screens each one
@@ -243,7 +239,6 @@ export function SidePane({
   marks,
   bookmarking,
   platform,
-  cards,
   onGoTo,
   onDeleteMark,
   markFocus,
@@ -294,7 +289,7 @@ export function SidePane({
   const shown = shownPane(wanted, contributed, fallback)
   const pane = shown.id
 
-  /* THE SHELF, INDEXED ONCE. Marginalia and Cards ask "what is this book
+  /* THE SHELF, INDEXED ONCE. Marginalia asks "what is this book
    * called" and "is it here" per row, and each answer was a linear `find` or
    * `some` over the whole shelf through a callback minted fresh every render
    * — so a panel of a few hundred rows rescanned a two-thousand-book shelf
@@ -328,7 +323,7 @@ export function SidePane({
          `{ id, label, Icon }`, so the map only rebuilt equal objects. */
       ...railFor(state.screen, audience),
       ...contributed
-        .filter((entry) => contributionFits(state.screen, entry))
+        .filter((entry) => contributionFits(state.screen, entry, audience))
         /* THE CONTRIBUTION'S OWN GLYPH, not one glyph for all of them — see
            `CONTRIBUTION_ICONS`, which is also where the defect this replaces is
            written down. Circle and Publish were both `Puzzle`. */
@@ -346,7 +341,14 @@ export function SidePane({
   if (isContributedScreenId(state.screen)) return null
   return (
     <>
-      <div className={styles.paneTitle}>{shown.title}</div>
+      <div className={styles.paneTitle}>
+        {shown.title}
+        {pane === 'marginalia' && marks.scanning && (
+          <span className={styles.paneBusy} role="status" aria-label={SCANNING_MARKS} title={SCANNING_MARKS}>
+            <LoaderCircle size={ICON.inline} strokeWidth={ICON.stroke} aria-hidden />
+          </span>
+        )}
+      </div>
 
       <div className={styles.body}>
         {pane === 'toc' && (
@@ -356,7 +358,6 @@ export function SidePane({
         {pane === 'marginalia' && (
           <Marginalia
             marks={marks}
-            cards={cards}
             bookId={book.bookId}
             onDelete={onDeleteMark}
             onDeleteBookmark={bookmarking.remove}
@@ -374,17 +375,6 @@ export function SidePane({
             focus={markFocus}
             onFocusDone={onMarkFocusDone}
             markControls={markControls}
-            {...goToProps}
-          />
-        )}
-
-        {pane === 'cards' && (
-          <Cards
-            cards={cards}
-            bookId={book.bookId}
-            /* THE SAME `books` LIST, THE SAME QUESTION as Marginalia asks two
-               panels up. One source, so the two cannot answer differently. */
-            onShelf={onShelf}
             {...goToProps}
           />
         )}
@@ -421,6 +411,7 @@ export function SidePane({
                read — not on whether the host handed over the diagnostics
                wiring, which is a different question and used to be conflated
                with this one. */
+            unfinishedPanes={contributed.filter((entry) => entry.unfinished === true)}
             {...(state.developer
               ? {
                   developer: {
@@ -457,6 +448,7 @@ export function SidePane({
             sections={settings.sections}
             missing={settings.missing}
             persistent={settings.persistent}
+            optionalFeatures={settings.optionalFeatures}
             theme={state.theme}
             themeFollowsOs={state.themeFollowsOs}
             pageLayout={state.pageLayout}
@@ -513,7 +505,7 @@ export function SidePane({
             <ContributionBody
               id={shown.contribution.id}
               render={shown.contribution.render}
-              context={{ bookId: contributionBookId }}
+              context={{ bookId: contributionBookId, ...(onGoTo ? { goTo: onGoTo } : {}) }}
             />
           </ContributionBoundary>
         )}

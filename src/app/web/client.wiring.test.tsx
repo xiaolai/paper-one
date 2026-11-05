@@ -67,7 +67,7 @@ const world = vi.hoisted(() => ({
   coversOver: [] as unknown[],
   searchesOver: [] as unknown[],
   storesOver: [] as unknown[],
-  stores: { marks: { name: 'marks' }, cards: null, cardRows: [] } as unknown,
+  stores: { marks: { name: 'marks' } } as unknown,
   settings: [] as unknown[],
   /** Each start-up step that leaves a trace, and the titlebar height published by then. */
   startup: [] as (readonly [step: string, titlebar: string])[],
@@ -233,10 +233,6 @@ vi.mock('../../kernel/ui/browser', () => ({
     world.drawn.set('Library', props)
     return <div data-stub="Library" />
   },
-  Cards: (props: Record<string, unknown>) => {
-    world.drawn.set('Cards', props)
-    return <div data-stub="Cards" />
-  },
   installFatalHandlers: () => {
     world.startup.push(['fatal handlers', document.documentElement.style.getPropertyValue('--titlebar-h')])
   },
@@ -352,7 +348,7 @@ beforeEach(() => {
     coversOver: [],
     searchesOver: [],
     storesOver: [],
-    stores: { marks: { name: 'marks' }, cards: null, cardRows: [] },
+    stores: { marks: { name: 'marks' } },
     settings: [],
     startup: [],
     drawn: new Map(),
@@ -841,31 +837,5 @@ describe('the other tabs', () => {
     expect(drew('SettingsScreen').settings, 'a new store for the same browser').toBe(first)
     await during(() => (drew('SettingsScreen').onSignOut as () => void)())
     await vi.waitFor(() => expect(world.signOuts).toBe(1))
-  })
-
-  it('draws no deck until the store exists', async () => {
-    await atTheShelf()
-    await select('cards')
-    expect(shown('Cards')).toBe(false)
-    expect(page().querySelector(`h1.${styles.screenTitle}`)?.textContent).toBe('Cards')
-  })
-
-  it('hands the deck what the store read, with nothing that writes, and the book being read', async () => {
-    world.stores = { marks: { name: 'marks' }, cards: { persistent: true }, cardRows: ['a card'] }
-    await atTheShelf()
-    await select('cards')
-    expect(page().querySelector('[data-stub="Cards"]')?.parentElement?.className).toBe(`${styles.stage} ${styles.screen}`)
-    expect(drew('Cards')).toEqual({
-      cards: { all: ['a card'], persistent: true },
-      bookId: null,
-      onShelf: expect.any(Function),
-    })
-    expect((drew('Cards').onShelf as () => boolean)()).toBe(false)
-
-    await select('library')
-    await during(() => (drew('Library').onOpen as (one: unknown) => void)({ bookId: 'a', title: 'First' }))
-    await during(() => (drew('Reader').onClose as () => void)())
-    await select('cards')
-    expect(drew('Cards').bookId).toBe('a')
   })
 })

@@ -47,9 +47,6 @@ import { contributionsIn, namesOf } from './lib/surfaces.mjs'
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const KERNEL = new URL('../src/kernel/', import.meta.url)
-const CAPABILITIES = new URL('../src/capabilities/', import.meta.url)
-
-register(new URL('./lib/tsResolve.mjs', import.meta.url), import.meta.url)
 
 /**
  * The capabilities, by directory name.
@@ -60,9 +57,35 @@ register(new URL('./lib/tsResolve.mjs', import.meta.url), import.meta.url)
  * a finding that gate owns — and one in the manifest with no directory is a
  * finding this one raises rather than skips past.
  */
-function capabilityIds() {
-  const manifest = JSON.parse(readFileSync(path.join(REPO_ROOT, 'capabilities.manifest.json'), 'utf8'))
+function capabilityIds(root) {
+  const file = path.join(root, 'capabilities.manifest.json')
+  // Stryker disable next-line StringLiteral: an emptied encoding makes readFileSync return a Buffer, and JSON.parse reads a Buffer as its UTF-8 text, so the same manifest parses
+  const manifest = JSON.parse(readFileSync(file, 'utf8'))
   return manifest.capabilities.map((c) => c.ts ?? c.id)
+}
+
+/**
+ * Each capability's contributions, by id, READ from its `index.ts` under
+ * `root`. `root` is a parameter so a test can hand it a tree whose manifest
+ * names a capability that is not there.
+ */
+export function capabilityContributions(root = REPO_ROOT) {
+  const capabilities = {}
+  for (const id of capabilityIds(root)) {
+    const file = path.join(root, 'src', 'capabilities', id, 'index.ts')
+    let source
+    try {
+      source = readFileSync(file, 'utf8')
+    } catch (cause) {
+      throw new Error(
+        `capabilities.manifest.json names "${id}" and ${path.relative(root, file)} cannot be read ` +
+          `(${cause.code ?? cause.message}) — a manifest entry with no capability is a finding, not a skip`,
+        { cause },
+      )
+    }
+    capabilities[id] = contributionsIn(source)
+  }
+  return capabilities
 }
 
 /** Everything the app declares, as one object. */
@@ -70,32 +93,19 @@ export async function collectSurfaces() {
   const load = (rel) => import(new URL(rel, KERNEL).href)
 
   const [settings, metrics, uiTypes, table, marks, cards, panes, typefaces, formats] = await Promise.all([
+    // Stryker disable next-line StringLiteral: under Vite an empty path resolves to `src/kernel/index.ts`, which re-exports this registry, so in-process the same list is read; a bare node refuses the directory import, which only the child run in `surfaces.test.mjs` sees
     load('core/settings.ts'),
     load('core/metrics.ts'),
     load('core/uiTypes.ts'),
+    // Stryker disable next-line StringLiteral: under Vite an empty path resolves to `src/kernel/index.ts`, which re-exports this registry, so in-process the same list is read; a bare node refuses the directory import, which only the child run in `surfaces.test.mjs` sees
     load('core/serviceTable.ts'),
     load('core/marks.ts'),
+    // Stryker disable next-line StringLiteral: under Vite an empty path resolves to `src/kernel/index.ts`, which re-exports this registry, so in-process the same list is read; a bare node refuses the directory import, which only the child run in `surfaces.test.mjs` sees
     load('core/cards.ts'),
     load('ui/panes.ts'),
     load('core/typefaces.ts'),
     load('core/formats.ts'),
   ])
-
-  const capabilities = {}
-  for (const id of capabilityIds()) {
-    const file = path.join(fileURLToPath(CAPABILITIES), id, 'index.ts')
-    let source
-    try {
-      source = readFileSync(file, 'utf8')
-    } catch (cause) {
-      throw new Error(
-        `capabilities.manifest.json names "${id}" and ${path.relative(REPO_ROOT, file)} cannot be read ` +
-          `(${cause.code ?? cause.message}) — a manifest entry with no capability is a finding, not a skip`,
-        { cause },
-      )
-    }
-    capabilities[id] = contributionsIn(source)
-  }
 
   return {
     kernelSettings: Object.keys(settings.KERNEL_SETTINGS),
@@ -103,7 +113,6 @@ export async function collectSurfaces() {
     readingSteps: metrics.READING_STEPS.map((s) => s.size),
     spacingAxes: Object.keys(metrics.SPACING),
     panes: [...uiTypes.KERNEL_PANE_IDS],
-    unfinishedPanes: [...uiTypes.UNFINISHED_PANE_IDS],
     aligns: [...uiTypes.ALIGNS],
     services: table.SERVICE_TABLE.map((s) => s.name),
     markTints: [...marks.MARK_TINTS],
@@ -115,13 +124,21 @@ export async function collectSurfaces() {
     bundledFaces: typefaces.BUNDLED_FACES.map((f) => f.id),
     allFaces: typefaces.ALL_FACES.map((f) => f.id),
     acceptFormats: formats.ACCEPT_FORMATS.split(','),
-    capabilities,
+    capabilities: capabilityContributions(),
   }
 }
 
 const USAGE = 'usage: node scripts/surfaces.mjs [--names]'
 
-async function main(argv) {
+/**
+ * The command, as an exit code: 0 printed, 2 refused or failed.
+ *
+ * Exported, and the loader hook is NOT registered here, so a test can run it
+ * in-process: under Vitest the kernel's extensionless imports already resolve
+ * through Vite, and only a bare `node` needs `lib/tsResolve.mjs`. `collect` is
+ * a parameter so the failure arm is reachable without breaking a registry.
+ */
+export async function main(argv, collect = collectSurfaces) {
   /* ⚠️ AN UNKNOWN ARGUMENT USED TO SUCCEED. `--nmaes` printed the whole JSON
      inventory and exited 0, so a caller asking for the name list got the wrong
      format with every signal saying it had worked. Found by audit 2026-09-11. */
@@ -130,7 +147,13 @@ async function main(argv) {
     process.stderr.write(`surfaces: unknown argument ${JSON.stringify(unknown[0])}\n${USAGE}\n`)
     return 2
   }
-  const surfaces = await collectSurfaces()
+  let surfaces
+  try {
+    surfaces = await collect()
+  } catch (error) {
+    process.stderr.write(`surfaces: ${error?.message ?? error}\n`)
+    return 2
+  }
   if (argv.includes('--names')) {
     for (const name of namesOf(surfaces)) process.stdout.write(`${name}\n`)
     return 0
@@ -139,12 +162,7 @@ async function main(argv) {
   return 0
 }
 
-if (isProcessEntry(import.meta)) {
-  main(process.argv.slice(2)).then(
-    (code) => { process.exitCode = code },
-    (error) => {
-      process.stderr.write(`surfaces: ${error?.message ?? error}\n`)
-      process.exitCode = 2
-    },
-  )
-}
+/* Node, unlike Vite, cannot resolve the kernel's extensionless imports, so the
+   hook is installed here, where only a process started on this file reaches. */
+// Stryker disable next-line all: reached only when node starts this file, and a spawned child never runs the mutant under test — every decision is in `main`, which is measured in-process, and `surfaces.test.mjs` runs this line as a child
+if (isProcessEntry(import.meta)) { register(new URL('./lib/tsResolve.mjs', import.meta.url), import.meta.url); process.exitCode = await main(process.argv.slice(2)) }

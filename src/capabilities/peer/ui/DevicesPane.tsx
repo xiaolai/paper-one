@@ -1,5 +1,7 @@
 import { useState, useSyncExternalStore } from 'react'
-import { CAPABILITY_UI as ui, inlineQrSvg } from '../../../kernel'
+import { CAPABILITY_UI as ui, messageOf } from '../../../kernel'
+import { inlineQrSvg } from '../lib/qrSvg'
+import { P2P_SWITCH_TITLE, type P2pSwitch } from '../lib/p2pSwitch'
 import type { DevicesModel } from './devicesModel'
 import {
   ROLE_CHOICES,
@@ -38,15 +40,68 @@ import {
  * gets its own idea of what Paper looks like.
  */
 
+/**
+ * ONE CONTROL, AND IT SAYS WHAT IT COSTS. Off stops the connections as soon as
+ * the write lands; the screens composed around the old answer until a relaunch,
+ * which is the same deal the role choice makes below.
+ */
+function P2pSwitchRow({ p2p }: { readonly p2p: P2pSwitch }) {
+  const chosen = useSyncExternalStore(p2p.subscribe, p2p.chosen)
+  const writing = useSyncExternalStore(p2p.subscribeWriting, p2p.writing)
+  const [failure, setFailure] = useState<{ readonly why: string; readonly landed: boolean } | null>(null)
+  return (
+    <>
+      <div className={ui.row}>
+        <span className={ui.grow}>{P2P_SWITCH_TITLE}</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={chosen}
+          aria-label={P2P_SWITCH_TITLE}
+          className={ui.button}
+          disabled={writing}
+          onClick={() => {
+            const next = !chosen
+            setFailure(null)
+            /* Asked of the switch: the write can fail with the word already in the file. */
+            p2p.set(next).catch((cause: unknown) => setFailure({ why: messageOf(cause), landed: p2p.chosen() === next }))
+          }}
+        >
+          {chosen ? 'On' : 'Off'}
+        </button>
+      </div>
+      <div className={ui.hint}>
+        Connects Paper directly to your other devices, your Circle and public sharing. Off, Paper makes none of those
+        connections, and your pairings and what friends shared stay on this device.
+      </div>
+      {p2p.needsReopen() && <div className={ui.hint}>Quit and reopen Paper to finish turning this {chosen ? 'on' : 'off'}.</div>}
+      {failure !== null && (
+        <div className={ui.hint}>
+          {failure.landed ? `This changed, but it may not survive a power cut: ${failure.why}` : `Could not change this: ${failure.why}`}
+        </div>
+      )}
+    </>
+  )
+}
+
+// Stryker disable next-line ArrowFunction: with no switch there is nothing to hear, so nothing calls back, and React takes an unsubscribe of `undefined` as no cleanup at all.
+const noSwitchToWatch = () => () => {}
+
 export interface DevicesPaneProps {
   readonly model: DevicesModel
+  /** Null where there is no plugin to switch: a browser tab, or a test's fake. */
+  readonly p2p?: P2pSwitch | null
   /** "Sync now" — supplied by the sync capability through the peer's slot;
    *  null renders no button (sync not composed, or not started yet). */
   readonly syncNow: (() => void) | null
 }
 
-export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
+export function DevicesPane({ model, syncNow, p2p = null }: DevicesPaneProps) {
   const snapshot = useSyncExternalStore(model.subscribe, model.getSnapshot)
+  /* The writing signal, because `needsReopen` is settled when writing ends and
+     `subscribe` hears only of an answer or a close, not of every settling. */
+  // Stryker disable next-line BooleanLiteral: `needsReopen` is read only beside a switch, so the answer for no switch is never read.
+  const needsReopen = useSyncExternalStore(p2p?.subscribeWriting ?? noSwitchToWatch, () => p2p?.needsReopen() ?? false)
   const [code, setCode] = useState('')
   /* Reset by the offer's identity, so a second pairing does not open already
      saying "Copied" about an invite the reader has not copied. */
@@ -66,6 +121,17 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
   const [settingRole, setSettingRole] = useState(false)
   const [updatingGrants, setUpdatingGrants] = useState<ReadonlySet<string>>(() => new Set())
 
+  /* Once the switch has closed the transport every device command is refused
+     until the next launch, so nothing but the switch is drawn: the same answer
+     as a launch with it off. */
+  if (p2p && (!p2p.launchedOn || needsReopen)) {
+    return (
+      <div className={ui.section}>
+        <P2pSwitchRow p2p={p2p} />
+      </div>
+    )
+  }
+
   if (!snapshot.available) {
     /* INSIDE A SECTION, like every other state this pane can be in. The
        section is what carries the inset that lines a contributed row up with
@@ -80,6 +146,7 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
 
   return (
     <div className={ui.section}>
+      {p2p && <P2pSwitchRow p2p={p2p} />}
       <div className={ui.row}>
         <span className={ui.grow}>This device</span>
         {/* WHAT IT DOES, NOT WHAT THE PROTOCOL CALLS IT. The endpoint id went

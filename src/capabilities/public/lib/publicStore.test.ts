@@ -1,24 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import {
-  DEFAULT_LIFETIME_MS,
-  EMPTY_PUBLIC_FILE,
-  MAX_HELD_BYTES_PER_BOOK,
-  MAX_TASK_MS,
-  VERIFY_PER_TASK,
-  foldPublic,
-  MAX_HELD_PER_BOOK,
-  PUBLIC_SUPPORTED,
-  PUBLIC_VERSION,
-  canonicalJson,
-  isPublicEnvelopeShape,
-  publicPathIn,
-  publicSignedBytes,
-  type IndexFs,
-  type PublicCrypto,
-  type PublicEnvelope,
-  type WriteQueue,
-  writeQueue,
-} from '../../../kernel'
+import { canonicalJson, publicPathIn, type IndexFs, type WriteQueue, writeQueue } from '../../../kernel'
+import { DEFAULT_LIFETIME_MS, PUBLIC_SUPPORTED, PUBLIC_VERSION, isPublicEnvelopeShape, publicSignedBytes, type PublicCrypto, type PublicEnvelope } from './envelope'
+import { EMPTY_PUBLIC_FILE, foldPublic } from './order'
+import { MAX_HELD_BYTES_PER_BOOK, MAX_TASK_MS, VERIFY_PER_TASK, MAX_HELD_PER_BOOK } from './bounds'
 import {
   MAX_CONFLICTS_PER_BOOK,
   MAX_EVIDENCE_BYTES_PER_BOOK,
@@ -264,7 +248,10 @@ function equivocationsCosting(total: number, firstSeq: number): string[] {
 describe('readPublic', () => {
   it('a book nobody has annotated is empty, not an error', () => {
     return readPublic2(fakeFs(new Map()), 'book:1', crypto(accepted), NOW, never).then((read) => {
-      expect(read.file).toEqual(EMPTY_PUBLIC_FILE)
+      /* Spelled out, not compared with `EMPTY_PUBLIC_FILE`: a reader's first
+         look at a book must hold nothing at all, and comparing the constant
+         with itself would pass whatever the constant held. */
+      expect(read.file).toEqual({ kept: [], held: [], withdrawn: [], equivocated: [] })
     })
   })
 

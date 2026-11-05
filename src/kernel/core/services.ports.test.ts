@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { compareHlc, parseHlc } from './hlc'
 import { createKernelServices, monotonicClock } from './services'
 import type { Diagnostics } from './ports'
-import type { PublicPassage } from './public/envelope'
+import type { PublicPassage } from './ports'
 import { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY } from './settings'
 import { servicesWith, spyRecorder } from './servicesWorld.testkit'
 
@@ -450,6 +450,7 @@ describe('the device, shelf and size ports', () => {
     ['bindHashPort', 'bindHashPort: the hash port is already bound'],
     ['bindSpeechEngines', 'bindSpeechEngines: the speech engine port is already bound'],
     ['bindPrivateAudience', 'bindPrivateAudience: the private-audience port is already bound'],
+    ['bindNotifier', 'bindNotifier: the notice line is already bound'],
   ])('refuses a second %s by name', (bind, message) => {
     const services = servicesWith(spyRecorder().recorder)
     const port = (async () => []) as never
@@ -693,5 +694,49 @@ describe('the settings store, as composed', () => {
       settingsMigration: (found) => ({ 'kernel.theme': (found?.values['theme'] === 'sage' ? 'night' : 'paper') as string }),
     })
     expect(services.settings.get(KERNEL_SETTINGS.theme)).toBe('night')
+  })
+})
+
+/* The notice line and the file door, which a capability with only a palette row has
+   for a surface. */
+describe('notify', () => {
+  const quiet = (warn: Diagnostics['warn']): Diagnostics => {
+    const diagnostics: Diagnostics = { child: () => diagnostics, info: () => {}, warn, error: () => {} }
+    return diagnostics
+  }
+
+  it('reaches the bound notice line, and only it', () => {
+    const warn = vi.fn()
+    const services = createKernelServices({ fs: null, storage: null, diagnostics: quiet(warn) })
+    const line = vi.fn()
+    services.bindNotifier(line)
+    services.notify('Exported 3 marks.')
+    expect(line.mock.calls).toEqual([['Exported 3 marks.']])
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('goes to diagnostics with nothing bound, or after the line is unbound, rather than nowhere', () => {
+    const warn = vi.fn()
+    const services = createKernelServices({ fs: null, storage: null, diagnostics: quiet(warn) })
+    services.notify('Before.')
+    const line = vi.fn()
+    services.bindNotifier(line).dispose()
+    services.notify('After.')
+    expect(warn.mock.calls).toEqual([
+      ['notice with no notice line', { text: 'Before.' }],
+      ['notice with no notice line', { text: 'After.' }],
+    ])
+    expect(line).not.toHaveBeenCalled()
+  })
+})
+
+describe('files', () => {
+  it('says so where no dialog was supplied', () => {
+    expect(createKernelServices({ fs: null, storage: null }).files.available).toBe(false)
+  })
+
+  it('is the picker the composition root supplied', () => {
+    const files = { available: true, pickOpen: async () => null, pickSave: async () => null }
+    expect(createKernelServices({ fs: null, storage: null, files }).files).toBe(files)
   })
 })

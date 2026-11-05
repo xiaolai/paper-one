@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { MAX_BOOKS_WITH_PUBLIC, folderForFetch, type IndexedBook, type Library } from '../../../kernel'
+import { type IndexedBook, type Library } from '../../../kernel'
+import { MAX_BOOKS_WITH_PUBLIC } from './bounds'
+import { folderForFetch } from './publicShare'
 import type { SharedBook, SharePort, ShareService } from '../../peer'
 import { publicPortOver } from './publicPort'
 

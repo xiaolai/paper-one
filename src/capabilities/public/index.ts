@@ -1,19 +1,7 @@
 import { createElement } from 'react'
-import {
-  isContentHash,
-  messageOf,
-  notifyAll,
-  standingOf,
-  type Capability,
-  type CapabilityContext,
-  type Disposable,
-  type ForeignAnnotation,
-  type IndexFs,
-  type Library,
-  type OverlayRequest,
-  type PublicPassage,
-} from '../../kernel'
-import { sharePort, voicePort } from '../peer'
+import { isContentHash, messageOf, notifyAll, type Capability, type CapabilityContext, type Disposable, type ForeignAnnotation, type IndexFs, type Library, type OverlayRequest, type PublicPassage } from '../../kernel'
+import { standingOf } from './lib/binding'
+import { P2P_SWITCH_TITLE, p2pAvailable, sharePort, voicePort } from '../peer'
 import { publicAnnotationsFor } from './lib/overlay'
 import { publicPortOver, type PublicPort } from './lib/publicPort'
 import { publishPortOver, type PublishPublicPort } from './lib/publishPort'
@@ -29,7 +17,7 @@ import { PublishControl } from './ui/PublishControl'
  * Phase 25. The Rust half is the share endpoint in `tauri-plugin-peer`
  * (`src/share/`): a second keypair on a second port, content-addressed, with
  * two independent services — the book's bytes and public annotations about it.
- * This half is the composition: the kernel's pure rules (`publicShare.ts`), the
+ * This half is the composition: the pure rules (`lib/publicShare.ts`), the
  * library snapshot, the peer plugin's share commands, and one pane.
  *
  * ## Why it is not part of `circle`
@@ -383,6 +371,10 @@ function runningOver(ctx: CapabilityContext): Running {
 export const publicSharing: Capability = {
   id: 'public',
   requires: ['peer'],
+  available: () => p2pAvailable(),
+  /* Not a switch of its own: it is P2P and nothing else, so one switch governs it
+     and the reader is told which. */
+  follows: { title: 'Public sharing', switch: P2P_SWITCH_TITLE },
   /**
    * Publishing one passage, on the mark's own row — WI-26.4's surface.
    *

@@ -1,4 +1,5 @@
 import { notifyAll } from './notify'
+import { presentPaneName } from './uiTypes'
 import { MARK_TINTS, READER_STYLES, type MarkStorage, type MarkStyle, type MarkTint } from './marks'
 import {
   BRIGHTNESS,
@@ -575,7 +576,7 @@ const boolean = (raw: unknown): boolean | undefined => (typeof raw === 'boolean'
  * whole list. A non-array IS rejected, because that is a value of the wrong
  * shape rather than a list with a bad member.
  */
-const stringList = (raw: unknown): readonly string[] | undefined =>
+export const stringList = (raw: unknown): readonly string[] | undefined =>
   Array.isArray(raw) ? raw.filter((one): one is string => typeof one === 'string') : undefined
 
 /**
@@ -767,7 +768,7 @@ export const KERNEL_SETTINGS = {
    *
    * ⌘⌃⌥D is the only way in — there is no control anywhere that turns this on,
    * because a switch a reader can find is a switch a reader will find. What it
-   * reveals is the unfinished panels (`UNFINISHED_PANE_IDS`) and the Developer
+   * reveals is the panels that say they are unfinished and the Developer
    * panel itself.
    *
    * PERSISTED, like every other preference. Re-entering a four-key chord on
@@ -781,14 +782,21 @@ export const KERNEL_SETTINGS = {
    * Consulted only under `developer`, which is what makes it harmless: a
    * reader who never opens developer options cannot end up with a list that
    * means anything, and turning the master switch off gives the plain app back
-   * whatever was ticked while it was on. See `paneOffered`, which is the one
-   * function that reads both.
+   * whatever was ticked while it was on. See `contributionOffered`, which is the
+   * one function that reads both.
+   *
+   * ⚠️ **READ UNDER THE PANEL'S PRESENT NAME** (`presentPaneName`): Cards was hidden
+   * as `cards` until it became `cards:deck`, and a stored list goes on saying the
+   * old one until the reader next changes it.
    *
    * Empty by default, so turning developer options on shows everything — the
    * switches are there to take a panel away while you work on another, not to
    * make you go and find each one.
    */
-  hiddenPanes: defineSetting<readonly string[]>('kernel.hiddenPanes', [], stringList),
+  hiddenPanes: defineSetting<readonly string[]>('kernel.hiddenPanes', [], (raw) => {
+    const list = stringList(raw)
+    return list && [...new Set(list.map((one) => presentPaneName(one) as string))]
+  }),
   theme: defineSetting<Theme>('kernel.theme', 'paper', oneOf(THEME_IDS)),
   themeFollowsOs: defineSetting<boolean>('kernel.themeFollowsOs', true, boolean),
   /* A string, validated only as a non-empty one: the registry of faces is the

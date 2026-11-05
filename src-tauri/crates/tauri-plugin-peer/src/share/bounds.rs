@@ -1,7 +1,7 @@
 //! What serving strangers may cost this machine — WI-25.6.
 //!
 //! ⚠️ **THE CIRCLE'S BUDGETS DO NOT TRANSFER, AND THE REASON IS STRUCTURAL.**
-//! `core/circle/bound.ts` charges per `(peer, work)`. That works because a
+//! The circle capability's `lib/bound.ts` charges per `(peer, work)`. That works because a
 //! circle peer is a person who had to be admitted: a fresh key buys nothing,
 //! because a fresh key is not in the circle. Here a fresh key is free and
 //! anonymous, so a per-peer budget is a budget per *attacker patience* — and

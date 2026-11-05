@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EngineSpeaker } from './engineSpeaker'
 import { FakeAudioHost, pcmOf } from './enginePlayer.testkit'
 import { FakeSynth, FakeUtterance } from './speechSynth.testkit'
-import { Speaker, type SpeakPrefs, type SpeakerCallbacks } from './speech'
+import { Speaker, type SpeakPrefs, type SpeakerCallbacks } from './speaker'
 import type { SpokenAudio } from '../../core/ports'
 
 const RATE = 24_000

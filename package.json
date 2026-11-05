@@ -40,6 +40,8 @@
     "prebuild": "node scripts/sync-pdfjs-assets.mjs",
     "architecture:check": "node scripts/architecture-check.mjs",
     "compositions:check": "node scripts/check-compositions.mjs",
+    "residue:check": "node scripts/check-residue.mjs",
+    "residue:selftest": "node scripts/check-residue.selftest.mjs",
     "css:check": "node scripts/check-dead-css.mjs",
     "css:tokens": "node scripts/check-css-tokens.mjs",
     "browser:check": "node scripts/check-browser-safe.mjs",

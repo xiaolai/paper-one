@@ -56,7 +56,7 @@ describe('parseRows', () => {
    * React resolves a duplicate key by rendering one element and discarding the
    * other, so a shelf that sends the same book twice makes a book VANISH from
    * the shelf — no error, no warning a reader could see, and the cause three
-   * screens away. `marks.ts` and `cards.ts` both pin this; `books.ts` is the
+   * screens away. `marks.ts` pins this too; `books.ts` is the
    * one a reader looks at first.
    */
   it('keeps the first of two rows sharing an id', () => {
@@ -143,6 +143,15 @@ describe('parseRows', () => {
   it('refuses a format it does not know', () => {
     expect(parseRows([{ bookId: 'a', format: 'epub' }])[0]?.format).toBe('epub')
     expect(parseRows([{ bookId: 'a', format: 'docx' }])[0]?.format).toBeNull()
+    expect(parseRows([{ bookId: 'a', format: '' }])[0]?.format).toBeNull()
+  })
+
+  it('knows every format the kernel’s rows can send', () => {
+    /* `services/rows.ts`' `BookRowFormat`, spelled out: a format this client
+       forgot reads as unknown, and the shelf draws that book with no format. */
+    for (const format of ['epub', 'pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz', 'bin'] as const) {
+      expect(parseRows([{ bookId: 'a', format }])[0]?.format, format).toBe(format)
+    }
   })
 
   it('keeps only the strings out of a list, rather than the list or nothing', () => {

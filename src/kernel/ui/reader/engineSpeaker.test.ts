@@ -10,7 +10,7 @@ import {
 } from './engineSpeaker'
 import { FakeAudioHost, pcmOf } from './enginePlayer.testkit'
 import type { ClipKey, SpeechRequest, SpokenAudio } from '../../core/ports'
-import type { SpeakerCallbacks } from './speech'
+import type { SpeakerCallbacks } from './speaker'
 
 const RATE = 24_000
 

@@ -24,12 +24,8 @@ function context(over: Partial<AppState> = {}, ctxOver: Record<string, unknown> 
     closeBook: () => {},
     openSwitcher: () => {},
     editTags: null,
-    exportTags: null,
-    importTags: null,
     jumpBack: null,
     jumpForward: null,
-    exportMarks: null,
-    importMarks: null,
     /* Null is the ordinary state: no pace derived, or a reading speaking. */
     autoAdvance: null,
     ...ctxOver,
@@ -55,11 +51,8 @@ describe('buildCommands', () => {
      * version named four of the five panels that carry a digit and had already
      * drifted — it did not include Bookmarks, and nothing compared it with
      * `PANES`. A second copy of a registry is a second opinion about it. */
-    /* DEVELOPER OPTIONS ON, because one of the five digits is Cards and Cards
-       is unfinished — see `UNFINISHED_PANE_IDS`. The claim being made here is
-       that a panel the palette OFFERS carries the digit the keyboard BINDS, and
-       a panel nobody is offered has neither. The other half of that pairing —
-       the digit going dead with the panel — is the case below. */
+    /* The claim being made here is that a panel the palette OFFERS carries the
+       digit the keyboard BINDS, and a panel nobody is offered has neither. */
     const commands = buildCommands(context({ screen: 'reader', developer: true }).ctx)
     for (const { combo, pane } of PANE_SHORTCUTS) {
       expect(find(commands, `pane:${pane}`)?.combo, `pane:${pane}`).toBe(combo)
@@ -67,33 +60,14 @@ describe('buildCommands', () => {
     expect(find(commands, 'pane:toggle')?.combo).toBe('⌘\\')
   })
 
-  /**
-   * ⚠️ **AN UNFINISHED PANEL IS NOT IN THE PALETTE EITHER.**
-   *
-   * The rail, the palette and the digits all read `paneFits`, which is the
-   * point of folding `paneOffered` into it: a reader who has not turned
-   * developer options on cannot reach Cards by any of the three, and there is
-   * no fourth route that was forgotten.
-   */
-  it('does not offer the unfinished panel until developer options are on', () => {
+  /* ⚠️ **DEVELOPER IS NOT IN THE PALETTE WITHOUT THE CHORD.** A contributed panel
+     that calls itself unfinished is asked the same; see 'unfinished' below. */
+  it('does not offer the Developer panel until developer options are on', () => {
     const plain = buildCommands(context({ screen: 'reader' }).ctx)
-    expect(find(plain, 'pane:cards')).toBeUndefined()
     expect(find(plain, 'pane:dev')).toBeUndefined()
 
     const developer = buildCommands(context({ screen: 'reader', developer: true }).ctx)
-    expect(find(developer, 'pane:cards')).toBeDefined()
     expect(find(developer, 'pane:dev')).toBeDefined()
-  })
-
-  /* HIDING ONE LEAVES THE REST. Developer is not unfinished and is not hidden
-     by `hiddenPanes`, so it is what says the switch is per-panel rather than a
-     second master. */
-  it('drops one that developer options hid', () => {
-    const commands = buildCommands(
-      context({ screen: 'reader', developer: true, hiddenPanes: ['cards'] }).ctx,
-    )
-    expect(find(commands, 'pane:cards')).toBeUndefined()
-    expect(find(commands, 'pane:dev')).toBeDefined()
   })
 
   /**
@@ -113,10 +87,6 @@ describe('buildCommands', () => {
     // The cross-book ones stay: they are why the library has a pane at all.
     expect(find(library, 'pane:marginalia')).toBeDefined()
     expect(find(library, 'pane:settings')).toBeDefined()
-    /* Cards is cross-book too, and unfinished — so on the shelf it is a
-       question of the SCREEN once the reader has asked to see it at all. */
-    const shown = buildCommands(context({ screen: 'library', developer: true }).ctx)
-    expect(find(shown, 'pane:cards')).toBeDefined()
   })
 
   it('offers all of them in a book', () => {
@@ -301,10 +271,6 @@ describe('every row the palette prints', () => {
         editTags: handler('editTags'),
         jumpBack: handler('jumpBack'),
         jumpForward: handler('jumpForward'),
-        exportMarks: handler('exportMarks'),
-        importMarks: handler('importMarks'),
-        exportTags: handler('exportTags'),
-        importTags: handler('importTags'),
         openBookPicker: handler('openBookPicker'),
         importFolder: handler('importFolder'),
         openSwitcher: handler('openSwitcher'),
@@ -376,10 +342,6 @@ describe('every row the palette prints', () => {
          The palette draws a heading whenever the group changes, so that order
          put "Book" on screen twice; `contiguous` joins a split group now, and
          the table says the order the reader sees. */
-      { id: 'marks:export', label: 'Export your marks and cards…', group: 'Library', keywords: 'mark note card highlight annotation backup save export file json markdown archive', ran: ['exportMarks'] },
-      { id: 'marks:import', label: 'Import marks from a file… (merge)', group: 'Library', keywords: 'mark note card highlight annotation restore load import merge file json archive backup', ran: ['importMarks'] },
-      { id: 'tags:export', label: 'Export your tags…', group: 'Library', keywords: 'tag backup save export file json archive', ran: ['exportTags'] },
-      { id: 'tags:import', label: 'Import tags from a file… (merge)', group: 'Library', keywords: 'tag restore load import merge file json archive backup', ran: ['importTags'] },
     ])
   })
 
@@ -448,10 +410,6 @@ describe('every row the palette prints', () => {
       ['book:tags', { editTags: () => {} }],
       ['jump:back', { jumpBack: () => {} }],
       ['jump:forward', { jumpForward: () => {} }],
-      ['marks:export', { exportMarks: () => {} }],
-      ['marks:import', { importMarks: () => {} }],
-      ['tags:export', { exportTags: () => {} }],
-      ['tags:import', { importTags: () => {} }],
     ] as const
     for (const [id, handler] of GATED) {
       const added = buildCommands({ ...bare, ...handler })
@@ -476,7 +434,7 @@ describe('every row the palette prints', () => {
  * other" — and which nothing enforced until the size shortcuts were added.
  *
  * Read from App's SOURCE rather than by dispatching a synthetic KeyboardEvent,
- * for the reason the ⌘1…5 test above gives: the two things that must agree live
+ * for the reason the ⌘1…3 test above gives: the two things that must agree live
  * in different files, and a test that asks the registry about itself can only
  * ever agree with itself. A combo advertised in the palette and bound nowhere
  * is a row that prints a keystroke which does nothing.
@@ -568,7 +526,7 @@ describe('advertised combos are bound', () => {
    * to bind BOTH — ⌘+ on a US layout is ⌘⇧= and reports '+', while ⌘= reports
    * '=' — or the shortcut works only for readers who happened to hold shift.
    *
-   * Panel digits are absent on purpose: ⌘1…5 is bound from PANE_SHORTCUTS, and
+   * Panel digits are absent on purpose: ⌘1…3 is bound from PANE_SHORTCUTS, and
    * the test above already checks that table against the renderer.
    */
   /* A key, or — for a chord that stacks Control on the accelerator — the whole
@@ -620,12 +578,8 @@ describe('advertised combos are bound', () => {
       lookUp: () => {},
       toggleBookmark: () => {},
       editTags: () => {},
-      exportTags: () => {},
-      importTags: () => {},
       jumpBack: () => {},
       jumpForward: () => {},
-      exportMarks: () => {},
-      importMarks: () => {},
     }
     const digits = new Set(PANE_SHORTCUTS.map((entry) => entry.combo))
     const advertised = new Set(
@@ -664,11 +618,10 @@ describe('advertised combos are bound', () => {
      everywhere was the hole: deleting the digit branch entirely left the suite
      green, because the only other test of it asserted that the PANELS render. */
   it('binds every panel digit the rail advertises, and toggles the open one', () => {
-    /* DEVELOPER OPTIONS ON, because ⌘4 is Cards and Cards is unfinished. What
-       is being checked here is that an OFFERED panel's digit works; that a
-       panel nobody is offered has a dead digit is the case below, and the two
-       together are the whole rule. */
-    const offered = { ...anything, developer: true }
+    /* What is being checked here is that an OFFERED panel's digit works. The
+       context carries no developer options: a digit for a panel they gate would
+       be refused, and this is what would say so. */
+    const offered = anything
     for (const { digit, pane } of PANE_SHORTCUTS) {
       expect(resolveAccel({ key: digit, repeat: false }, offered), `⌘${digit}`).toEqual({
         kind: 'openPane',
@@ -682,25 +635,10 @@ describe('advertised combos are bound', () => {
     }
   })
 
-  /**
-   * ⚠️ **A DIGIT FOR A PANEL NOBODY IS OFFERED IS DEAD**, the same way a digit
-   * for a panel this screen has not got is dead. A key that opens something the
-   * rail does not draw is the mirror of a rail button that opens nothing.
-   */
-  it('leaves an unfinished panel’s digit unbound until developer options are on', () => {
-    const cards = PANE_SHORTCUTS.find(({ pane }) => pane === 'cards')
-    expect(cards, 'Cards no longer carries a digit — this check needs rewriting').toBeDefined()
-    expect(resolveAccel({ key: cards!.digit, repeat: false }, anything)).toBeNull()
-    expect(
-      resolveAccel({ key: cards!.digit, repeat: false }, { ...anything, developer: true }),
-    ).toEqual({ kind: 'openPane', pane: 'cards' })
-    /* And hidden inside developer options, it goes dead again. */
-    expect(
-      resolveAccel(
-        { key: cards!.digit, repeat: false },
-        { ...anything, developer: true, hiddenPanes: ['cards'] },
-      ),
-    ).toBeNull()
+  /* ⌘4 LEFT WITH THE PANEL: the seam offers a capability no accelerator. */
+  it('gives Cards no digit: the panel is a capability\'s, and a contributed pane gets none', () => {
+    expect(PANE_SHORTCUTS.map(({ pane }) => pane)).not.toContain('cards')
+    expect(resolveAccel({ key: '4', repeat: false }, anything)).toBeNull()
   })
 
   /**
@@ -878,8 +816,8 @@ describe('advertised combos are bound', () => {
    * it — letter, character, digit or chord.
    */
   describe('the modifier that is neither the accelerator nor a layout’s', () => {
-    const windows = { ...anything, platform: 'windows', developer: true } as const
-    const mac = { ...anything, developer: true } as const
+    const windows = { ...anything, platform: 'windows' } as const
+    const mac = anything
     const KEYS = ['k', 'l', 'd', 'b', 't', '\\', '[', ']', '=', '+', '-', '_', '0', ...PANE_SHORTCUTS.map((entry) => entry.digit)]
 
     it('binds nothing with Meta added off a Mac', () => {
@@ -1050,7 +988,7 @@ describe('advertised combos are bound', () => {
 })
 
 describe('PANE_SHORTCUTS', () => {
-  it('binds §11\'s ⌘1…4 to contents, marginalia, search and cards', () => {
+  it('binds §11\'s ⌘1…3 to contents, marginalia and search', () => {
     /* FOUR, AND THE NAME SAYS FOUR — THE SECOND TIME THIS NAME OUTLIVED A PANEL.
      *
      * It said six once, naming a Bookmarks panel left behind when bookmarks
@@ -1078,7 +1016,6 @@ describe('PANE_SHORTCUTS', () => {
       ['1', 'toc'],
       ['2', 'marginalia'],
       ['3', 'search'],
-      ['4', 'cards'],
     ])
 
     /* THE TITLE, HELD TO THE ROWS.
@@ -1277,40 +1214,6 @@ describe('filterCommands', () => {
   })
 })
 
-describe('the tag archive commands', () => {
-  /** The shared context with the archive hooks swapped in. */
-  const withArchive = (over: { exportTags?: (() => void) | null; importTags?: (() => void) | null }) => ({
-    ...context().ctx,
-    ...over,
-  })
-
-  /* Offered only where there is a filesystem to write to — `canArchiveTags` is
-     false in a plain browser tab, and a row that opens a dialog which cannot
-     exist is the app describing a feature it does not have. */
-  it('offers export and import when the archive is available', () => {
-    const ids = buildCommands(withArchive({ exportTags: () => {}, importTags: () => {} })).map((c) => c.id)
-    expect(ids).toContain('tags:export')
-    expect(ids).toContain('tags:import')
-  })
-
-  it('offers neither when it is not', () => {
-    const ids = buildCommands(withArchive({ exportTags: null, importTags: null })).map((c) => c.id)
-    expect(ids).not.toContain('tags:export')
-    expect(ids).not.toContain('tags:import')
-  })
-
-  it('says merge in the import label, because that is what it does', () => {
-    /* The word is the reassurance: an import never removes a tag, so restoring
-       an old file cannot silently undo a month of filing. */
-    const row = buildCommands(withArchive({ importTags: () => {} })).find((c) => c.id === 'tags:import')
-    /* THE LABEL, which this title always named and which this case never read:
-       it asserted the keywords, and the label had no "merge" in it from the
-       day the row was written (2026-09-13 audit). */
-    expect(row?.label).toBe('Import tags from a file… (merge)')
-    expect(row?.keywords).toContain('merge')
-  })
-})
-
 /**
  * Contributed commands — WI-5.6. The composition's commands come after the
  * kernel's, built from a context derived from the same state, so what they say
@@ -1338,6 +1241,24 @@ describe('contributed commands', () => {
     const { ctx } = context()
     expect(buildCommands(ctx).some((c) => c.id.startsWith('example:'))).toBe(false)
   })
+
+  /* FILED UNDER A KERNEL GROUP, a contributed row joins that group where the
+     group first appeared: pushed last, it must not drag the whole group to the
+     end of the palette. */
+  it('join a kernel group where that group first appeared, leaving the groups in their order', () => {
+    const { ctx } = context({ screen: 'reader' })
+    const runs = (commands: readonly Command[]) =>
+      commands.map((one) => one.group).filter((group, at, all) => group !== all[at - 1])
+    const kernel = buildCommands(ctx)
+    const first = kernel[0]!.group
+    const joined = buildCommands({
+      ...ctx,
+      contributed: () => [{ id: 'example:extra', label: 'Something extra', group: first, run: () => {} }],
+    })
+    expect(runs(joined)).toEqual(runs(kernel))
+    const lastOfFirst = kernel.map((one) => one.group).lastIndexOf(first)
+    expect(joined[lastOfFirst + 1]?.id).toBe('example:extra')
+  })
 })
 
 /**
@@ -1355,6 +1276,14 @@ describe('contributed panels', () => {
     expect(row?.group).toBe('Panels')
     row?.run()
     expect(dispatched).toEqual([{ type: 'openPane', pane: 'circle:book' }])
+  })
+
+  it('get no row while the panel is unfinished, and one under developer options', () => {
+    const deck = { ...circle, id: 'deck:panel' as const, unfinished: true }
+    const reader = context({ screen: 'reader', pane: null })
+    expect(find(buildCommands({ ...reader.ctx, contributedPanes: [deck] }), 'pane:deck:panel')).toBeUndefined()
+    const dev = context({ screen: 'reader', pane: null, developer: true })
+    expect(find(buildCommands({ ...dev.ctx, contributedPanes: [deck] }), 'pane:deck:panel')?.label).toBe(`Open ${circle.label}`)
   })
 
   it('offer to close the one that is open', () => {

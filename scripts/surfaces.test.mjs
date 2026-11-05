@@ -16,24 +16,41 @@
  * `contributionsIn` is shown a source it must find things in, a source it must
  * find NOTHING in, and a source that would fool the obvious flat regex.
  *
- * The evaluated half runs `surfaces.mjs` as a CHILD PROCESS rather than
- * importing it: that module registers a loader hook at import time, and
- * installing a resolver into the test runtime to check a script is a larger
- * change to the thing under test than the test is worth.
+ * ⚠️ **THE EVALUATED HALF IS IMPORTED, AND THE COMMAND IS ALSO RUN AS A CHILD.**
+ * This suite used to run `surfaces.mjs` ONLY as a child process, because the
+ * module registered its loader hook at import time. A child is invisible to
+ * the mutation sweep — it found no covering test for any of the file's 74
+ * mutants. The hook now installs only where node starts the file, so the
+ * registries are read in-process here (Vite resolves the kernel's
+ * extensionless imports itself), and one child run proves the hook still
+ * gives a bare `node` the same answer.
  */
 
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
-import { CONTRIBUTION_SEAMS, contributionsIn, namesOf } from './lib/surfaces.mjs'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { CONTRIBUTION_SEAMS, EXCLUDED, contributionsIn, namesOf } from './lib/surfaces.mjs'
+import { capabilityContributions, collectSurfaces, main } from './surfaces.mjs'
 
 const SCRIPT = fileURLToPath(new URL('./surfaces.mjs', import.meta.url))
 const REPO = fileURLToPath(new URL('..', import.meta.url))
 
 const run = (...args) => execFileSync('node', [SCRIPT, ...args], { cwd: REPO, encoding: 'utf8' })
-const surfaces = JSON.parse(run())
+/* Collected before EACH test that reads it, never once at import. Collected at
+ * import, every mutant on the collection path becomes static: one that throws
+ * fails the suite's load, which Stryker's vitest runner reports as Survived,
+ * so a broken reader read as a test that cannot fail. */
+let surfaces
+const collectBeforeEach = () =>
+  beforeEach(async () => {
+    surfaces = await collectSurfaces()
+  })
 
 describe('the registries it evaluates', () => {
+  collectBeforeEach()
   /* Exact lists, not counts, wherever the list is short enough to read. A count
    * says a member changed; a list says WHICH, which is the difference between a
    * red test somebody can act on and one they re-run. */
@@ -45,9 +62,8 @@ describe('the registries it evaluates', () => {
     ])
   })
 
-  it('reads the seven kernel panes and the one that is unfinished', () => {
-    expect(surfaces.panes).toEqual(['toc', 'marginalia', 'cards', 'search', 'library', 'settings', 'dev'])
-    expect(surfaces.unfinishedPanes).toEqual(['cards'])
+  it('reads the six kernel panes', () => {
+    expect(surfaces.panes).toEqual(['toc', 'marginalia', 'search', 'library', 'settings', 'dev'])
   })
 
   it('reads three tints, three mark styles, and only two offered to the reader', () => {
@@ -112,6 +128,11 @@ describe('the registries it evaluates', () => {
     expect(surfaces.readingSteps.at(-1)).toBe(28)
   })
 
+  it('reads the three alignments and the pane shortcuts as "<combo> <pane>"', () => {
+    expect(surfaces.aligns).toEqual(['justified', 'justified-no-hyphens', 'ragged'])
+    expect(surfaces.paneShortcuts).toEqual(['⌘1 toc', '⌘2 marginalia', '⌘3 search'])
+  })
+
   it('names every service as <noun>.<verb>', () => {
     for (const name of surfaces.services) expect(name).toMatch(/^[a-z]+\.[a-zA-Z]+$/u)
     expect(new Set(surfaces.services).size).toBe(surfaces.services.length)
@@ -119,6 +140,7 @@ describe('the registries it evaluates', () => {
 })
 
 describe('the capability contributions it reads', () => {
+  collectBeforeEach()
   it('covers every capability the manifest declares', () => {
     const manifest = JSON.parse(execFileSync('cat', ['capabilities.manifest.json'], { cwd: REPO, encoding: 'utf8' }))
     const declared = manifest.capabilities.map((c) => c.ts ?? c.id).sort()
@@ -358,6 +380,7 @@ describe('contributionsIn, against known positives', () => {
 })
 
 describe('namesOf', () => {
+  collectBeforeEach()
   it('carries every reading-typography field through', () => {
     const names = namesOf(surfaces)
     for (const field of surfaces.readingStyle) expect(names, `${field} should reach the name set`).toContain(field)
@@ -401,5 +424,126 @@ describe('namesOf', () => {
     const names = namesOf(surfaces)
     expect(names).toEqual([...names].sort())
     expect(new Set(names).size).toBe(names.length)
+  })
+})
+
+describe('the fields it leaves out', () => {
+  /* A REASON IS THE WHOLE OF AN EXCLUSION. `namesOf` accepts any field named
+   * in `EXCLUDED`, so a reason emptied to `''` would leave a field out of
+   * coverage with nobody having said why — the silent omission the list was
+   * built to end. */
+  it('gives every excluded field a reason', () => {
+    expect(Object.keys(EXCLUDED).sort()).toEqual(['allFaces', 'capabilities', 'paneShortcuts', 'readerStyles', 'readingSteps'])
+    for (const [field, why] of Object.entries(EXCLUDED)) expect(why.trim(), `${field} is excluded without a reason`).not.toBe('')
+  })
+})
+
+describe('capabilityContributions', () => {
+  let root
+  afterEach(() => {
+    if (root !== undefined) rmSync(root, { recursive: true, force: true })
+    root = undefined
+  })
+
+  const tree = (capabilities, files) => {
+    root = mkdtempSync(path.join(tmpdir(), 'surfaces-'))
+    writeFileSync(path.join(root, 'capabilities.manifest.json'), JSON.stringify({ capabilities }))
+    for (const [rel, text] of Object.entries(files)) {
+      mkdirSync(path.dirname(path.join(root, rel)), { recursive: true })
+      writeFileSync(path.join(root, rel), text)
+    }
+    return root
+  }
+
+  /* The directory is the manifest's `ts` where it has one, its `id` where not. */
+  it('reads each capability from the directory the manifest names', () => {
+    const at = tree([{ id: 'one', ts: 'two' }, { id: 'three' }], {
+      'src/capabilities/two/index.ts': "export const cap = {\n  panes: [{ id: 'two:pane' }],\n}\n",
+      'src/capabilities/three/index.ts': 'export const cap = { id: "three" }\n',
+    })
+    expect(capabilityContributions(at)).toEqual({ two: { panes: ['two:pane'] }, three: {} })
+  })
+
+  it('refuses a manifest entry with no capability rather than skipping it', () => {
+    const at = tree([{ id: 'ghost' }], {})
+    expect(() => capabilityContributions(at)).toThrow(
+      `capabilities.manifest.json names "ghost" and ${path.join('src', 'capabilities', 'ghost', 'index.ts')} cannot be read ` +
+        '(ENOENT) — a manifest entry with no capability is a finding, not a skip',
+    )
+  })
+
+  /* The message carries only the code; the read's own error, path and all, is
+     the `cause`, so whoever reads the refusal can still see what failed. */
+  it('keeps the failed read as the cause of the refusal', () => {
+    const at = tree([{ id: 'ghost' }], {})
+    let refusal
+    try {
+      capabilityContributions(at)
+    } catch (error) {
+      refusal = error
+    }
+    expect(refusal?.cause).toMatchObject({
+      code: 'ENOENT',
+      path: path.join(at, 'src', 'capabilities', 'ghost', 'index.ts'),
+    })
+  })
+})
+
+describe('main', () => {
+  collectBeforeEach()
+  const capture = () => {
+    const out = []
+    const err = []
+    vi.spyOn(process.stdout, 'write').mockImplementation((text) => (out.push(String(text)), true))
+    vi.spyOn(process.stderr, 'write').mockImplementation((text) => (err.push(String(text)), true))
+    return { out, err }
+  }
+  afterEach(() => vi.restoreAllMocks())
+
+  it('prints the inventory as JSON, and the names one per line with --names', async () => {
+    const { out, err } = capture()
+    expect(await main([], async () => surfaces)).toBe(0)
+    expect(out.join('')).toBe(`${JSON.stringify(surfaces, null, 2)}\n`)
+    out.length = 0
+    expect(await main(['--names'], async () => surfaces)).toBe(0)
+    expect(out.join('')).toBe(namesOf(surfaces).map((name) => `${name}\n`).join(''))
+    expect(err).toEqual([])
+  })
+
+  it('collects the real registries when it is handed nothing', async () => {
+    const { out } = capture()
+    expect(await main([])).toBe(0)
+    expect(JSON.parse(out.join(''))).toEqual(surfaces)
+  })
+
+  it('refuses an unknown argument with exit 2 and the usage, and collects nothing', async () => {
+    const { out, err } = capture()
+    const collect = vi.fn(async () => surfaces)
+    expect(await main(['--names', '--nmaes'], collect)).toBe(2)
+    expect(err.join('')).toBe('surfaces: unknown argument "--nmaes"\nusage: node scripts/surfaces.mjs [--names]\n')
+    expect(out).toEqual([])
+    expect(collect).not.toHaveBeenCalled()
+  })
+
+  it('turns a collector that fails into exit 2 and its message, whatever it threw', async () => {
+    const { out, err } = capture()
+    expect(await main([], async () => { throw new Error('the manifest is gone') })).toBe(2)
+    expect(await main([], () => Promise.reject(null))).toBe(2)
+    expect(err).toEqual(['surfaces: the manifest is gone\n', 'surfaces: null\n'])
+    expect(out).toEqual([])
+  })
+})
+
+/* THE ONE THING ONLY A CHILD CAN SHOW: that a bare `node` — no Vite — still
+ * resolves the kernel through the hook this file installs as an entry, and
+ * reads exactly what the in-process collector reads. */
+describe('the command', () => {
+  collectBeforeEach()
+  it('gives a bare node the same inventory, the same names, and exit 2 for a bad flag', () => {
+    expect(JSON.parse(run())).toEqual(surfaces)
+    expect(run('--names')).toBe(namesOf(surfaces).map((name) => `${name}\n`).join(''))
+    const bad = spawnSync('node', [SCRIPT, '--nmaes'], { cwd: REPO, encoding: 'utf8' })
+    expect(bad.status).toBe(2)
+    expect(bad.stderr).toContain('unknown argument "--nmaes"')
   })
 })

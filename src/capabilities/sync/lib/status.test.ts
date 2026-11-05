@@ -3,7 +3,7 @@ import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { ServiceCallError, serviceError } from '../../../kernel'
-import { REFUSAL_KINDS, describeRefusal, describeSession, refusalKind, type RefusalKind } from './status'
+import { REFUSAL_KINDS, describeRefusal, describeSession, isLinkClosure, refusalKind, saysMoreThanClosure, type RefusalKind } from './status'
 
 /**
  * WI-20.25 — the words. Every way a session can be refused used to reach the
@@ -59,6 +59,13 @@ describe('classifying what a session threw', () => {
     [remote('malformed'), 'broken-peer'],
     [remote('protocol'), 'broken-peer'],
     [remote('internal'), 'broken-peer'],
+    // Every other envelope code, each to its kind — a code that read as `unknown` would say "Sync failed" about a dropped link.
+    [remote('overloaded', true), 'unreachable'],
+    [remote('cancelled'), 'unreachable'],
+    [remote('unknown-service'), 'broken-peer'],
+    [remote('duplicate-id'), 'broken-peer'],
+    [remote('frame-too-large'), 'broken-peer'],
+    [remote('not-found'), 'broken-peer'],
     // The ledger's own local refusals are plain `{code, retryable, message}` objects.
     [{ code: 'unreadable', retryable: true, message: 'book.json is there but could not be read' }, 'unreadable'],
     [{ code: 'unsupported', retryable: false, message: 'the shelf speaks sync [2, 2]' }, 'unsupported'],
@@ -79,15 +86,33 @@ describe('classifying what a session threw', () => {
     [{ kind: 'iroh', message: 'peer unreachable' }, 'unreachable'],
     [{ kind: 'connect', message: 'no route' }, 'unreachable'],
     [{ kind: 'timeout', message: 'dial timed out' }, 'unreachable'],
+    // Every way the plugin says the link itself failed is the link, not the book.
+    [{ kind: 'connection', message: 'connection lost' }, 'unreachable'],
+    [{ kind: 'streamClosed', message: 'stream closed' }, 'unreachable'],
+    [{ kind: 'streamRead', message: 'read failed' }, 'unreachable'],
+    [{ kind: 'streamWrite', message: 'write failed' }, 'unreachable'],
+    [{ kind: 'noSession', message: 'no session' }, 'unreachable'],
+    [{ kind: 'sessionUnknown', message: 'session gone' }, 'unreachable'],
+    [{ kind: 'tooManySessions', message: 'busy' }, 'unreachable'],
     [{ kind: 'blobRefused', message: 'ungranted' }, 'revoked'],
     [{ kind: 'blobHashMismatch', message: 'digest differs' }, 'content'],
     [{ kind: 'blobInterrupted', message: 'short read' }, 'content'],
+    [{ kind: 'blobMismatch', message: 'not the promised file' }, 'content'],
+    [{ kind: 'blobTooLarge', message: 'past the cap' }, 'content'],
+    [{ kind: 'p2pOff', message: 'peer-to-peer is off' }, 'p2p-off'],
+    [{ kind: 'peerClosed', message: 'peer-to-peer was closed' }, 'p2p-closed'],
     [new Error('not paired with a shelf'), 'unpaired'],
     [new Error('No space left on device (os error 28)'), 'disk-full'],
+    // A quota is spelled with a space, an underscore or nothing between its words, and is a full disk each way.
+    [new Error('quota exceeded'), 'disk-full'],
+    [new Error('QUOTA_EXCEEDED'), 'disk-full'],
+    [new Error('QuotaExceeded on write'), 'disk-full'],
+    [new Error('disk full'), 'disk-full'],
     [new Error('sync.push answered an ack that does not match the pushed group'), 'broken-peer'],
     [new Error('something else entirely'), 'unknown'],
     ['a string', 'unknown'],
     [null, 'unknown'],
+    [undefined, 'unknown'],
   ]
   it.each(cases)('%o → %s', (thrown, kind) => {
     expect(refusalKind(thrown)).toBe(kind)
@@ -194,6 +219,17 @@ describe('audit-fix round 1 — what the classifier got wrong', () => {
   it('a refusal reason this build does not know is unknown — the peer was reached', () => {
     expect(refusalKind({ kind: 'sessionRefused', message: 'some-new-reason' })).toBe('unknown')
   })
+  it('a switch the reader turned off is not reported as a failure', () => {
+    expect(describeRefusal({ kind: 'p2p-off', message: 'x' }, names)).toBe('Peer-to-peer is off')
+    expect(describeRefusal({ kind: 'p2p-closed', message: 'x' }, names)).toBe('Quit and reopen Paper to use peer-to-peer')
+  })
+  it('a shelf whose pairing name is empty still gets a sentence, rather than a crash', () => {
+    /* `capital` reads the first character; a name that is there and empty has
+       none, and the status line must still be written. */
+    const blank = { shelf: '', title: () => null }
+    expect(describeRefusal({ kind: 'revoked', message: 'x' }, blank)).toBe(' no longer allows this device — pair it again')
+    expect(describeRefusal({ kind: 'unsupported', message: 'x' }, blank)).toBe(' runs a different version of Paper — update both')
+  })
   it('the raw message never becomes the sentence', () => {
     expect(describeRefusal({ kind: 'unknown', message: '/Users/x/Library/…/journal: EACCES' }, names)).toBe('Sync failed')
   })
@@ -203,5 +239,45 @@ describe('audit-fix round 1 — what the classifier got wrong', () => {
   })
   it('the tuple is the type: every kind in the list has a sentence, and the list is the whole type', () => {
     for (const kind of REFUSAL_KINDS) expect(describeRefusal({ kind, message: '' }, names)).not.toBe('')
+  })
+})
+
+describe('what a closed connection excuses', () => {
+  it('excuses the connection failing, however that arrives', () => {
+    for (const thrown of [
+      { kind: 'p2pOff', message: 'off' },
+      { kind: 'peerClosed', message: 'closed' },
+      { kind: 'streamClosed', message: 'gone' },
+      { kind: 'noSession', message: 'gone' },
+      { kind: 'blobInterrupted', message: 'cut off' },
+      { code: 'disconnected', message: 'gone' },
+    ]) {
+      expect(isLinkClosure(thrown)).toBe(true)
+    }
+  })
+
+  it('does not excuse a local write, or bytes that arrived wrong', () => {
+    for (const thrown of [
+      new Error('no space left on device'),
+      new Error('the journal would not write'),
+      { kind: 'blobHashMismatch', message: 'digest differs' },
+      { code: 'unreadable', message: 'the record will not read' },
+      null,
+      /* A promise rejected with nothing at all: there is no kind to read, and
+         asking for one must not itself throw. */
+      undefined,
+    ]) {
+      expect(isLinkClosure(thrown)).toBe(false)
+    }
+  })
+
+  const nothingHeld = { held: 0, dropped: 0, repaired: 0 }
+
+  it('finds more to say in a finished session only beyond the connection', () => {
+    expect(saysMoreThanClosure({ refused: [], quarantine: nothingHeld })).toBe(false)
+    expect(saysMoreThanClosure({ refused: [{ kind: 'unreachable', message: 'x' }], quarantine: nothingHeld })).toBe(false)
+    expect(saysMoreThanClosure({ refused: [{ kind: 'conflict', book: 'b', message: 'x' }], quarantine: nothingHeld })).toBe(true)
+    expect(saysMoreThanClosure({ refused: [], quarantine: { ...nothingHeld, held: 1 } })).toBe(true)
+    expect(saysMoreThanClosure({ refused: [], quarantine: { ...nothingHeld, dropped: 1 } })).toBe(true)
   })
 })

@@ -84,6 +84,10 @@ export const REFUSAL_KINDS = [
   'broken-peer',
   /** This device is out of space. */
   'disk-full',
+  /** The reader turned peer-to-peer off, so this device connects to nothing. */
+  'p2p-off',
+  /** Peer-to-peer went off and on again; its transport waits for a relaunch. */
+  'p2p-closed',
   'unknown',
 ] as const
 
@@ -93,7 +97,7 @@ export type RefusalKind = (typeof REFUSAL_KINDS)[number]
 export interface SessionRefusal {
   readonly kind: RefusalKind
   /** The book it was about, when it was about one. The cards group is `''`. */
-  readonly book?: string
+  readonly book?: string | undefined
   /** The raw message, for the diagnostic — never shown as the sentence. */
   readonly message: string
 }
@@ -160,6 +164,8 @@ const KIND_BY_PLUGIN_KIND: Readonly<Record<string, RefusalKind>> = {
   blobMismatch: 'content',
   blobInterrupted: 'content',
   blobTooLarge: 'content',
+  p2pOff: 'p2p-off',
+  peerClosed: 'p2p-closed',
 }
 
 const DISK_FULL = /no space left|enospc|quota(?:\s|_)?exceeded|disk full/i
@@ -214,11 +220,42 @@ export function refusalKind(thrown: unknown): RefusalKind {
   return 'unknown'
 }
 
+/** What a connection going away does to whatever was running on it. */
+const CLOSURE_KINDS: ReadonlySet<RefusalKind> = new Set<RefusalKind>(['unreachable', 'p2p-off', 'p2p-closed'])
+
+/**
+ * Whether a failure is the closed connection and nothing more, which is what
+ * the reader who just turned peer-to-peer off expects and is already told.
+ * Anything else, a local write above all, has no other way of being heard.
+ *
+ * `blobInterrupted` is named apart because its kind is `content`, which also
+ * covers bytes that arrived wrong, and only the plugin's kind can tell them apart.
+ */
+export function isLinkClosure(thrown: unknown): boolean {
+  if (CLOSURE_KINDS.has(refusalKind(thrown))) return true
+  return typeof thrown === 'object' && thrown !== null && (thrown as { kind?: unknown }).kind === 'blobInterrupted'
+}
+
+/** Whether a finished session has something to say apart from a closed connection. */
+export function saysMoreThanClosure(outcome: { readonly refused: readonly SessionRefusal[]; readonly quarantine: QuarantineReport }): boolean {
+  return (
+    outcome.refused.some((refusal) => !CLOSURE_KINDS.has(refusal.kind)) ||
+    outcome.quarantine.held > 0 ||
+    outcome.quarantine.dropped > 0
+  )
+}
+
 /* ---------------------------------------------------------- the words */
 
 /** The name-less fallback — what the Storage pane says for `degraded` with
  *  no detail. Every real degradation sets a detail through `describeRefusal`. */
 export const DEGRADED_DETAIL = 'Your library isn’t reachable'
+
+/** The status once the reader turned the P2P switch off in this run. */
+export const P2P_OFF_DETAIL = 'Peer-to-peer is off'
+
+/** The status once the reader turned it back on in a run whose transport has already closed. */
+export const P2P_CLOSED_DETAIL = 'Quit and reopen Paper to use peer-to-peer'
 
 const quoted = (book: string, names: RefusalNames): string => `“${names.title(book) ?? book}”`
 const shelfOr = (names: RefusalNames, fallback: string): string => names.shelf ?? fallback
@@ -252,6 +289,10 @@ export function describeRefusal(refusal: SessionRefusal, names: RefusalNames): s
       return `Paper on ${shelf} and this device couldn’t understand each other`
     case 'disk-full':
       return 'This device is out of space, so nothing more could be saved'
+    case 'p2p-off':
+      return P2P_OFF_DETAIL
+    case 'p2p-closed':
+      return P2P_CLOSED_DETAIL
     case 'unknown':
       /* The raw message goes to the diagnostic (`sync.session-failed`,
        * `sync.push-refused`), never here — `SessionRefusal.message`'s own

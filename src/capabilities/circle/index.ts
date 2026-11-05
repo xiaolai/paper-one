@@ -1,33 +1,6 @@
-import {
-  acceptsTransport,
-  canonicalJson,
-  createCoverFactsPass,
-  drawable,
-  drawsEntry,
-  folderOf,
-  listTrash,
-  messageOf,
-  overlayKeyOf,
-  publishableCover,
-  readmit,
-  type Capability,
-  type CapabilityContext,
-  type Disposable,
-  type ForeignAnnotation,
-  type ForeignEntry,
-  type HashPort,
-  type Hlc,
-  type IndexFs,
-  type IndexedBook,
-  type Library,
-  type OverlayRequest,
-  type Relationship,
-  type ResolvedPassage,
-  type SettingsStore,
-  type TrashFs,
-  type VaultFs,
-  type WriteQueue,
-} from '../../kernel'
+import { canonicalJson, createCoverFactsPass, folderOf, listTrash, messageOf, overlayKeyOf, publishableCover, type Capability, type CapabilityContext, type Disposable, type ForeignAnnotation, type HashPort, type Hlc, type IndexFs, type IndexedBook, type Library, type OverlayRequest, type ResolvedPassage, type SettingsStore, type TrashFs, type VaultFs, type WriteQueue } from '../../kernel'
+import { acceptsTransport, drawsEntry, readmit, type Relationship } from './lib/relationshipState'
+import { drawable, type ForeignEntry } from './lib/foreign'
 import { createElement } from 'react'
 import { peopleFor, readForeign, type ForeignFile } from './lib/store'
 import { answerCover, answerPages, welcome, type BookLike, type Sealed, type Serving } from './lib/exchange'
@@ -50,7 +23,7 @@ import { tellEach } from './lib/listeners'
 import { createSpendLedger, type SpendLedger } from './lib/spendLedger'
 import { listsPortOver, type ListsPort } from './lib/listsPort'
 import { purgePerson, readRelationship, writeRelationship } from './lib/relationships'
-import { peerPort, personPort, publishPort, type PublishPort } from '../peer'
+import { P2P_SWITCH_TITLE, p2pAvailable, peerPort, personPort, publishPort, type PublishPort } from '../peer'
 import { CirclePane } from './ui/CirclePane'
 import { ShareControl } from './ui/ShareControl'
 
@@ -374,6 +347,10 @@ interface PagePublisherLike {
 export const circle: Capability = {
   id: 'circle',
   requires: ['peer'],
+  available: () => p2pAvailable(),
+  /* Not a switch of its own: it is P2P and nothing else, so one switch governs it
+     and the reader is told which. */
+  follows: { title: 'Circle', switch: P2P_SWITCH_TITLE },
   /**
    * The circle's own SCREEN — WI-22.D3.
    *

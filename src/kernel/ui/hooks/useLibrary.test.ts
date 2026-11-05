@@ -280,6 +280,28 @@ describe('useLibrary, mounted', () => {
     expect(record.tags).toEqual(['Sea'])
   })
 
+  /* Rekeyed back to the name it left, the book's own id must reach its folder:
+   * the old `a`→`b` alias outlived the move back and sent every later write
+   * under `a` to `b`, a folder that was gone, where it was dropped. */
+  it('lands a write under a book’s id after it is rekeyed away and back', async () => {
+    const { fs, queue, hook } = mount(
+      {
+        [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({ title: 't', author: '' }),
+        [`${BOOKS_DIR}/book_a/content.epub`]: 'B',
+      },
+      [{ bookId: 'book_a', title: 't', author: '', hasContent: true }],
+    )
+    await act(async () => {
+      await expect(hook.result.current.rekeyBook('book_a', 'book_b')).resolves.toBe('moved')
+      await expect(hook.result.current.rekeyBook('book_b', 'book_a')).resolves.toBe('moved')
+      hook.result.current.update('book_a', (r) => ({ ...r, position: 'after' }))
+      await queue.idle()
+    })
+    const raw = fs.store.get(`${BOOKS_DIR}/book_a/book.json`)
+    expect(JSON.parse(new TextDecoder().decode(raw!))).toMatchObject({ bookId: 'book_a', position: 'after' })
+    expect([...fs.store.keys()].filter((key) => key.startsWith(`${BOOKS_DIR}/book_b`))).toEqual([])
+  })
+
   /* A write that FAILS must not leave its optimistic prediction in the row —
    * the index is serialised from the rows, the trust check never re-reads an
    * idle book's record, so a phantom edit in a trusted cache survives across

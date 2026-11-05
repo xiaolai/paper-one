@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_BUDGET } from '../../../kernel'
+import { DEFAULT_BUDGET } from './bound'
 import { createSpendLedger } from './spendLedger'
 
 /**

@@ -1,17 +1,11 @@
 import { cutToField, hasOnly, isPublishableWork } from './workField'
-import {
-  OWN_SHELF_PATH,
-  atomicWrite,
-  compareEntries,
-  primaryLanguage,
-  type Entry,
-  type Hlc,
-  type ShelvedWork,
-  type VaultFs,
-  type WriteQueue,
-  isHlc,
-} from '../../../kernel'
+import { CIRCLE_DIR, atomicWrite, type Hlc, type VaultFs, type WriteQueue, isHlc } from '../../../kernel'
+import { compareEntries, type Entry, type ShelvedWork } from './log'
+import { primaryLanguage } from './workClaim'
 import { isSealedPage, isWithdrawal, pagesOver, withdrawnBy, type Bounds, type Publisher, type SealedPage, type Withdrawal, DEFAULT_BOUNDS, boundariesInOrder } from './publish'
+
+/** The reader's OWN shelf as published — the publisher's store for the shelf log. */
+export const OWN_SHELF_PATH = `${CIRCLE_DIR}/shelf.json`
 
 /**
  * The reader's own shelf, as PUBLISHED — WI-23.C1's store.
@@ -62,9 +56,6 @@ export interface ShelfFile {
 }
 
 export const NOTHING_SHELVED: ShelfFile = { works: [], sealed: [] }
-
-/** BLAKE3, hex — what a cover on a shelf entry is (WI-23.C5). */
-export const COVER_DIGEST = /^[0-9a-f]{64}$/u
 
 /** A book as the library holds it, narrowed to what the shelf publishes. */
 export interface ShelvedBook {

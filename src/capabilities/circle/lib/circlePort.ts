@@ -1,14 +1,5 @@
-import {
-  FIRST_EPOCH,
-  acceptsTransport,
-  changeState,
-  drawsEntry,
-  messageOf,
-  showShelf,
-  type Hlc,
-  type ReadingState,
-  type Relationship,
-} from '../../../kernel'
+import { messageOf, type Hlc, type ReadingState } from '../../../kernel'
+import { FIRST_EPOCH, acceptsTransport, changeState, drawsEntry, showShelf, type Relationship } from './relationshipState'
 import { claimOfShelved, viewOf, EMPTY_VIEW, type CircleView } from './circleView'
 import { bookVia, indexOf, type BookLike } from './exchange'
 import type { ForeignFile } from './store'

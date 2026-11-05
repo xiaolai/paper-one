@@ -520,6 +520,8 @@ cat <<EOF
   identical (\$APPDATA resolves the same under the same username), so the
   one-machine plan's "distinct data roots" becomes "distinct hosts" here. What
   must differ: host · peer_status().endpointId · peer_local_role() · bridge port.
+  A machine that has never used peer-to-peer answers p2pOff to peer_status():
+  turn it on in Settings, under Devices, and reopen Paper there first.
 
   This script proved the bridge's OWNER, not that its webview answers. Check
   peer_local_role() reads "satchel" before trusting anything the run reports.

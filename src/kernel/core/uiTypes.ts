@@ -99,7 +99,6 @@ export type Typeface = string
 export const KERNEL_PANE_IDS = [
   'toc',
   'marginalia',
-  'cards',
   'search',
   'library',
   'settings',
@@ -108,84 +107,70 @@ export const KERNEL_PANE_IDS = [
 export type KernelPaneId = (typeof KERNEL_PANE_IDS)[number]
 
 /**
- * The panels that are not finished, and are not shown to a reader who has not
- * asked for them.
+ * The name a panel goes by now, given any name it has gone by.
  *
- * A LIST RATHER THAN A FLAG ON EACH, because the question "what is unfinished"
- * is asked in four places — the pane rail, the command palette, the accelerator
- * map and the Developer settings band — and four copies of it would drift the
- * way §11's three copies of the pane ids drifted before `panes.ts` existed.
- *
- * `cards` has a study surface with no scheduler under it yet: it draws a panel
- * a reader can open and does not answer what the panel promises, which is the
- * property this list names — not "new", not "experimental", but *the reader
- * would be right to expect more than this*.
- *
- * ⚠️ **IT HELD `companion` TOO, AND THAT ONE LEFT BY THE OTHER DOOR.** A panel
- * on this list is one that will be finished; the companion was deleted with the
- * rest of the AI features instead. A list of unfinished work is not a graveyard
- * — an id that is never coming back belongs in neither list.
- *
- * ⚠️ **REMOVING AN ID FROM HERE IS HOW A FEATURE SHIPS.** It is the only edit
- * required: the rail, the palette, the digit and the band all read this.
+ * ⚠️ **THE ONE PANEL THAT MOVED OUT OF THE KERNEL KEPT ITS READERS' OLD WORD FOR
+ * IT.** Cards was the kernel's `cards` and is the capability's `cards:deck`, so a
+ * remembered `cards` would match nothing: a reader's hidden panel would reappear
+ * and a remembered one would fall back. Read here, where the old name is loaded,
+ * with no version bump, because a value already under the new name reads the same.
+ * Anything else comes back as it went in.
  */
-export const UNFINISHED_PANE_IDS: readonly KernelPaneId[] = ['cards']
+export function presentPaneName(id: unknown): unknown {
+  return id === 'cards' ? 'cards:deck' : id
+}
 
 /**
- * Whether a panel is one the reader may see right now.
+ * Whether one of the kernel's panels is one the reader may see right now: all of
+ * them are, but Developer, which needs developer options.
  *
- * TOTAL AND PURE, so the four surfaces that ask cannot answer differently. A
- * finished panel is always visible; an unfinished one needs developer mode AND
- * not to have been hidden inside it.
+ * TOTAL AND PURE, so the surfaces that ask cannot answer differently.
  *
- * `hidden` is consulted ONLY under developer mode, which is what makes the
- * stored value harmless: a reader who never opens developer options cannot end
- * up with a list that means anything, and one who turns it off gets the plain
- * app back whatever they ticked while it was on.
+ * ⚠️ **THE KERNEL HAS NO UNFINISHED PANEL ANY MORE.** It kept a list of them, whose
+ * last member was `cards`; that panel is the `cards` capability's now and says of
+ * itself that it is unfinished (`PaneContribution.unfinished`, `contributionOffered`
+ * below). A kernel panel that is not finished does not ship.
  */
-export function paneOffered(
-  pane: PaneId,
+export function paneOffered(pane: PaneId, developer: boolean): boolean {
+  return pane !== 'dev' || developer
+}
+
+/**
+ * Whether a CONTRIBUTED panel is one the reader may see right now. A panel that
+ * says of itself that it is unfinished needs developer options AND not to have
+ * been hidden inside them; any other is always there.
+ *
+ * `hidden` is consulted ONLY under developer options, which is what makes the
+ * stored value harmless: a reader who never opens them cannot end up with a list
+ * that means anything, and one who turns them off gets the plain app back
+ * whatever they ticked while they were on.
+ *
+ * Structural rather than `PaneContribution`, because `capability.ts` already
+ * imports this file.
+ */
+export function contributionOffered(
+  entry: { readonly id: string; readonly unfinished?: boolean },
   developer: boolean,
+  // Stryker disable next-line ArrayDeclaration: every entry asked about is a contributed panel, whose id is `<capability>:<name>`, so a seeded entry with no colon in it can never match one.
   hidden: readonly string[] = [],
 ): boolean {
-  if (!(UNFINISHED_PANE_IDS as readonly string[]).includes(pane)) return pane !== 'dev' || developer
-  return developer && !hidden.includes(pane)
+  return entry.unfinished !== true || (developer && !hidden.includes(entry.id))
 }
 
 /**
  * Whether a capability's SETTINGS section is one the reader may see right now.
  *
- * ⚠️ **`UNFINISHED_PANE_IDS` HID A PANEL AND NEVER ITS SETTINGS**, and the
- * paragraph above claiming that removing an id from it is "the only edit
- * required" was written without noticing. The deleted companion's settings
- * section sat in the The app band for every reader from the day it was
- * contributed, configuring a panel that same reader could not open — a section
- * about a surface that is not there is worse than either half alone, because it
- * is evidence the feature exists.
- *
- * DERIVED FROM THE ONE LIST, NOT A SECOND ONE. A section id is
- * `${capabilityId}:${name}` by construction (`SettingsSection.id`), and the
- * capability whose feature a panel promises carries the panel's id. So the
- * question "is this feature unfinished" is still asked in exactly one place,
- * which is the reason `UNFINISHED_PANE_IDS` is a list rather than a flag on
- * each pane.
+ * A section about a panel the reader cannot open is worse than either half alone,
+ * because it is evidence the feature exists. A section id is
+ * `${capabilityId}:${name}` by construction (`SettingsSection.id`), and so is the
+ * id of a panel that capability contributes, so a section follows its own
+ * capability's unfinished panel.
  *
  * ⚠️ **AND IT IS NOT A RULE ABOUT DEPENDENCIES.** The match is on the section's
  * OWN capability and nothing it depends on: one capability commonly drives
  * several features, and hiding a shipped feature's settings because an
  * unfinished feature shares its engine would take a working control away from
  * the reader.
- *
- * ⚠️ **A SECTION COULD ALSO DECLARE ITSELF UNFINISHED, AND THAT FLAG IS GONE.**
- * `SettingsSection.unfinished` existed for the one case the list cannot
- * express — a single section of a capability whose others ship — and had
- * exactly one declarer, the deleted inference capability's cloud endpoints. It
- * was kept for one round as "the contract's, not that capability's"; a contract
- * field nothing declares is a second way to answer this question that no caller
- * exercises, which is how the two answers drift. The list is the one way again.
- * Recoverable from history if a second case turns up, along with the two rules
- * it needed: `true` or absent and never `false`, and developer options alone —
- * `hidden` names PANELS, and such a section has no panel to name.
  *
  * TAKES THE SECTION, not its id, though the id is now all it reads: a caller
  * that had to unpack the field would be a caller that could forget it, and the
@@ -196,10 +181,13 @@ export function settingsSectionOffered(
   section: { readonly id: string },
   developer: boolean,
   hidden: readonly string[] = [],
+  unfinishedPanes: readonly { readonly id: string }[],
 ): boolean {
   const capability = section.id.slice(0, section.id.indexOf(':'))
-  if (!(UNFINISHED_PANE_IDS as readonly string[]).includes(capability)) return true
-  return paneOffered(capability as PaneId, developer, hidden)
+  /* A CONTRIBUTED PANEL CARRIES ITS OWN CAPABILITY'S NAME, so the same match
+   * finds it, and the section follows the panel it is about. */
+  const pane = unfinishedPanes.find((one) => one.id.startsWith(`${capability}:`))
+  return pane === undefined || contributionOffered({ ...pane, unfinished: true }, developer, hidden)
 }
 
 /**
@@ -219,7 +207,9 @@ export function isContributedPaneId(id: PaneId): id is ContributedPaneId {
 
 /** Whether an id — from anywhere, typed or not — names one of the kernel's own panes. */
 export function isKernelPaneId(id: unknown): id is KernelPaneId {
-  return typeof id === 'string' && (KERNEL_PANE_IDS as readonly string[]).includes(id)
+  /* No `typeof` check first: `includes` answers false for anything that is not
+     one of the ids, whatever its type. */
+  return (KERNEL_PANE_IDS as readonly unknown[]).includes(id)
 }
 
 export const SIDES = ['left', 'right'] as const

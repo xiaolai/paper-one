@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { NO_DECISIONS, type VoiceDecisions } from '../../../kernel'
+import { NO_DECISIONS, type VoiceDecisions } from '../lib/binding'
 import type { VoiceDecisionsPort } from '../lib/voicePort'
 import { VoiceDecisionsControl } from './VoiceDecisions'
 

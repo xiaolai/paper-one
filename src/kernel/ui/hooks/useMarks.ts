@@ -17,9 +17,8 @@ import {
  * the service; this subscribes a component to the snapshot, tells the service
  * which book is open, and hands the verbs on with their promises let go —
  * see `useLibrary` for why a rejection is caught here rather than left. The
- * exceptions hand the promise back as well: `addMany`, for an import that must
- * know before it claims anything, and `setNote`, for an editor that still holds
- * the text and can try again (#131).
+ * one exception hands the promise back as well: `setNote`, for an editor that
+ * still holds the text and can try again (#131).
  */
 
 /** One shared empty list, so a book with no marks does not re-render on identity. */
@@ -69,16 +68,6 @@ export interface MarksView {
    * the reader scrolled away and back.
    */
   add: <T extends NewMark>(draft: T) => Mark & Pick<T, 'kind'>
-  /**
-   * Mint and write several marks for ONE book in a single store write, and
-   * resolve when it has landed.
-   *
-   * `add` is right for the reader marking a passage — one mark, one write, the
-   * promise let go because the pane reports persistence separately. An import
-   * is the other case: a whole archive in one write per book, and an answer
-   * about whether it worked before anything is claimed.
-   */
-  addMany: (bookId: string, drafts: readonly NewMark[]) => Promise<void>
   /**
    * Remove a mark — from ITS OWN BOOK, which is not always the open one.
    *
@@ -141,57 +130,8 @@ export interface MarksView {
   rekey: (from: string, to: string) => void
   /** Read every book's marks into `all`. Called by the Marginalia pane when it mounts. */
   loadAll: () => void
-  /**
-   * Read every book's marks and RESOLVE WITH THEM — annotations and bookmarks
-   * together, which is what a whole-library reader needs.
-   *
-   * WHY THIS EXISTS RATHER THAN `loadAll()` FOLLOWED BY READING `all`. The
-   * cross-book lists are empty until a scan has run, and the ONLY caller of
-   * `loadAll` is the Marginalia panel mounting. So an export from the command
-   * palette, in a session where that panel was never opened, walked an empty
-   * list, wrote `{"version":1,"books":[]}` and reported success — a backup that
-   * exists, opens, and contains nothing. The reader does not find out until the
-   * day they need it.
-   *
-   * Awaiting `loadAll()` and then reading the hook's `all` would not fix it
-   * either: `all` is a value captured in the closure that called it, one React
-   * commit behind the store. This asks the store and hands the rows straight
-   * back, so there is no render in the path at all.
-   *
-   * ⚠️ **REJECTS WITH `MarksScanFailed` WHEN THE SCAN DID NOT LAND**, rather
-   * than resolving with the empty list a failed scan leaves behind. That is
-   * the second half of the same backup, and without it the first half only
-   * moved the empty archive one cause further along.
-   */
-  loadAllNow: () => Promise<readonly Mark[]>
 }
 
-/**
- * The cross-book scan FAILED — what `loadAllNow` throws instead of answering
- * with an empty library.
- *
- * `MarkStore.loadAll` catches the scan's failure, installs `[]` and resolves,
- * because the Marginalia panel that calls it has to draw something either way;
- * the difference between "nothing is kept" and "nothing could be read" lives
- * in `MarkSnapshot.scanFailed`. The panel reads that flag and says which it
- * was. Every OTHER caller read the empty list as an answer — and the export
- * turned that answer into a file: `{"version":1,"books":[]}` written over the
- * reader's only backup and reported as a success (the 2026-08-28 audit, #101).
- *
- * A REJECTION RATHER THAN A FLAG BESIDE THE ROWS, because a caller that
- * forgets to read a flag writes the empty archive, and a caller that forgets
- * to catch does not write anything at all. The failure mode of the omission
- * is what decides the shape.
- */
-export class MarksScanFailed extends Error {
-  constructor() {
-    /* NO `cause` TO CARRY, and no parameter pretending there might be:
-       `MarkStore.loadAll` catches the scan's failure and does not keep it.
-       This says which failure it is, which is what the callers branch on. */
-    super("the library's marks could not be read")
-    this.name = 'MarksScanFailed'
-  }
-}
 
 const SAVE_FAILED = "Paper: could not save that book's marks"
 
@@ -242,21 +182,6 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
         letGo(store.add(mark))
         return mark
       },
-      addMany: (bookId: string, drafts: readonly NewMark[]): Promise<void> => {
-        /* FAIL FAST on a draft naming another book. The store writes the batch
-         * under the FIRST argument's file, so a mismatched draft would land in
-         * one book's file while carrying another book's id — ownership
-         * corrupted quietly, surfacing only when a later mutation routes by
-         * the id inside the row. Today's one caller builds both from the same
-         * plan entry; this guard is for the caller that will not. */
-        const foreign = drafts.find((draft) => draft.bookId !== bookId)
-        if (foreign) {
-          return Promise.reject(
-            new Error(`addMany for ${bookId} was handed a draft belonging to ${foreign.bookId}`),
-          )
-        }
-        return store.addMany(bookId, drafts.map((draft) => createMark(draft)))
-      },
       remove: (mark: MarkRef) => letGo(store.remove(mark.id, mark.bookId)),
       setNote: (mark: MarkRef, note: string): Promise<void> => {
         const written = store.updateNote(mark.id, note, mark.bookId)
@@ -293,26 +218,6 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
       loadAll: () => {
         setScans((n) => n + 1)
         letGo(store.loadAll().finally(() => setScans((n) => n - 1)))
-      },
-      loadAllNow: async () => {
-        await store.loadAll()
-        const fresh = store.getSnapshot()
-        /* ⚠️ A FAILED SCAN STILL RESOLVES, so the flag is the only thing that
-         * tells it from an empty library — see `MarksScanFailed`. `loadAll`
-         * catches the scan's failure and installs `[]` on purpose, for the
-         * panel that has to draw something; this caller has to WRITE something,
-         * and an empty answer becoming a file on disk is the one outcome worth
-         * refusing. Read from the snapshot the scan just published rather than
-         * from the hook's `all`, which is a commit behind. */
-        if (fresh.scanFailed) throw new MarksScanFailed()
-        /* BOTH CLASSES. They share a file and a store and are split at the
-           snapshot; anything that wants the whole of what a reader left in
-           their books has to put them back together. */
-        /* ⚠️ ALL THREE CLASSES. This said two, and a third arriving without
-           this line is the empty-file trap wearing a new hat: an export would
-           write a backup that silently omitted every unplaced mark, and the
-           file is not read again until the day the reader needs it. */
-        return [...fresh.all, ...fresh.allUnplaced, ...fresh.allBookmarks]
       },
     }),
     [store],

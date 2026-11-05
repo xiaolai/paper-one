@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { SectionText } from '../../core/ports'
 import {
   ExportCancelled,
   exportAudiobook,
   planChapters,
   type AudiobookPlatform,
-  type SectionText,
 } from './audiobook'
 
 const section = (index: number, text: string, title: string | null = null): SectionText => ({

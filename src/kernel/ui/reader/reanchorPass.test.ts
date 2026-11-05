@@ -2,8 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { CORPUS_BUILDS, CORPUS_PASSAGES, type BuildId } from '../../core/markCorpus.testkit'
 import { MIN_CONFIDENCE, distinguishable } from './reanchor'
-import { ANCHOR_PER_TASK } from '../../core/public/bounds'
-import { decide, reanchorPass, type PassDeps, type PendingMark } from './reanchorPass'
+import { ANCHOR_PER_TASK, decide, reanchorPass, type PassDeps, type PendingMark } from './reanchorPass'
 import { recordPath } from '../../core/bookFolder'
 import { fakeFs } from '../../core/indexFsFake.testkit'
 import { createMarkStore } from '../../core/markStore'
@@ -167,6 +166,10 @@ describe('the re-anchoring pass', () => {
     })
     /* Between, not before each — five sections are four gaps. */
     expect(breathe).toHaveBeenCalledTimes(4)
+  })
+
+  it('has a batch size for the loop WI-26.7 names', () => {
+    expect(ANCHOR_PER_TASK).toBeGreaterThan(0)
   })
 
   it('hands the main thread back INSIDE a section too — WI-26.7', async () => {

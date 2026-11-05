@@ -67,6 +67,9 @@
 /* The services, and the factory a composition root calls once. */
 export { createKernelServices } from './core/services'
 export type { KernelServices, KernelServicesOptions } from './core/services'
+/* The door to a file the reader chose. Types only: a capability receives one from
+   `services.files` and has no business building its own. */
+export type { FileFilter, FilePicker, PickedFile } from './core/pickedFile'
 export { createLibrary } from './core/libraryStore'
 export type { BookPatch, Library, LibraryOptions, RekeyOutcome, RemoteRow } from './core/libraryStore'
 /* The one reader of a rejection's text. In the kernel because a capability
@@ -78,7 +81,7 @@ export { messageOf } from './core/messageOf'
 /* How a voice pack's size is spelled for a reader. ONE formatter: the
    Listen control's notice and the Voices pane both say a pack's size, and
    their two copies had already drifted apart at 1 023.6 MiB. */
-export { packArrived, packSize } from './ui/reader/engineVoice'
+export { packArrived, packSize } from './core/packSize'
 /* The digest a rendered section is keyed by. Exported for the voices
    capability's port, which is the one place a `spokenDigest` is computed —
    see `SpeechRequest.clip`. */
@@ -110,7 +113,8 @@ export { bodyOf, canonicalTextOf, extractSections, MAX_SECTION_CHARS } from './u
  * path"* is that assertion, and it exists because WI-21.P1 paid for it. */
 export { refuseBookScripts } from './ui/reader/bookScripts'
 export type { ExtractDeps, ExtractedSection, Extraction } from './ui/reader/passageText'
-export { createMarkStore } from './core/markStore'
+export { cfiOverlaps } from './core/markMatch'
+export { MarksScanFailed, createMarkStore } from './core/markStore'
 export type { MarkSnapshot, MarkStore, MarkStoreOptions } from './core/markStore'
 export type { UnplacedMark } from './core/marks'
 
@@ -125,6 +129,7 @@ export type {
   Disposable,
   KernelApi,
   MarkControl,
+  MarkControlTools,
   PaneContext,
   PaneContribution,
   ScreenContribution,
@@ -150,8 +155,10 @@ export {
    * first render, while every unit test passed because each had been handed an
    * UNSCOPED store. */
   scopeSettings,
+  withoutSwitchedOff,
 } from './core/registry'
-export type { CapabilityErrorCode, Composition, CompositionOptions, Contributions } from './core/registry'
+export type { CapabilityErrorCode, Composition, CompositionOptions, Contributions, Standing } from './core/registry'
+export { readSwitchedOff } from './core/pluginSwitches'
 
 /* THE SERVICE TABLE — the one declaration the router registration, the client
  * stubs and the CLI's commands are all derived from (phase 11). Public because
@@ -213,7 +220,9 @@ export type {
   ClipKey,
   ClipUsage,
   ClipsEvicted,
+  RenderedFile,
   SpeechEnginePort,
+  SpeechFileRequest,
   SpeechRequest,
   SpokenAudio,
   SpokenClip,
@@ -266,7 +275,6 @@ export {
 } from './core/diagnosticsLog'
 export type { DiagnosticEntry, DiagnosticLog, DiagnosticSpool } from './core/diagnosticsLog'
 export { CAPABILITY_UI, type CapabilityUiClass } from './core/capabilityUi'
-export { inlineQrSvg } from './core/qrSvg'
 /* ⚠️ **`core/capabilitySession.ts` AND `core/renderSlot.ts` ARE DELETED**, with
  * the clauses that re-exported them. `openSession` released everything a
  * capability's `start` acquired; `createRenderSlot` was a STACK for the value a
@@ -374,13 +382,6 @@ export { META_SCHEMA } from './core/bookFolder'
 export type { BookRecord, CoverFacts, CoverName, TagClock, TagClockEntry } from './core/bookFolder'
 export { MAX_COVER_BYTES, createCoverFactsPass, measureCover, publishableCover } from './core/coverFacts'
 export type { CoverFactsPass, CoverFs } from './core/coverFacts'
-/* The work key (WI-21.3): what a book's declared `identifier` says about the
- * WORK, as one comparable string. Exported here rather than kept private
- * because "two devices derive the same key" is a claim about two PROCESSES,
- * and a host that cannot call it cannot check it. Pure string work — nothing
- * platform-bound joins the browser-safe subtree by this. */
-export { sameWork, workKey } from './core/workKey'
-export type { WorkKey, WorkKeyKind } from './core/workKey'
 export { INDEX_FILE, loadShelf, parseIndex, scanBooks, writeIndex } from './core/bookIndex'
 export type { IndexFs, IndexedBook, ShelfSource } from './core/bookIndex'
 /* The FLAT STORE's seam and its opener. Public since phase 11: a host outside
@@ -417,7 +418,6 @@ export type { WriteQueue } from './core/writeQueue'
    `circlePathIn`. The paths are the kernel's because the folder layout is. */
 export {
   CIRCLE_DIR,
-  OWN_SHELF_PATH,
   circleFolderIn,
   circlePathIn,
   personFolderIn,
@@ -430,91 +430,9 @@ export {
   publicPathIn,
   sharedPathIn,
   PUBLIC_DIR,
-  VOICE_DECISIONS_PATH,
 } from './core/bookFolder'
-/* Public sharing — phase 25. Pure, browser-safe, and deliberately NOT under
-   `circle/`: public and circle share no authorization and no storage, and a
-   module that sat beside the circle's would be the first place that blurs. */
-export {
-  adopts,
-  folderForFetch,
-  mayAdoptIdentity,
-  mayPublishNotes,
-  offerAbsentBecause,
-  offerabilityOf,
-  planShareImport,
-} from './core/publicShare'
-export type { AdoptionVerdict, HeldBook, Offerable, PublicOfferability, ShareImport } from './core/publicShare'
-/* Phase 26 — public annotations. Pure, browser-safe, and under `core/public/`
-   rather than `core/circle/`: they share no authorization, no storage and no
-   wire type, and a module sitting beside the circle's is the first place that
-   blurs. The crypto is INJECTED for `page.ts`'s reason. */
-export {
-  DEFAULT_LIFETIME_MS,
-  MAX_CLOCK_SKEW_MS,
-  MAX_ENVELOPE_BYTES,
-  MAX_LIFETIME_MS,
-  byteLengthOf,
-  PUBLIC_OPS,
-  PUBLIC_SUPPORTED,
-  PUBLIC_VERSION,
-  isPublicEnvelopeShape,
-  mintNote,
-  mintPublicationId,
-  mintUnnote,
-  publicSignedBytes,
-  readPublicEnvelope,
-  sealPublic,
-} from './core/public/envelope'
-export type { Minting, PublicCrypto, PublicEnvelope, PublicPassage, PublicRefusal, Unsealed, Unsigned } from './core/public/envelope'
-export {
-  EMPTY_PUBLIC_FILE,
-  comparePublic,
-  foldPublic,
-  publicationKey,
-  sequenceKey,
-} from './core/public/order'
-export type { Delivered, KeptEnvelope, PublicFile, PublicHeld, PublicWithdrawal } from './core/public/order'
-export {
-  PUBLIC_DISCLOSURE,
-  PUBLIC_LINKS_DISCLOSURE,
-  disclosureFor,
-  linksVoiceToPerson,
-  mayPublish,
-} from './core/public/publish'
-export type { Audience, PublishRefusal, PublishRequest } from './core/public/publish'
-export {
-  NO_DECISIONS,
-  bind,
-  blockPerson,
-  blockVoice,
-  isWellFormed,
-  personOf,
-  standingOf,
-  unbind,
-  unblockPerson,
-  unblockVoice,
-  voicesOf,
-} from './core/public/binding'
-export type { BindingRefusal, VoiceBinding, VoiceDecisions, VoiceStanding } from './core/public/binding'
-export { PUBLIC_WEIGHT, reconcile } from './core/public/presentation'
-export type { AnchorWeight, Contributor } from './core/public/presentation'
-export {
-  ANCHOR_PER_TASK,
-  DEFAULT_PUBLIC_BOUNDS,
-  MAX_BOOKS_WITH_PUBLIC,
-  MAX_HELD_BYTES_PER_BOOK,
-  MAX_HELD_PER_BOOK,
-  MAX_TASK_MS,
-  VERIFY_PER_TASK,
-  admitsAnotherBook,
-  hasRoom,
-  keepWithin,
-  sizeOf,
-  sliceFor,
-} from './core/public/bounds'
-export type { PublicBounds, Weighed } from './core/public/bounds'
-export type { ForeignAnnotation, ForeignEntry, ForeignOpinion, OverlayAudience } from './core/circle/foreign'
+export type { PublicPassage } from './core/ports'
+export type { ForeignAnnotation, ForeignOpinion, OverlayAudience } from './core/foreignAnnotation'
 /* The overlay seam's vocabulary — a capability implementing one needs to name
    the request it is handed and the resolver inside it. */
 export type {
@@ -524,81 +442,12 @@ export type {
   ResolvedPassage,
   ResolvePort,
   ResolveResult,
-} from './core/circle/overlay'
-export {
-  drawable,
-  foreignWeight,
-  readersAmong,
-  offersShare,
-  offersUnshare,
-  overlayKey,
-  overlayKeyOf,
-  shareAbsentBecause,
-} from './core/circle/foreign'
-export type { Publishability } from './core/circle/foreign'
-/* The page protocol. Pure, and deliberately so — the crypto is INJECTED, which
-   is what keeps `page.ts` inside `check-browser-safe.mjs`'s pinned set while
-   the Ed25519 that satisfies it lives in a capability. */
-export {
-  MAX_ENTRIES_PER_PAGE,
-  MAX_PAGE_CHARS,
-  MAX_ROSTER_DEVICES,
-  SUPPORTED,
-  WIRE_VERSION,
-  carriedBy,
-  chainHash,
-  checkPage,
-  integersOnly,
-  isCanonical,
-  isEntryShape,
-  isPageShape,
-  negotiate,
-  paginate,
-  signedBytes,
-} from './core/circle/page'
-export type { Page, PageCrypto, PageRefusal, SignedKind, VersionRange } from './core/circle/page'
-/* The log a page carries, and the fold that turns one into what is held. */
-export { READING_STATES, STARS, compacted, compareEntries, fold, mergeLogs, nextSeq, resolved } from './core/circle/log'
-export type {
-  Entry,
-  Folded,
-  Held,
-  HeldReview,
-  HeldWork,
-  Passage,
-  ReadingState,
-  Register,
-  ShelvedWork,
-  Stars,
-} from './core/circle/log'
-/* What a book is called when two libraries have to agree it is the same book.
-   Never a hash of the file — `wire.md` §"`workKey` cannot be the log key". */
-export { LIST_ID, MAX_CLAIM_DIGESTS, SHELF_WORK, claimFor, indexKeys, isClaimShape, listIdOf, listWork, logOfClaim, matchWork, primaryLanguage } from './core/circle/workClaim'
-export type { ClaimSource, WorkClaim, WorkMatch } from './core/circle/workClaim'
-/* A list's log, folded — WI-23.E1. */
-export { NO_LIST, compactedList, compareItems, foldList } from './core/circle/list'
-export type { ListItem, ListState } from './core/circle/list'
-/* The bound that runs BEFORE a page is parsed, and the states it reads. */
-export { BLOCKED_BUDGET, DEFAULT_BUDGET, NOTHING_SPENT, charge, readRouting } from './core/circle/bound'
-export type { Budget, Charge, Routing, Spend } from './core/circle/bound'
-export {
-  acceptsTransport,
-  admits,
-  budgetFor,
-  changeState,
-  drawsEntry,
-  drawsOverlays,
-  mergeRelationship,
-  FIRST_EPOCH,
-  newRelationship,
-  readmit,
-  showShelf,
-} from './core/circle/relationships'
-export type { Relationship, RelationshipState, Retain } from './core/circle/relationships'
-/* Whether the device that signed a page may still speak for its person. */
-export { SKEW_MS, checkDelegation, maySpeak, shouldRenew, type Liveness } from './core/circle/identity'
-export type { Delegation as CircleDelegation } from './core/circle/identity'
-export { tagKey } from './core/tags'
+} from './core/overlay'
+export { foreignWeight, overlayKey, overlayKeyOf, readersAmong } from './core/foreignAnnotation'
+export { READING_STATES, STARS } from './core/readingState'
+export type { ReadingState, Stars } from './core/readingState'
+/* `fold` UNDER ANOTHER NAME, because the entry's `fold` is circle's. */
+export { TAG_MAX, fold as foldForMatching, normalizeTag, tagKey } from './core/tags'
 
 /* The ledger's primitives: the stamp, the presence register, the formats. */
 export {
@@ -657,9 +506,12 @@ export {
   MARK_KINDS,
   MARK_STYLES,
   MARK_TINTS,
+  MAX_MARK_NOTE,
+  MAX_MARK_TEXT,
   createMark,
   isAnnotation,
   isBookmark,
+  isBookmarkKind,
   liveMarks,
   markStamp,
   mergeMarks,
@@ -684,14 +536,15 @@ export type {
  * which is where it is declared — it used to be re-exported through the reader,
  * whose module imports foliate's CFI parser. */
 export type { ResolvedCfi } from './core/resolvedCfi'
-export { CARD_KINDS, CARDS_STORAGE_KEY, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
+export { CARD_KINDS, CARDS_STORAGE_KEY, MAX_CARD_TEXT, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
+export { createCard } from './core/cardStore'
+export { rowHue } from './core/bookAccent'
 export type { Card, CardKind, NewCard } from './core/cards'
-/* `paneOffered` and its list are the rule for whether a reader may see a panel
+/* `paneOffered` is the rule for whether a reader may see a panel
    at all — `composition.contract.test.ts` holds `KERNEL_DEFAULT_PANE` to it, so
    the kernel's fallback cannot drift back onto a panel nobody is shown. */
 export {
   KERNEL_PANE_IDS,
-  UNFINISHED_PANE_IDS,
   isContributedPaneId,
   isKernelPaneId,
   paneOffered,

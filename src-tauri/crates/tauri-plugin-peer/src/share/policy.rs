@@ -45,7 +45,7 @@ pub fn share_dir(root: &Path) -> PathBuf {
 }
 
 /// `<root>/peer/share/offered.json`.
-fn policy_path(root: &Path) -> PathBuf {
+pub(crate) fn policy_path(root: &Path) -> PathBuf {
     share_dir(root).join("offered.json")
 }
 

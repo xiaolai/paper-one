@@ -72,6 +72,7 @@ function wireOver(over: Partial<VoicesWire> = {}): VoicesWire {
     remove: async () => {},
     clipFind: async () => null,
     clipRender: async () => CLIP,
+    renderFile: async () => ({ sampleRate: 24_000, skipped: [] }),
     clipHold: async (stems: readonly string[]) => stems.length,
     clipUsage: async () => ({ bytes: 0, budget: 5 * 1024 * 1024 * 1024, clips: 0 }),
     clipForget: async () => ({ clips: 0, bytes: 0 }),
@@ -399,6 +400,47 @@ describe('a rendered section', () => {
     )
     const audio = await port.render(requestFor())
     expect(audio.evicted).toEqual({ clips: 2, bytes: 96_088 })
+  })
+})
+
+describe('rendering a chapter into a file', () => {
+  const REQUEST = { packId: 'chinese-qwen', voiceId: 'Vivian', text: '春天', path: '/scratch/chapter-3.wav' }
+
+  it('asks for the file it was given, and answers what the plugin says of it', async () => {
+    const renderFile = vi.fn(async () => ({ sampleRate: 48_000, skipped: [{ text: '㐀', why: 'unknown' }] }))
+    const port = voicesPortOver(wireOver({ renderFile }))
+
+    await expect(port.renderFile?.({ ...REQUEST, rate: 1.25 })).resolves.toEqual({
+      sampleRate: 48_000,
+      skipped: [{ text: '㐀', why: 'unknown' }],
+    })
+    expect(renderFile).toHaveBeenCalledWith({
+      pack: 'chinese-qwen',
+      voice: 'Vivian',
+      text: '春天',
+      rate: 1.25,
+      path: '/scratch/chapter-3.wav',
+    })
+  })
+
+  it('sends no rate as null, and keeps a clip of nothing', async () => {
+    const renderFile = vi.fn(async () => ({ sampleRate: 24_000, skipped: [] }))
+    const clipRender = vi.fn(async () => CLIP)
+    await voicesPortOver(wireOver({ renderFile, clipRender })).renderFile?.(REQUEST)
+
+    expect(renderFile.mock.calls[0]).toEqual([expect.objectContaining({ rate: null })])
+    expect(clipRender, 'an export must not fill the store of what was heard').not.toHaveBeenCalled()
+  })
+
+  it('refuses a reply that would report a short chapter as a whole one', async () => {
+    const replying = (reply: unknown) => voicesPortOver(wireOver({ renderFile: async () => reply })).renderFile?.(REQUEST)
+
+    await expect(replying({ sampleRate: 24_000 })).rejects.toThrow('skip list')
+    await expect(replying({ sampleRate: 24_000, skipped: [{ text: 'x' }] })).rejects.toThrow('skip list')
+    await expect(replying({ sampleRate: 0, skipped: [] })).rejects.toThrow('sample rate')
+    await expect(replying({ skipped: [] })).rejects.toThrow('sample rate')
+    await expect(replying(null)).rejects.toThrow('sample rate')
+    await expect(replying({ sampleRate: 1, skipped: [] })).resolves.toEqual({ sampleRate: 1, skipped: [] })
   })
 })
 

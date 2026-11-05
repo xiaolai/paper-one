@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { hlcOf, matchWork, newRelationship, readmit, type Hlc, type Relationship } from '../../../kernel'
-import { namesOf, sentencesOf, starsText, viewOf, type PersonHeld } from './circleView'
+import { hlcOf, type Hlc } from '../../../kernel'
+import { matchWork } from './workClaim'
+import { newRelationship, readmit, type Relationship } from './relationshipState'
+import { EMPTY_VIEW, namesOf, sentencesOf, starsText, viewOf, type PersonHeld } from './circleView'
 import { NOTHING_SHARED, type ForeignFile } from './store'
 
 /**
@@ -35,6 +37,13 @@ const person = (name: string, over: Partial<PersonHeld> = {}): PersonHeld => ({
 const MOBY_ROW = { title: 'Moby-Dick', author: 'Herman Melville', identifier: 'isbn:9780142437247' }
 
 describe('the circle’s view of a book — WI-23.D1', () => {
+  /* What the port answers for a book the shelf does not hold: the same view
+     a book nobody in the circle has would draw — no one, and nothing else. */
+  it('is empty, exactly as a book nobody holds is', () => {
+    expect(EMPTY_VIEW).toEqual(viewOf(MOBY, BOOKS, []))
+    expect(EMPTY_VIEW).toEqual({ people: [], alsoRead: [] })
+  })
+
   it('names who has it, who is where in it, and counts the ratings — never a mean', () => {
     const view = viewOf(MOBY, BOOKS, [
       person('Alice', {

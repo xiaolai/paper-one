@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { acceptsTransport, drawsOverlays, hlcOf, newRelationship, type Hlc, type Relationship } from '../../../kernel'
+import { hlcOf, type Hlc } from '../../../kernel'
+import { acceptsTransport, drawsOverlays, newRelationship, type Relationship } from './relationshipState'
 import { COVER_WIDTH, NOT_IN_CIRCLE, RECENT_LIMIT, circlePortOver, slotsOf, type CirclePortDeps, type FriendBook } from './circlePort'
 import { NOTHING_SHARED, type ForeignFile } from './store'
 import { refusalOf } from '../../../kernel/testkit'

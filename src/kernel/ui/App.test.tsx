@@ -10,6 +10,7 @@ import type { TrashedBook } from '../core/bookTrash'
 import { settleBeforeDrain } from '../core/beforeClose'
 import { createDiagnosticLog } from '../core/diagnosticsLog'
 import { KERNEL_SETTINGS } from '../core/settings'
+import { pluginsOff } from '../core/pluginSwitches'
 import { DEFAULT_STEP_IDX, PANE_TRACK, readingStep } from '../core/metrics'
 import { MAX_FILES } from '../core/importFolder'
 import { META_SCHEMA, folderOf } from '../core/bookFolder'
@@ -17,7 +18,6 @@ import { bookIdFor } from '../core/marks'
 import { fakeFs } from '../core/indexFsFake.testkit'
 import { composeCapabilities, kernelApi } from '../core/registry'
 import { createKernelServices } from '../core/services'
-import { UNFINISHED_PANE_IDS } from '../core/uiTypes'
 import { PANE_TITLES } from './panes'
 import readerStyles from './screens/Reader.module.css'
 
@@ -392,6 +392,33 @@ const controlsLabelled = (label: string) =>
 
 const row = (bookId: string, title: string): TrashedBook => ({ folder: bookId.replace(':', '_'), bookId, title, author: 'Someone', removedAt: 1_000, expiresAt: 2_000 })
 
+describe('a capability saying what happened', () => {
+  it('reaches the notice line, and gives the line back when the window goes', async () => {
+    const { services } = await mount(null)
+    act(() => services.notify('Exported 3 marks from 1 book.'))
+    expect(screen.getByText('Exported 3 marks from 1 book.')).toBeTruthy()
+    cleanup()
+    /* A slot still held would refuse this with "already bound". */
+    expect(() => services.bindNotifier(() => {})).not.toThrow()
+  })
+
+  it('reaches the line through the services the window holds now, and gives the old ones back their slot', async () => {
+    const signal = new AbortController().signal
+    const first = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    const { rerender } = render(
+      <App services={first} fs={null} composition={await composeCapabilities([], kernelApi(first), signal)} />,
+    )
+    await settle()
+    const second = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    rerender(<App services={second} fs={null} composition={await composeCapabilities([], kernelApi(second), signal)} />)
+    await settle()
+    act(() => second.notify('Said through the second.'))
+    expect(screen.getByText('Said through the second.')).toBeTruthy()
+    /* A slot the window still held would refuse this with "already bound". */
+    expect(() => first.bindNotifier(() => {})).not.toThrow()
+  })
+})
+
 describe('what a contributed screen is handed', () => {
   it('gets no `openBook` without a filesystem — a control that could open nothing is not offered', async () => {
     /* `openStored` returns at once with no filesystem, and a contribution
@@ -573,8 +600,7 @@ describe('the palette’s own commands', () => {
   /**
    * ⚠️ **THE RULE HAD FOUR READERS AND SIX SURFACES.**
    *
-   * `UNFINISHED_PANE_IDS` says removing an id from it is "the only edit
-   * required" to ship a panel, and `paneFits` says it has five callers. Two
+   * `paneFits` says it has five callers. Two
    * surfaces in this window never asked either: the titlebar drew the deleted
    * companion's button for every reader (whose click `paneFor` sent to
    * Contents, and whose `aria-pressed` could therefore never be true), and the
@@ -586,11 +612,9 @@ describe('the palette’s own commands', () => {
    * an unmatched query now says so and Enter is inert, on every screen and
    * whatever the chord. The titlebar's half is still a live filter.
    *
-   * Written over the LIST rather than over those two controls, so it is a rule
-   * and not a pair of pins: a third unfinished panel, or a seventh surface that
-   * draws one, fails here. It asserts on the shared titles from `panes.ts`,
-   * which is where every surface takes its label from, so a surface drawing an
-   * unfinished panel under the right name cannot pass.
+   * Written over a contributed panel that calls itself unfinished, rather than
+   * over those two controls, so it is a rule and not a pair of pins: a seventh
+   * surface that draws one fails here.
    */
   it('offers no unfinished panel anywhere in the window until the chord reveals them', async () => {
     /* ⚠️ **A REAL BOOK, BECAUSE THE TITLEBAR'S BUTTONS ARE BEHIND `isReader`.**
@@ -600,17 +624,19 @@ describe('the palette’s own commands', () => {
        that could not have failed it. The whole point is the titlebar, so the
        test has to be in the reader. */
     const { fs, moby } = await shelfWithMoby()
-    await mount(fs, { books: [moby] })
+    await mount(fs, {
+      books: [moby],
+      capability: {
+        id: 'deck',
+        requires: [],
+        panes: [{ id: 'deck:panel', label: 'Unfinished deck', icon: 'layers', screens: ['reader'], unfinished: true, render: () => null }],
+      },
+    })
     fireEvent.click(screen.getByTitle('Open Moby-Dick'))
     await settle()
     expect(await screen.findByText(WILL_NOT_PARSE)).toBeTruthy()
 
-    /* NON-VACUOUS: this proves nothing if the list is empty, and the list is
-       the whole subject. */
-    expect(UNFINISHED_PANE_IDS.length).toBeGreaterThan(0)
-    for (const id of UNFINISHED_PANE_IDS) {
-      expect(controlsLabelled(PANE_TITLES[id])).toEqual([])
-    }
+    expect(controlsLabelled('Unfinished deck')).toEqual([])
     /* The finished panel beside it IS drawn, in both the titlebar group and
        the rail — the proof that this window renders the surfaces under test,
        so the emptiness above is the filter's doing and not the harness's. */
@@ -638,9 +664,7 @@ describe('the palette’s own commands', () => {
     await settle()
     developerChord()
     await settle()
-    for (const id of UNFINISHED_PANE_IDS) {
-      expect(controlsLabelled(PANE_TITLES[id]).length).toBeGreaterThan(0)
-    }
+    expect(controlsLabelled('Unfinished deck').length).toBeGreaterThan(0)
   })
 })
 
@@ -2365,6 +2389,66 @@ describe('the Settings panel, as the window hands it over', () => {
       screen.getByText(/These settings are not being saved/u),
       'a window that cannot save its settings let the reader believe it could',
     ).toBeTruthy()
+  })
+
+  /* TWO OPTIONAL PROPS BETWEEN THE COMPOSITION AND THE GROUP, in `App` and in
+     `SidePane`, and `Settings.test.tsx` supplies the group's props itself: drop
+     either and the group is merely never drawn, with nothing failing. */
+  it('draws the optional features from the composition, and the switch writes to the window’s settings', async () => {
+    const { services } = await mount(null, {
+      capability: { id: 'switchable', toggle: { title: 'Some feature', summary: 'What it does.' } },
+    })
+    await runCommand('Settings', 'Open Settings')
+    fireEvent.click(screen.getByRole('button', { name: /Optional features/u }))
+    const row = screen.getByRole('switch', { name: 'Some feature' })
+    expect(row.getAttribute('aria-checked'), 'a capability that composed was drawn as off').toBe('true')
+    fireEvent.click(row)
+    expect(services.settings.get(pluginsOff), 'the switch did not reach the settings App holds').toEqual(['switchable'])
+    expect(screen.getByText('Quit and reopen Paper to finish turning this off.')).toBeTruthy()
+  })
+
+  /* WHAT THIS RUN LAUNCHED WITH is read off the composition's `standing`, and
+     the reopen line is the difference between it and the switch. */
+  const SWITCHABLE = { id: 'switchable', toggle: { title: 'Some feature', summary: 'What it does.' } }
+  const optionalFeatures = async () => {
+    await runCommand('Settings', 'Open Settings')
+    fireEvent.click(screen.getByRole('button', { name: /Optional features/u }))
+    return screen.getByRole('switch', { name: 'Some feature' })
+  }
+
+  it('asks for no reopen over a feature this run launched without, until it is switched back on', async () => {
+    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    services.settings.set(pluginsOff, ['switchable'])
+    const composition = await composeCapabilities([SWITCHABLE], kernelApi(services), new AbortController().signal, {
+      switchedOff: new Set(['switchable']),
+    })
+    render(<App services={services} fs={null} composition={composition} />)
+    await settle()
+    const row = await optionalFeatures()
+    expect(row.getAttribute('aria-checked')).toBe('false')
+    expect(screen.queryByText(/Quit and reopen Paper/u), 'a feature that launched off was taken to be running').toBeNull()
+    fireEvent.click(row)
+    expect(screen.getByText('Quit and reopen Paper to finish turning this on.')).toBeTruthy()
+  })
+
+  it('measures the switch against the composition the window holds now', async () => {
+    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    const signal = new AbortController().signal
+    const { rerender } = render(
+      <App services={services} fs={null} composition={await composeCapabilities([SWITCHABLE], kernelApi(services), signal)} />,
+    )
+    await settle()
+    fireEvent.click(await optionalFeatures())
+    expect(screen.getByText('Quit and reopen Paper to finish turning this off.')).toBeTruthy()
+    /* Composed again with the feature off, as the reopen would compose it:
+       the switch and the launch agree, so there is nothing left to finish. */
+    const relaunched = await composeCapabilities([SWITCHABLE], kernelApi(services), signal, {
+      switchedOff: new Set(['switchable']),
+    })
+    rerender(<App services={services} fs={null} composition={relaunched} />)
+    await settle()
+    expect(screen.getByRole('switch', { name: 'Some feature' }).getAttribute('aria-checked')).toBe('false')
+    expect(screen.queryByText(/Quit and reopen Paper/u), 'the switches still measured the first launch').toBeNull()
   })
 })
 

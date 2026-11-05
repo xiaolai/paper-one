@@ -329,6 +329,15 @@ export const CASES = [
     to: /(^|\/)@tauri-apps\/plugin-fs(\/|$)/,
     expect: ['no-direct-fs-plugin-outside-storage'],
   },
+  /* THE DIALOG GETS THE SAME REFUSAL AS THE FILESYSTEM. A capability that could open
+     a dialog could hold the path it answers, which `services.files` exists to withhold. */
+  {
+    name: '@tauri-apps/plugin-dialog imported by a capability',
+    files: { 'src/capabilities/alpha/lib/helper.ts': "import { open } from '@tauri-apps/plugin-dialog'\nexport const helper = open\n" },
+    from: 'src/capabilities/alpha/lib/helper.ts',
+    to: /(^|\/)@tauri-apps\/plugin-dialog(\/|$)/,
+    expect: ['no-tauri-api-outside-plugin-wires'],
+  },
   {
     name: '@tauri-apps/plugin-fs imported by a kernel module that is not a storage adapter',
     files: { 'src/kernel/core/other.ts': "import { readFile } from '@tauri-apps/plugin-fs'\nexport const other = readFile\nexport type OtherType = { m: number }\n" },

@@ -48,15 +48,29 @@ import { SYNC_QUARANTINE_SETTING } from './lib/quarantine'
 const native = vi.hoisted(() => ({
   /** What `peerPort()` answers — the port `peer.start` would have built over the plugin. */
   port: null as unknown,
+  /** What the P2P switch answers. */
+  p2pOn: (async () => true) as () => Promise<boolean>,
+  /** Whoever is watching the switch, to change it under them. */
+  p2pWatcher: null as ((on: boolean) => void) | null,
   /** The "Sync now" feeds registered with the Devices pane. */
   syncNow: new Set<() => void>(),
   /** Whether taking a feed back throws — the pane failing to let go. */
   refuseUnregister: false,
+  /** Whether letting go of the switch throws. */
+  refuseUnwatch: false,
 }))
 
 vi.mock('../peer', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../peer')>()),
   peerPort: () => native.port,
+  p2pAvailable: () => native.p2pOn(),
+  watchP2p: (listener: (on: boolean) => void) => {
+    native.p2pWatcher = listener
+    return () => {
+      if (native.refuseUnwatch) throw new Error('the switch would not let go')
+      native.p2pWatcher = null
+    }
+  },
   registerSyncNow: (fn: () => void) => {
     native.syncNow.add(fn)
     return () => {
@@ -340,6 +354,7 @@ beforeEach(() => {
   native.port = null
   native.syncNow.clear()
   native.refuseUnregister = false
+  native.refuseUnwatch = false
 })
 
 afterEach(async () => {
@@ -1493,6 +1508,62 @@ describe('a runtime with no transport', () => {
     expect(sync.settings?.[0]?.render({ bookId: null })).toBeNull()
   })
 
+  it.each([
+    ['off', async () => false],
+    ['unreadable', () => Promise.reject(new Error('unreadable'))],
+  ])('says peer-to-peer is off, not that a plugin is missing, while the switch is %s', async (_name, answer) => {
+    const before = native.p2pOn
+    native.p2pOn = answer
+    try {
+      await start({ fs: crashableFs(book('book:a', 'Alpha', 'bytes')), noPlugin: true })
+      expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+    } finally {
+      native.p2pOn = before
+    }
+  })
+
+  /* THE LINE WAS WRITTEN AT LAUNCH, and it is the Storage pane's only word on
+     it: turning the switch on in this run has to say what that takes. */
+  it('follows the switch in a run launched with it off', async () => {
+    const before = native.p2pOn
+    native.p2pOn = async () => false
+    try {
+      const run = await start({ fs: crashableFs(book('book:a', 'Alpha', 'bytes')), noPlugin: true })
+      expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+      native.p2pWatcher?.(true)
+      expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Quit and reopen Paper to use peer-to-peer' })
+
+      native.p2pWatcher?.(false)
+      expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+      run.handle.dispose()
+      expect(native.p2pWatcher).toBeNull()
+    } finally {
+      native.p2pOn = before
+    }
+  })
+
+  it('watches nothing when it was stopped before the launch finished', async () => {
+    const answer = gate()
+    const before = native.p2pOn
+    native.p2pOn = async () => {
+      await answer.promise
+      return false
+    }
+    try {
+      const controller = new AbortController()
+      const starting = start({ fs: crashableFs(book('book:a', 'Alpha', 'bytes')), noPlugin: true, controller })
+      await settled(10)
+      controller.abort()
+      answer.open()
+      await starting
+      expect(native.p2pWatcher).toBeNull()
+    } finally {
+      native.p2pOn = before
+    }
+  })
+
   it('journals the library it has, and says the peer plugin is unavailable', async () => {
     const run = await start({ fs: crashableFs(book('book:a', 'Alpha', 'bytes')), noPlugin: true })
 
@@ -2089,6 +2160,28 @@ describe('downloading a book to a satchel, and evicting it', () => {
     expect(text(run.fs.store.get('books/book_a/content.epub'))).toBe('bytes')
   })
 
+  /* Eviction never touches the link, so the closed link is no excuse for it. */
+  it('says an eviction failed after the switch has gone off', async () => {
+    let refusing = false
+    const { run } = await synced({
+      start: {
+        around: (services) => ({
+          ...services,
+          removeBlob: (bookId, name) => (refusing ? Promise.reject(new Error('the folder is locked')) : services.removeBlob(bookId, name)),
+        }),
+      },
+    })
+    await action('sync:download').run('book:a')
+    refusing = true
+    native.p2pWatcher?.(false)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+    await action('sync:evict').run('book:a')
+
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'degraded', detail: 'Sync failed' })
+    expect(text(run.fs.store.get('books/book_a/content.epub'))).toBe('bytes')
+  })
+
   it('does nothing, and says nothing, for a press that lands after the satchel stopped', async () => {
     const { run } = await synced()
     await action('sync:download').run('book:a')
@@ -2509,6 +2602,82 @@ describe('two satchels, one module', () => {
     expect(named(newer.events, 'sync.session-failed'), 'the newer satchel lost the runtime it was using').toEqual([])
   })
 
+  /* An Off that closed the transport and could not be saved leaves the switch
+     reading on: the watcher hears on, and the transport is gone all the same. */
+  it('stops the schedule and asks for a relaunch when the transport closes with the switch still on', async () => {
+    const hellos = perDevice(null, Promise.resolve())
+    const { run } = await satchelWith(book('book:a', 'Alpha', 'bytes'), { serve: hellos.serve })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    const asked = hellos.total()
+
+    native.p2pWatcher?.(true)
+
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Quit and reopen Paper to use peer-to-peer' })
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(hellos.total(), 'the schedule kept dialling a closed transport').toBe(asked)
+    run.handle.dispose()
+  })
+
+  /* A start with no transport asks the plugin why, and a newer runtime can come up
+     and report during that await. The older one's sentence is not the newer's. */
+  it('leaves a newer runtime its status when an older unwired start answers late', async () => {
+    const before = native.p2pOn
+    let answer: (on: boolean) => void = () => {}
+    const asked = vi.fn(() => new Promise<boolean>((resolve) => { answer = resolve }))
+    native.p2pOn = asked
+    const older = start({ noPlugin: true })
+    await until(() => expect(asked).toHaveBeenCalled())
+    native.p2pOn = before
+    const hellos = perDevice(null, Promise.resolve())
+    await satchelWith(book('book:a', 'Alpha', 'bytes'), { serve: hellos.serve })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+
+    answer(false)
+    await older
+
+    expect(syncStatus.getSnapshot().state).toBe('ok')
+  })
+
+  /* THE SWITCH'S SENTENCE IS THE RUNNING RUNTIME'S, like the slot it sits beside. */
+  it('keeps the newer satchel off when an older one stops', async () => {
+    const hellos = perDevice(null, Promise.resolve())
+    const { far, run } = await satchelWith(book('book:a', 'Alpha', 'bytes'), { serve: hellos.serve })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    const newer = await second(far)
+    await until(() => expect(hellos.of('second-satchel')).toBe(1))
+    native.p2pWatcher?.(false)
+
+    run.handle.dispose()
+
+    await expect(newer.services.shelf()?.sync()).resolves.toEqual({ started: false, detail: 'Peer-to-peer is off' })
+  })
+
+  it('does not take the older satchel’s switch for the newer one’s', async () => {
+    const hellos = perDevice(null, Promise.resolve())
+    const { far } = await satchelWith(book('book:a', 'Alpha', 'bytes'), { serve: hellos.serve })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    native.p2pWatcher?.(false)
+
+    const newer = await second(far)
+
+    await expect(newer.services.shelf()?.sync()).resolves.toEqual({ started: true, detail: null })
+  })
+
+  it('lets an older satchel’s watcher stop its own schedule without speaking for the newer one', async () => {
+    const hellos = perDevice(null, Promise.resolve())
+    const { far } = await satchelWith(book('book:a', 'Alpha', 'bytes'), { serve: hellos.serve })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    const olderWatcher = native.p2pWatcher
+    const newer = await second(far)
+    await until(() => expect(hellos.of('second-satchel')).toBe(1))
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+
+    olderWatcher?.(false)
+
+    expect(syncStatus.getSnapshot().state).toBe('ok')
+    await expect(newer.services.shelf()?.sync()).resolves.toEqual({ started: true, detail: null })
+  })
+
   /* AND IT ASKS THE NEW RUNTIME'S PLUGIN NOTHING. A session that failed for a
      runtime that has been replaced has no sentence to write and no name to
      look up — reaching for one would be IPC on somebody else's transport. */
@@ -2585,6 +2754,16 @@ describe('the rest of taking a runtime down', () => {
     run.handle.dispose()
 
     expect(named(run.events, 'sync.teardown-step-failed')).toEqual([{ label: 'syncNow', message: 'the Devices pane would not let go' }])
+  })
+
+  it('reports a switch watch that will not let go, by name', async () => {
+    const { run } = await satchelWith(book('book:a', 'Alpha', 'bytes'))
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    native.refuseUnwatch = true
+
+    run.handle.dispose()
+
+    expect(named(run.events, 'sync.teardown-step-failed')).toEqual([{ label: 'p2p-watch', message: 'the switch would not let go' }])
   })
 
   it('offers neither Download nor Evict once the satchel has stopped', async () => {
@@ -2808,6 +2987,163 @@ describe('whose sentence a failure is', () => {
     await action('sync:download').run('book:ghost')
 
     expect(syncStatus.getSnapshot()).toMatchObject({ state: 'degraded', detail: '“book:ghost” couldn’t be read on one of the devices' })
+  })
+
+  it('stops the schedule and says why when the switch goes off, and a failure on the closed link does not reword it', async () => {
+    const { run } = await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.content.name]: () => {
+            throw { code: 'disconnected', retryable: true, message: 'the session closed' }
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    const sessions = named(run.events, 'sync.session-ok').length
+
+    native.p2pWatcher?.(false)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+    await action('sync:download').run('book:ghost')
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+    /* Past the backstop's whole period, so a live schedule would have run again. */
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(named(run.events, 'sync.session-ok')).toHaveLength(sessions)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+    await expect(run.services.shelf()?.sync()).resolves.toEqual({ started: false, detail: 'Peer-to-peer is off' })
+
+    native.p2pWatcher?.(true)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Quit and reopen Paper to use peer-to-peer' })
+
+    run.handle.dispose()
+    expect(native.p2pWatcher).toBeNull()
+  })
+
+  /* Only the closed connection is excused. These all land after the reader
+     turned the switch off, and their sentence is the only sign of them. */
+  it('says a download’s own local write failed after the switch has gone off', async () => {
+    await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      start: {
+        around: (services) => ({
+          ...services,
+          library: {
+            ...services.library,
+            refreshContent: () => Promise.reject(new Error('no space left on device')),
+          },
+        }),
+      },
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    native.p2pWatcher?.(false)
+
+    await action('sync:download').run('book:a')
+
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'degraded', detail: 'This device is out of space, so nothing more could be saved' })
+  })
+
+  it('says a download was refused for a reason of its own after the switch has gone off, and not when the link closed', async () => {
+    let refusal: unknown = { code: 'disconnected', retryable: true, message: 'the session closed' }
+    await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.content.name]: () => {
+            throw refusal
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('ok'))
+    native.p2pWatcher?.(false)
+
+    await action('sync:download').run('book:a')
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+
+    refusal = { code: 'unreadable', retryable: true, message: 'the record will not read' }
+    await action('sync:download').run('book:a')
+    expect(syncStatus.getSnapshot().state).toBe('degraded')
+  })
+
+  it('says a session failed for a reason of its own after the switch has gone off', async () => {
+    const hello = gate()
+    await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.hello.name]: async () => {
+            await hello.promise
+            throw { code: 'unsupported', retryable: false, message: 'a newer journal' }
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('syncing'))
+    native.p2pWatcher?.(false)
+    hello.open()
+
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('degraded'))
+  })
+
+  it('leaves the switch’s sentence alone when a session fails because the link closed', async () => {
+    const hello = gate()
+    const { run } = await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.hello.name]: async () => {
+            await hello.promise
+            throw { code: 'disconnected', retryable: true, message: 'the session closed' }
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('syncing'))
+    native.p2pWatcher?.(false)
+    hello.open()
+
+    await until(() => expect(named(run.events, 'sync.session-failed')).toHaveLength(1))
+    await settled(100)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
+  })
+
+  it('names a book a session could not move when it finishes after the switch has gone off', async () => {
+    const hello = gate()
+    await satchelWith({}, {
+      knows: true,
+      near: { ...book('book:first', 'First', 'first bytes'), ...book('book:mine', 'Mine', 'my bytes') },
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.hello.name]: async (request, context, real) => {
+            await hello.promise
+            return real(request, context)
+          },
+          [SYNC_SERVICES.push.name]: async (request, context, real) => {
+            if ((request as { book?: string }).book === 'book:mine') throw { code: 'conflict', retryable: false, message: 'the file differs' }
+            return real(request, context)
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('syncing'))
+    native.p2pWatcher?.(false)
+    hello.open()
+
+    await until(() => expect(syncStatus.getSnapshot().detail).toMatch(/Mine/))
+  })
+
+  it('leaves the switch’s sentence alone when a session finishes with nothing to say', async () => {
+    const hello = gate()
+    const { run } = await satchelWith(book('book:a', 'Alpha', 'bytes'), {
+      serve: (far) =>
+        replacing(far.ledger.services(), {
+          [SYNC_SERVICES.hello.name]: async (request, context, real) => {
+            await hello.promise
+            return real(request, context)
+          },
+        }),
+    })
+    await until(() => expect(syncStatus.getSnapshot().state).toBe('syncing'))
+    native.p2pWatcher?.(false)
+    hello.open()
+
+    await until(() => expect(named(run.events, 'sync.session-ok')).toHaveLength(1))
+    await settled(100)
+    expect(syncStatus.getSnapshot()).toMatchObject({ state: 'idle', detail: 'Peer-to-peer is off' })
   })
 
   it('refuses a session by name when the runtime it belonged to is gone', async () => {

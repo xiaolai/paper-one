@@ -1,11 +1,12 @@
 import { messageOf } from './messageOf'
-import type { PublicPassage } from './public/envelope'
+import type { PublicPassage } from './ports'
 import type { IndexFs, IndexedBook } from './bookIndex'
 import type { Disposable, ServiceContribution } from './capability'
 import { createCards, type CardStorage, type Cards } from './cardStore'
 import { type Hlc, compareHlc, deviceOf, laterHlc, makeHlc, parseHlc, ZERO_DEVICE, HLC_MAX_COUNTER } from './hlc'
 import { createLibrary, type Library } from './libraryStore'
 import { createMarkStore, type MarkStore } from './markStore'
+import { NO_FILE_PICKER, type FilePicker } from './pickedFile'
 import { folderOf, readBook, recordPath } from './bookFolder'
 import {
   NOOP_DIAGNOSTICS,
@@ -165,6 +166,22 @@ export interface KernelServices {
    */
   bindPrivateAudience(port: PrivateAudience): Disposable
   /**
+   * Say one sentence on the shelf's notice line: "something just happened to your
+   * library". For a capability whose whole surface is a palette row, an errand
+   * that finished silently is indistinguishable from one that never ran.
+   *
+   * With nothing bound (a shell with no notice line) the sentence goes to
+   * diagnostics rather than nowhere.
+   */
+  notify(text: string): void
+  /** The shell's half of `notify`. Same restoring, idempotent disposer as the other binders. */
+  bindNotifier(port: (text: string) => void): Disposable
+  /**
+   * A file the reader points at, as a handle and never as a path. See
+   * `pickedFile.ts`, which is where the confinement is.
+   */
+  readonly files: FilePicker
+  /**
    * The passages this reader has already shared privately for one book.
    *
    * Empty when nothing is bound, which is every build with no circle and every
@@ -285,6 +302,8 @@ export interface KernelServicesOptions {
    * until `bindClock` supplies the sync capability's HLC.
    */
   readonly clock?: () => Hlc
+  /** The reader's file dialogs. Absent where there are none, and `files.available` then says so. */
+  readonly files?: FilePicker
 }
 
 /**
@@ -725,6 +744,7 @@ export function createKernelServices({
   diagnostics = NOOP_DIAGNOSTICS,
   settingsMigration,
   clock,
+  files = NO_FILE_PICKER,
 }: KernelServicesOptions): KernelServices {
   /* The delegating ports. The stores capture THESE, so a bind after
    * construction reaches every store without any of them knowing. Each
@@ -742,6 +762,10 @@ export function createKernelServices({
     () => Promise.resolve([]),
   )
   const clockPort = flooredClock(clockSlot)
+  const notifierSlot = exclusiveSlot<(text: string) => void>(
+    'bindNotifier: the notice line is already bound',
+    (text) => diagnostics.warn('notice with no notice line', { text }),
+  )
 
   /* A SET, NOT A SLOT, since phase 18.
    *
@@ -864,6 +888,9 @@ export function createKernelServices({
     bindClock: (next, witness) => clockSlot.bind({ now: next, witness }),
     bindPrivateAudience: (next) => privateAudienceSlot.bind(next),
     sharedPrivately: (bookId) => privateAudienceSlot.get()(bookId),
+    notify: (text) => notifierSlot.get()(text),
+    bindNotifier: (next) => notifierSlot.bind(next),
+    files,
     clock: clockPort,
     bindServiceHost: (next) => {
       /* A fresh object per bind — see the Set's own note. Two binds of one

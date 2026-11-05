@@ -49,6 +49,8 @@ import {
   DIAGNOSTICS_SWITCH,
   buildServices,
   composeCapabilities,
+  readSwitchedOff,
+  withoutSwitchedOff,
   createDiagnosticLog,
   createDiagnosticSpool,
   createDiagnostics,
@@ -87,6 +89,7 @@ import {
   summariseMigration,
   timed,
   watchFs,
+  tauriFilePicker,
   tauriSizePort,
 } from '../kernel/ui/boot'
 import type { OpenRequests } from '../kernel/ui/boot'
@@ -247,6 +250,7 @@ export async function bootApp(capabilities: readonly Capability[]): Promise<Boot
      * from a library with none. `shelf.status` reported `books: 0` to a peer
      * asking whether this device was healthy. */
     shelfRead: !shelfUnread,
+    ...(inTauri() ? { files: tauriFilePicker() } : {}),
     /* `record` TEES THE SAME REDACTED FIELDS the console line gets — redaction
        happens once, above both, so the file cannot come to carry something the
        console would not. `enabled` still decides everything: turned off, this
@@ -365,9 +369,15 @@ export async function bootApp(capabilities: readonly Capability[]): Promise<Boot
   /* THE TEARDOWN IS HANDED TO THE WINDOW AS WELL. Arming answers the shell's
      ask; the same function goes to `App` as `beforeWindowClose`, so the red
      button — the only quit on Windows and Linux — closes the journal too. */
+  /* WHAT THE READER SWITCHED OFF, read once, so the quit handshake and the
+     composition below act on one answer. A change made in this run waits for the
+     next launch: nothing can take one capability down (`createPluginSwitches`). */
+  const switchedOff = readSwitchedOff(services.settings)
   /* `capabilities` IS THE STATIC LIST the entry handed in, not the composition
      awaited below — see `quiesce` in `shutdownDepsOf`. */
-  const teardown = armShutdownInBackground(shutdownDepsOf({ services, lifetime, diagnosticSpool, capabilities }))
+  const teardown = armShutdownInBackground(
+    shutdownDepsOf({ services, lifetime, diagnosticSpool, capabilities: withoutSwitchedOff(capabilities, switchedOff) }),
+  )
 
   /* THE LIFETIME ENDS WITH THE PAGE, which nothing used to do.
    *
@@ -399,6 +409,7 @@ export async function bootApp(capabilities: readonly Capability[]): Promise<Boot
      * CALL on a shelf, as opposed to what it answers. Derived, so it cannot
      * name a service that does not exist. */
     clients: serviceClients(),
+    switchedOff,
   })
 
   /* AND THE SAME TEARDOWN ON QUIT, which `pagehide` does not cover.

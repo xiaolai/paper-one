@@ -56,6 +56,11 @@ describe('the public layer’s reviewed write', () => {
     'books/book_abc/content.epub',
     'books/book_abc/public.jsonl/../marks.json',
     'trash/book_abc/public.jsonl',
+    /* The pattern is anchored at both ends: the reviewed name with anything
+       after it, or the reviewed shape below another folder, is not it. */
+    'books/book_abc/public.jsonl.bak',
+    'books/book_abc/public.jsonl.writing.bak',
+    'trash/books/book_abc/public.jsonl',
   ]
 
   it('lets the public layer write the one file its review names, atomically and otherwise', async () => {
@@ -87,6 +92,8 @@ describe('the public layer’s reviewed write', () => {
        been reviewed for more than it needs. */
     const scoped = scopeFs(rawFs(), 'public')!
     await expect(scoped.mkdir('books/book_abc/public')).rejects.toThrow(/may only mkdir under "public\/"/u)
+    /* And the book's folder only where `books/` begins the path. */
+    await expect(scoped.mkdir('trash/books/book_abc')).rejects.toThrow(/may only mkdir under "public\/"/u)
   })
 })
 
@@ -145,6 +152,10 @@ describe('the circle’s two reviewed write shapes', () => {
     await expect(scoped.mkdir('books/book_abc/shared.json')).rejects.toThrow(/may only mkdir/u)
     await expect(scoped.removeDir('books/book_abc')).rejects.toThrow(/may only removeDir under "circle\/"/u)
     await expect(scoped.removeDir('books/book_abc/circle')).rejects.toThrow(/may only removeDir/u)
+    /* The two parents and nothing that merely contains or begins with one. */
+    for (const path of ['public/books/book_abc', 'public/books/book_abc/circle', 'books/book_abc/circle_old', 'books/book_abc/circle/aa11']) {
+      await expect(scoped.mkdir(path)).rejects.toThrow(/may only mkdir/u)
+    }
     const sync = scopeFs(withoutAtomic as unknown as NonNullable<KernelServices['fs']>, 'sync')!
     await expect(sync.mkdir('books/book_abc')).rejects.toThrow(/may only mkdir under "sync\/"/u)
   })
