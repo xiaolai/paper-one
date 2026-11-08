@@ -406,7 +406,10 @@ export function useSpeech(
   const pendingNext = useRef<number | null>(null)
   /* Read inside the boundary handler, which is created once per utterance —
    * a captured `followsWords` would be the value at the time speech started. */
-  const followsRef = useRef(true)
+  /* SEEDED FROM THE STATE IT MIRRORS rather than from a literal of its own: the
+   * layout effect below overwrites it at every commit, before any utterance can
+   * report a boundary, so a separate initial value could never be read. */
+  const followsRef = useRef(followsWords)
   /* THE READING: true from the reader's Listen until their stop, the end of
    * the book or an engine error. A ref, not state, because it is consulted
    * from engine callbacks and from the document effect, and both need the
@@ -450,6 +453,7 @@ export function useSpeech(
     followsRef.current = followsWords
   })
 
+  // Stryker disable next-line ArrayDeclaration: `speechAvailable` reads nothing from this component, so whatever the list holds the memo is computed once.
   const available = useMemo(() => speechAvailable(), [])
 
   /**
@@ -472,12 +476,15 @@ export function useSpeech(
     [],
   )
 
-  const clearContinuation = useCallback(() => {
-    if (continuing.current !== null) {
-      clearTimeout(continuing.current)
+  /** End the section walk, if one is running — no `!== null` guard, for `clearGap`'s reason. */
+  const clearContinuation = useCallback(
+    () => {
+      clearTimeout(continuing.current ?? undefined)
       continuing.current = null
-    }
-  }, [])
+    },
+    // Stryker disable next-line ArrayDeclaration: this reads only a ref, so a constant list is a constant identity whatever is in it.
+    [],
+  )
 
   /** Take the spoken word off the page, if a section is being read. */
   const clearBand = useCallback(
@@ -650,7 +657,13 @@ export function useSpeech(
            * before the reading was sentence-at-a-time. `advance` is the platform
            * unit's road and answers false past the last sentence, which is how
            * the two stay one function rather than two. */
-          if (spokenRef.current?.unit === 'sentence' && advanceRef.current(cursorRef.current + 1)) {
+          /* `!` and not `?.`: `spokenRef` is null only during the section walk,
+           * which begins after the last utterance has already reported done, and
+           * inside the commit between a section's cleanup and its document effect,
+           * which no callback can interleave with. So a reading under way always
+           * has a section here, and the optional chain was a branch no case could
+           * take. */
+          if (spokenRef.current!.unit === 'sentence' && advanceRef.current(cursorRef.current + 1)) {
             return
           }
           continueReading()
@@ -873,7 +886,9 @@ export function useSpeech(
    */
   const speakDocument = useCallback(
     (section: SpokenSection, from = 0): boolean => {
-      if (!speaker) return false
+      /* NO `if (!speaker) return false`, AND THERE WAS ONE: both callers already
+       * hold a speaker — `start` refuses without one, and the document effect runs
+       * only inside a reading, which cannot begin without one. */
       const { lang } = section
       const plan: ReadingPlan = { sentences: section.sentences, blocks: section.blocks }
       const clip: ClipKey = {
@@ -942,7 +957,7 @@ export function useSpeech(
         /* The whole text IS the utterance, so a boundary's index is already an
            offset into it. */
         baseRef.current = 0
-        return speaker.speak(section.text, lang, prefsRef.current)
+        return speaker!.speak(section.text, lang, prefsRef.current)
       }
 
       /* ⚠️ **A SECTION WITH NO SENTENCES GOES TO THE ENGINE ANYWAY, AND SKIPPING
@@ -961,7 +976,7 @@ export function useSpeech(
         /* The whole text IS the utterance here, so a boundary's index is already
            an offset into it. */
         baseRef.current = 0
-        return speaker.speak(section.text, lang, prefsRef.current)
+        return speaker!.speak(section.text, lang, prefsRef.current)
       }
       return speakSentence(from)
     },
@@ -1170,7 +1185,9 @@ export function useSpeech(
       if (!readingRef.current) return
       if (next === null) return
       clearGap()
-      clearContinuation()
+      /* NO `clearContinuation()` HERE, for `stepBy`'s reason: a section walk sets
+         `spokenRef` to null as it begins, and `stepBy` — the only caller — has
+         returned at its first guard whenever it is null. */
       /* NO `setSpeaking(true)` HERE, AND THERE WAS ONE. `moveTo` has already
          returned unless a reading is under way, and the only writers of that
          flag — `start` and `endReading` — set `speaking` in the same breath, so
@@ -1178,8 +1195,8 @@ export function useSpeech(
          its removal nor its argument could be told apart by any test. */
       speakSentence(next)
     },
-    // Stryker disable next-line ArrayDeclaration: `speakSentence` and the two clears never move — as above.
-    [speakSentence, clearGap, clearContinuation],
+    // Stryker disable next-line ArrayDeclaration: `speakSentence` and `clearGap` never move — as above.
+    [speakSentence, clearGap],
   )
 
   /**
@@ -1208,16 +1225,15 @@ export function useSpeech(
        * re-`speak`, so a step that did not write it would step from the same
        * place every time. */
       if (current.unit === 'section') {
-        const to = next ?? (by === -1 ? cursorRef.current : null)
-        /* ⚠️ **THE INDEX AND ITS SENTENCE AS ONE VALUE, AND ONE GUARD OVER THE
-         * PAIR.** There are two ways there is nothing to step to — past the last
-         * sentence `to` is null, and an index the plan does not hold answers
-         * `undefined` — and they are one ANSWER: *"there is no sentence there"*.
-         * Written as two guards, whichever ran second could never be the one that
-         * decided, which is the unkillable-mutant shape this repository removes
-         * rather than disables. Paired, `tsc` narrows the index with the sentence
-         * and there is nothing left to get wrong. */
-        const at = to === null ? null : { index: to, sentence: current.plan.sentences[to] }
+        /* ⚠️ **-1 FOR "NOTHING THERE", WHICH NO PLAN HOLDS.** Past the last
+         * sentence there is nothing to step to, and an index the plan does not
+         * hold answers `undefined` — two ways of one ANSWER, *"there is no
+         * sentence there"*, so one lookup asks it. This read
+         * `to === null ? null : { index, sentence }`, and that ternary could not
+         * change the result: `sentences[null]` is `undefined` too, so its `false`
+         * mutant survived. */
+        const to = next ?? (by === -1 ? cursorRef.current : -1)
+        const sentence = current.plan.sentences[to]
         /* ⚠️ **ASKED FIRST, MOVED AFTER — AN INDEPENDENT AUDIT FOUND IT THE OTHER
          * WAY ROUND, 2026-09-30, AND IT IS `stepChapter`'s OWN LESSON ONE FLOOR
          * DOWN.** A seek ANSWERS FALSE where there are no word timings at all,
@@ -1254,9 +1270,9 @@ export function useSpeech(
          * own first guard. Hand-applied 2026-09-30, with the calls and without
          * them: the suite is green either way. A line that cannot be observed is
          * a line this repository removes rather than keeps for comfort. */
-        if (!at?.sentence || speaker!.seekToOffset(at.sentence.start) !== true) return
+        if (!sentence || speaker!.seekToOffset(sentence.start) !== true) return
         chasingRef.current = true
-        cursorRef.current = at.index
+        cursorRef.current = to
         return
       }
       moveTo(next ?? (by === -1 ? cursorRef.current : null))
@@ -1277,30 +1293,6 @@ export function useSpeech(
    * is, and the only thing that knows that is the player — the fraction is a
    * request, and clamping happens inside it.
    */
-  /**
-   * Put the sentence cursor where the speaker says the reading now is.
-   *
-   * ⚠️ **THROUGH `sentenceIndexAt`, WHICH IS WHAT `onWord` USES**, so a seek and a
-   * word boundary cannot disagree about which sentence an offset is in. A second
-   * lookup here would be the *rule written twice* this repository keeps having to
-   * delete.
-   *
-   * A `null` offset leaves the cursor alone: that is Web Speech, which cannot
-   * answer, and a Chinese reading, which has no word timings — and in both cases
-   * the reading's sentence is not knowable rather than zero.
-   */
-  const landCursorOn = useCallback((offset: number | null) => {
-    const current = spokenRef.current
-    /* ⚠️ **NO `unit !== 'section'` CLAUSE, AND THERE WAS ONE — FOUND BY THE
-       MUTATION SWEEP.** The only caller is `seekToFraction`, and on the sentence
-       unit that refuses at `speaker.seekToFraction(…)` before it gets here: the
-       platform speaker has no fraction to seek to. So the clause could never be
-       the thing that returned — a guard against a state the caller already
-       prevents. */
-    if (offset === null || !current) return
-    cursorRef.current = sentenceIndexAt(current.plan, offset)
-  }, [])
-
   /* ⚠️ **`speaker!` IN THE FOUR SEEKS AND THE POSITION TICK, AND IT USED TO BE
      `speaker?.x?.(…)` — FOUND BY THE MUTATION SWEEP, ten unkillable mutants.**
      Two chains, neither of which could come back undefined where it stood:
@@ -1318,11 +1310,12 @@ export function useSpeech(
   const seekToFraction = useCallback(
     (fraction: number): boolean => {
       if (!readingRef.current) return false
-      /* ⚠️ **ASKED FIRST, TORN DOWN AFTER** — as `stepChapter` and `stepBy`. A
-       * scrub the speaker refuses (the platform voice, or a render still in
-       * flight) must not take the sentence gap and the section continuation with
-       * it: the reading would be left lit over silence with no timer to advance
-       * or end it. Found by an independent audit, 2026-09-30.
+      /* ⚠️ **A SCRUB THE SPEAKER REFUSES CHANGES NOTHING** — the platform voice,
+       * or a render still in flight. It used to tear down the sentence gap and
+       * the section continuation first, which left the reading lit over silence
+       * with no timer to advance or end it. Found by an independent audit,
+       * 2026-09-30; see below for why a scrub that lands has nothing to tear down
+       * either.
        *
        * ⚠️ **THE CURSOR IS SET FROM WHERE THE SPEAKER LANDED, AND IT USED TO WAIT
        * FOR THE NEXT WORD BOUNDARY — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.**
@@ -1335,18 +1328,29 @@ export function useSpeech(
        * Inside the window, a reader who scrubbed from sentence 2 to sentence 20 and
        * pressed Next Sentence stepped to sentence 3.
        *
-       * `null` on a Chinese reading, where there are no word timings at all — the
-       * cursor is left alone there, exactly as before, and sentence stepping is
-       * unavailable on that voice anyway. */
+       * A Chinese reading has no word timings to answer with: see below. */
       if (speaker!.seekToFraction(fraction) !== true) return false
       chasingRef.current = true
-      landCursorOn(speaker!.spokenOffset())
-      clearGap()
-      clearContinuation()
+      /* THROUGH `sentenceIndexAt`, WHICH IS WHAT `onWord` USES, so a seek and a
+       * word boundary cannot disagree about which sentence an offset is in.
+       *
+       * ⚠️ **`?? 0` RATHER THAN LEAVING THE CURSOR ALONE, AND NO CASE CAN TELL
+       * THE TWO APART.** After a seek that landed, the offset is null only where
+       * the reading has no word timings at all — a Chinese pack — and there
+       * nothing reads the cursor: every step is a seek by offset, which refuses
+       * without timings, and no boundary arrives to move it. The guard that
+       * stood here, and one on `spokenRef` (which a seek that landed has already
+       * answered), survived every mutation for exactly that reason.
+       *
+       * ⚠️ **NOTHING IS TORN DOWN, AND `clearGap()` / `clearContinuation()` STOOD
+       * HERE.** A seek lands only while the engine is reading a section; a gap
+       * belongs to the platform's sentence unit, and a walk begins only after the
+       * engine's reading has ended — so either clear could only find nothing. */
+      cursorRef.current = sentenceIndexAt(spokenRef.current!.plan, speaker!.spokenOffset() ?? 0)
       return true
     },
-    // Stryker disable next-line ArrayDeclaration: all four follow only values that never move — as above.
-    [speaker, clearGap, clearContinuation, landCursorOn],
+    // Stryker disable next-line ArrayDeclaration: `speaker` never moves — as above.
+    [speaker],
   )
 
   /**
@@ -1361,21 +1365,19 @@ export function useSpeech(
   const seekToOffset = useCallback(
     (offset: number): boolean => {
       if (!readingRef.current) return false
-      const current = spokenRef.current
-      if (!current) return false
-      /* ASKED FIRST, TORN DOWN AFTER — as above. */
+      /* A REFUSAL CHANGES NOTHING, and a landing has nothing to tear down — both
+         as in `seekToFraction`. No `spokenRef` guard either: a seek lands only
+         while the engine reads a section, and `spokenRef` then holds it. */
       if (speaker!.seekToOffset(offset) !== true) return false
       chasingRef.current = true
-      clearGap()
-      clearContinuation()
       /* THE OFFSET IS KNOWN HERE, unlike a fraction, so the cursor can be set at
          once rather than at the next word — which matters for a reader who taps a
          word and then presses the sentence step. */
-      cursorRef.current = sentenceIndexAt(current.plan, offset)
+      cursorRef.current = sentenceIndexAt(spokenRef.current!.plan, offset)
       return true
     },
     // Stryker disable next-line ArrayDeclaration: as above.
-    [speaker, clearGap, clearContinuation],
+    [speaker],
   )
 
   /**
@@ -1424,7 +1426,9 @@ export function useSpeech(
        * during one be noticed. */
       setAt((was) => {
         const now = speaker!.at()
-        if (was === null || now === null) return was === now ? was : now
+        /* `now`, and it read `was === now ? was : now`: with either side null
+           the two are equal only when both are, and then they are one null. */
+        if (was === null || now === null) return now
         return was.positionMs === now.positionMs && was.durationMs === now.durationMs ? was : now
       })
     }, POSITION_TICK_MS)
@@ -1480,8 +1484,10 @@ export function useSpeech(
       endReading()
       return
     }
-    const queued = speakDocument(section)
-    if (queued) setSpeaking(true)
+    /* NO `if (queued) setSpeaking(true)`, AND THERE WAS ONE — `moveTo`'s reason:
+       this effect has returned unless a reading is under way, and `speaking` is
+       written only beside `readingRef`, so it is already true. */
+    speakDocument(section)
   }, [speaker, sectionKey, speakDocument, endReading, clearGap, clearContinuation])
 
   /* `clearBand` DOES NOTHING HERE FOR A DOCUMENT THAT WAS REPLACED, WHICH IS FINE:
