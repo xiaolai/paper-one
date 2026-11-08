@@ -1793,6 +1793,10 @@ export function App({
    * write the tag into. FROM `openRow`, which is the same lookup made once
    * above — this ran its own scan of the shelf beside it. */
   const readingBook = onReader ? (openRow ?? null) : null
+  /* Whether there IS one, for the keyboard map, which asks nothing else. The row
+     itself takes a new identity on every position save, and listing it there
+     reinstalled the map every two seconds of reading. */
+  const hasReadingBook = readingBook !== null
   /* Memoized as the one-element list `TagEditor` takes, or a fresh `[book]`
    * inline at the render defeated every books-keyed memo inside it. */
   const readingBooks = useMemo(() => (readingBook ? [readingBook] : NO_BOOKS), [readingBook])
@@ -1858,6 +1862,14 @@ export function App({
      A refused jump and a jump whose book would not open are the same lie to
      the reader, and only the first was being caught. */
 
+  /* ⚠️ **THE SHELF THROUGH A REF, BECAUSE `library.books` MOVES WITH THE PAGE.**
+     Every position save makes a new array, and listing it below rebuilt
+     `goToJump`, then the whole jump stack, then the keyboard map that reads it
+     — every two seconds of reading. The lookup runs when a jump is MADE, so it
+     reads the shelf as it is then; a ref is the latest array, never a stale one. */
+  const booksRef = useRef(library.books)
+  booksRef.current = library.books
+
   /** Go where a jump asks, and say whether it was accepted — see `JumpsDeps`. */
   const goToJump = useCallback(
     (target: JumpTarget, revert: () => void): boolean => {
@@ -1878,7 +1890,7 @@ export function App({
         book.goTo(target.cfi)
         return true
       }
-      const row = library.books.find((one) => one.bookId === target.bookId)
+      const row = booksRef.current.find((one) => one.bookId === target.bookId)
       if (!row) {
         /* The book left the shelf between the row being drawn and the row
            being clicked. Marginalia disables such rows, so this is the race
@@ -1921,7 +1933,7 @@ export function App({
       setOpenAt(target)
       return true
     },
-    [book.bookId, book.goTo, library.books, openStored, setReturnTo, state.screen, dispatch],
+    [book.bookId, book.goTo, openStored, setReturnTo, state.screen, dispatch],
   )
 
   const jumps = useJumps({ placeHere, navigate: goToJump })
@@ -2428,7 +2440,7 @@ export function App({
         hasSelection: marking.canMark,
         canBookmark: bookmarking.canBookmark,
         onReader,
-        hasBook: readingBook !== null,
+        hasBook: hasReadingBook,
         canJumpBack: jumps.canBack,
         canJumpForward: jumps.canForward,
         /* Who took this key's first press — see `pressTaken`, and `taken`. */
@@ -2552,7 +2564,7 @@ export function App({
        handler. The two are `markSelection`'s dependencies now, and this lists
        the callback (2026-09-13 audit). */
     markSelection,
-    readingBook,
+    hasReadingBook,
     openTags,
     /* The whole object, because ⌘B reads two things off it — whether a place
        can be kept, and whether it already is — and a handler closed over a
