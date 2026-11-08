@@ -9929,6 +9929,7 @@
     "src/kernel/ui/App.reading.test.tsx > a jump inside the open book > offers no way back from a place that cannot be pinned down, and still gives up the way forward",
     "src/kernel/ui/App.reading.test.tsx > a jump inside the open book > offers no way back from a place that names no chapter",
     "src/kernel/ui/App.reading.test.tsx > a jump inside the open book > records where a link inside the book left from, and says so",
+    "src/kernel/ui/App.reading.test.tsx > a jump inside the open book > records where a seek left from, so ⌘[ goes back to it",
     "src/kernel/ui/App.reading.test.tsx > a jump inside the open book > shows the reader for a jump made from the shelf, and leaves an open layer alone for one made in the reader",
     "src/kernel/ui/App.reading.test.tsx > a jump inside the open book > takes a link that leaves the book away from foliate, and says when it is refused",
     "src/kernel/ui/App.reading.test.tsx > a jump into a book whose stored copy is gone > carries the jump through an address, without looking for a file of that name",
