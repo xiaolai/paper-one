@@ -197,6 +197,7 @@ export class Speaker {
    * unless it is still the current one.
    */
   #generation = 0
+  /* Stryker disable next-line BooleanLiteral: `speak` writes this before it wires the only reader, the grace timer its utterance arms */
   #sawBoundary = false
   #graceTimer: ReturnType<typeof setTimeout> | null = null
   /**
@@ -340,7 +341,12 @@ export class Speaker {
       // whole sentence.
       if (name && name !== 'word') return
       this.#sawBoundary = true
-      this.#cb.onWord(charIndex, charLength && charLength > 0 ? charLength : wordLengthAt(text, charIndex))
+      /* THE ENGINE'S OWN LENGTH WHEN IT GIVES A USABLE ONE, the word's span in
+         the text otherwise. This read `charLength && charLength > 0`, whose
+         first half could not change the answer — 0 and absence both fail the
+         second — so a mutation of it failed no test by construction. */
+      const length = charLength ?? 0
+      this.#cb.onWord(charIndex, length > 0 ? length : wordLengthAt(text, charIndex))
     })
 
     /* Both guarded by generation. `cancel()` does not suppress the cancelled
@@ -461,10 +467,10 @@ export class Speaker {
   }
 
   #clearGrace(): void {
-    if (this.#graceTimer !== null) {
-      clearTimeout(this.#graceTimer)
-      this.#graceTimer = null
-    }
+    /* UNCONDITIONAL: clearing no timer is a no-op by the spec, so a guard here
+       could not change what happens and no test could tell it was there. */
+    clearTimeout(this.#graceTimer ?? undefined)
+    this.#graceTimer = null
   }
 
   /**
