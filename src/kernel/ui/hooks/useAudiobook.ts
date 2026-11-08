@@ -1,13 +1,10 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import type { TocItem } from 'foliate-js/view.js'
 import { ExportCancelled, exportAudiobook, planChapters } from '../reader/audiobook'
 import { basename } from '../../core/bookFiles'
 import { messageOf } from '../../core/messageOf'
 import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
 import { engineVoiceFor, missingPackNotice, packVoiceOf, qualify } from '../reader/engineVoice'
-import type { SectionTextWalk, SpeechRequest, SpeechSkipPrefs, SpokenClip, VoicePack } from '../../core/ports'
-import { documentLang } from '../reader/speech'
-import type { Book } from './useBook'
+import type { ReadyBook, SpeechRequest, SpeechSkipPrefs, SpokenClip, VoicePack } from '../../core/ports'
 
 /**
  * Exporting the open book, from the command palette.
@@ -27,27 +24,14 @@ import type { Book } from './useBook'
  * unexpected voice is not the same bargain.
  */
 
-export interface AudiobookSource {
-  /** Which book this is, so a chapter already rendered can be found. */
-  readonly bookId: string
-  readonly title: string
-  readonly author: string
-  readonly lang: string | null
-  readonly toc: readonly TocItem[]
-  /**
-   * Whether the book is laid out in fixed pages — every PDF, and an EPUB that
-   * declares `pre-paginated`. See `run`, which refuses one.
-   *
-   * REQUIRED, so a caller has to say which it has. Defaulted to false it would
-   * read as "reflowable" for a caller that never considered the question, which
-   * is the shape of the defect this refuses.
-   */
-  readonly fixedLayout: boolean
-  readonly sectionTexts: (
-    toc?: readonly TocItem[],
-    shouldStop?: () => boolean,
-    skip?: SpeechSkipPrefs,
-  ) => Promise<SectionTextWalk>
+/**
+ * The book being exported, and which of its words count.
+ *
+ * ⚠️ **`fixedLayout` IS REQUIRED, ON `ReadyBook`**, so a caller has to say which it
+ * has. Defaulted to false it would read as "reflowable" for a caller that never
+ * considered the question, which is the shape of the defect `run` refuses.
+ */
+export interface AudiobookSource extends ReadyBook {
   /**
    * What the READING skips, so the export skips the same.
    *
@@ -61,45 +45,6 @@ export interface AudiobookSource {
 export interface AudiobookControl {
   readonly running: boolean
   readonly run: () => void
-}
-
-/**
- * The export's input, from the book on screen — or null while the walk has
- * nothing it could run over.
- *
- * ⚠️ **READY MEANS A DOCUMENT, NOT AN ID.** The book's id resolves from the
- * file's bytes BEFORE the book is parsed, so gating on it alone offered, for
- * the first moments of every opening, an export whose walk had no navigator to
- * ask — and it answered `complete: false`, which the export reports as "the book
- * stopped being readable part way through". A reader who chose it quickly was
- * told their book was broken. `doc` is published only after the session has
- * handed over its navigator, so it is the fact that means the walk can run.
- *
- * ⚠️ **PULLED OUT OF `App.tsx` SO IT CAN BE ASKED DIRECTLY.** Built inline in a
- * memo, its fallbacks — a title for a book that declares none, no author rather
- * than a wrong one — could only be seen by driving an export through the whole
- * app on the one platform that has the engine.
- */
-export function audiobookSourceOf(
-  book: Pick<Book, 'bookId' | 'doc' | 'meta' | 'toc' | 'fixedLayout' | 'sectionTexts'>,
-  /** THE SAME VALUE THE VOICE READS, so the file holds what the reading would
-   *  have said. */
-  notesAloud: boolean,
-): AudiobookSource | null {
-  if (!book.bookId || !book.doc) return null
-  return {
-    bookId: book.bookId,
-    title: book.meta?.title ?? 'Audiobook',
-    author: book.meta?.author ?? '',
-    lang: documentLang(book.doc),
-    toc: book.toc,
-    /* A PDF, or an EPUB of fixed pages: `run` refuses one, and says so. Read
-       from the view rather than guessed from the file's extension — see
-       `SessionCallbacks.onFixedLayout`. */
-    fixedLayout: book.fixedLayout,
-    sectionTexts: book.sectionTexts,
-    skip: { notes: notesAloud },
-  }
 }
 
 export interface AudiobookDeps {
@@ -269,7 +214,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
         /* THE STOP GOES IN, rather than being checked only on the way out. A long
            book is seconds of parsing per section, so "Stopping…" used to sit on
            screen through hundreds of them. */
-        const walk = await source.sectionTexts(source.toc, () => stop.current, source.skip)
+        const walk = await source.sectionTexts(() => stop.current, source.skip)
         if (stop.current) throw new ExportCancelled()
         /* ⚠️ **AN INCOMPLETE WALK IS REFUSED, NOT EXPORTED.** `sectionTexts` stops
          * when the book closes or is replaced, and it used to return a bare array

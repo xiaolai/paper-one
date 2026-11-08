@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render } from '@testing-library/react'
+import { useLayoutEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeSynth, FakeUtterance } from './speechSynth.testkit'
 import { FakeAudioHost, pcmOf } from './enginePlayer.testkit'
@@ -9,13 +10,13 @@ import {
   CONTINUE_TICK_MS,
   POSITION_TICK_MS,
   TURN_SETTLE_MS,
-  NOWHERE_IN_PARTICULAR,
   refusalFor,
   useSpeech,
+  type ReadingContext,
   type ReadingEngine,
   type Speech,
-  type SpeechPlace,
 } from './useSpeech'
+import { useReadingSurface, type BookFacts, type SpeechPlace } from './readingSurface'
 import { textDigest } from './clipKey'
 import { canonicalTextOf } from './passageText'
 import { Speaker, type SpeakPrefs } from './speaker'
@@ -23,6 +24,17 @@ import { collectText } from './speech'
 
 /** Where the reader is before anything has resolved — the app's first render. */
 const NOWHERE: SpeechPlace = { bookId: null, sectionIndex: null }
+
+/** The book, which nothing in this file asks about: `readingSurface.test.tsx` does. */
+const NO_BOOK: BookFacts = {
+  generation: 1,
+  bookId: null,
+  doc: null,
+  meta: null,
+  toc: [],
+  fixedLayout: false,
+  sectionTexts: async () => ({ sections: [], complete: true }),
+}
 
 /**
  * The wiring: a section's document in, page turns and utterances out.
@@ -162,17 +174,26 @@ function mount(
      must survive it — see the case that presses a dead direction mid-gap. */
   const chapter = vi.fn(() => lands)
   const api: { current: Speech | null } = { current: null }
+  const held: { current: () => boolean } = { current: () => false }
+  /* ⚠️ **THE READING IS A CHILD OF WHAT COMMITS THE SURFACE, AS IT IS IN THE APP,
+     AND THAT IS WHAT EVERY CASE IN THIS FILE NOW PROVES.** A child's effects run
+     before its parent's, so these cases are the timing check on that move: their
+     bodies did not change when it was made. */
+  function Reading({ sectionKey, surface }: ReadingContext) {
+    api.current = useSpeech({ sectionKey, surface }, prefs, engine)
+    return null
+  }
   function Probe({ doc }: { doc: Document | null }) {
     /* ABSENT rather than a no-op when the book cannot step chapters — the
        transport reads its presence to decide whether to draw the buttons. */
-    api.current = useSpeech(
+    const { surface, paceHeld } = useReadingSurface({
       doc,
-      chapters ? { next, prev, chapter: { can: can ?? (() => lands), go: chapter } } : { next, prev },
-      prefs,
-      engine,
       place,
-    )
-    return null
+      paging: chapters ? { next, prev, chapter: { can: can ?? (() => lands), go: chapter } } : { next, prev },
+      book: NO_BOOK,
+    })
+    held.current = paceHeld
+    return <Reading sectionKey={doc} surface={surface} />
   }
   const view = render(<Probe doc={doc} />)
   return {
@@ -180,6 +201,7 @@ function mount(
     prev,
     chapter,
     speech: () => api.current!,
+    paceHeld: () => held.current(),
     show: (doc: Document | null) => view.rerender(<Probe doc={doc} />),
     /**
      * Change where the reader is AFTER the first render, which is what the app
@@ -671,6 +693,43 @@ describe('the band does not outlive its sentence', () => {
     ends()
     boundary(0, 3)
     expect(bandIn(a.doc)).not.toBeNull()
+    a.remove()
+  })
+
+  it('goes when the section’s text runs out, while the walk looks for the next', () => {
+    /* No sentence follows to clear it, and the page is about to be turned. */
+    const a = section('One here.')
+    const { speech, next } = mount(a.doc)
+    act(() => speech().start())
+    boundary(0, 3)
+    expect(bandIn(a.doc), 'a boundary should have drawn a band').not.toBeNull()
+    ends()
+    expect(next, 'the walk began').toHaveBeenCalledTimes(1)
+    expect(bandIn(a.doc)).toBeNull()
+    a.remove()
+  })
+
+  it('goes when the reader stops', () => {
+    const a = section('One here. Two there.')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    boundary(0, 3)
+    expect(bandIn(a.doc), 'a boundary should have drawn a band').not.toBeNull()
+    act(() => speech().stop())
+    expect(bandIn(a.doc)).toBeNull()
+    a.remove()
+  })
+
+  it('goes with the component, from a document still on screen', () => {
+    /* Nothing replaced the document, so the surface took nothing down: the
+       reading is the only thing that can. */
+    const a = section('One here. Two there.')
+    const { speech, unmount } = mount(a.doc)
+    act(() => speech().start())
+    boundary(0, 3)
+    expect(bandIn(a.doc), 'a boundary should have drawn a band').not.toBeNull()
+    act(() => unmount())
+    expect(bandIn(a.doc)).toBeNull()
     a.remove()
   })
 })
@@ -2090,7 +2149,7 @@ describe('five defects an independent audit found', () => {
 
   it('turns the page BACK to a word a seek landed on above it', async () => {
     /* ⚠️ **EVERY BACKWARD SEEK THIS PHASE ADDS COULD LEAVE THE READING OFF THE TOP
-       OF THE PAGE — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.** `SpeechPaging`
+       OF THE PAGE — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.** `SurfacePaging`
        had only `next`, because before phase 34 the voice could only move forward;
        a word classified `behind` fell through a bare `return` and the page stayed
        where it was, so the reader was left looking at text nobody was reading.
@@ -2820,25 +2879,6 @@ describe('a tap on a word, which is the direction phase 34 added', () => {
 })
 
 /**
- * ⚠️ **THE TWO SENTINELS HAD NO CASE — FOUND BY THE MUTATION SWEEP.** Each stands
- * for *the bookkeeping has not caught up yet*, and each is sent to the plugin as a
- * real key — so what is IN them decides whether the store answers a miss or, far
- * worse, something. Every string in both was replaceable and nothing failed.
- */
-describe('the value that means “nothing is known yet”', () => {
-  it('names no book and no section', () => {
-    expect(NOWHERE_IN_PARTICULAR).toEqual({ bookId: null, sectionIndex: null })
-  })
-
-  it('is what the app’s own first render passes, before anything has resolved', () => {
-    /* `bookId` is a content hash that resolves asynchronously and `sectionIndex`
-       arrives with the document, so this IS the value `App` holds at mount — see
-       the in-app run, where a `?? -1` in its place killed every Listen. */
-    expect(NOWHERE, 'the harness and the hook agree about it').toEqual(NOWHERE_IN_PARTICULAR)
-  })
-})
-
-/**
  * ⚠️ **THE ENGINE GOING AWAY IS A ROUTE CHANGE, NOT A FAILURE — which is what the
  * mutation sweep settled.** Four members of the speaker's deps used to guard
  * against `engineRef.current` being null, and every one of those branches was
@@ -3061,6 +3101,14 @@ describe('the transport pressed when there is nothing to press it on', () => {
     page.remove()
   })
 
+  it('starts nothing where there is no document to read', () => {
+    const { speech, unmount } = mount(null)
+    act(() => speech().start())
+    expect(synth.queued).toEqual([])
+    expect(speech().speaking).toBe(false)
+    unmount()
+  })
+
   it('answers false for a seek once the reading has been stopped', async () => {
     const page = section(['One sentence.', 'Two sentence.'], 'en')
     const { speech, unmount } = mount(page.doc)
@@ -3111,5 +3159,451 @@ describe('the transport pressed when there is nothing to press it on', () => {
     expect(live(), 'the tick went with the reading').toBeLessThan(reading)
     unmount()
     page.remove()
+  })
+})
+
+/**
+ * ⚠️ **WHAT THE SURFACE ADDED TO A READING, WHICH THE CASES ABOVE COULD NOT ASK**:
+ * they were written before a reading held anything or listened through a section.
+ */
+describe('a reading in Chinese', () => {
+  it('speaks a sentence at a time in the language of the section, and goes on to the next', () => {
+    const a = section('第一句话。第二句话。', 'zh-Hans')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    expect(spoken()).toEqual(['第一句话。'])
+    expect(synth.queued[0]?.lang).toBe('zh-Hans')
+    ends()
+    expect(spoken()).toEqual(['第一句话。', '第二句话。'])
+    a.remove()
+  })
+})
+
+describe('the pace a reading holds', () => {
+  it('is taken by the Listen itself, not by the render after it', () => {
+    const a = section('Bonjour le monde.')
+    const { speech, paceHeld } = mount(a.doc)
+    expect(paceHeld()).toBe(false)
+    let during = false
+    act(() => {
+      speech().start()
+      during = paceHeld()
+    })
+    expect(during).toBe(true)
+    a.remove()
+  })
+
+  it('is not taken by a Listen that found nothing to read', () => {
+    const a = section('')
+    const { speech, paceHeld } = mount(a.doc)
+    act(() => speech().start())
+    expect(paceHeld()).toBe(false)
+    a.remove()
+  })
+
+  it('is held through a pause', () => {
+    const a = section('Bonjour le monde.')
+    const { speech, paceHeld } = mount(a.doc)
+    act(() => speech().start())
+    act(() => speech().pause())
+    expect(paceHeld()).toBe(true)
+    act(() => speech().resume())
+    expect(paceHeld()).toBe(true)
+    a.remove()
+  })
+
+  it('is held through the silence between two sentences, and a pause in it', () => {
+    const a = section('One sentence here. And another one.')
+    const { speech, paceHeld } = mount(a.doc, { prefs: { sentenceGapMs: 1000 } })
+    act(() => speech().start())
+    ends()
+    expect(paceHeld(), 'in the gap, nothing sounding').toBe(true)
+    act(() => speech().pause())
+    expect(paceHeld(), 'and paused in it').toBe(true)
+    a.remove()
+  })
+
+  it('is held across a section change, and the walk that finds it', () => {
+    const a = section('Bonjour.')
+    const b = section('Encore.')
+    const { speech, show, paceHeld } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    expect(paceHeld(), 'walking to the next section').toBe(true)
+    show(b.doc)
+    expect(paceHeld()).toBe(true)
+    a.remove()
+    b.remove()
+  })
+
+  it('is let go at a stop, once, so a second Listen holds it again', () => {
+    const a = section('Bonjour.')
+    const { speech, paceHeld } = mount(a.doc)
+    act(() => speech().start())
+    act(() => speech().start())
+    act(() => speech().stop())
+    expect(paceHeld(), 'two Listens are one reading').toBe(false)
+    act(() => speech().start())
+    expect(paceHeld()).toBe(true)
+    a.remove()
+  })
+
+  it('is let go when the book runs out', () => {
+    const a = section('Bonjour.')
+    const { speech, paceHeld } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    act(() => {
+      vi.advanceTimersByTime(CONTINUE_GRACE_MS + CONTINUE_TICK_MS)
+    })
+    expect(paceHeld()).toBe(false)
+    a.remove()
+  })
+
+  it('is let go when the book closes, and when the host goes', () => {
+    const a = section('Bonjour.')
+    const closes = mount(a.doc)
+    act(() => closes.speech().start())
+    closes.show(null)
+    expect(closes.paceHeld()).toBe(false)
+
+    const b = section('Encore.')
+    const goes = mount(b.doc)
+    act(() => goes.speech().start())
+    const held = goes.paceHeld
+    goes.unmount()
+    expect(held()).toBe(false)
+    a.remove()
+    b.remove()
+  })
+})
+
+describe('the tap listener a reading keeps on its section', () => {
+  /** Adds less removes, of click listeners on this document. */
+  function counting(doc: Document) {
+    let net = 0
+    const add = doc.addEventListener.bind(doc)
+    const remove = doc.removeEventListener.bind(doc)
+    doc.addEventListener = ((type: string, ...rest: []) => {
+      if (type === 'click') net += 1
+      return (add as (type: string, ...rest: unknown[]) => void)(type, ...rest)
+    }) as typeof doc.addEventListener
+    doc.removeEventListener = ((type: string, ...rest: []) => {
+      if (type === 'click') net -= 1
+      return (remove as (type: string, ...rest: unknown[]) => void)(type, ...rest)
+    }) as typeof doc.removeEventListener
+    return () => net
+  }
+
+  const engineFor = (): ReadingEngine => ({
+    packs: () => [
+      {
+        id: 'english-kokoro',
+        name: 'English',
+        summary: '',
+        family: 'kokoro',
+        languages: ['en'],
+        bytes: 1,
+        minimumMemoryGb: 1,
+        voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+        installed: true,
+      },
+    ],
+    host: () => new FakeAudioHost(),
+    render: async () => ({
+      pcm: pcmOf(48_000),
+      sampleRate: 24_000,
+      words: [],
+      skipped: [],
+      evicted: { clips: 0, bytes: 0 },
+      clipPath: '/tmp/audio/clips/x.wav',
+    }),
+  })
+
+  it('is one while a downloaded voice reads, and none once it stops', () => {
+    const a = section('Hello there.', 'en')
+    const listening = counting(a.doc)
+    const { speech, unmount } = mount(a.doc, { engine: engineFor() })
+    act(() => speech().start())
+    expect(listening()).toBe(1)
+    act(() => speech().stop())
+    expect(listening()).toBe(0)
+    unmount()
+    a.remove()
+  })
+
+  it('is none on the platform’s voice, which cannot seek', () => {
+    const a = section('Hello there.', 'en')
+    const listening = counting(a.doc)
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    expect(listening()).toBe(0)
+    a.remove()
+  })
+
+  it('is none once the section’s sound has run out, while the walk looks for the next', async () => {
+    /* There is nothing left in that section to seek to. */
+    const a = section('Hello there.', 'en')
+    const listening = counting(a.doc)
+    const host = new FakeAudioHost()
+    const { speech, next, unmount } = mount(a.doc, { engine: { ...engineFor(), host: () => host } })
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(listening()).toBe(1)
+    await act(async () => {
+      host.latest.end()
+      await Promise.resolve()
+    })
+    expect(next, 'the walk began').toHaveBeenCalled()
+    expect(listening()).toBe(0)
+    unmount()
+    a.remove()
+  })
+
+  it('does not pile up when a Listen is pressed twice', () => {
+    const a = section('Hello there.', 'en')
+    const listening = counting(a.doc)
+    const { speech, unmount } = mount(a.doc, { engine: engineFor() })
+    act(() => speech().start())
+    act(() => speech().start())
+    expect(listening()).toBe(1)
+    unmount()
+    a.remove()
+  })
+
+  it('leaves the old document when the section changes', () => {
+    const a = section('Hello there.', 'en')
+    const b = section('Another section.', 'en')
+    const old = counting(a.doc)
+    const next = counting(b.doc)
+    const { speech, show, unmount } = mount(a.doc, { engine: engineFor() })
+    act(() => speech().start())
+    show(b.doc)
+    expect(old()).toBe(0)
+    expect(next()).toBe(1)
+    unmount()
+    a.remove()
+    b.remove()
+  })
+})
+
+describe('the surface it is given', () => {
+  it('is the one last rendered with, whichever a callback asks', () => {
+    /* Nothing in the app swaps it: this is the ref's reason for being a ref. */
+    const a = section('From the first.')
+    const b = section('From the second.')
+    const speechOf: { current: Speech | null } = { current: null }
+    function Child({ sectionKey, surface }: ReadingContext) {
+      speechOf.current = useSpeech({ sectionKey, surface })
+      return null
+    }
+    function Parent({ doc, other }: { doc: Document; other: Document }) {
+      const first = useReadingSurface({ doc, place: NOWHERE, paging: { next() {}, prev() {} }, book: NO_BOOK })
+      const second = useReadingSurface({ doc: other, place: NOWHERE, paging: { next() {}, prev() {} }, book: NO_BOOK })
+      return <Which first={first.surface} second={second.surface} />
+    }
+    let choose: (one: boolean) => void = () => {}
+    function Which({ first, second }: { first: ReadingContext['surface']; second: ReadingContext['surface'] }) {
+      const [one, setOne] = useState(true)
+      choose = setOne
+      return <Child sectionKey="fixed" surface={one ? first : second} />
+    }
+    render(<Parent doc={a.doc} other={b.doc} />)
+    act(() => choose(false))
+    act(() => speechOf.current!.start())
+    expect(synth.queued.at(-1)?.text).toContain('second')
+    a.remove()
+    b.remove()
+  })
+})
+
+/**
+ * What the cases above cannot reach through `mount`, which keys every section by
+ * its document and commits in one go: a host that keys its sections itself, and
+ * the moment between a commit's layout effects and its passive ones, where a
+ * timer can fire in a browser and the document effect has not yet run.
+ */
+describe('a reading under a host that keys its own sections', () => {
+  const ENGLISH: VoicePack = {
+    id: 'english-kokoro',
+    name: 'English',
+    summary: '',
+    family: 'kokoro',
+    languages: ['en'],
+    bytes: 1,
+    minimumMemoryGb: 4,
+    voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+    installed: true,
+  }
+  /* `One sentence. Two sentence. Three sentence.` — a word at each sentence's
+     first character, as in the stepping cases above. */
+  const THREE = 'One sentence. Two sentence. Three sentence.'
+  const WORDS = [
+    { start: 0, length: 3, startMs: 100, endMs: 200 },
+    { start: 14, length: 3, startMs: 500, endMs: 600 },
+    { start: 28, length: 5, startMs: 900, endMs: 1000 },
+  ]
+  const NO_SETTINGS: SpeakPrefs = {}
+
+  function downloaded(words: SpokenAudio['words'] = WORDS) {
+    const host = new FakeAudioHost()
+    const engine: ReadingEngine = {
+      packs: () => [ENGLISH],
+      host: () => host,
+      render: async () => ({
+        pcm: pcmOf(48_000),
+        sampleRate: 24_000,
+        words,
+        skipped: [],
+        evicted: { clips: 0, bytes: 0 },
+        clipPath: '/tmp/audio/clips/x.wav',
+      }),
+    }
+    return { engine, host }
+  }
+
+  function keyed(doc: Document, sectionKey: unknown, engine: ReadingEngine | null = null) {
+    const next = vi.fn()
+    const api: { current: Speech | null } = { current: null }
+    /** Run once, at the next commit, after the hook's layout effect and before
+     *  the surface's — so before the surface answers for the new document and
+     *  before any passive effect. */
+    const between: { current: (() => void) | null } = { current: null }
+    function Reading({ sectionKey, surface }: ReadingContext) {
+      api.current = useSpeech({ sectionKey, surface }, NO_SETTINGS, engine)
+      return null
+    }
+    function Between() {
+      useLayoutEffect(() => {
+        const run = between.current
+        between.current = null
+        run?.()
+      })
+      return null
+    }
+    function Probe({ doc, sectionKey }: { doc: Document; sectionKey: unknown }) {
+      const { surface } = useReadingSurface({ doc, place: NOWHERE, paging: { next, prev() {} }, book: NO_BOOK })
+      return (
+        <>
+          <Reading sectionKey={sectionKey} surface={surface} />
+          <Between />
+        </>
+      )
+    }
+    const view = render(<Probe doc={doc} sectionKey={sectionKey} />)
+    return {
+      next,
+      between,
+      speech: () => api.current!,
+      show: (doc: Document, sectionKey: unknown) => view.rerender(<Probe doc={doc} sectionKey={sectionKey} />),
+      unmount: () => view.unmount(),
+    }
+  }
+
+  const bandIn = (doc: Document) => doc.getElementById('paper-spoken-word')
+
+  it('turns no page past a section that arrives while the walk is waiting', () => {
+    /* ⚠️ **THE WALK SEES THE ARRIVAL BEFORE THE DOCUMENT EFFECT DOES**, which is
+       why `sectionKeyRef` is committed in a layout effect: a tick that fires
+       between the two must not ask for a page of a section nobody has read. */
+    const a = section('First chapter.')
+    const b = section('Second chapter.')
+    const { speech, next, between, show, unmount } = keyed(a.doc, a.doc)
+    act(() => speech().start())
+    ends()
+    expect(next, 'the walk began').toHaveBeenCalledTimes(1)
+    between.current = () => vi.advanceTimersByTime(CONTINUE_TICK_MS)
+    show(b.doc, b.doc)
+    expect(between.current, 'the tick was given its moment').toBeNull()
+    expect(next, 'and asked for no page past the new section').toHaveBeenCalledTimes(1)
+    expect(spoken()).toEqual(['First chapter.', 'Second chapter.'])
+    unmount()
+    a.remove()
+    b.remove()
+  })
+
+  it('moves nothing for a word of a section that is no longer on screen', async () => {
+    /* Nothing told the reading the section changed, so its words go on being
+       reported: they must not move the band, the page or the sentence cursor. */
+    const { engine, host } = downloaded()
+    const a = section(THREE, 'en')
+    const b = section('Somewhere else entirely.', 'en')
+    const { speech, next, show, unmount } = keyed(a.doc, 'fixed', engine)
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    show(b.doc, 'fixed')
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600)
+    })
+    expect(bandIn(a.doc)).toBeNull()
+    expect(bandIn(b.doc)).toBeNull()
+    expect(next).not.toHaveBeenCalled()
+    act(() => speech().stepSentence(1))
+    expect(
+      host.latest.started[0]?.offset,
+      'the step counts from the first sentence, not from where the unseen words got to',
+    ).toBeCloseTo(0.5, 3)
+    unmount()
+    a.remove()
+    b.remove()
+  })
+
+  it('takes the old section’s band down when the key moves, even over the same document', async () => {
+    const { engine } = downloaded()
+    const a = section(THREE, 'en')
+    const { speech, show, unmount } = keyed(a.doc, 1, engine)
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150)
+    })
+    expect(bandIn(a.doc), 'the first word was drawn').not.toBeNull()
+    show(a.doc, 2)
+    expect(bandIn(a.doc)).toBeNull()
+    expect(speech().speaking, 'and the reading goes on').toBe(true)
+    unmount()
+    a.remove()
+  })
+
+  it('drops the follow-along, and a band left from before, when a reading has no word timings', async () => {
+    /* A Qwen pack reports none. The band an earlier reading of this page drew
+       would otherwise sit on its word for the whole section. */
+    let rendered = 0
+    const { engine } = downloaded()
+    const timed = engine.render
+    const once: ReadingEngine = {
+      ...engine,
+      render: async (request) => {
+        rendered += 1
+        const audio = await timed(request)
+        return rendered === 1 ? audio : { ...audio, words: [] }
+      },
+    }
+    const a = section(THREE, 'en')
+    const { speech, unmount } = keyed(a.doc, a.doc, once)
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150)
+    })
+    expect(bandIn(a.doc), 'the first reading drew its first word').not.toBeNull()
+    expect(speech().followsWords).toBe(true)
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(rendered, 'the second Listen rendered again').toBe(2)
+    expect(speech().followsWords).toBe(false)
+    expect(bandIn(a.doc)).toBeNull()
+    unmount()
+    a.remove()
   })
 })

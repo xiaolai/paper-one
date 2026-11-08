@@ -61,7 +61,6 @@ import { CommandPalette } from './overlays/CommandPalette'
 import { OverlaySheet } from './overlays/OverlaySheet'
 import { listTrash, type TrashedBook } from '../core/bookTrash'
 import { TrashSheet } from './overlays/TrashSheet'
-import { TitleBar } from './shell/TitleBar'
 import { WindowShell } from './shell/WindowShell'
 import { Library } from './screens/Library'
 import { Reader } from './screens/Reader'
@@ -70,14 +69,14 @@ import { tagCounts } from '../core/library'
 import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
 import { chapterSteps } from './tocOrder'
-import { useSpeech } from './reader/useSpeech'
+import { createHostStore, HostedTitleBar, ReadingHost, useHosted, type Hosted } from './reader/readingHost'
+import { useReadingSurface } from './reader/readingSurface'
 import { useAutoAdvance } from './reader/useAutoAdvance'
 import { documentLang } from './reader/speech'
 import { NO_GOOD_VOICE, voiceFor } from './reader/voiceChoice'
 import { engineVoiceFor, missingPackNotice } from './reader/engineVoice'
 import { useVoicePacks } from './hooks/useVoicePacks'
 import { useVoices } from './hooks/useVoices'
-import { audiobookSourceOf, useAudiobook } from './hooks/useAudiobook'
 
 
 /**
@@ -174,6 +173,9 @@ export interface AppProps {
  * pass, so this is also how long that pass can be prevented from reporting.
  */
 const NOTICE_MS = 12_000
+
+/** The export control the host publishes, or null while it has none to offer. */
+const audiobookOf = (hosted: Hosted | null) => hosted?.audiobook ?? null
 
 /**
  * The desktop shell — and at well over two thousand lines, the largest component
@@ -378,20 +380,44 @@ export function App({
     () => ({ bookId: book.bookId, sectionIndex: book.docSection }),
     [book.bookId, book.docSection],
   )
-  const speech = useSpeech(book.doc, speechPaging, speechPrefs, voiceEngine, speechPlace)
+  /* The book, for the export. Everything in it comes from `useBook`, so that a
+     walk can be bound to one opening: see `readyBookOf`. */
+  const speechBook = useMemo(
+    () => ({
+      generation: book.generation,
+      bookId: book.bookId,
+      doc: book.doc,
+      meta: book.meta,
+      toc: book.toc,
+      fixedLayout: book.fixedLayout,
+      sectionTexts: book.sectionTexts,
+    }),
+    [book.generation, book.bookId, book.doc, book.meta, book.toc, book.fixedLayout, book.sectionTexts],
+  )
+  /* ⚠️ **COMMITTED HERE, READ BY `ReadingHost` BELOW**, which is a child, so its
+     effects run before this component's: see `readingSurface.ts` for what makes
+     that safe. */
+  const readingSurface = useReadingSurface({
+    doc: book.doc,
+    place: speechPlace,
+    paging: speechPaging,
+    book: speechBook,
+  })
+  const [hostStore] = useState(createHostStore)
   /**
    * The book turning itself, at the pace the time-left estimate uses.
    *
-   * ⚠️ **DECLARED AFTER `speech` BECAUSE IT DEFERS TO IT.** Read aloud already
-   * turns the page, so the two together double-advance; `useAutoAdvance` refuses
-   * to start while a reading speaks and gives the book up if one starts under
-   * it. One pace at a time.
+   * ⚠️ **IT DEFERS TO WHOEVER HOLDS THE PACE, WHICH IS A READING.** Read aloud
+   * already turns the page, so the two together double-advance; `useAutoAdvance`
+   * refuses to start while a reading speaks and gives the book up if one starts
+   * under it. One pace at a time.
    */
-  // Stryker disable next-line ObjectLiteral: wiring — five values straight from `useBook` and `useSpeech`; the hook's own cases hold every rule they feed.
+  const paceHeld = useSyncExternalStore(readingSurface.subscribePace, readingSurface.paceHeld)
+  // Stryker disable next-line ObjectLiteral: wiring — five values straight from `useBook` and the surface; the hook's own cases hold every rule they feed.
   const autoAdvance = useAutoAdvance({
     step: book.step,
     pace: book.pace,
-    speaking: speech.speaking,
+    speaking: paceHeld,
     /* The reader stays mounted behind the library and every contributed screen,
        so without this the book turned itself where nobody could see it. */
     onReader,
@@ -794,47 +820,9 @@ export function App({
     return () => bound.dispose()
   }, [services, setImportNotice])
   /* The audiobook export, reachable from the command palette and nowhere else —
-     see `useAudiobook` for why that is the whole surface for now. */
-  const audiobookSource = useMemo(
-    () =>
-      audiobookSourceOf(
-        {
-          bookId: book.bookId,
-          doc: book.doc,
-          meta: book.meta,
-          toc: book.toc,
-          fixedLayout: book.fixedLayout,
-          sectionTexts: book.sectionTexts,
-        },
-        state.readingNotesAloud,
-      ),
-    [
-      book.bookId,
-      book.meta,
-      book.doc,
-      book.toc,
-      book.fixedLayout,
-      book.sectionTexts,
-      state.readingNotesAloud,
-    ],
-  )
-  const audiobook = useAudiobook({
-    /* The engine is macOS-only and the commands refuse elsewhere by name, so the
-       palette entry follows the same platform the rest of the app reads. */
-    available: platform === 'macos',
-    source: audiobookSource,
-    packs: voicePacks,
-    chosen: state.readingVoice,
-    rate: state.readingRate,
-    /* WI-34.4: the export asks for the reading's own audio before rendering a
-       chapter again. In a build with no voices capability this answers null,
-       which is the truth there — there is no rendered reading at all. */
-    findClip: findVoiceClip,
-    /* The lease that keeps a cached chapter from being evicted under the packer —
-       see `AudiobookPlatform.hold`. */
-    holdClips: holdVoiceClips,
-    say: setImportNotice,
-  })
+     see `useAudiobook` for why that is the whole surface for now. It runs in
+     `ReadingHost`, below. */
+  const audiobook = useHosted(hostStore, audiobookOf)
 
   /* Standing, not transient: a quarantined store is not something the app
      did, it is something the reader has lost, and it stays until they say
@@ -1802,6 +1790,10 @@ export function App({
    * write the tag into. FROM `openRow`, which is the same lookup made once
    * above — this ran its own scan of the shelf beside it. */
   const readingBook = onReader ? (openRow ?? null) : null
+  /* Whether there IS one, for the keyboard map, which asks nothing else. The row
+     itself takes a new identity on every position save, and listing it there
+     reinstalled the map every two seconds of reading. */
+  const hasReadingBook = readingBook !== null
   /* Memoized as the one-element list `TagEditor` takes, or a fresh `[book]`
    * inline at the render defeated every books-keyed memo inside it. */
   const readingBooks = useMemo(() => (readingBook ? [readingBook] : NO_BOOKS), [readingBook])
@@ -1867,6 +1859,14 @@ export function App({
      A refused jump and a jump whose book would not open are the same lie to
      the reader, and only the first was being caught. */
 
+  /* ⚠️ **THE SHELF THROUGH A REF, BECAUSE `library.books` MOVES WITH THE PAGE.**
+     Every position save makes a new array, and listing it below rebuilt
+     `goToJump`, then the whole jump stack, then the keyboard map that reads it
+     — every two seconds of reading. The lookup runs when a jump is MADE, so it
+     reads the shelf as it is then; a ref is the latest array, never a stale one. */
+  const booksRef = useRef(library.books)
+  booksRef.current = library.books
+
   /** Go where a jump asks, and say whether it was accepted — see `JumpsDeps`. */
   const goToJump = useCallback(
     (target: JumpTarget, revert: () => void): boolean => {
@@ -1887,7 +1887,7 @@ export function App({
         book.goTo(target.cfi)
         return true
       }
-      const row = library.books.find((one) => one.bookId === target.bookId)
+      const row = booksRef.current.find((one) => one.bookId === target.bookId)
       if (!row) {
         /* The book left the shelf between the row being drawn and the row
            being clicked. Marginalia disables such rows, so this is the race
@@ -1930,7 +1930,7 @@ export function App({
       setOpenAt(target)
       return true
     },
-    [book.bookId, book.goTo, library.books, openStored, setReturnTo, state.screen, dispatch],
+    [book.bookId, book.goTo, openStored, setReturnTo, state.screen, dispatch],
   )
 
   const jumps = useJumps({ placeHere, navigate: goToJump })
@@ -2437,7 +2437,7 @@ export function App({
         hasSelection: marking.canMark,
         canBookmark: bookmarking.canBookmark,
         onReader,
-        hasBook: readingBook !== null,
+        hasBook: hasReadingBook,
         canJumpBack: jumps.canBack,
         canJumpForward: jumps.canForward,
         /* Who took this key's first press — see `pressTaken`, and `taken`. */
@@ -2561,7 +2561,7 @@ export function App({
        handler. The two are `markSelection`'s dependencies now, and this lists
        the callback (2026-09-13 audit). */
     markSelection,
-    readingBook,
+    hasReadingBook,
     openTags,
     /* The whole object, because ⌘B reads two things off it — whether a place
        can be kept, and whether it already is — and a handler closed over a
@@ -2593,17 +2593,40 @@ export function App({
 
   return (
     <>
+      {/* ⚠️ **FIRST, BECAUSE IT PUBLISHES IN A LAYOUT EFFECT**: see its header. */}
+      <ReadingHost
+        context={{ sectionKey: book.doc, surface: readingSurface.surface }}
+        prefs={speechPrefs}
+        engine={voiceEngine}
+        audiobook={{
+          /* The engine is macOS-only and the commands refuse elsewhere by name, so
+             the palette entry follows the same platform the rest of the app reads. */
+          available: platform === 'macos',
+          packs: voicePacks,
+          chosen: state.readingVoice,
+          rate: state.readingRate,
+          /* WI-34.4: the export asks for the reading's own audio before rendering a
+             chapter again. In a build with no voices capability this answers null,
+             which is the truth there — there is no rendered reading at all. */
+          findClip: findVoiceClip,
+          /* The lease that keeps a cached chapter from being evicted under the
+             packer — see `AudiobookPlatform.hold`. */
+          holdClips: holdVoiceClips,
+          say: setImportNotice,
+        }}
+        store={hostStore}
+      />
       <WindowShell
         state={state}
         platform={platform}
         titleBar={
-          <TitleBar
+          <HostedTitleBar
+            store={hostStore}
             state={state}
             dispatch={dispatch}
             platform={platform}
             bookTitle={title}
             bookSubtitle={subtitle}
-            speech={speech}
             listenRefusal={listenRefusal}
             hasBook={book.source !== null}
             screens={composition.screens}

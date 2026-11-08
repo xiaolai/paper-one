@@ -1680,7 +1680,8 @@ describe('books a launch carried', () => {
 describe('turning a page', () => {
   it('does not reinstall the keyboard listeners', async () => {
     const moby = await shelved(BYTES, 'Moby-Dick')
-    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    const fs = fakeFs(moby.files) as unknown as IndexFs
+    await mount(fs, [moby.row])
     await open('Moby-Dick')
     await settle()
 
@@ -1690,6 +1691,20 @@ describe('turning a page', () => {
         await act(async () => reader.live!.relocate(cfi))
         await settle()
       }
+      /* ⚠️ **AND THE POSITION THOSE TURNS SAVE, WHICH IS WHAT MADE THIS FLAKY.**
+         Reading writes the place into the shelf's row on a two-second throttle,
+         and the row takes a new identity with it. The handler's effect listed
+         that row (`readingBook`) and the jump stack, whose `navigate` closed over
+         the whole shelf — so every save reinstalled the map. In isolation this
+         case finished inside the two seconds and never saw the write; on a loaded
+         machine the timer fired inside the spy, and only then did it fail. The
+         write is FORCED here — `pagehide` flushes the recorder, the same write
+         the timer makes — so the save is always inside the window, not only when
+         the machine is slow enough to put it there. */
+      fireEvent(window, new Event('pagehide'))
+      const placed = () => (stored(fs, `${folderOf(moby.bookId)}/book.json`) as { position?: string }).position
+      await eventually(() => expect(placed(), 'the turns never saved their place').toBe(THERE))
+      await settle()
       /* ⚠️ **`keyup`, NOT `keydown`, AND THE DIFFERENCE MADE THIS FLAKY ON CI.**
          The defect guarded here is APP's effect re-running. A `window` spy is
          global, and `keydown` on `window` is bound by two other components —
