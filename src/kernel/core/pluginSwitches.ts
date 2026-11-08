@@ -15,6 +15,7 @@ import { stringList } from './settings'
  * any preference change, from the reducer's copy. A write here that the reducer
  * knew nothing of would be overwritten by the next change of theme.
  */
+// Stryker disable next-line StringLiteral: an empty key makes `defineSetting` throw while this module is imported, so every covering suite fails to load and Stryker's vitest runner reports it Survived — the key itself is asserted by `pluginSwitches.test.ts`, which reads the stored list under it.
 export const pluginsOff = defineSetting<readonly string[]>('kernel.pluginsOff', [], stringList)
 
 /** What the store says is off: the set a composition root hands the registry. */

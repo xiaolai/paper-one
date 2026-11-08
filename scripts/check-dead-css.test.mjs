@@ -103,6 +103,25 @@ describe('what a file that holds none carries', () => {
   })
 })
 
+/*
+ * A holder is filled in the order the file names it, so `t` takes `c`, then `a`, then
+ * `b`, one round each. The round that hands it `b` holds no name the round before did
+ * not: a walk that stopped at the first round with no new holder would stop one short,
+ * and miss that `t.both` reads a stylesheet with no `.both` in it.
+ */
+describe('a holder that takes another stylesheet in a later round', () => {
+  it('reads from it as well', () => {
+    const root = fixture({
+      'src/A.module.css': '.both { color: red; }\n',
+      'src/B.module.css': '.other { color: red; }\n',
+      'src/C.module.css': '.both { color: red; }\n',
+      'src/X.tsx':
+        "import a from './A.module.css'\nimport b from './B.module.css'\nimport c from './C.module.css'\ndeclare const flag: boolean\nconst t = flag ? c : s\nexport const f = () => t.both\nconst s = flag ? a : r\nconst r = b\n",
+    })
+    expect(undefinedClasses(root).map((u) => `${u.file}: ${u.name}`)).toEqual(['src/X.tsx: both'])
+  })
+})
+
 describe('what the gate reports', () => {
   it('finds a rule no source names', () => {
     const root = fixture({
@@ -381,50 +400,6 @@ describe('a class reached under another import name', () => {
       'src/A.tsx': "import editorStyles from './A.module.css'\nexport const A = () => editorStyles.popover\n",
     })
     expect(names(root)).toEqual([])
-  })
-})
-
-describe('the CLI', () => {
-  it('exits 0 on this repository, and says what it looked at', () => {
-    /* Against the real tree, which is the run that gates every push. The
-       counts are printed because a check reporting "0 unreachable" over 0
-       modules looks exactly like one that worked. */
-    const run = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' })
-    expect(run.stdout).toMatch(/check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined, 0 unfollowed/)
-    expect(run.status).toBe(0)
-  })
-
-  /* The guard, in-process: a child runs the file from disk, so only these see a change to
-     it. Whether this file is the one node started is `isProcessEntry`'s to say, and has its
-     own tests; here it is told. */
-  afterEach(() => {
-    vi.doUnmock('./lib/entry.mjs')
-    vi.restoreAllMocks()
-    vi.resetModules()
-  })
-  const load = async (entry) => {
-    vi.doMock('./lib/entry.mjs', () => ({ isProcessEntry: () => entry }))
-    const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined)
-    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
-    vi.resetModules()
-    await import('./check-dead-css.mjs')
-    return { exit, printed: write.mock.calls.map(([text]) => text).join('') }
-  }
-
-  it('runs, and exits with what it found, when node starts this file', async () => {
-    const { exit, printed } = await load(true)
-    expect(exit.mock.calls).toEqual([[0]])
-    expect(printed).toMatch(/^check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined, 0 unfollowed\n$/)
-  })
-
-  it('did not exit when this file imported it', () => {
-    expect(importing.exits).toEqual([])
-  })
-
-  it('neither prints nor exits when imported', async () => {
-    const { exit, printed } = await load(false)
-    expect(exit).not.toHaveBeenCalled()
-    expect(printed).toBe('')
   })
 })
 
@@ -1486,5 +1461,57 @@ describe('what the command prints, and how it exits', () => {
     const written = []
     expect(main({ stdout: { write: (text) => written.push(text) } })).toBe(0)
     expect(written.join('')).toMatch(/^check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined, 0 unfollowed\n$/)
+  })
+})
+
+/*
+ * LAST IN THE FILE, because these read the whole repository, as the test just
+ * above does. A mutant that slows every read turns them from seconds into a
+ * minute, and a mutation run stops at the first failing test: the fixture tests
+ * above catch such a mutant in milliseconds, but only if they run first. Ahead
+ * of them, these spent the deadline, and the mutant was reported timed out
+ * rather than killed.
+ */
+describe('the CLI', () => {
+  it('exits 0 on this repository, and says what it looked at', () => {
+    /* Against the real tree, which is the run that gates every push. The
+       counts are printed because a check reporting "0 unreachable" over 0
+       modules looks exactly like one that worked. */
+    const run = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' })
+    expect(run.stdout).toMatch(/check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined, 0 unfollowed/)
+    expect(run.status).toBe(0)
+  })
+
+  /* The guard, in-process: a child runs the file from disk, so only these see a change to
+     it. Whether this file is the one node started is `isProcessEntry`'s to say, and has its
+     own tests; here it is told. */
+  afterEach(() => {
+    vi.doUnmock('./lib/entry.mjs')
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+  const load = async (entry) => {
+    vi.doMock('./lib/entry.mjs', () => ({ isProcessEntry: () => entry }))
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined)
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    vi.resetModules()
+    await import('./check-dead-css.mjs')
+    return { exit, printed: write.mock.calls.map(([text]) => text).join('') }
+  }
+
+  it('runs, and exits with what it found, when node starts this file', async () => {
+    const { exit, printed } = await load(true)
+    expect(exit.mock.calls).toEqual([[0]])
+    expect(printed).toMatch(/^check-dead-css: [1-9]\d* modules, [1-9]\d* classes used, 0 unreachable, 0 undefined, 0 unfollowed\n$/)
+  })
+
+  it('did not exit when this file imported it', () => {
+    expect(importing.exits).toEqual([])
+  })
+
+  it('neither prints nor exits when imported', async () => {
+    const { exit, printed } = await load(false)
+    expect(exit).not.toHaveBeenCalled()
+    expect(printed).toBe('')
   })
 })

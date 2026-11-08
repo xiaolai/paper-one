@@ -169,20 +169,13 @@ const enclosingFunction = (node) => {
   return at !== undefined && isFunctionLike(at) ? at : null
 }
 
+/** Hold `origins` under `key`, and say whether `key` holds anything now. */
 const add = (map, key, origins) => {
-  let added = false
-  let held = map.get(key)
   for (const origin of origins) {
-    if (held === undefined) {
-      held = new Set()
-      map.set(key, held)
-    }
-    if (!held.has(origin)) {
-      held.add(origin)
-      added = true
-    }
+    if (!map.has(key)) map.set(key, new Set())
+    map.get(key).add(origin)
   }
-  return added
+  return map.has(key)
 }
 
 /**
@@ -234,7 +227,6 @@ export function followHolders({
   /* A member's symbol asks the checker for the type of what it is read from, and that
      is the slow question, so it is asked only of names something here could answer. */
   const heldKeys = new Set()
-  let changed
 
   /* In `{ s }` the name's own symbol is the key; the variable is what it means. */
   const symbolOf = (identifier) =>
@@ -325,15 +317,12 @@ export function followHolders({
 
   const hold = (identifier, origins) => {
     const symbol = symbolOf(identifier)
-    if (symbol !== undefined && add(direct, symbol, origins)) {
-      /* A member typed as the value, read later as `x.s`. */
-      heldKeys.add(identifier.text)
-      changed = true
-    }
+    /* A member typed as the value, read later as `x.s`. */
+    if (symbol !== undefined && add(direct, symbol, origins)) heldKeys.add(identifier.text)
   }
   const holdElements = (identifier, origins) => {
     const symbol = symbolOf(identifier)
-    if (symbol !== undefined && add(elements, symbol, origins)) changed = true
+    if (symbol !== undefined) add(elements, symbol, origins)
   }
   /** One key of a pattern over a holder: a way through, or a read. */
   const patternKey = (at, key, origins, target) => {
@@ -436,8 +425,14 @@ export function followHolders({
     }
   }
 
-  do {
-    changed = false
+  /* WHAT IS HELD ONLY GROWS, and only from what this file names, so a round that
+     added nothing is the last, and there is a last. Measured from the maps rather
+     than flagged at each place that adds: a flag every site had to remember was a
+     second copy of this rule, and a site that set it without adding never ended.
+     The measure is taken in the loop's own step, so no change to the round can
+     skip it. */
+  const heldSizes = () => JSON.stringify([direct, elements, keyed, objects, returns].map((map) => [...map.values()].map((held) => held.size)))
+  for (let before = null, now = heldSizes(); now !== before; before = now, now = heldSizes()) {
     for (const [target, origins] of allSeeds) fill(target, origins)
     for (const [target, origins] of elementSeeds) fillElements(target, origins)
     for (const [target, from] of flows) {
@@ -449,16 +444,13 @@ export function followHolders({
     for (const [name, from] of values) {
       const origins = originsOf(from)
       const key = keyText(name, checker)
-      if (key !== null && add(keyed, name.parent, origins)) {
-        heldKeys.add(key)
-        changed = true
-      }
+      if (key !== null && add(keyed, name.parent, origins)) heldKeys.add(key)
       /* Under the root's own name, whoever gets the object can read it back by that name. */
       const bound = key === rootName ? null : nameBinding(name.parent.parent)
-      if (bound !== null && add(objects, checker.getSymbolAtLocation(bound), origins)) changed = true
+      if (bound !== null) add(objects, checker.getSymbolAtLocation(bound), origins)
     }
     /* A function with no name files under null, and every lookup here is by a symbol. */
-    for (const [fn, from] of returned) if (add(returns, symbolOfFn(fn), originsOf(from))) changed = true
+    for (const [fn, from] of returned) add(returns, symbolOfFn(fn), originsOf(from))
     for (const call of calls) {
       const callee = unwrapped(call.expression)
       const fn = fnOfSymbol(calleeSymbol(callee))
@@ -481,7 +473,7 @@ export function followHolders({
       if (CALLS_BACK.has(callee.name.text)) fill(first.name, elementsOf(callee.expression))
       if (callee.name.text === 'then') fill(first.name, originsOf(callee.expression))
     }
-  } while (changed)
+  }
 
   /* Holders are settled: what each is used for can be said once, and only once. */
   for (const [at, origins] of patternReads) read([...origins], patternKeys.get(at), at)

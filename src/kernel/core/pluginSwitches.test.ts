@@ -87,4 +87,25 @@ describe('the switches for one run', () => {
     switches.set('a', false)
     expect(heard).toHaveBeenCalledTimes(1)
   })
+
+  /* A subscriber that throws is logged and the rest are still told; the log names
+     which subscription it was, so the sentence is how the throw is traced. */
+  it('names a subscriber that throws as one of the optional feature switches', () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const switches = createPluginSwitches(new Set(), storeOver())
+      const after = vi.fn()
+      switches.subscribe(() => {
+        throw new Error('subscriber failed')
+      })
+      switches.subscribe(after)
+      switches.set('a', true)
+      expect(logged.mock.calls.map(([label]) => label)).toEqual([
+        'Paper: a optional feature switch subscriber threw while being notified',
+      ])
+      expect(after).toHaveBeenCalledTimes(1)
+    } finally {
+      logged.mockRestore()
+    }
+  })
 })
