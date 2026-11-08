@@ -14185,6 +14185,8 @@
     "src/kernel/ui/shell/TitleBar.test.tsx > the Listen control, in each state it can be in > cannot be pressed with no book open, though the engine is there",
     "src/kernel/ui/shell/TitleBar.test.tsx > the Listen control, in each state it can be in > reads the chapter aloud when there is an engine and a book",
     "src/kernel/ui/shell/TitleBar.test.tsx > the Listen control, in each state it can be in > says the build has no speech engine, and cannot be pressed",
+    "src/kernel/ui/shell/TitleBar.test.tsx > the chrome that fades in the reader > hides in the reader while the pointer is away",
+    "src/kernel/ui/shell/TitleBar.test.tsx > the chrome that fades in the reader > shows for each condition that keeps it",
     "src/kernel/ui/shell/TitleBar.test.tsx > the chrome, and what keeps it up > comes up when something inside it takes focus, so a keyboard reader can see it",
     "src/kernel/ui/shell/TitleBar.test.tsx > the chrome, and what keeps it up > goes down when focus leaves for something outside it",
     "src/kernel/ui/shell/TitleBar.test.tsx > the chrome, and what keeps it up > goes down when the pointer leaves and nothing inside it has focus",

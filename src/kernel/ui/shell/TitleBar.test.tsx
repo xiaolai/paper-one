@@ -924,3 +924,51 @@ describe('the chrome, and what keeps it up', () => {
     expect(dispatch.mock.calls.map(([action]) => action)).toEqual([])
   })
 })
+
+/**
+ * §06: THE CHROME FADES ONLY IN THE READER, ONLY WHILE THE POINTER IS AWAY, AND
+ * NEVER UNDER AN OPEN SWITCHER — the chip it is anchored to would vanish beneath
+ * it. Hidden means all three at once: transparent, `visibility: hidden`, and
+ * `inert`, so a control nobody can see can be neither tabbed to nor clicked.
+ */
+describe('the chrome that fades in the reader', () => {
+  function zoneOf(state: Partial<typeof initialState>) {
+    const { container } = render(
+      <TitleBar
+        screens={[]}
+        state={{ ...initialState, ...state }}
+        dispatch={vi.fn()}
+        platform="macos"
+        bookTitle="Paper"
+        bookSubtitle=""
+        speech={speech}
+        listenRefusal={null}
+        hasBook
+      />,
+    )
+    const chip = container.querySelector('button[title="Switch book"]')
+    if (!(chip?.parentElement instanceof HTMLElement)) throw new Error('no chip zone drawn')
+    return chip.parentElement
+  }
+
+  it('hides in the reader while the pointer is away', () => {
+    const zone = zoneOf({ screen: 'reader', chromeOn: false, switcherOpen: false })
+    expect(zone.style.opacity).toBe('0')
+    expect(zone.style.visibility).toBe('hidden')
+    expect(zone.hasAttribute('inert')).toBe(true)
+  })
+
+  it('shows for each condition that keeps it', () => {
+    for (const state of [
+      { screen: 'reader', chromeOn: true, switcherOpen: false },
+      { screen: 'reader', chromeOn: false, switcherOpen: true },
+      { screen: 'library', chromeOn: false, switcherOpen: false },
+    ] as const) {
+      cleanup()
+      const zone = zoneOf(state)
+      expect(zone.style.opacity, JSON.stringify(state)).toBe('1')
+      expect(zone.style.visibility, JSON.stringify(state)).toBe('visible')
+      expect(zone.hasAttribute('inert'), JSON.stringify(state)).toBe(false)
+    }
+  })
+})
