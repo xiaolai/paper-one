@@ -1191,12 +1191,15 @@ describe('what the store promises never to do', () => {
         },
       }
       const store = createSettingsStore({ storage, migrate: () => ({ 'test.count': BigInt(10) }) })
+      const heard: boolean[] = []
+      store.subscribe(() => heard.push(store.persistent))
 
       store.set(KERNEL_SETTINGS.theme, 'night')
 
       expect(store.get(KERNEL_SETTINGS.theme), 'the session still sees what it chose').toBe('night')
       expect(writes, 'nothing reached the storage').toBe(0)
       expect(store.persistent, 'and the store says so, instead of reporting a save it did not make').toBe(false)
+      expect(heard, '`set` notifies before it persists, so only the failure itself can publish the flip').toContain(false)
       expect(error).toHaveBeenCalledWith(
         'Paper: settings could not be serialised, so they will not be saved on this device',
         expect.any(TypeError),
