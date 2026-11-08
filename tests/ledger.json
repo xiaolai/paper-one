@@ -10020,6 +10020,7 @@
     "src/kernel/ui/ContributionBoundary.test.tsx > a contributed renderer inside its boundary > hands the renderer the context it was given",
     "src/kernel/ui/ContributionBoundary.test.tsx > a contributed renderer inside its boundary > holds the window while a contribution suspends, and draws it when it settles",
     "src/kernel/ui/ContributionBoundary.test.tsx > a contributed renderer inside its boundary > names the contribution by its id in the log and by its label to the reader",
+    "src/kernel/ui/ContributionBoundary.test.tsx > a silent boundary > draws nothing when its contribution throws, and still names it in the log",
     "src/kernel/ui/appStorage.test.ts > choosing where a damaged store goes > keeps counting past a run of them",
     "src/kernel/ui/appStorage.test.ts > choosing where a damaged store goes > refuses when every candidate is taken",
     "src/kernel/ui/appStorage.test.ts > choosing where a damaged store goes > skips a candidate it could not interrogate",
