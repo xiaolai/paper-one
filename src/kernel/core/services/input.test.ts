@@ -319,6 +319,28 @@ describe('the bounds every field declares', () => {
     for (const [constraint, count] of exercised) expect(count, constraint).toBeGreaterThan(0)
   })
 
+  /* An empty book id names no book: `folderOf('')` was the library's own
+   * folder once. So every service that requires one book refuses a blank one
+   * here, before any handler builds a path from it. The services are found by
+   * the field's name, not by the bound it declares, so a row that forgot the
+   * bound fails here instead of being skipped by the sweep above. */
+  it('refuses a blank book id to every service that requires one book', () => {
+    let services = 0
+    for (const name of SERVICE_NAMES) {
+      const descriptor = descriptorFor(name)
+      if (!descriptor.input.some((field) => field.name === 'book' && field.type === 'string' && field.required === true)) continue
+      services += 1
+      /* The same body with a book in it is accepted, so the refusal below is the blank's. */
+      expect(readInput(descriptor, body(descriptor)), name).toHaveProperty('book', 'x')
+      for (const blank of ['', '   ']) {
+        const call = () => readInput(descriptor, { ...body(descriptor), book: blank })
+        expect(call, `${name} ${JSON.stringify(blank)}`).toThrow('book must not be empty')
+        expect(thrown(call).code, `${name} ${JSON.stringify(blank)}`).toBe('malformed')
+      }
+    }
+    expect(services).toBeGreaterThan(0)
+  })
+
   it('accepts a value exactly at each bound, so the check is not off by one', () => {
     for (const name of SERVICE_NAMES) {
       const descriptor = descriptorFor(name)

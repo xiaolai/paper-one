@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Capability } from './capability'
-import { composeCapabilities, isCapabilityId, KERNEL_DEFAULT_PANE, kernelApi, resolvePaneId } from './registry'
+import { composeCapabilities, isCapabilityId, kernelApi, resolvePaneId } from './registry'
 import { createKernelServices } from './services'
 
 /**
@@ -37,8 +37,12 @@ describe('resolvePaneId', () => {
     expect(resolvePaneId('example:pane', ['example:pane'], 'library')).toBe('example:pane')
   })
 
-  it('opens the contents panel by default', () => {
-    expect(KERNEL_DEFAULT_PANE).toBe('toc')
+  /* The default is asserted by what it does, not by the name it holds: it is
+     a kernel pane, so it resolves to itself against a composition that lists
+     nothing, whatever fallback the caller names. */
+  it('falls back by default to a kernel pane, which resolves to itself with nothing composed', () => {
+    const fallback = resolvePaneId('gone:pane', [])
+    expect(resolvePaneId(fallback, [], 'library')).toBe(fallback)
   })
 })
 
@@ -56,16 +60,19 @@ describe('a disposed composition', () => {
     expect(composition.bookStatuses).toEqual([])
   })
 
-  it('leaves no other list behind either', async () => {
+  it('answers every contributed list with an empty one', async () => {
     const services = createKernelServices({ fs: null, storage: null })
     const composition = await composeCapabilities([], kernelApi(services), new AbortController().signal)
     composition.dispose()
     expect(composition.panes).toEqual([])
-    expect(composition.overlays).toEqual([])
     expect(composition.screens).toEqual([])
+    expect(composition.overlays).toEqual([])
     expect(composition.settings).toEqual([])
     expect(composition.bookActions).toEqual([])
+    expect(composition.bookStatuses).toEqual([])
+    expect(composition.markControls).toEqual([])
     expect(composition.clients).toEqual([])
+    expect(composition.services.size).toBe(0)
   })
 })
 

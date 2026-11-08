@@ -196,16 +196,50 @@ jobs:
   # WORSE here: its key is per-job, so a new job's first run is a miss, the
   # offline call fails, the job fails — and a failed job saves no cache, which is
   # a state that cannot recover on its own.
+  # WHICH CAPABILITIES THE PROOF REMOVES, asked of the tree, never typed. The
+  # matrix below is built from this answer, so each of its jobs proves an id the
+  # tree itself offered — the three conditions are `removableCapabilities`', and
+  # an empty answer exits 2 here rather than leaving a matrix with no job in it.
+  deletion-plan:
+    name: deletion (which capabilities are removable)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      capabilities: ${{ steps.list.outputs.capabilities }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # An assignment, not `echo "…$(…)"`: under `bash -e` a failing command
+      # substitution fails the assignment, where inside an echo it would vanish.
+      - id: list
+        run: |
+          capabilities=$(node scripts/verify-without.mjs --list)
+          echo "verify-without: removable $capabilities"
+          echo "capabilities=$capabilities" >> "$GITHUB_OUTPUT"
+
   deletion:
-    name: deletion (every removable capability, temp checkout)
+    name: deletion (without ${{ matrix.capability }}, temp checkout)
+    needs: deletion-plan
     runs-on: macos-26
-    # 5 capabilities x ~250s = 1242s measured, so ~21 min: `circle` 266.7,
-    # `passages` 249.2, `public` 250.8, `voices` 258.8, `webhost` 208.0. The list
-    # is DERIVED, so it grows as capabilities are added — 40 leaves room for four
-    # more before anybody has to think about this number. When it does bind, the
-    # lever is the one `verify-without.mjs` already names: a CI matrix over
-    # `removableCapabilities()`, not measuring fewer of them.
-    timeout-minutes: 40
+    # ONE CAPABILITY PER JOB, because one job for all of them bound. It was
+    # sized at 5 x ~250s, about 21 min, against a 40-minute limit; on 2026-11-04
+    # seven capabilities at about six minutes each (the copy's `pnpm test` alone
+    # is ~5 min of it) ran past 40 and were cancelled mid-`webhost`. The lever
+    # was the one `verify-without.mjs` named: a matrix, not measuring fewer.
+    # Each job now holds one ~6-minute proof plus its setup, and 20 is twice
+    # that, whatever the count grows to.
+    timeout-minutes: 20
+    strategy:
+      # One capability's failure must not cancel the others: every one that
+      # cannot be removed is named on the same run.
+      fail-fast: false
+      matrix:
+        capability: ${{ fromJSON(needs.deletion-plan.outputs.capabilities) }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -225,9 +259,11 @@ jobs:
       # the copy's pruning a different operation from the one this proves.
       - name: Cargo's registry, so a lockfile can be pruned without a network
         run: cargo fetch --locked --manifest-path src-tauri/Cargo.toml
-      # NO ARGUMENT, DELIBERATELY. The script derives which capability it can
-      # remove — the manifest declares it, nothing `requires` it, no host
-      # imports it outside a composition root — and prints what it chose.
+      # THE ID IS THE MATRIX'S, WHICH IS THE TREE'S. `deletion-plan` asked the
+      # script which capabilities it can remove — the manifest declares it,
+      # nothing `requires` it, no host imports it outside a composition root —
+      # and this job proves the one it was handed. It reaches the shell through
+      # `env`, never spliced into the script's text.
       #
       # ⚠️ **THIS LINE NAMED AN ID BY HAND AND WAS WRONG THREE TIMES.** It said
       # `example` for months after the capability called `example` was deleted
@@ -244,7 +280,9 @@ jobs:
       # host import fails in the suite rather than retiring this step by
       # accident.
       - name: Deletion is an operation (temp checkout)
-        run: pnpm verify:without
+        env:
+          CAPABILITY: ${{ matrix.capability }}
+        run: pnpm verify:without "$CAPABILITY"
 
   linux:
     name: linux (Ubuntu 24.04, full gate)

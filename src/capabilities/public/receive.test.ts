@@ -59,8 +59,12 @@ vi.mock('./lib/crypto', () => ({
     verify: (_key: string, message: string, sig: string) => sig === SIG_HOISTED && accepted.has(message),
   },
 }))
+/* The peer-to-peer switch as `p2pAvailable` reads it, which this capability
+   follows rather than having a switch of its own. */
+const p2p = vi.hoisted(() => ({ on: true }))
 vi.mock('../peer', () => ({
   P2P_SWITCH_TITLE: 'Peer-to-peer',
+  p2pAvailable: () => Promise.resolve(p2p.on),
   sharePort: () => ({
     offered: () => Promise.resolve([]),
     offerBytes: () => Promise.resolve(),
@@ -134,6 +138,17 @@ describe('what the app is offered', () => {
     expect(publicSharing.id).toBe('public')
     expect(publicSharing.requires).toEqual(['peer'])
     expect(publicSharing.follows).toEqual({ title: 'Public sharing', switch: 'Peer-to-peer' })
+  })
+
+  it('is available exactly while peer-to-peer is', async () => {
+    try {
+      p2p.on = false
+      await expect(publicSharing.available!()).resolves.toBe(false)
+      p2p.on = true
+      await expect(publicSharing.available!()).resolves.toBe(true)
+    } finally {
+      p2p.on = true
+    }
   })
 
   it('puts one publish control on a mark’s row, and one pane in the reader', () => {

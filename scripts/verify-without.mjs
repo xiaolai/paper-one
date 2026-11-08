@@ -70,7 +70,7 @@ export const COPY_EXCLUDE = Object.freeze([
   '.DS_Store',
 ])
 
-const USAGE = 'usage: node scripts/verify-without.mjs [id] [--keep]'
+const USAGE = 'usage: node scripts/verify-without.mjs [id] [--keep] | --list'
 
 /**
  * The steps run in the copy after the removal.
@@ -128,6 +128,8 @@ export const EXCLUDED = Object.freeze({
 })
 
 export function parseArgs(argv) {
+  /* `--list` proves nothing, so anything beside it would be ignored. */
+  if (argv.includes('--list')) return argv.length === 1 ? { list: true } : { error: '--list takes no other argument' }
   let id
   let keep = false
   for (const arg of argv) {
@@ -434,26 +436,41 @@ export function verifyWithout(id, { source = REPO_ROOT, keep = false, run = spaw
  * stop-at-first-failure can be tested without copying the tree three times —
  * the same shape `verifyWithout` gives its own `run` and `log`.
  */
-export function main(argv, { prove = verifyWithout, out = (l) => process.stdout.write(l), err = (l) => process.stderr.write(l) } = {}) {
+export function main(
+  argv,
+  {
+    prove = verifyWithout,
+    out = (l) => process.stdout.write(l),
+    err = (l) => process.stderr.write(l),
+    removable: pick = removableCapabilities,
+  } = {},
+) {
   const args = parseArgs(argv)
   if (args.error !== undefined) {
     err(`verify-without: ${args.error}\n${USAGE}\n`)
     return 2
   }
   /* AN ID MAY STILL BE NAMED — for asking about one in particular, which is
-     what a person debugging the remover wants. With none, the tree is asked,
-     and EVERY removable capability is proved. */
+     what a person debugging the remover wants, and what each job of CI's
+     matrix does with an id `--list` gave it. With none, the tree is asked, and
+     EVERY removable capability is proved. */
   let ids
   if (args.id === undefined) {
-    const removable = removableCapabilities()
+    const removable = pick()
     if (removable.length === 0) {
       /* NOT A PASS. Every capability being unremovable is the thing this proof
          exists to notice — it means every leaf has grown a host import — and
-         answering 0 here would retire the gate by accident. */
+         answering 0 here would retire the gate by accident. `--list` refuses
+         too: an empty list is a matrix with no job in it, which a pull request
+         shows much as it shows a pass. */
       err(
         'verify-without: no capability can be removed from this tree — every one is required by another or imported by a host outside a composition root\n',
       )
       return 2
+    }
+    if (args.list) {
+      out(`${JSON.stringify(removable)}\n`)
+      return 0
     }
     ids = removable
     /* ⚠️ **THIS TOOK `removable[0]` AND PRINTED THE REST AS AN ASIDE** — so the
@@ -465,9 +482,10 @@ export function main(argv, { prove = verifyWithout, out = (l) => process.stdout.
        without a crate; `verify:without webhost` failed on both the first time
        anybody ran it, on 2026-09-19, long after either could have been caught.
 
-       So all of them are proved. Roughly 140–170 s each here, and the honest
-       lever if that ever matters is a CI matrix over `removableCapabilities()`,
-       not measuring fewer of them. */
+       So all of them are proved. Roughly 140–170 s each here; in CI it came to
+       matter — seven of them, about six minutes each on the runner, passed the
+       one job's 40-minute limit on 2026-11-04 — so CI runs a matrix over
+       `--list`, one job per capability, rather than measuring fewer of them. */
     out(`verify-without: proving all ${removable.length} removable (${removable.join(', ')})\n`)
   } else {
     ids = [args.id]

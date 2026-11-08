@@ -27,15 +27,22 @@ import {
   updateBook,
   writeBook,
 } from './bookFolder'
+import { scopeFs } from './registry'
+import type { KernelServices } from './services'
 import {
   CIRCLE_DIR,
   OWN_LISTS_DIR,
+  PUBLIC_DIR,
+  circleFolderIn,
+  circlePathIn,
   ownListPathIn,
   personFolderIn,
   personListPathIn,
   personListsDirIn,
   personShelfPathIn,
+  publicPathIn,
   relationshipPathIn,
+  sharedPathIn,
 } from './bookFolder'
 
 /**
@@ -240,6 +247,10 @@ describe('parseRecord', () => {
     expect(isContentHash('CD'.repeat(32))).toBe(false)
     expect(isContentHash('cd'.repeat(31))).toBe(false)
     expect(isContentHash(`${'cd'.repeat(32)}\n`)).toBe(false)
+    /* Anchored at both ends: a digest with anything before it, or one digit
+       past it, is not one. */
+    expect(isContentHash(`x${'cd'.repeat(32)}`)).toBe(false)
+    expect(isContentHash(`${'cd'.repeat(32)}c`)).toBe(false)
     expect(isContentHash(['cd'.repeat(32)])).toBe(false)
     expect(isContentHash({ toString: () => 'cd'.repeat(32) })).toBe(false)
     expect(isContentHash(null)).toBe(false)
@@ -1322,6 +1333,44 @@ describe('where the circle’s files live — WI-23.C3 and E1', () => {
     expect(personFolderIn('../books').split('/')).toHaveLength(2)
     expect(ownListPathIn('../x').split('/')).toHaveLength(3)
     expect(personListPathIn('p/q', 'r/s').split('/')).toHaveLength(4)
+  })
+
+  it('names the circle’s and the public layer’s files in a book’s folder, beside circle/ and never in it', () => {
+    const person = 'ab'.repeat(32)
+    expect(circleFolderIn('book:a')).toBe('books/book_a/circle')
+    expect(circlePathIn('book:a', person)).toBe(`books/book_a/circle/${person}.json`)
+    expect(sharedPathIn('book:a')).toBe('books/book_a/shared.json')
+    expect(publicPathIn('book:a')).toBe('books/book_a/public.jsonl')
+    /* A hostile person id stays inside its one segment. */
+    expect(circlePathIn('book:a', '../x').split('/')).toHaveLength(4)
+  })
+})
+
+describe('the public layer’s own folder', () => {
+  /* What the public layer keeps that is about no one book (the reader's
+   * decisions about voices) lives under `PUBLIC_DIR`. A capability may write
+   * only under its own id, so that folder is one the public capability's
+   * scoped filesystem lets it write, and the write reaches the disk at the
+   * path it was given. */
+  it('is a folder the public capability may write in', async () => {
+    const written: string[] = []
+    const fs = { writeFile: async (path: string) => void written.push(path) } as unknown as NonNullable<KernelServices['fs']>
+    const scoped = scopeFs(fs, 'public')!
+    await expect(scoped.writeFile(`${PUBLIC_DIR}/voices.json`, new Uint8Array([1]))).resolves.toBeUndefined()
+    expect(written).toEqual(['public/voices.json'])
+    /* And no other capability may write there. */
+    await expect(scopeFs(fs, 'circle')!.writeFile(`${PUBLIC_DIR}/voices.json`, new Uint8Array([1]))).rejects.toThrow(/may only writeFile under "circle\/"/u)
+  })
+})
+
+describe('a book id with nothing to name a folder by', () => {
+  /* `folderOf('')` was `books/`, and `trashBook(fs, '')` then renamed the
+     whole library into the trash. An empty id is refused by name; any other
+     id is one segment, even one with no alphanumeric character in it. */
+  it('is refused, rather than naming the library itself', () => {
+    expect(() => folderOf('')).toThrow('bookFolder: a book id must have at least one alphanumeric character')
+    expect(() => circlePathIn('book:a', '')).toThrow(/at least one alphanumeric character/u)
+    expect(folderOf('_')).toBe('books/_')
   })
 })
 
