@@ -356,10 +356,14 @@ describe('the arguments', () => {
   const REPO = fileURLToPath(new URL('..', import.meta.url))
 
   it('reads a root against the working directory, and defaults to this repository', () => {
-    expect(parseArgs(['--root', 'a'], '/base')).toEqual({ root: '/base/a' })
-    expect(parseArgs(['--root', 'a--'], '/base')).toEqual({ root: '/base/a--' })
-    expect(parseArgs(['--root', '/elsewhere'], '/base')).toEqual({ root: '/elsewhere' })
-    expect(parseArgs([], '/base')).toEqual({ root: REPO })
+    /* In the platform's own spelling: on Windows `/base` is `D:\base`. Joined, not
+       resolved, so the expectation is not the expression under test, and an
+       absolute `--root` still has to replace the base rather than join it. */
+    const base = path.resolve('/base')
+    expect(parseArgs(['--root', 'a'], base)).toEqual({ root: path.join(base, 'a') })
+    expect(parseArgs(['--root', 'a--'], base)).toEqual({ root: path.join(base, 'a--') })
+    expect(parseArgs(['--root', '/elsewhere'], base)).toEqual({ root: path.resolve('/elsewhere') })
+    expect(parseArgs([], base)).toEqual({ root: REPO })
   })
 
   it('refuses what it does not understand', () => {

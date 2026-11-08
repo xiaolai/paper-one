@@ -728,6 +728,7 @@ export async function writeIndex(
    * folders offers nothing to carry, and the field stays absent as before. */
   let kept = folders
   if (!kept) {
+    // Stryker disable next-line ArrowFunction: previous is read only through previous?.folders, where null and undefined both skip the carry, so no caller can tell them apart.
     const previous = await readIndex(fs).catch(() => null)
     if (previous?.folders) {
       const owned = new Set(previous.books.map((one) => folderNameOf(one.bookId)))

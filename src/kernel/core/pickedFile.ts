@@ -63,9 +63,15 @@ export interface FilePickerIo {
   writeText(path: string, text: string): Promise<void>
 }
 
-/** The last path segment, whichever separator the platform used. */
+/**
+ * The last path segment, whichever separator the platform used.
+ *
+ * Everything after the last separator of either kind, or the whole of a path with
+ * none. Written without `split(…).pop()`, whose `undefined` cannot happen (a split
+ * always has a part) and still needed a fallback no input could reach.
+ */
 export function fileNameOf(path: string): string {
-  return path.split(/[\\/]/u).pop() ?? ''
+  return path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
 }
 
 /** A platform call whose failure says only `sentence`. Async, so a throw is caught as a rejection is. */

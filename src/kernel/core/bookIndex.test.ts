@@ -182,6 +182,19 @@ describe('loadShelf', () => {
     expect(fs.store.has(INDEX_DIRTY_FILE)).toBe(false)
   })
 
+  /* The marker's name is on disk, written by a launch that crashed before its
+     flush: a build that looked elsewhere would trust a cache that is behind. */
+  it('finds the marker a crashed launch left at index.dirty', async () => {
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    fs.store.set(`${BOOKS_DIR}/book_a/book.json`, new TextEncoder().encode(JSON.stringify({ title: 'Alpha', author: '', position: 'p2' })))
+    fs.store.set('index.dirty', new TextEncoder().encode(JSON.stringify({ version: 1, generation: 1, books: ['book_a'] })))
+
+    const { books } = await loadShelf(fs)
+    expect(books.find((one) => one.bookId === 'book_a')?.position).toBe('p2')
+    expect(fs.store.has('index.dirty')).toBe(false)
+  })
+
   it('serves the re-read from memory and writes nothing when persisting is off', async () => {
     const fs = fakeFs(twoBooks)
     await writeIndex(fs, await scanBooks(fs))

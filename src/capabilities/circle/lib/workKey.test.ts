@@ -121,6 +121,8 @@ describe('workKey', () => {
     expect(workKey('urn:uuid::1b2c3d4e-5f60-7182-93a4-b5c6d7e8f901')?.key).toBe(uuid)
     // `uuid` trailing the value is not a prefix, and leaves no UUID behind.
     expect(workKey('1b2c3d4e-5f60-7182-93a4-b5c6d7e8f901uuid')?.kind).toBe('opaque')
+    // Nor `isbn`, which would otherwise leave a valid ISBN-13 behind.
+    expect(workKey('9780142437247isbn')?.kind).toBe('opaque')
   })
 
   it('takes a UUID or an ISBN only when it is the whole of what is left', () => {

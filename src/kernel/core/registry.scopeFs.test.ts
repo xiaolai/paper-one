@@ -56,6 +56,11 @@ describe('the public layer’s reviewed write', () => {
     'books/book_abc/content.epub',
     'books/book_abc/public.jsonl/../marks.json',
     'trash/book_abc/public.jsonl',
+    /* The pattern is anchored at both ends: the reviewed name with anything
+       after it, or the reviewed shape below another folder, is not it. */
+    'books/book_abc/public.jsonl.bak',
+    'books/book_abc/public.jsonl.writing.bak',
+    'trash/books/book_abc/public.jsonl',
   ]
 
   it('lets the public layer write the one file its review names, atomically and otherwise', async () => {
@@ -87,6 +92,8 @@ describe('the public layer’s reviewed write', () => {
        been reviewed for more than it needs. */
     const scoped = scopeFs(rawFs(), 'public')!
     await expect(scoped.mkdir('books/book_abc/public')).rejects.toThrow(/may only mkdir under "public\/"/u)
+    /* And the book's folder only where `books/` begins the path. */
+    await expect(scoped.mkdir('trash/books/book_abc')).rejects.toThrow(/may only mkdir under "public\/"/u)
   })
 })
 
