@@ -45,6 +45,8 @@ interface Publishing {
   /** What the host had decided this book should open AT — read once, when a real session parses. */
   lastLocation: string | null
   readonly goTo: string[]
+  /** Every seek, as the fraction the seek track asked for. */
+  readonly seeks: number[]
   readonly turns: string[]
   /** Every walk of this book for marks with no anchor in it. */
   readonly reanchored: { id: string }[][]
@@ -173,7 +175,7 @@ vi.mock('./reader/session', async (importActual) => {
   class StandIn {
     #callbacks: any
     #gone = false
-    readonly own: Publishing = { source: null, lastLocation: null, goTo: [], turns: [], reanchored: [], published: false }
+    readonly own: Publishing = { source: null, lastLocation: null, goTo: [], seeks: [], turns: [], reanchored: [], published: false }
     #cfi = 'epubcfi(/6/4!/4/2,/1:0,/1:9)'
 
     constructor(_host: HTMLElement, callbacks: any) {
@@ -220,6 +222,14 @@ vi.mock('./reader/session', async (importActual) => {
             if (!this.#gone) this.#relocate(target)
           }, 0)
         }
+      },
+      /* A seek lands a turn later, as `goTo` does, and somewhere else: THERE
+         stands for wherever the fraction resolves to. */
+      goToFraction: (fraction: number) => {
+        this.own.seeks.push(fraction)
+        setTimeout(() => {
+          if (!this.#gone) this.#relocate(THERE)
+        }, 0)
       },
       /* A generator that yields nothing: the reader asks for results and gets none. */
       search: async function* () {},
@@ -591,6 +601,23 @@ describe('a jump inside the open book', () => {
     await settle()
     accel('[')
     await eventually(() => expect(reader.opened[0]!.goTo).toEqual([HERE]))
+  })
+
+  /* A SEEK IS A JUMP THE READER CAN UNDO. A thumb slipped on the seek track can
+     move a reader a thousand pages, and ⌘[ is the only way back to the page
+     they were reading. The book was not open when the app first drew, so this
+     also holds that the seek records from the book open NOW — a seek handler
+     kept from that first render recorded no place at all, and ⌘[ went nowhere. */
+  it('records where a seek left from, so ⌘[ goes back to it', async () => {
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    await open('Moby-Dick')
+
+    fireEvent.keyDown(screen.getByRole('slider', { name: 'How far through the book' }), { key: 'End' })
+    await eventually(() => expect(reader.opened[0]!.seeks, 'the seek never reached the book').toEqual([1]))
+    await settled(2)
+    accel('[')
+    await eventually(() => expect(reader.opened[0]!.goTo, 'the seek left no way back').toEqual([HERE]))
   })
 
   it('takes a link that leaves the book away from foliate, and says when it is refused', async () => {
