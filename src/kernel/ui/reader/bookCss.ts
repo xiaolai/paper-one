@@ -500,6 +500,20 @@ export interface BookCssOptions {
    * sheets to it.
    */
   readonly style?: Partial<ReadingStyle>
+  /**
+   * How tall the page is, in CSS pixels — the reader's stage, not the book's
+   * document. Zero or less means not yet measured.
+   *
+   * REQUIRED BECAUSE THE FIGURE CAP IS A SHARE OF IT, and no CSS unit inside
+   * the book can name it. The cap was `95vh`, and inside an iframe `vh` is the
+   * IFRAME. In paginated flow that is the page, which is why it looked right;
+   * in scrolled flow foliate sizes the iframe to its content, so a figure
+   * capped at 95vh grew the iframe, which raised the cap, which grew the
+   * figure — the ResizeObserver flood on illustrated Gutenberg books, with the
+   * page count collapsing to zero. A length measured off the stage cannot
+   * feed back, because nothing in the book moves the stage.
+   */
+  readonly pageHeight: number
 }
 
 /**
@@ -533,6 +547,7 @@ export function bookVars({
   brightness,
   contrast,
   style,
+  pageHeight,
 }: BookCssOptions): BookVars {
   const set: ReadingStyle = { ...DEFAULT_READING_STYLE, ...style }
   const step = readingStep(stepIdx)
@@ -624,7 +639,7 @@ export function bookVars({
     '--paper-figure-width': set.figureScalesWithText
       ? `${stepAt(FIGURE_WIDTHS, set.figureWidth) / 10}em`
       : `${stepAt(FIGURE_WIDTHS, set.figureWidth)}%`,
-    '--paper-figure-height': `${stepAt(FIGURE_HEIGHTS, set.figureHeight)}vh`,
+    '--paper-figure-height': figureHeightPx(set.figureHeight, pageHeight),
     /* inherit rather than absent, because pre and code take the browser's
        monospace by default and the reader asking for the book's face means the
        BOOK's, not the UA's. */
@@ -652,6 +667,19 @@ export function bookVars({
        nothing. See MINIMUM_SIZES for the 8.5px that bought this. */
     '--paper-min-size': minimumSizePx(set.minimumSize),
   }
+}
+
+/**
+ * The figure cap as pixels of the page, or null before the page is measured.
+ *
+ * NULL REMOVES THE PROPERTY, so `max-height: var(--paper-figure-height)` is
+ * invalid at computed-value time and falls back to `none` — no cap from Paper
+ * for the moment before the stage has a height. Never a viewport unit as a
+ * stand-in: see `BookCssOptions.pageHeight` for the loop that one starts.
+ */
+function figureHeightPx(step: number, pageHeight: number): string | null {
+  if (!(pageHeight > 0)) return null
+  return `${Math.round((stepAt(FIGURE_HEIGHTS, step) * pageHeight) / 100)}px`
 }
 
 /** The floor's pixel value, or null at step 0 — one `stepAt`, asked once. */

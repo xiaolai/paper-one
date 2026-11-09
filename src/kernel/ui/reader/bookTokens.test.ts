@@ -40,8 +40,9 @@ import { describe, expect, it } from 'vitest'
  * the app's chrome:
  *
  *   — Viewport units are NOT structure here. `100dvh` in a panel is the window;
- *     `max-height: 95vh` on a figure is a typographic cap somebody chose, and
- *     WI-14.4 turns it into a setting.
+ *     inside the book's iframe a viewport unit is the iframe, which in
+ *     scrolled flow is as tall as its content — the figure cap was `95vh` and
+ *     fed a resize loop until it became pixels of the page.
  *   — A bare number outside a function is a chosen ratio, not arithmetic.
  *     `line-height: 1.2` and `font-weight: 600` are exactly the values the
  *     audit found, and a guard that waved bare numbers through would have

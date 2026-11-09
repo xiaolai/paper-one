@@ -295,9 +295,12 @@ export interface SteppedScale {
    *
    * `x` is a bare multiplier and has no unit at all — it is spelled here so
    * `StepRow` can report "1.15×" rather than "1.15", which reads as a length.
-   * The rest are CSS units and are appended verbatim.
+   * The rest are CSS units and are appended verbatim — except the figure
+   * height's `%`, which is a share of the page and is converted to pixels.
+   * No viewport unit is offered: inside the book's iframe it measures the
+   * iframe, not the page — see `FIGURE_HEIGHTS`.
    */
-  readonly unit: 'em' | 'x' | '%' | 'vh' | 'px' | 'ms'
+  readonly unit: 'em' | 'x' | '%' | 'px' | 'ms'
 }
 
 // Stryker disable next-line ObjectLiteral: emptying this table leaves `DEFAULT_SPACING` below reading `.def` off four missing scales, at module scope — so the mutant throws while this module is being imported, every covering suite fails to LOAD, no test fails, and Stryker's vitest runner reports it Survived with nothing able to kill it (measured 2026-09-14)
@@ -1523,8 +1526,13 @@ export const FIGURE_WIDTHS: SteppedScale = { steps: [70, 80, 90, 95, 100], def: 
  * all and why Readium carries the same safeguard at the same value. The lower
  * steps are for a reader who would rather see a figure and the text around it
  * than a figure alone.
+ *
+ * A PERCENTAGE OF THE PAGE, NOT `vh`. The book renders in an iframe, where a
+ * viewport unit is the iframe — and in scrolled flow the iframe is as tall as
+ * its content, so a `vh` cap chased its own figure. `bookVars` turns the share
+ * into pixels of the measured stage; see `BookCssOptions.pageHeight`.
  */
-export const FIGURE_HEIGHTS: SteppedScale = { steps: [50, 70, 85, 95], def: 3, unit: 'vh' }
+export const FIGURE_HEIGHTS: SteppedScale = { steps: [50, 70, 85, 95], def: 3, unit: '%' }
 
 /**
  * A floor under the smallest text in the book — F5.

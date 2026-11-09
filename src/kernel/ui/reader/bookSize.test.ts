@@ -27,6 +27,7 @@ const settings = (stepIdx: number) => ({
   spacing: { letter: 1, word: 0, line: 1, paragraph: 2 },
   brightness: 1,
   contrast: 0,
+  pageHeight: 800,
 })
 
 /** A declaration inside the rule with exactly this selector, comments stripped. */

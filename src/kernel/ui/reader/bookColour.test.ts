@@ -28,6 +28,7 @@ const settings = (theme: (typeof THEME_IDS)[number]) => ({
   spacing: { letter: 1, word: 1, line: 1, paragraph: 1 },
   brightness: 1,
   contrast: 0,
+  pageHeight: 800,
 })
 
 const sheet = (theme: (typeof THEME_IDS)[number]) =>
