@@ -92,17 +92,27 @@ export const WEB_SPEECH = /speechSynthesis/i
  * the other half: code that reads aloud, wherever it is written. Only a
  * module's code says that, so this reads the code. Logic that merely concerns
  * voices names no API and passes here; keeping it in narration is what holds
- * it. A module Rollup rendered nothing of has `code: null`, which `test` reads
- * as the text `null` and so never names the API. An asset has no `modules`.
+ * it. A module Rollup rendered nothing of has `code: null`, and is skipped. An
+ * asset has no `modules`.
+ *
+ * ⚠️ **NOTHING READ IS A REFUSAL, NOT A PASS.** A bundle whose module maps are
+ * empty, or hold only `null` code, names no API only because no code was looked
+ * at; that throws, and the build fails, rather than reporting a clean bundle.
  */
 export function webSpeechOutsideNarration(platform, bundle, manifest) {
   const owner = manifest.capabilities.find((entry) => entry.id === WEB_SPEECH_OWNER)
   if (owner !== undefined && owner.platforms.includes(platform)) return []
   const found = []
+  let read = false
   for (const output of Object.values(bundle)) {
     for (const [id, { code }] of Object.entries(output.modules ?? {})) {
+      if (typeof code !== 'string') continue
+      read = true
       if (WEB_SPEECH.test(code)) found.push(id)
     }
+  }
+  if (!read) {
+    throw new Error(`assert-bundle: the ${platform} bundle has no rendered module code, so whether it names the Web Speech API was never read`)
   }
   return found
 }

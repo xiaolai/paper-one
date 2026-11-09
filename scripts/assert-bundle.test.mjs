@@ -74,7 +74,9 @@ function drive(root, platform, moduleIds, modules) {
     },
   }
   const bundle = {
-    'assets/index.js': { type: 'chunk', moduleIds, ...(modules === undefined ? {} : { modules }) },
+    /* Rollup renders every module it keeps, so a bundle given no code renders
+       a plain line for each: the Web Speech check refuses one it read nothing of. */
+    'assets/index.js': { type: 'chunk', moduleIds, modules: modules ?? Object.fromEntries(moduleIds.map((id) => [id, { code: 'export {};' }])) },
     'assets/index.css': { type: 'asset' },
   }
   let threw = null
@@ -418,8 +420,22 @@ describe('webSpeechOutsideNarration', () => {
   })
 
   it('skips a module Rollup rendered nothing of, an asset, and a chunk with no module map', () => {
-    const bundle = { ...rendered({ '/r/src/gone.ts': null }), 'assets/other.js': { type: 'chunk', moduleIds: ['/r/src/other.ts'] } }
+    const bundle = {
+      ...rendered({ '/r/src/gone.ts': null, '/r/src/plain.ts': 'export const plain = 1;' }),
+      'assets/other.js': { type: 'chunk', moduleIds: ['/r/src/other.ts'] },
+    }
     expect(webSpeechOutsideNarration('web', bundle, { capabilities: [SPEAKING.narration] })).toEqual([])
+  })
+
+  it('refuses a bundle it could read no code of, rather than passing it unread', () => {
+    /* An empty module map, or one Rollup rendered nothing of, names no API
+       only because nothing was looked at. */
+    const manifest = { capabilities: [SPEAKING.narration] }
+    const refusal = 'assert-bundle: the web bundle has no rendered module code, so whether it names the Web Speech API was never read'
+    expect(() => webSpeechOutsideNarration('web', {}, manifest)).toThrow(refusal)
+    expect(() => webSpeechOutsideNarration('web', rendered({}), manifest)).toThrow(refusal)
+    expect(() => webSpeechOutsideNarration('web', rendered({ '/r/src/gone.ts': null }), manifest)).toThrow(refusal)
+    expect(webSpeechOutsideNarration('desktop', {}, { capabilities: [SPEAKING.both, SPEAKING.narration] }), 'nothing is owed where narration is composed').toEqual([])
   })
 
   it('fails the build that carries it, naming the modules, one per line, and the platform', () => {
