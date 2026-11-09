@@ -38,9 +38,16 @@ import { DEFAULT_SPACING } from '../../core/metrics'
  */
 
 const sessions = vi.hoisted(() => ({
-  built: [] as { started: unknown[]; disposed: number; settings: number }[],
+  built: [] as {
+    started: unknown[]
+    deps: Record<string, unknown>[]
+    disposed: number
+    settings: number
+  }[],
   /** Held open until a test settles it — this is what "mid-startup" means. */
   finish: null as null | (() => void),
+  /** What `session.view` answers; null, as during startup, unless a test sets it. */
+  view: null as null | { renderer: unknown },
 }))
 
 vi.mock('./session', async (importOriginal) => {
@@ -48,12 +55,18 @@ vi.mock('./session', async (importOriginal) => {
   return {
     ...real,
     ReaderSession: class {
-      readonly own = { started: [] as unknown[], disposed: 0, settings: 0 }
+      readonly own = {
+        started: [] as unknown[],
+        deps: [] as Record<string, unknown>[],
+        disposed: 0,
+        settings: 0,
+      }
       constructor() {
         sessions.built.push(this.own)
       }
-      start(source: unknown) {
+      start(source: unknown, deps: Record<string, unknown>) {
         this.own.started.push(source)
+        this.own.deps.push(deps)
         return new Promise<void>((resolve) => {
           sessions.finish = resolve
         })
@@ -73,7 +86,7 @@ vi.mock('./session', async (importOriginal) => {
       drawMarks() {}
       redraw() {}
       get view() {
-        return null
+        return sessions.view
       }
     },
   }
@@ -133,12 +146,48 @@ const props = (over: Record<string, unknown> = {}): ComponentProps<typeof Foliat
 
 const book = (name = 'Moby-Dick.epub') => new File(['PK'], name)
 
+/**
+ * jsdom has no `ResizeObserver`; this one records what it was asked to watch
+ * and lets a test deliver the notification by hand.
+ */
+const observers: { callback: () => void; observed: Element[]; disconnected: boolean }[] = []
+class RecordingObserver {
+  readonly own: (typeof observers)[number]
+  constructor(callback: () => void) {
+    this.own = { callback, observed: [], disconnected: false }
+    observers.push(this.own)
+  }
+  observe(target: Element) {
+    this.own.observed.push(target)
+  }
+  unobserve() {}
+  disconnect() {
+    this.own.disconnected = true
+  }
+}
+
+/** The stage's height as jsdom will report it — jsdom has no layout. */
+let stageHeight = 0
+const realClientHeight = Object.getOwnPropertyDescriptor(Element.prototype, 'clientHeight')
+
 beforeEach(() => {
   sessions.built = []
   sessions.finish = null
+  sessions.view = null
+  observers.length = 0
+  stageHeight = 0
+  vi.stubGlobal('ResizeObserver', RecordingObserver)
+  Object.defineProperty(Element.prototype, 'clientHeight', {
+    configurable: true,
+    get: () => stageHeight,
+  })
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+  if (realClientHeight) Object.defineProperty(Element.prototype, 'clientHeight', realClientHeight)
+})
 
 describe('a book that is open', () => {
   it('builds a session for a file, and none without one', () => {
@@ -280,5 +329,82 @@ describe('unmounting while the book is still opening', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(spies.onError).not.toHaveBeenCalled()
     expect(sessions.built[0]?.disposed).toBe(1)
+  })
+})
+
+describe('the figure cap follows the page', () => {
+  const figureCap = (doc: Document) => doc.documentElement.style.getPropertyValue('--paper-figure-height')
+  const openDoc = () => document.implementation.createHTMLDocument('section')
+
+  /* STARTUP READS THE STAGE AS IT IS. The first section is written to through
+     `applyVars`, so the height has to be known before the book opens. */
+  it('hands the measured page height to every document the session writes to', () => {
+    stageHeight = 600
+    render(<FoliateView {...props({ ...callbacks(), file: book() })} />)
+    const deps = sessions.built[0]?.deps[0] as { applyVars: (doc: Document) => void }
+    const doc = openDoc()
+    deps.applyVars(doc)
+    expect(figureCap(doc)).toBe('570px')
+  })
+
+  it('watches its own stage, and stops when it goes', () => {
+    const { container, unmount } = render(<FoliateView {...props({ ...callbacks(), file: book() })} />)
+    expect(observers).toHaveLength(1)
+    expect(observers[0]?.observed).toEqual([container.firstElementChild])
+    unmount()
+    expect(observers[0]?.disconnected).toBe(true)
+  })
+
+  /**
+   * ⚠️ **A RESIZE REWRITES THE CAP ON THE OPEN DOCUMENTS**, and only the cap's
+   * variables — no settings effect re-runs. The cap was `95vh`, which tracked
+   * the window for free and fed a ResizeObserver loop in scrolled flow; a pixel
+   * cap does not track anything, so this is what keeps it a share of the page.
+   */
+  it('rewrites the cap when the page changes height, and not when it does not', () => {
+    stageHeight = 600
+    const doc = openDoc()
+    sessions.view = { renderer: { getContents: () => [{ doc }] } }
+    render(<FoliateView {...props({ ...callbacks(), file: book() })} />)
+
+    stageHeight = 900
+    observers[0]?.callback()
+    expect(figureCap(doc)).toBe('855px')
+
+    /* A width change notifies too, and the cap does not read width. */
+    doc.documentElement.style.setProperty('--paper-figure-height', 'untouched')
+    observers[0]?.callback()
+    expect(figureCap(doc)).toBe('untouched')
+  })
+
+  it('remembers a resize that lands before the book has a renderer', () => {
+    stageHeight = 600
+    render(<FoliateView {...props({ ...callbacks(), file: book() })} />)
+    stageHeight = 700
+    expect(() => observers[0]?.callback()).not.toThrow()
+
+    const deps = sessions.built[0]?.deps[0] as { applyVars: (doc: Document) => void }
+    const doc = openDoc()
+    deps.applyVars(doc)
+    expect(figureCap(doc)).toBe('665px')
+  })
+
+  /* A RENDERER THAT THROWS MID-RESIZE IS LOGGED, NOT LET LOOSE. The callback
+     runs outside React, so an exception there would surface as an uncaught
+     error at the window with nothing to say which book it belonged to. */
+  it('logs a resize it could not apply instead of throwing', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    sessions.view = {
+      renderer: {
+        getContents: () => {
+          throw new Error('gone')
+        },
+      },
+    }
+    render(<FoliateView {...props({ ...callbacks(), file: book() })} />)
+    stageHeight = 500
+    expect(() => observers[0]?.callback()).not.toThrow()
+    expect(error).toHaveBeenCalledWith('Paper: resizing the figure cap failed', expect.any(Error))
+    error.mockRestore()
   })
 })

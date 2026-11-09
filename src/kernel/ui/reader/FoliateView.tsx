@@ -182,13 +182,23 @@ interface Settings {
  * them — and `setStyles` is optional because the fixed-layout renderer does
  * not implement it.
  */
-export function applySettings(renderer: Renderer, settings: Settings): void {
+export function applySettings(renderer: Renderer, settings: Settings, pageHeight: number): void {
   applyLayout(renderer, settings)
   applySheets(renderer)
-  /* THE CHANGE ITSELF IS THE VARIABLES, and the sheets above almost never move.
-     Every document already on screen is written to here; one that arrives later
-     is written to as it loads — see `applyVars` in the session's deps. */
-  for (const { doc } of renderer.getContents()) applyBookVars(doc, readingVars(settings))
+  applyVarsToContents(renderer, settings, pageHeight)
+}
+
+/**
+ * The variables, onto every document the renderer has on screen.
+ *
+ * THE CHANGE ITSELF IS THE VARIABLES, and the sheets almost never move. Every
+ * document already on screen is written to here; one that arrives later is
+ * written to as it loads — see `applyVars` in the session's deps. Also run on
+ * its own when the stage changes height, because the figure cap is a share of
+ * it — see `BookCssOptions.pageHeight`.
+ */
+export function applyVarsToContents(renderer: Renderer, settings: Settings, pageHeight: number): void {
+  for (const { doc } of renderer.getContents()) applyBookVars(doc, readingVars(settings, pageHeight))
 }
 
 /**
@@ -198,7 +208,7 @@ export function applySettings(renderer: Renderer, settings: Settings): void {
  * measure, the page margins, the flow and whether a turn animates, none of
  * which the stylesheet has ever taken.
  */
-export function readingVars(settings: Settings): Parameters<typeof applyBookVars>[1] {
+export function readingVars(settings: Settings, pageHeight: number): Parameters<typeof applyBookVars>[1] {
   const base = {
     stepIdx: settings.stepIdx,
     theme: settings.theme,
@@ -208,7 +218,7 @@ export function readingVars(settings: Settings): Parameters<typeof applyBookVars
     contrast: settings.contrast,
     align: settings.align,
   }
-  return { ...base, style: settings.style }
+  return { ...base, style: settings.style, pageHeight }
 }
 
 /**
@@ -544,6 +554,10 @@ export function FoliateView({
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
    * the answer exists; the session reads this once, after the book is parsed. */
   const lastLocationRef = useRef(lastLocation)
+  /* THE STAGE'S HEIGHT, which the figure cap is a share of — see
+   * `BookCssOptions.pageHeight`. A ref, measured by the observer below, so a
+   * resize rewrites the variables without re-running any settings effect. */
+  const pageHeight = useRef(0)
 
   /* All four refs commit together, after render — see the note on `handlers`.
    * `useLayoutEffect` rather than `useEffect` because it runs before the
@@ -556,6 +570,33 @@ export function FoliateView({
     settings.current = currentSettings
     lastLocationRef.current = lastLocation
   })
+
+  /* WATCH THE STAGE'S HEIGHT, and rewrite only the variables when it moves.
+   *
+   * A layout effect declared before the session's, so the first measurement
+   * is taken before startup reads it. The stage is `inset: 0` in its parent, so nothing
+   * the book renders can change its height — which is the property that makes
+   * this safe where the `vh` it replaces was not. Equal heights are skipped:
+   * the observer also reports width changes, which the cap does not read. */
+  useLayoutEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    pageHeight.current = host.clientHeight
+    const observer = new ResizeObserver(() => {
+      const height = host.clientHeight
+      if (height === pageHeight.current) return
+      pageHeight.current = height
+      const renderer = sessionRef.current?.view?.renderer
+      if (!renderer) return
+      try {
+        applyVarsToContents(renderer, settings.current, height)
+      } catch (cause) {
+        console.error('Paper: resizing the figure cap failed', cause)
+      }
+    })
+    observer.observe(host)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     const host = hostRef.current
@@ -699,8 +740,8 @@ export function FoliateView({
         /* Asked after the fork has parsed the archive and before any section
          * loads — a DRM'd book is refused by name, not rendered as noise. */
         protection: protectionOf,
-        applySettings: (view: View) => applySettings(view.renderer, settings.current),
-        applyVars: (doc: Document) => applyBookVars(doc, readingVars(settings.current)),
+        applySettings: (view: View) => applySettings(view.renderer, settings.current, pageHeight.current),
+        applyVars: (doc: Document) => applyBookVars(doc, readingVars(settings.current, pageHeight.current)),
         styleNote: (view: View) => styleNoteView(view.renderer),
         lastLocation: () => lastLocationRef.current,
       })
@@ -747,7 +788,7 @@ export function FoliateView({
        * what keeps this the third construction site no longer (audit round 1,
        * #484). The deps below still say which props re-run this effect;
        * `measure` and `pageMargins` are deliberately not among them. */
-      applySettings(renderer, settings.current)
+      applySettings(renderer, settings.current, pageHeight.current)
       /* A theme change reaches open documents as VARIABLES — `applySettings`
        * writes `applyBookVars` into each; the sheets themselves are
        * identity-cached and almost never move — so no section rebuilds, no

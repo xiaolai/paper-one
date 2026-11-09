@@ -34,6 +34,7 @@ const settings = (over: Partial<Parameters<typeof bookVars>[0]> = {}) => ({
   spacing: { letter: 1, word: 1, line: 1, paragraph: 1 },
   brightness: 1,
   contrast: 0,
+  pageHeight: 800,
   ...over,
 })
 

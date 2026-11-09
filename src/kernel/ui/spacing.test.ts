@@ -195,6 +195,7 @@ describe('the reader’s spacings survive a book’s own stylesheet', () => {
     spacing: { letter: 1, word: 1, line: 1, paragraph: 1 },
     brightness: 1,
     contrast: 0,
+    pageHeight: 800,
   })
 
   /* THE UNRESOLVED SHEET, for the questions that are about the sheet.
@@ -318,6 +319,7 @@ describe('the reader’s spacings survive a book’s own stylesheet', () => {
     spacing: { letter: 1, word: 1, line: idx, paragraph: 1 },
     brightness: 1,
     contrast: 0,
+    pageHeight: 800,
   }).replace(/\/\*[\s\S]*?\*\//g, '')
 
   const headingLine = (idx: number) => {
