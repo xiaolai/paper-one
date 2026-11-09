@@ -1,10 +1,9 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { ExportCancelled, exportAudiobook, planChapters } from '../reader/audiobook'
-import { basename } from '../../core/bookFiles'
-import { messageOf } from '../../core/messageOf'
-import { chooseAudiobookPath, tauriAudiobook } from '../reader/audiobookTauri'
-import { engineVoiceFor, missingPackNotice, packVoiceOf, qualify } from '../reader/engineVoice'
-import type { ReadyBook, SpeechRequest, SpeechSkipPrefs, SpokenClip, VoicePack } from '../../core/ports'
+import { engineVoiceFor, messageOf, missingPackNotice, packVoiceOf, qualify } from '../../../kernel'
+import type { ReadyBook, SpeechSkipPrefs } from '../../../kernel'
+import { ExportCancelled, exportAudiobook, planChapters } from '../lib/audiobook'
+import { narrationPlatform, pickDestination, releaseDestination, type NarrationEngine } from '../lib/wire'
+import type { AudiobookControl } from '../lib/running'
 
 /**
  * Exporting the open book, from the command palette.
@@ -42,46 +41,25 @@ export interface AudiobookSource extends ReadyBook {
   readonly skip: SpeechSkipPrefs
 }
 
-export interface AudiobookControl {
-  readonly running: boolean
-  readonly run: () => void
-}
-
 export interface AudiobookDeps {
-  /** Present only where the engine is — see `narrate`'s platform gate. */
-  readonly available: boolean
   readonly source: AudiobookSource | null
-  /**
-   * The downloaded packs — the only voices an export can use.
-   *
-   * ⚠️ **THE PLATFORM'S LIST USED TO BE HERE TOO, AND IS NOT.** Phase 30
-   * deleted `narrate_render` over AVSpeechSynthesizer: every voice it reached
-   * on a Mac is below the floor the reading refuses, so it could not produce a
-   * file anybody would want. A book with no pack is refused, and told which
-   * pack would read it.
-   */
-  readonly packs: readonly VoicePack[]
   readonly chosen: Readonly<Record<string, string>>
   readonly rate: number
   /**
-   * Whether a section is already rendered, asked without rendering it.
+   * The downloadable voices, or null where there are none to render with — and
+   * then there is no export to offer.
    *
-   * ⚠️ **THE HALF OF WI-34.4 THAT CANNOT BE DEFAULTED.** Given a
-   * `?? (() => null)` this hook would silently re-render every chapter of a book
-   * the reader had just listened to, and no test could tell one absent function
-   * from another. A build with no voices capability supplies one that answers
-   * null, at the call site, where the absence can be read.
-   */
-  readonly findClip: (request: SpeechRequest) => Promise<SpokenClip | null>
-  /**
-   * Hold rendered sections open while the packer reads them, or let them go.
+   * ⚠️ **THE PACKS ARE ASKED FOR WHEN AN EXPORT STARTS, NOT HANDED IN.** The
+   * catalogue is the only voices an export can use, and a list captured at
+   * render would be the one from before the reader's last download.
    *
-   * REQUIRED for the reason `findClip` is: a build that silently held nothing
-   * would lose a chapter under a running export only when a reader happened to be
-   * listening at the same time, which is the hardest kind of defect to find.
+   * ⚠️ **`findClip` AND `holdClips` CANNOT BE DEFAULTED, AND HERE THEY CANNOT
+   * BE ABSENT.** They are the half of WI-34.4 that makes exporting a book the
+   * reader has listened to cost only the muxing; an engine that is present
+   * carries both.
    */
-  readonly holdClips: (stems: readonly string[], hold: boolean) => Promise<number>
-  /** One line to the reader. The same surface an import reports through. */
+  readonly engine: NarrationEngine | null
+  /** One line to the reader, on the notice line. */
   readonly say: (text: string) => void
 }
 
@@ -97,8 +75,18 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
    * export starts with it false, and a second reset at the start would be a line
    * no test could tell from its absence. */
   const stop = useRef(false)
+  /**
+   * Gives the picked destination back now — a no-op until one is picked.
+   *
+   * ⚠️ **A STOP DURING THE JOIN USED TO WAIT FOR THE JOIN, AND THE JOIN THEN
+   * WROTE OVER THE READER'S FILE.** The token was released only in the
+   * `finally`, after `package` had returned, so the plugin's commit never saw
+   * the release and moved the book onto the name the reader chose. Released
+   * when the stop lands, the commit refuses and whatever was there survives.
+   */
+  const letGo = useRef<() => void>(() => {})
 
-  const { available, source, packs, chosen, rate, findClip, holdClips, say } = deps
+  const { source, chosen, rate, engine, say } = deps
 
   /**
    * ⚠️ **ONE LONG FUNCTION, AND THAT IS THE DECISION RATHER THAN THE DEBT.** An
@@ -135,13 +123,14 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
      * thing the CONTROLS read, which is what state is for.
      */
     if (inFlight.current) {
-      /* The same command stops it — see `commands.ts`. Nothing is awaited here:
+      /* The same command stops it — see the capability's `commands`. Nothing is awaited here:
        * the loop notices between chapters and unwinds itself. */
       stop.current = true
+      letGo.current()
       say('Stopping the export after this chapter…')
       return
     }
-    if (!source) return
+    if (!source || !engine) return
     /**
      * ⚠️ **A BOOK OF FIXED PAGES IS NOT EXPORTED AT ALL — the owner's decision,
      * 2026-09-21.**
@@ -167,6 +156,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
     void (async () => {
       setRunning(true)
       try {
+        const packs = await engine.catalogue()
         /* ⚠️ **A DOWNLOADED VOICE IS ASKED FOR FIRST, AND IT SETTLES BOTH
          * REFUSALS BELOW.** The floor refuses every platform voice below
          * Enhanced, which on a Mac is all of them — so before this the export
@@ -232,35 +222,51 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
           return
         }
 
-        const path = await chooseAudiobookPath(source.title)
+        const destination = await pickDestination(source.title)
         /* ⚠️ **THE DIALOG IS ASKED AFTER THE BOOK IS READ, DELIBERATELY.** A
          * reader who picks a file name and is then told the book has nothing to
          * read has been made to do work for an answer that was already known. */
-        if (!path) return
+        if (!destination) return
+        /* ONCE, whichever comes first: the stop, or the way out below. */
+        let given: Promise<void> | null = null
+        const giveBack = (): Promise<void> =>
+          (given ??= releaseDestination(destination.token).catch(() => {}))
+        letGo.current = () => {
+          void giveBack()
+        }
 
-        const platform = await tauriAudiobook(packs, findClip, holdClips)
-        const result = await exportAudiobook(platform, {
-          chapters,
-          voice,
-          rate,
-          title: source.title,
-          author: source.author,
-          bookId: source.bookId,
-          path,
-          onProgress: (done, total, title) => {
-            say(
-              done >= total
-                ? 'Joining the chapters…'
-                : `Reading ${title} — ${done + 1} of ${total}…`,
-            )
-          },
-          cancelled: () => stop.current,
-        })
-        say(
-          `Exported ${result.chapters} chapters, ${Math.round(result.durationMs / 60_000)} minutes, to ${nameOf(result.path)}.` +
-            skippedNote(result.skipped) +
-            leftBehindNote(result.leftBehind),
-        )
+        try {
+          const platform = await narrationPlatform(packs, engine)
+          const result = await exportAudiobook(platform, {
+            chapters,
+            voice,
+            rate,
+            title: source.title,
+            author: source.author,
+            bookId: source.bookId,
+            destination: destination.token,
+            onProgress: (done, total, title) => {
+              say(
+                done >= total
+                  ? 'Joining the chapters…'
+                  : `Reading ${title} — ${done + 1} of ${total}…`,
+              )
+            },
+            cancelled: () => stop.current,
+          })
+          say(
+            `Exported ${result.chapters} chapters, ${Math.round(result.durationMs / 60_000)} minutes, to ${result.name}.` +
+              skippedNote(result.skipped) +
+              leftBehindNote(result.leftBehind),
+          )
+        } finally {
+          /* ⚠️ **THE TOKEN IS GIVEN BACK ON EVERY ROAD OUT.** The plugin holds a
+             bounded number of picked destinations, so one left behind by a failed
+             or stopped export is a place the next pick cannot have. A release
+             that fails is not the reader's news: the export's own outcome is. */
+          letGo.current = () => {}
+          await giveBack()
+        }
       } catch (cause) {
         if (cause instanceof ExportCancelled) {
           /* ⚠️ **THIS SAID "Nothing was left behind." UNCONDITIONALLY**, while
@@ -276,9 +282,18 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
            * NEITHER — so it is kept, and this is the sentence that says so. Without
            * it the notice claimed *"Nothing was left behind"* over a file that had
            * replaced one of theirs. */
-          if (cause.kept) {
+          if (cause.book === 'replaced') {
             say(
               `The export was stopped, but the book had already been written over the file you chose.${leftBehindNote(cause.leftBehind)}`,
+            )
+            return
+          }
+          /* THE BOOK ITSELF, NAMED AS THE BOOK. A removal the plugin refused
+             leaves the audiobook at the name the reader typed, and calling it a
+             temporary file would send them looking in the wrong place. */
+          if (cause.book === 'stuck') {
+            say(
+              `The export was stopped, but the book it had written could not be removed from where you chose.${leftBehindNote(cause.leftBehind)}`,
             )
             return
           }
@@ -299,25 +314,20 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
     /* NO `running` HERE. It is not read — the claim is `inFlight.current`, which
        is the whole point of that ref — so listing it only changed this callback's
        identity on every start and stop, for a value the body never looks at. */
-  }, [source, packs, chosen, rate, findClip, holdClips, say])
+  }, [source, engine, chosen, rate, say])
 
   /**
    * ⚠️ **MEMOISED BECAUSE A CONSUMER HAS TO BE ABLE TO DEPEND ON IT.** A fresh
-   * object per render is why `App`'s `commands` memo left `audiobook` out of its
-   * dependency list — including it would have rebuilt every command on every
-   * render, and every position update is a render. So the palette kept the first
-   * `running: false` and the first `run` closure: selecting the row again started
-   * a SECOND export instead of stopping the first, and the label never changed to
-   * "Stop exporting the audiobook".
-   *
-   * That memo's own comment says a stale command is worse than a missing one
-   * because it looks like it worked, which is exactly what happened. A stable
-   * identity is what lets the dependency be declared honestly.
+   * object per render once kept the palette on the first `running: false` and
+   * the first `run` closure: selecting the row again started a SECOND export
+   * instead of stopping the first. The host publishes this control from an
+   * effect, so a stable identity is also what keeps that effect from running on
+   * every render — and every position update is a render.
    */
   const control = useMemo<AudiobookControl>(() => ({ running, run }), [running, run])
   /**
    * ⚠️ **AND A RUNNING EXPORT KEEPS ITS CONTROL EVEN WHEN THE BOOK GOES.**
-   * This was `if (!available || !source) return null`, so closing the book mid
+   * This was once `if (!available || !source) return null`, so closing the book mid
    * export took the only way to stop it off the palette while the operation
    * carried on — reading, rendering and writing a file the reader could no longer
    * reach, and with `source` gone they could not start another to get the row
@@ -331,20 +341,8 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
    * claim in `run` is built on.
    */
   if (running) return control
-  if (!available || !source) return null
+  if (!engine || !source) return null
   return control
-}
-
-/**
- * The file's own name, since the whole path is longer than a notice.
- *
- * ⚠️ **THE KERNEL'S `basename`, NOT A THIRD ONE.** This hand-rolled
- * `lastIndexOf('/')` knew only the POSIX separator, which is the same defect
- * `audiobookTauri`'s `discard` had beside it — two copies of one helper, both
- * wrong on Windows, in the same feature.
- */
-function nameOf(path: string): string {
-  return basename(path) || path
 }
 
 /**

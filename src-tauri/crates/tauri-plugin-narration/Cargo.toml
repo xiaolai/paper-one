@@ -1,0 +1,37 @@
+[package]
+name = "tauri-plugin-narration"
+version = "0.1.0"
+description = "Paper's audiobook export: the save pick, the export's scratch, and the packer that joins rendered chapters into one .m4b"
+authors = ["Paper"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.91"
+publish = false
+# `tauri-plugin` requires this to equal the package name: it is how the
+# permission generator finds the crate whose commands it is writing grants for.
+links = "tauri-plugin-narration"
+# Not a crates.io crate: a workspace member of the app, reached by path.
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# `tauri_plugin_log` is what carries these to the app's log file, which is the
+# only way a release build says anything at all.
+log = "0.4"
+# The plugin surface. `default-features = false` for the same reason every
+# other plugin here does it: the app's own crate picks the Tauri features.
+tauri = { version = "2.11.3", default-features = false }
+# The save pick, made in RUST so the chosen path never becomes a webview grant.
+# The dialog's JavaScript `save` adds the chosen file to the fs scope, and the
+# persisted scope keeps it across launches; the Rust builder does neither. The
+# app already links this crate at this version — a direct dependency here adds
+# no package to the lockfile.
+tauri-plugin-dialog = "2"
+
+[build-dependencies]
+tauri-plugin = { version = "2.6", features = ["build"] }
+
+[dev-dependencies]
+# Already in the lockfile, as a dev-dependency of the voices and passages
+# plugins.
+tempfile = "3"

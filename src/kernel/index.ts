@@ -86,6 +86,10 @@ export { packArrived, packSize } from './core/packSize'
    capability's port, which is the one place a `spokenDigest` is computed —
    see `SpeechRequest.clip`. */
 export { textDigest } from './ui/reader/clipKey'
+/* Which downloaded voice reads a book, and how a choice is written down —
+   published for the narration capability, whose export must pick the voice the
+   reading would, by the same rule rather than a copy of it. */
+export { engineVoiceFor, missingPackNotice, packVoiceOf, qualify, unqualify } from './ui/reader/engineVoice'
 /* THE EXTRACTOR, published because the `passages` capability is what drives it
  * and a capability may import nothing of the kernel but this entry.
  *
@@ -264,9 +268,11 @@ export type {
   ReadingSurface,
   ReadyBook,
   RemovableBlobName,
+  SectionText,
   Setting,
   SettingKey,
   SettingsStore,
+  SpeechSkipPrefs,
   SpokenSection,
 } from './core/ports'
 export { createDiagnostics, defaultDiagnostics, redact } from './core/diagnostics'

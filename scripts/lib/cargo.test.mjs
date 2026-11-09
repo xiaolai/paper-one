@@ -171,9 +171,13 @@ ignored = "1"
        MLX for the Chinese one, neither of which compiles for a phone. The
        sixth is phase 31's `tauri-plugin-passages`, desktop-only because it
        links tantivy — an mmap directory and merge threads, over a posting list
-       for a library a phone is RECEIVING rather than holding. */
+       for a library a phone is RECEIVING rather than holding. The seventh is
+       step 5.4's `tauri-plugin-narration`, desktop-only because its encoder is
+       macOS's `afconvert` and a phone has no save dialog to hand it a
+       destination. */
     const pinned = new Set([
       'tauri-plugin-mcp-bridge',
+      'tauri-plugin-narration',
       'tauri-plugin-passages',
       'tauri-plugin-persisted-scope',
       'tauri-plugin-single-instance',

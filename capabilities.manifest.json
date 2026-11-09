@@ -64,6 +64,19 @@
       ]
     },
     {
+      "id": "narration",
+      "requires": [],
+      "ts": "narration",
+      "platforms": [
+        "desktop"
+      ],
+      "crate": "tauri-plugin-narration",
+      "plugin": "narration",
+      "permissions": [
+        "narration:default"
+      ]
+    },
+    {
       "id": "passages",
       "requires": [],
       "ts": "passages",

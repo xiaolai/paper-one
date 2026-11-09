@@ -13,6 +13,7 @@
   "permissions": [
     "webhost:default",
     "voices:default",
-    "passages:default"
+    "passages:default",
+    "narration:default"
   ]
 }

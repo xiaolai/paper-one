@@ -29,39 +29,42 @@
 //! ⚠️ **AND THE CONTAINER IS WRITTEN BY HAND, IN PURE RUST** — see `m4b`. Two
 //! readers must agree about it, and ffmpeg and AVFoundation disagreed on three
 //! separate defects; a green ffprobe means nothing on its own.
+//!
+//! ⚠️ **MOVED FROM THE APP CRATE INTO `tauri-plugin-narration`, 2026-11-09.**
+//! The command that drives this is the plugin's `narrate_package` now, and it
+//! takes a token for the destination and a run id for the scratch — never a
+//! path from the window. See `crate::commands`.
 
 use serde::Serialize;
 
 /// The container — pure Rust, no framework, tested everywhere. See the module.
 ///
-/// ⚠️ **GATED, BECAUSE `mod narrate` IS PRIVATE AND `pub` DOES NOT SAVE IT.**
-/// Nothing outside the Apple backend and these modules' own tests calls any of
-/// this, so on Linux and Windows every item below is unreachable from the
-/// crate's public API — which is `dead_code`, which `cargo clippy --all-targets
-/// -- -D warnings` turns into a failed build. The audit caught it; a Mac never
-/// could.
-#[cfg(any(target_os = "macos", test))]
+/// UNGATED since the move into this plugin: it is a public module of a library
+/// crate, so nothing in it is `dead_code` on a platform that never calls it.
 pub mod m4b;
 
 /// The WAV between the engine and the encoder, both directions. See the module.
-#[cfg(any(target_os = "macos", test))]
 pub mod wav;
 
-/// The Objective-C half. Everything above and below it is portable and tested
-/// on every platform; only this is Apple's.
-#[cfg(target_os = "macos")]
-mod apple;
+/// The join, the encoder and the container, in order. Only the call to
+/// `afconvert` is Apple's.
+pub mod apple;
+
+/// Whether this platform can package a book at all: the encoder is macOS's own
+/// `afconvert`, and an exporter that silently produced a chapterless file would
+/// be worse than one that stops.
+pub const SUPPORTED: bool = cfg!(target_os = "macos");
+
+/// The refusal everywhere else.
+pub const UNSUPPORTED: &str = "Paper can only package an audiobook on macOS";
 
 /// Run blocking work off both the main thread and the async runtime's own
 /// threads.
 ///
-/// `spawn_blocking` rather than simply awaiting in place: these two commands
-/// block for as long as a chapter takes, and an `async` body that blocks holds a
-/// runtime worker for the duration. The main thread stays free either way, which
-/// is the part that matters — it is the one delivering the speech engine's
-/// callbacks.
-#[cfg(target_os = "macos")]
-async fn offload<T, F>(what: &str, work: F) -> Result<T, String>
+/// `spawn_blocking` rather than simply awaiting in place: a package blocks for
+/// as long as the encoder takes, and an `async` body that blocks holds a
+/// runtime worker for the duration.
+pub async fn offload<T, F>(what: &str, work: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
     T: Send + 'static,
@@ -69,36 +72,21 @@ where
     match tauri::async_runtime::spawn_blocking(work).await {
         Ok(outcome) => outcome,
         /* A panic in the worker, which would otherwise surface as a silent hang.
-         * NAMED BY OPERATION: this helper serves both commands, and a hardcoded
-         * "the render did not finish" reported a failed PACKAGE as a failed
-         * render — which sends whoever is diagnosing it to the wrong half. */
+         * NAMED BY OPERATION, so a failed package is not reported as something
+         * else. */
         Err(error) => Err(format!("the {what} did not finish: {error}")),
     }
 }
 
-/// One chapter of an export: a title, and the file a render left behind.
+/// What packaging produced, as the window is told it.
 ///
-/// ⚠️ **macOS's OWN, BECAUSE ONLY macOS READS IT.** It is deserialised from the
-/// command's payload and then read by `apple::package` alone, so on any other
-/// platform its fields have no reader at all — and `-D warnings` makes that a
-/// build error. The Linux leg caught it on the 0.4.1 release commit; a Mac
-/// cannot, because there the reader is compiled in. An `allow(dead_code)` would
-/// have said these fields are unused of the two fields that ARE the wire
-/// contract, so the platform boundary is written as one instead.
-#[cfg(target_os = "macos")]
-#[derive(serde::Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ChapterAudio {
-    pub title: String,
-    /// A WAV that `narrate_render` wrote.
-    pub path: String,
-}
-
-/// What packaging produced.
+/// ⚠️ **THE NAME, NOT THE PATH.** The window never held the destination's path
+/// — it holds a token — so the answer does not hand it one either. A name is
+/// all a notice needs.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Packaged {
-    pub path: String,
+    pub name: String,
     pub duration_ms: u64,
     pub chapters: usize,
 }
@@ -109,7 +97,6 @@ pub struct Packaged {
 /// that needs no audio at all. The running total is in FRAMES and converted once,
 /// because summing rounded milliseconds drifts: forty chapters rounded down
 /// individually can put the last mark most of a second early.
-#[cfg(any(target_os = "macos", test))]
 pub fn chapter_starts(parts: &[wav::Facts]) -> Result<Vec<u64>, String> {
     let mut starts = Vec::with_capacity(parts.len());
     let mut frames = 0u64;
@@ -141,42 +128,6 @@ pub fn chapter_starts(parts: &[wav::Facts]) -> Result<Vec<u64>, String> {
         frames += part.frames;
     }
     Ok(starts)
-}
-
-/// Turn a book's rendered chapters into one `.m4b`.
-///
-/// ⚠️ **REFUSED OFF macOS**, like `narrate_render`: the encoder is the system's
-/// own `afconvert`, and an exporter that silently produced a chapterless file
-/// would be worse than one that stops.
-///
-/// ⚠️ **`async`, AND THAT IS NOT A STYLE CHOICE** — see `narrate_render`. A
-/// synchronous command runs on the main thread, and encoding a whole book there
-/// would freeze the window for the length of the export.
-/// ⚠️ **AND OFF macOS IT TAKES NOTHING.** It used to take the payload everywhere
-/// and drop it with a `let _ = (…)`, which consumes the values and reads none of
-/// their fields — see `ChapterAudio`. The command still EXISTS on every platform
-/// and still refuses by name, which is what stops an exporter carrying on past a
-/// platform that cannot do it: Tauri deserialises the arguments a command
-/// declares and ignores the rest of the payload.
-#[cfg(target_os = "macos")]
-#[tauri::command]
-pub async fn narrate_package(
-    chapters: Vec<ChapterAudio>,
-    title: String,
-    author: String,
-    path: String,
-) -> Result<Packaged, String> {
-    offload("package", move || {
-        apple::package(chapters, title, author, path)
-    })
-    .await
-}
-
-/// Refused, with nothing to take: see the macOS form above.
-#[cfg(not(target_os = "macos"))]
-#[tauri::command]
-pub async fn narrate_package() -> Result<Packaged, String> {
-    Err("Paper can only package an audiobook on macOS".to_owned())
 }
 
 #[cfg(test)]

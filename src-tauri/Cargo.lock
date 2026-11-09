@@ -139,6 +139,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-log",
  "tauri-plugin-mcp-bridge",
+ "tauri-plugin-narration",
  "tauri-plugin-passages",
  "tauri-plugin-peer",
  "tauri-plugin-persisted-scope",
@@ -7222,6 +7223,19 @@ dependencies = [
  "webview2-com",
  "windows 0.61.3",
  "windows-core 0.61.2",
+]
+
+[[package]]
+name = "tauri-plugin-narration"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "tauri-plugin-dialog",
+ "tempfile",
 ]
 
 [[package]]

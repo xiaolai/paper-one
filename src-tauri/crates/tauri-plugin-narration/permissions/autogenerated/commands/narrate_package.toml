@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-narrate-package"
+description = "Enables the narrate_package command without any pre-configured scope."
+commands.allow = ["narrate_package"]
+
+[[permission]]
+identifier = "deny-narrate-package"
+description = "Denies the narrate_package command without any pre-configured scope."
+commands.deny = ["narrate_package"]

@@ -151,6 +151,15 @@ impl VoicesState {
         }
     }
 
+    /// The app's data root, once the app has said.
+    fn data_root(&self) -> Result<PathBuf, String> {
+        self.root
+            .lock()
+            .map_err(|_| "the voices root is poisoned".to_owned())?
+            .clone()
+            .ok_or_else(|| "the voices root is not set".to_owned())
+    }
+
     /// Where packs live, once the app has said.
     fn layout(&self) -> Result<Layout, String> {
         let root = self
@@ -563,15 +572,21 @@ fn read_with_qwen(
 /// ⚠️ **A FILE RATHER THAN BYTES, AND NOT FOR CONVENIENCE.** A ten-hour book
 /// is gigabytes of PCM; handing a chapter across the IPC as a JSON array would
 /// widen every sample to a decimal number and hold the whole of it in the
-/// webview's heap. `narrate_render` already writes files for the same reason,
-/// and `narrate_package` — the muxer, `afconvert`, the chapter track, both
-/// readers' checks — reads them and is untouched by this.
+/// webview's heap. The narration plugin's `narrate_package` reads these files.
+///
+/// ⚠️ **ONLY INTO AN EXPORT'S OWN SCRATCH, AND ONLY AS A NEW FILE.** This took
+/// any path from the webview and wrote it, which made it a write-anywhere
+/// primitive for whatever script runs in the window. It now writes only
+/// `<data>/audiobook/run-*/chapter-<n>.wav` — the run directory the narration
+/// plugin made — and only where nothing is yet; see [`chapter_target`]. Moved
+/// with the narration boundary, 2026-11-09.
 ///
 /// # Errors
-/// When the pack is unknown or not installed, when the engine refuses, when
-/// the chapter is longer than a WAV header can state, or when the file cannot
-/// be written. Never a partial file: a short WAV is indistinguishable from a
-/// short chapter, so a failed write removes what it wrote.
+/// When the path is not an export's chapter, when the pack is unknown or not
+/// installed, when the engine refuses, when the chapter is longer than a WAV
+/// header can state, or when the file cannot be written. Never a partial file:
+/// a short WAV is indistinguishable from a short chapter, so a failed write
+/// removes what it wrote.
 #[tauri::command]
 pub async fn voices_render_file(
     state: State<'_, VoicesState>,
@@ -581,15 +596,14 @@ pub async fn voices_render_file(
     rate: Option<f32>,
     path: String,
 ) -> Result<RenderedFile, String> {
+    /* CHECKED BEFORE THE RENDER, which takes minutes, so a refused path costs
+     * nothing — and again by the exclusive create, which is what holds. */
+    let target = chapter_target(&state.data_root()?, &path)?;
     let rendered = voices_render(&state, pack, voice, text, rate).await?;
     let bytes = crate::wav::bytes(&rendered.samples, rendered.sample_rate)?;
-    let target = PathBuf::from(&path);
-    tokio::fs::write(&target, &bytes).await.map_err(|e| {
-        /* A half-written chapter reads as a short one, and the packer would
-         * join it without complaint. Removed rather than left. */
-        let _ = std::fs::remove_file(&target);
-        format!("{path} could not be written: {e}")
-    })?;
+    write_new(&target, &bytes)
+        .await
+        .map_err(|e| format!("{path} could not be written: {e}"))?;
     Ok(RenderedFile {
         sample_rate: rendered.sample_rate,
         skipped: rendered
@@ -601,6 +615,90 @@ pub async fn voices_render_file(
             })
             .collect(),
     })
+}
+
+/// The directory under the app's data root that holds every export's scratch.
+/// The narration plugin names it too (`inputs::SCRATCH_DIR`); neither crate
+/// depends on the other, so the name is written in both.
+pub const AUDIOBOOK_SCRATCH: &str = "audiobook";
+
+/// The file a chapter may be written to, rebuilt from the data root.
+///
+/// The given path must be `<root>/audiobook/run-*/chapter-<digits>.wav`, with
+/// neither `audiobook` nor the run directory a link, and the run directory
+/// resolving to exactly itself. What is returned is the resolved run directory
+/// joined with the bare file name, so nothing in the given path but those two
+/// names reaches the write.
+pub fn chapter_target(root: &Path, given: &str) -> Result<PathBuf, String> {
+    let refused = |why: &str| format!("{given} is not an export's chapter: {why}");
+    let path = Path::new(given);
+    if !path.is_absolute() {
+        return Err(refused("not an absolute path"));
+    }
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| refused("no file name"))?;
+    let digits = name
+        .strip_prefix("chapter-")
+        .and_then(|rest| rest.strip_suffix(".wav"))
+        .ok_or_else(|| refused("not named chapter-<n>.wav"))?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(refused("not named chapter-<n>.wav"));
+    }
+    let parent = path.parent().ok_or_else(|| refused("no directory"))?;
+    let run = parent
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| n.starts_with("run-"))
+        .ok_or_else(|| refused("not in a run directory"))?;
+    let root = std::fs::canonicalize(root)
+        .map_err(|e| format!("cannot resolve the app's data directory: {e}"))?;
+    let scratch = root.join(AUDIOBOOK_SCRATCH);
+    let dir = scratch.join(run);
+    for each in [&scratch, &dir] {
+        let meta = std::fs::symlink_metadata(each).map_err(|e| refused(&e.to_string()))?;
+        if meta.file_type().is_symlink() {
+            return Err(refused(&format!("{} is a link", each.display())));
+        }
+        if !meta.is_dir() {
+            return Err(refused(&format!("{} is not a directory", each.display())));
+        }
+    }
+    let resolved = std::fs::canonicalize(parent).map_err(|e| refused(&e.to_string()))?;
+    if resolved != dir {
+        return Err(refused("outside the audiobook scratch"));
+    }
+    Ok(dir.join(name))
+}
+
+/// Write `bytes` to a file that did not exist, removing it if the write fails.
+///
+/// ⚠️ **ONLY WHAT THIS CALL CREATED IS EVER REMOVED.** The old write removed
+/// the target on any failure, which — given any path — was a delete-anything
+/// as well as a write-anything. `create_new` refuses an existing name, a link
+/// included and without following it, so the file removed on failure is always
+/// this call's own.
+pub async fn write_new(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .await?;
+    let written = async {
+        file.write_all(bytes).await?;
+        file.flush().await
+    }
+    .await;
+    if let Err(error) = written {
+        drop(file);
+        /* A half-written chapter reads as a short one, and the packer would
+         * join it without complaint. Removed rather than left. */
+        let _ = tokio::fs::remove_file(target).await;
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// What a chapter written to a file is reported as.

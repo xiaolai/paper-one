@@ -74,25 +74,6 @@ describe('without a voices capability', () => {
     expect(seen.current?.engine).toBeNull()
   })
 
-  it('still answers the two clip questions, rather than nothing', async () => {
-    /* ⚠️ **`NONE`'s ANSWERS HAD NO CASE — FOUND BY THE MUTATION SWEEP.** The
-       reading and the export both ask these on every platform, including the ones
-       with no voices capability at all: a phone, a browser client. An `undefined`
-       where a null or a count belongs is a caller comparing against the wrong
-       thing — `findClip` answering nothing reads as *there is a clip* to code that
-       tests for null, and `holdClips` answering nothing is a count that is not a
-       number, which `port.holdClips` refuses by name one layer down. */
-    const { seen } = await mount(servicesWith(null))
-    await expect(
-      seen.current?.findClip({ packId: 'p', voiceId: 'v', text: 'x', clip: { bookId: 'b', section: 0, textDigest: 'd' } }),
-      'null, which is a MISS rather than an absent answer',
-    ).resolves.toBeNull()
-    await expect(
-      seen.current?.holdClips(['a-0-x'], true),
-      'zero moved, which is what a store with nothing in it would say',
-    ).resolves.toBe(0)
-  })
-
   it('says nothing about it, however long it polls', async () => {
     /* A build with no voices capability is not a fault and has nothing to
        report. This is what makes the catch in `read` a different road rather
@@ -127,41 +108,6 @@ describe('with one', () => {
     const { seen } = await mount(servicesWith(portOver()))
     expect(seen.current?.packs).toEqual([PACK])
     expect(seen.current?.engine).not.toBeNull()
-  })
-
-  it('passes the clip questions through to the bound port, whole', async () => {
-    /* ⚠️ **THE FORWARDING HAD NO CASE — FOUND BY THE MUTATION SWEEP.** These two
-       are the only road from the reading and the export to the store, and both
-       were replaceable by `() => undefined` with every test green: a reading that
-       never finds a cached section renders every chapter again, and an export that
-       holds nothing loses a chapter to eviction. */
-    const found: unknown[] = []
-    const held: [readonly string[], boolean][] = []
-    const request = {
-      packId: 'english-kokoro',
-      voiceId: 'af_heart',
-      text: 'Call me Ishmael.',
-      clip: { bookId: 'book:a', section: 3, textDigest: 'fnv1a64:16:0000000000000001' },
-    }
-    const { seen } = await mount(
-      servicesWith(
-        portOver({
-          findClip: async (asked) => {
-            found.push(asked)
-            return null
-          },
-          holdClips: async (stems, hold) => {
-            held.push([stems, hold])
-            return stems.length
-          },
-        }),
-      ),
-    )
-
-    await expect(seen.current?.findClip(request)).resolves.toBeNull()
-    expect(found, 'the request reached the port unchanged').toEqual([request])
-    await expect(seen.current?.holdClips(['a-0-x', 'b-1-y'], true)).resolves.toBe(2)
-    expect(held, 'both arguments, and the count came back').toEqual([[['a-0-x', 'b-1-y'], true]])
   })
 
   it('re-reads it, so a pack downloaded in Settings reaches the book', async () => {

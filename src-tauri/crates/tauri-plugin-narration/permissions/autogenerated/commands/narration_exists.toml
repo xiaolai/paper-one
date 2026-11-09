@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-narration-exists"
+description = "Enables the narration_exists command without any pre-configured scope."
+commands.allow = ["narration_exists"]
+
+[[permission]]
+identifier = "deny-narration-exists"
+description = "Denies the narration_exists command without any pre-configured scope."
+commands.deny = ["narration_exists"]

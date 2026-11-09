@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { SectionText } from '../../core/ports'
+import type { SectionText } from '../../../kernel'
 import {
   ExportCancelled,
   exportAudiobook,
@@ -53,7 +53,7 @@ describe('planChapters', () => {
 /** A platform that records what it was asked and answers immediately. */
 function fake(overrides: Partial<AudiobookPlatform> = {}) {
   const rendered: string[] = []
-  const discarded: string[] = []
+  const discarded: number[] = []
   const sweeps: string[] = []
   /** The book at the reader's chosen name, which `discard` cannot reach. */
   const books: string[] = []
@@ -64,16 +64,17 @@ function fake(overrides: Partial<AudiobookPlatform> = {}) {
       rendered.push(job.path)
       return { path: job.path, cached: false, skipped: [] }
     }),
-    package: vi.fn(async () => ({ durationMs: 1234, chapters: 2 })),
+    package: vi.fn(async () => ({ name: 'book.m4b', durationMs: 1234, chapters: 2 })),
     scratchFor: (index) => `/tmp/ch-${index}.wav`,
-    discard: vi.fn(async (path) => {
-      discarded.push(path)
+    discard: vi.fn(async (index) => {
+      discarded.push(index)
     }),
     discardScratch: vi.fn(async () => {
       sweeps.push('swept')
     }),
-    discardBook: vi.fn(async (path: string) => {
-      books.push(path)
+    discardBook: vi.fn(async (destination: string) => {
+      books.push(destination)
+      return 'removed' as const
     }),
     releaseClips: vi.fn(async (paths: readonly string[]) => {
       released.push([...paths])
@@ -93,7 +94,7 @@ const request = (over: Partial<Parameters<typeof exportAudiobook>[1]> = {}) => (
   bookId: 'book:a',
   title: 'A Measured Book',
   author: 'Paper',
-  path: '/tmp/book.m4b',
+  destination: 'destination:1',
   onProgress: vi.fn(),
   cancelled: () => false,
   ...over,
@@ -106,14 +107,14 @@ describe('exportAudiobook', () => {
     expect(rendered).toEqual(['/tmp/ch-0.wav', '/tmp/ch-1.wav'])
     expect(platform.package).toHaveBeenCalledWith({
       chapters: [
-        { title: 'One', path: '/tmp/ch-0.wav' },
-        { title: 'Two', path: '/tmp/ch-1.wav' },
+        { title: 'One', source: { kind: 'scratch', index: 0 } },
+        { title: 'Two', source: { kind: 'scratch', index: 1 } },
       ],
       title: 'A Measured Book',
       author: 'Paper',
-      path: '/tmp/book.m4b',
+      destination: 'destination:1',
     })
-    expect(result).toEqual({ path: '/tmp/book.m4b', durationMs: 1234, chapters: 2, leftBehind: 0, skipped: 0 })
+    expect(result).toEqual({ name: 'book.m4b', durationMs: 1234, chapters: 2, leftBehind: 0, skipped: 0 })
   })
 
   /**
@@ -142,7 +143,7 @@ describe('exportAudiobook', () => {
       exists: vi.fn(async () => true),
       package: vi.fn(async () => {
         joining = true
-        return { durationMs: 1234, chapters: 2 }
+        return { name: 'book.m4b', durationMs: 1234, chapters: 2 }
       }),
     })
 
@@ -152,10 +153,10 @@ describe('exportAudiobook', () => {
     )
 
     expect(stopped).toBeInstanceOf(ExportCancelled)
-    expect((stopped as ExportCancelled).kept, 'the caller can say why').toBe(true)
-    /* ⚠️ **AND THE DEFAULT IS `false`, WHICH ONLY AN ORDINARY STOP CAN SHOW —
+    expect((stopped as ExportCancelled).book, 'the caller can say why').toBe('replaced')
+    /* ⚠️ **AND THE DEFAULT IS `'gone'`, WHICH ONLY AN ORDINARY STOP CAN SHOW —
        FOUND BY THE MUTATION SWEEP.** Every `new ExportCancelled()` in this file
-       takes it, so a default of `true` would have every stopped export tell the
+       takes it, so a default of `'replaced'` would have every stopped export tell the
        reader their own file had been written over. The case below is the same
        export with nothing at the destination. */
     expect(books, 'the book the reader already had is not taken from them too').toEqual([])
@@ -184,14 +185,14 @@ describe('exportAudiobook', () => {
       }),
       package: vi.fn(async () => {
         joining = true
-        return { durationMs: 1234, chapters: 2 }
+        return { name: 'book.m4b', durationMs: 1234, chapters: 2 }
       }),
     })
 
     await expect(
       exportAudiobook(platform, request({ cancelled: () => joining })),
     ).rejects.toBeInstanceOf(ExportCancelled)
-    expect(books).toEqual(['/tmp/book.m4b'])
+    expect(books).toEqual(['destination:1'])
   })
 
   it('counts what no chapter could say, from both the cached road and the fresh one', async () => {
@@ -306,14 +307,14 @@ describe('exportAudiobook', () => {
       exists: vi.fn(async () => false),
       package: vi.fn(async () => {
         joining = true
-        return { durationMs: 1234, chapters: 2 }
+        return { name: 'book.m4b', durationMs: 1234, chapters: 2 }
       }),
     })
     const stopped = await exportAudiobook(platform, request({ cancelled: () => joining })).then(
       () => null,
       (cause: unknown) => cause,
     )
-    expect((stopped as ExportCancelled).kept, 'nothing of the reader’s was replaced').toBe(false)
+    expect((stopped as ExportCancelled).book, 'nothing of the reader’s was replaced').toBe('gone')
   })
 
   it('reports a stop asked for while the chapters are being joined', async () => {
@@ -321,7 +322,7 @@ describe('exportAudiobook', () => {
     const { platform, discarded, books } = fake({
       package: vi.fn(async () => {
         joining = true
-        return { durationMs: 1234, chapters: 2 }
+        return { name: 'book.m4b', durationMs: 1234, chapters: 2 }
       }),
     })
 
@@ -341,8 +342,8 @@ describe('exportAudiobook', () => {
      * measures the fake** — the same lesson as `paper/share-notes/1` having no
      * client, and as `measuredIn` dropping `excluded`. The two operations are
      * separate now because their AUTHORITY is. */
-    expect(books, 'the book went through the operation that can reach it').toContain('/tmp/book.m4b')
-    expect(discarded, 'and not through the one scoped to scratch').not.toContain('/tmp/book.m4b')
+    expect(books, 'the book went through the operation that can reach it').toContain('destination:1')
+    expect(discarded, 'and only the chapters through the one scoped to scratch').toEqual([0, 1])
   })
 
   /**
@@ -401,7 +402,7 @@ describe('exportAudiobook', () => {
   it('removes every scratch file it wrote', async () => {
     const { platform, discarded } = fake()
     await exportAudiobook(platform, request())
-    expect(discarded).toEqual(['/tmp/ch-0.wav', '/tmp/ch-1.wav'])
+    expect(discarded).toEqual([0, 1])
   })
 
   it('removes them after a failure too', async () => {
@@ -413,7 +414,7 @@ describe('exportAudiobook', () => {
       }),
     })
     await expect(exportAudiobook(platform, request())).rejects.toThrow(/afconvert/u)
-    expect(discarded).toEqual(['/tmp/ch-0.wav', '/tmp/ch-1.wav'])
+    expect(discarded).toEqual([0, 1])
   })
 
   it('tries to remove the chapter whose render failed, not only the ones that worked', async () => {
@@ -431,7 +432,7 @@ describe('exportAudiobook', () => {
       }),
     })
     await expect(exportAudiobook(platform, request())).rejects.toThrow(/went quiet/u)
-    expect(discarded).toEqual(['/tmp/ch-0.wav', '/tmp/ch-1.wav'])
+    expect(discarded).toEqual([0, 1])
   })
 
   it('removes the first chapter when it is the one that failed', async () => {
@@ -444,7 +445,7 @@ describe('exportAudiobook', () => {
       }),
     })
     await expect(exportAudiobook(platform, request())).rejects.toThrow(/went quiet/u)
-    expect(discarded).toEqual(['/tmp/ch-0.wav'])
+    expect(discarded).toEqual([0])
   })
 
   it('still hands packaging only the chapters that finished', async () => {
@@ -477,7 +478,7 @@ describe('exportAudiobook', () => {
     ).rejects.toBeInstanceOf(ExportCancelled)
     /* One chapter got out before the stop was seen, and its file still goes. */
     expect(rendered).toEqual(['/tmp/ch-0.wav'])
-    expect(discarded).toEqual(['/tmp/ch-0.wav'])
+    expect(discarded).toEqual([0])
     expect(platform.package).not.toHaveBeenCalled()
   })
 
@@ -503,18 +504,18 @@ describe('exportAudiobook', () => {
       '/tmp/ch-1.wav',
     ])
     expect(platform.package, 'the join began after the reader had stopped').not.toHaveBeenCalled()
-    expect(discarded).toEqual(['/tmp/ch-0.wav', '/tmp/ch-1.wav'])
+    expect(discarded).toEqual([0, 1])
   })
 
-  it('counts a part-joined book it could not remove after a stop during the join', async () => {
+  it('reports a part-joined book it could not remove as the book, not as a temporary file', async () => {
     /* The book at the reader's chosen name is removed on the way out of a stop
-       during the join; when that removal fails, it is one more file left behind
-       — and the reader is told, rather than told nothing was. */
+       during the join; when that removal fails, the book is still there — and
+       the reader is told that, rather than that a temporary file was left. */
     let joining = false
     const { platform } = fake({
       package: vi.fn(async () => {
         joining = true
-        return { durationMs: 1234, chapters: 2 }
+        return { name: 'book.m4b', durationMs: 1234, chapters: 2 }
       }),
       /* THROUGH `discardBook`, which is the operation that can reach a path
          outside the export's own scratch — see the case above for what asserting
@@ -528,7 +529,51 @@ describe('exportAudiobook', () => {
       (e: unknown) => e,
     )
     expect(cause).toBeInstanceOf(ExportCancelled)
-    expect((cause as ExportCancelled).leftBehind, 'the part-joined book, and nothing else').toBe(1)
+    expect((cause as ExportCancelled).book).toBe('stuck')
+    expect((cause as ExportCancelled).leftBehind, 'the book is not scratch').toBe(0)
+  })
+
+  it('reports a join the plugin refused after a stop as the stop, with nothing at the reader’s name', async () => {
+    /* The window gives the destination back the moment the stop lands, so the
+       plugin's commit refuses — that refusal is the stop working. */
+    let joining = false
+    const { platform, books } = fake({
+      package: vi.fn(async () => {
+        joining = true
+        throw new Error('the export was cancelled before the book was written')
+      }),
+    })
+    const cause = await exportAudiobook(platform, request({ cancelled: () => joining })).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(cause).toBeInstanceOf(ExportCancelled)
+    expect((cause as ExportCancelled).book).toBe('gone')
+    expect(books, 'nothing was written, so nothing is removed').toEqual([])
+  })
+
+  it('keeps the book where the plugin says a file was there, whatever the question before the join answered', async () => {
+    /* ⚠️ **THE TWO CAN DISAGREE**: the question before the join can be refused,
+       which reads as "nothing there", and a file can arrive between it and the
+       write. The plugin looked when it wrote, so its answer is the one told. */
+    let joining = false
+    const { platform } = fake({
+      exists: vi.fn(async () => {
+        throw new Error('the destination could not be read')
+      }),
+      package: vi.fn(async () => {
+        joining = true
+        return { name: 'book.m4b', durationMs: 1234, chapters: 2 }
+      }),
+      discardBook: vi.fn(async () => 'kept' as const),
+    })
+    const cause = await exportAudiobook(platform, request({ cancelled: () => joining })).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(cause).toBeInstanceOf(ExportCancelled)
+    expect((cause as ExportCancelled).book).toBe('replaced')
+    expect((cause as ExportCancelled).leftBehind, 'a kept book is not scratch').toBe(0)
   })
 
   it('passes a genuine failure out as the engine’s own error, carrying no count', async () => {
@@ -554,6 +599,7 @@ describe('exportAudiobook', () => {
     expect(stop.message).toBe('the export was stopped')
     expect(stop.leftBehind).toBe(3)
     expect(new ExportCancelled().leftBehind, 'a stop with nothing counted left nothing').toBe(0)
+    expect(new ExportCancelled().book, 'a stop with nothing said wrote nothing').toBe('gone')
   })
 
   it('reports progress per chapter and once for the join', async () => {
@@ -592,7 +638,7 @@ describe('exportAudiobook', () => {
       }),
     })
     await expect(exportAudiobook(platform, request())).rejects.toThrow(/afconvert/u)
-    expect(discarded).toEqual(['/tmp/ch-0.wav', '/tmp/ch-1.wav'])
+    expect(discarded).toEqual([0, 1])
     expect(sweeps).toEqual(['swept'])
   })
 
@@ -632,8 +678,8 @@ describe('a chapter the reader has already listened to', () => {
     expect(platform.package).toHaveBeenCalledWith(
       expect.objectContaining({
         chapters: [
-          { title: 'One', path: '/data/audio/clips/heard-0.wav' },
-          { title: 'Two', path: '/tmp/ch-1.wav' },
+          { title: 'One', source: { kind: 'clip', path: '/data/audio/clips/heard-0.wav' } },
+          { title: 'Two', source: { kind: 'scratch', index: 1 } },
         ],
       }),
     )
@@ -651,7 +697,7 @@ describe('a chapter the reader has already listened to', () => {
       })),
     })
     await exportAudiobook(platform, request())
-    expect(discarded, 'only the scratch this export wrote').toEqual(['/tmp/ch-1.wav'])
+    expect(discarded, 'only the scratch this export wrote').toEqual([1])
   })
 
   it('removes nothing at all when every chapter was already rendered', async () => {
@@ -674,6 +720,6 @@ describe('a chapter the reader has already listened to', () => {
       }),
     })
     await expect(exportAudiobook(platform, request())).rejects.toThrow(/went quiet/u)
-    expect(discarded, 'the cached clip is not among them').toEqual(['/tmp/ch-1.wav'])
+    expect(discarded, 'the cached clip is not among them').toEqual([1])
   })
 })

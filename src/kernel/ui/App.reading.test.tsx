@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, configure, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { useEffect, useLayoutEffect } from 'react'
+import { useEffect, useLayoutEffect, useSyncExternalStore } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Capability, ReaderContext } from '../core/capability'
 import type { IndexFs, IndexedBook } from '../core/bookIndex'
@@ -2139,46 +2139,112 @@ describe('the reading transport over a real book', () => {
 })
 
 /**
- * The audiobook export, as the palette offers it.
+ * The audiobook export's three gates, as the window answers them.
  *
- * ⚠️ **TWO GATES, AND EACH HAD NO CASE.** The engine exists on macOS alone, so
- * everywhere else the command must not be there at all — offered, it could only
- * refuse. And a book is ready for it only once its document is: the id resolves
- * from the bytes before the parse, and an export started in that gap reported
- * the reader's book as unreadable.
+ * ⚠️ **THE EXPORT IS THE NARRATION CAPABILITY'S, AND THE KERNEL MAY NOT IMPORT
+ * IT** (`no-kernel-to-capabilities`), so the capability here is a stand-in that
+ * asks what `ExportHost` and `narration.commands` ask: whether the plugin can
+ * package (`available`), whether the voices bound an engine that writes files,
+ * and whether the surface has a ready book. What only this file can see is that
+ * the window answers them truthfully — through the real palette, the real
+ * composition, and a book that is not ready until its document is. The
+ * capability's own half is `capabilities/narration/index.test.ts` and
+ * `ui/ExportHost.test.tsx`.
  */
 describe('the audiobook export', () => {
-  afterEach(() => {
-    window.history.replaceState(null, '', '/')
-  })
+  const LABEL = 'Export as audiobook…'
 
-  async function openBook(platform: 'macos' | 'linux') {
-    /* The platform is resolved once, at mount, from the URL override first. */
-    window.history.replaceState(null, '', `/?platform=${platform}`)
+  /** The voices, as far as the export needs them: a bound engine that can write a file. */
+  const voicesStandIn: Capability = {
+    id: 'voices',
+    start: (api) =>
+      api.services.bindSpeechEngines({
+        catalogue: async () => [],
+        install: async () => {},
+        remove: async () => {},
+        render: async () => ({
+          pcm: new Uint8Array(0),
+          sampleRate: 24_000,
+          words: [],
+          skipped: [],
+          evicted: { clips: 0, bytes: 0 },
+          clipPath: '/tmp/audio/clips/x.wav',
+        }),
+        renderFile: async () => ({ sampleRate: 24_000, skipped: [] }),
+        findClip: async () => null,
+        holdClips: async (stems: readonly string[]) => stems.length,
+        clipUsage: async () => ({ bytes: 0, budget: 5 * 1024 * 1024 * 1024, clips: 0 }),
+        forgetClips: async () => ({ clips: 0, bytes: 0 }),
+        release: async () => {},
+      }),
+  }
+
+  /** The export's shape: a host that publishes a control, and a row that reads it. */
+  function narrationStandIn(canPackage: boolean): Capability {
+    let services: ReturnType<typeof createKernelServices> | null = null
+    let control: { readonly run: () => void } | null = null
+    function Host({ context }: { readonly context: ReaderContext }) {
+      const book = useSyncExternalStore(context.surface.subscribeBook, context.surface.book)
+      const ready = book !== null && services?.speechEngines()?.renderFile !== undefined
+      useEffect(() => {
+        if (!ready) return undefined
+        control = { run: () => {} }
+        return () => {
+          control = null
+        }
+      }, [ready])
+      return null
+    }
+    return {
+      id: 'narration',
+      available: () => canPackage,
+      windowHosts: [{ id: 'narration:export', render: (context) => <Host context={context} /> }],
+      commands: (ctx) =>
+        control && ctx.hasBook
+          ? [{ id: 'narration:audiobook', label: LABEL, group: 'Book', keywords: 'audiobook', run: () => control?.run() }]
+          : [],
+      start: (api) => {
+        services = api.services as ReturnType<typeof createKernelServices>
+        return {
+          dispose: () => {
+            services = null
+          },
+        }
+      },
+    }
+  }
+
+  async function openBook(capabilities: readonly Capability[]) {
     reader.prose = '<p>Call me Ishmael.</p>'
     const moby = await shelved(BYTES, 'Moby-Dick')
-    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], capabilities)
     return () => open('Moby-Dick')
   }
 
-  it('is offered for an open book on the platform with the engine', async () => {
-    const opening = await openBook('macos')
-    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'offered with no book open').toBe(false)
+  it('is offered for an open book where the plugin can package and the voices bound an engine', async () => {
+    const opening = await openBook([voicesStandIn, narrationStandIn(true)])
+    expect(await paletteOffers('audiobook', LABEL), 'offered with no book open').toBe(false)
     await opening()
-    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'the open book was not offered').toBe(true)
+    expect(await paletteOffers('audiobook', LABEL), 'the open book was not offered').toBe(true)
   })
 
-  it('is not offered where there is no engine to write it', async () => {
-    const opening = await openBook('linux')
+  it('is not offered where the plugin cannot package', async () => {
+    const opening = await openBook([voicesStandIn, narrationStandIn(false)])
     await opening()
-    expect(await paletteOffers('audiobook', 'Export as audiobook…')).toBe(false)
+    expect(await paletteOffers('audiobook', LABEL)).toBe(false)
+  })
+
+  it('is not offered where no voices bound an engine to write it', async () => {
+    const opening = await openBook([narrationStandIn(true)])
+    await opening()
+    expect(await paletteOffers('audiobook', LABEL)).toBe(false)
   })
 
   it('waits for the book’s document, which is what the walk runs over', async () => {
-    const opening = await openBook('macos')
+    const opening = await openBook([voicesStandIn, narrationStandIn(true)])
     reader.prose = null
     await opening()
-    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'a book with no document yet').toBe(false)
+    expect(await paletteOffers('audiobook', LABEL), 'a book with no document yet').toBe(false)
   })
 })
 
@@ -2248,6 +2314,37 @@ describe('what a capability adds around the reader', () => {
     expect(section?.text).toContain('Call me Ishmael.')
     expect(seen.context?.sectionKey, 'the document itself, so a new one is a new key').toBeInstanceOf(Document)
     expect(seen.context?.surface.book()?.title).toBeTruthy()
+  })
+
+  it('hands a host the voice, pace and notes the reading has stored', async () => {
+    /* What an audiobook export reads in, so the file says what the reading
+       would have said, in the voice it would have said it in. */
+    const { seen, capability } = reaching()
+    const storage = new Map<string, string>([
+      [
+        SETTINGS_STORAGE_KEY,
+        JSON.stringify({
+          version: SETTINGS_VERSION,
+          values: {
+            'kernel.readingVoice': { en: 'kokoro:am_adam' },
+            'kernel.readingRate': 1.5,
+            'kernel.readingNotesAloud': true,
+          },
+        }),
+      ],
+    ])
+    const services = createKernelServices({
+      fs: null,
+      storage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => void storage.set(key, value),
+      },
+      initialBooks: [],
+    })
+    const composition = await composeCapabilities([capability], kernelApi(services), new AbortController().signal)
+    render(<App services={services} fs={null} composition={composition} />)
+    await settle()
+    expect(seen.context?.voice).toEqual({ chosen: { en: 'kokoro:am_adam' }, rate: 1.5, notesAloud: true })
   })
 
   it('draws a reader control in the title bar, on the reader and nowhere else', async () => {

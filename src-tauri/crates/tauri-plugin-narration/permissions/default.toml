@@ -1,0 +1,24 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = """
+Paper's own window may export the open book as an audiobook.
+
+The destination is chosen in a native save dialog that this plugin opens
+itself, and the window is handed an opaque, single-use token for it rather
+than the path — so a grant here is never a grant to write anywhere the reader
+did not pick. Scratch audio lives under the app's own data directory, and every
+command that touches a file checks the path it was given against the roots the
+plugin resolved at startup.
+"""
+permissions = [
+  "allow-narration-supported",
+  "allow-narration-pick",
+  "allow-narration-begin",
+  "allow-narration-discard-chapter",
+  "allow-narration-discard",
+  "allow-narrate-package",
+  "allow-narration-exists",
+  "allow-narration-discard-book",
+  "allow-narration-release",
+]

@@ -125,9 +125,9 @@ export interface SurfaceDriver {
  * A walk that answers for one opening of one book.
  *
  * ⚠️ **THE NAVIGATOR BEHIND `sectionTexts` IS WHICHEVER BOOK IS OPEN NOW**, and
- * `useAudiobook` holds what it was given across a walk of minutes. So a book
- * replaced during an export could have its text filed under the old book's title
- * and voice. Past its generation this walks nothing and says it is not complete,
+ * the narration capability's `useAudiobook` holds what it was given across a
+ * walk of minutes. So a book replaced during an export could have its text
+ * filed under the old book's title and voice. Past its generation this walks nothing and says it is not complete,
  * which is the answer the export already refuses by name.
  *
  * ⚠️ **READY MEANS A DOCUMENT, NOT AN ID.** The book's id resolves from the bytes

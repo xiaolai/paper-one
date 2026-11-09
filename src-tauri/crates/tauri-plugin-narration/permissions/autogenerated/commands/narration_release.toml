@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-narration-release"
+description = "Enables the narration_release command without any pre-configured scope."
+commands.allow = ["narration_release"]
+
+[[permission]]
+identifier = "deny-narration-release"
+description = "Denies the narration_release command without any pre-configured scope."
+commands.deny = ["narration_release"]

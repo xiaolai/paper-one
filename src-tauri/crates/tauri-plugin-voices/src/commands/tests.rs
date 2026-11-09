@@ -281,3 +281,126 @@ fn a_pack_that_cannot_be_checked_is_not_reported_as_absent() {
         "{unreadable} should carry the reason, which is the only actionable part"
     );
 }
+
+/// A data root with one export's run directory, both canonical.
+fn export_root() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical");
+    let run = root.join(super::AUDIOBOOK_SCRATCH).join("run-1-ab");
+    std::fs::create_dir_all(&run).expect("run");
+    (dir, root, run)
+}
+
+#[test]
+fn a_chapter_is_written_only_into_an_exports_run_directory() {
+    let (_dir, root, run) = export_root();
+    let given = run.join("chapter-12.wav");
+    assert_eq!(
+        super::chapter_target(&root, &given.display().to_string()),
+        Ok(given)
+    );
+}
+
+#[test]
+fn a_path_that_is_not_an_exports_chapter_is_refused_by_name() {
+    let (_dir, root, run) = export_root();
+    let elsewhere = root.join("elsewhere").join("run-9");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    std::fs::create_dir_all(root.join(super::AUDIOBOOK_SCRATCH).join("run-9")).expect("run-9");
+    let s = |p: std::path::PathBuf| p.display().to_string();
+    for (given, says) in [
+        (
+            "audiobook/run-1-ab/chapter-1.wav".to_owned(),
+            "not an absolute path",
+        ),
+        (s(run.join("chapter-x.wav")), "chapter-<n>.wav"),
+        (s(run.join("chapter-.wav")), "chapter-<n>.wav"),
+        (s(run.join("chapter-1.m4b")), "chapter-<n>.wav"),
+        (s(run.join("book.wav")), "chapter-<n>.wav"),
+        (
+            s(root.join(super::AUDIOBOOK_SCRATCH).join("chapter-1.wav")),
+            "not in a run directory",
+        ),
+        (
+            s(root.join("run-1-ab").join("chapter-1.wav")),
+            "No such file",
+        ),
+        (
+            s(elsewhere.join("chapter-1.wav")),
+            "outside the audiobook scratch",
+        ),
+        (
+            s(run
+                .join("..")
+                .join("..")
+                .join("elsewhere")
+                .join("run-9")
+                .join("chapter-1.wav")),
+            "outside the audiobook scratch",
+        ),
+    ] {
+        let error = super::chapter_target(&root, &given).expect_err("refused");
+        assert!(error.contains(says), "{given}: {error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scratch_or_run_directory_that_is_a_link_is_refused() {
+    let (_dir, root, run) = export_root();
+    let outside = root.join("outside");
+    std::fs::create_dir_all(outside.join("run-2")).expect("outside");
+    std::os::unix::fs::symlink(outside.join("run-2"), run.with_file_name("run-2")).expect("plant");
+    let error = super::chapter_target(
+        &root,
+        &run.with_file_name("run-2")
+            .join("chapter-1.wav")
+            .display()
+            .to_string(),
+    )
+    .expect_err("refused");
+    assert!(error.contains("is a link"), "{error}");
+
+    /* And the scratch root itself swapped for a link. */
+    let scratch = root.join(super::AUDIOBOOK_SCRATCH);
+    std::fs::rename(&scratch, root.join("moved")).expect("move");
+    std::os::unix::fs::symlink(root.join("moved"), &scratch).expect("plant");
+    let error = super::chapter_target(&root, &run.join("chapter-1.wav").display().to_string())
+        .expect_err("refused");
+    assert!(error.contains("is a link"), "{error}");
+}
+
+#[tokio::test]
+async fn a_chapter_is_a_new_file_and_an_existing_one_is_left_alone() {
+    let (_dir, _root, run) = export_root();
+    let target = run.join("chapter-1.wav");
+    super::write_new(&target, b"first").await.expect("written");
+    assert_eq!(std::fs::read(&target).expect("read"), b"first");
+    let error = super::write_new(&target, b"second")
+        .await
+        .expect_err("refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        std::fs::read(&target).expect("read"),
+        b"first",
+        "a refused write touched the file, or removed it"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_planted_at_a_chapter_is_not_written_through() {
+    let (_dir, root, run) = export_root();
+    let victim = root.join("victim");
+    std::fs::write(&victim, b"keep me").expect("victim");
+    let target = run.join("chapter-1.wav");
+    std::os::unix::fs::symlink(&victim, &target).expect("plant");
+    super::write_new(&target, b"overwritten")
+        .await
+        .expect_err("refused");
+    assert_eq!(std::fs::read(&victim).expect("read"), b"keep me");
+    assert!(
+        std::fs::symlink_metadata(&target).is_ok(),
+        "the link was removed"
+    );
+}

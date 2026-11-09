@@ -2,7 +2,6 @@
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { useLayoutEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { VoicePack } from '../../core/ports'
 import { createHostStore, HostedTitleBar, ReadingHost, useHosted, type Hosted, type HostStore } from './readingHost'
 import { useReadingSurface, type BookFacts, type SurfaceDriver } from './readingSurface'
 import { FakeSynth, FakeUtterance } from './speechSynth.testkit'
@@ -18,25 +17,6 @@ vi.mock('../shell/TitleBar', () => ({
     </div>
   ),
 }))
-/* `audiobookTauri` is the save dialog and the engine. Nothing here gets that far:
-   an export that does has passed every refusal this file is about. */
-vi.mock('./audiobookTauri', () => ({
-  chooseAudiobookPath: vi.fn(async () => null),
-  tauriAudiobook: vi.fn(),
-}))
-
-const PACK: VoicePack = {
-  id: 'english-kokoro',
-  name: 'English',
-  summary: '',
-  family: 'kokoro',
-  languages: ['en'],
-  bytes: 1,
-  minimumMemoryGb: 4,
-  voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
-  installed: true,
-}
-
 let synth: FakeSynth
 const originalUtterance = globalThis.SpeechSynthesisUtterance
 
@@ -61,7 +41,7 @@ function page(text: string) {
   return doc
 }
 
-const hosted = (speaking: boolean): Hosted => ({ speech: { speaking } as Hosted['speech'], audiobook: null })
+const hosted = (speaking: boolean): Hosted => ({ speech: { speaking } as Hosted['speech'] })
 
 describe('the store', () => {
   it('has nothing until the host has published', () => {
@@ -188,26 +168,16 @@ const NO_FACTS: Omit<BookFacts, 'doc' | 'sectionTexts'> = {
  * What `App` does with the host: the surface committed by the parent, the host
  * first among its children, and the auto-advance reading the pace.
  */
-function mount(
-  first: Document | null,
-  walk: BookFacts['sectionTexts'] = async () => ({ sections: [], complete: true }),
-  /* An object, so that `{}` can say "never chosen": an `undefined` argument
-     would take a default. */
-  start: { readonly notes?: boolean } = { notes: false },
-) {
-  const say = vi.fn()
+function mount(first: Document | null) {
   const store = createHostStore()
   const api: { driver: SurfaceDriver | null; autoAdvance: AutoAdvance | null } = { driver: null, autoAdvance: null }
-  const set: { doc?: (doc: Document | null) => void; notes?: (notes: boolean) => void; generation?: (n: number) => void } = {}
+  const set: { doc?: (doc: Document | null) => void } = {}
   const paging = { next: () => {}, prev: () => {} }
+  const walk: BookFacts['sectionTexts'] = async () => ({ sections: [], complete: true })
   function Parent() {
     const [doc, setDoc] = useState(first)
-    const [notes, setNotes] = useState(start.notes)
-    const [generation, setGeneration] = useState(1)
     set.doc = setDoc
-    set.notes = setNotes
-    set.generation = setGeneration
-    const book = useMemo(() => ({ ...NO_FACTS, generation, doc, sectionTexts: walk }), [doc, generation])
+    const book = useMemo(() => ({ ...NO_FACTS, doc, sectionTexts: walk }), [doc])
     const driver = useReadingSurface({ doc, place: { bookId: 'book:1', sectionIndex: 0 }, paging, book })
     api.driver = driver
     const paceHeld = useSyncExternalStore(driver.subscribePace, driver.paceHeld)
@@ -216,23 +186,14 @@ function mount(
       pace: () => ({ bookWords: 60_000, sectionBytes: 1, spineBytes: 10, steps: 20 }),
       speaking: paceHeld,
       onReader: true,
-      generation,
+      generation: NO_FACTS.generation,
     })
     return (
       <>
         <ReadingHost
           context={{ sectionKey: doc, surface: driver.surface }}
-          prefs={notes === undefined ? {} : { notesAloud: notes }}
+          prefs={{ notesAloud: false }}
           engine={null}
-          audiobook={{
-            available: true,
-            packs: [PACK],
-            chosen: {},
-            rate: 1,
-            findClip: async () => null,
-            holdClips: async (stems) => stems.length,
-            say,
-          }}
           store={store}
         />
         <HostedTitleBar store={store} {...TITLE_BAR} />
@@ -242,12 +203,10 @@ function mount(
   const view = render(<Parent />)
   return {
     store,
-    say,
     api,
     set,
     view,
     speech: () => store.read()!.speech,
-    audiobook: () => store.read()!.audiobook,
     bar: () => screen.getByTestId('bar').textContent,
   }
 }
@@ -274,13 +233,6 @@ describe('the host', () => {
     act(() => set.doc?.(page('Second section.')))
     expect(synth.queued.at(-1)?.text, 'a chapter turn is a step in the reading').toContain('Second')
     expect(speech().speaking).toBe(true)
-  })
-
-  it('offers no export until the book is ready', () => {
-    const { audiobook, set } = mount(null)
-    expect(audiobook()).toBeNull()
-    act(() => set.doc?.(page('Words.')))
-    expect(audiobook()).not.toBeNull()
   })
 })
 
@@ -318,72 +270,5 @@ describe('the pace, as the book’s own turning sees it', () => {
     const driver = api.driver!
     view.unmount()
     expect(driver.paceHeld()).toBe(false)
-  })
-})
-
-describe('an export through the surface', () => {
-  /** A walk the test holds open, which is where a replacement can land. */
-  function heldWalk() {
-    let open!: (walk: Awaited<ReturnType<BookFacts['sectionTexts']>>) => void
-    const seen: { stop?: () => boolean; skip?: unknown } = {}
-    const walk: BookFacts['sectionTexts'] = (_toc, stop, skip) => {
-      seen.stop = stop
-      seen.skip = skip
-      return new Promise((resolve) => {
-        open = resolve
-      })
-    }
-    return { walk, seen, finish: (complete: boolean) => open({ sections: [], complete }) }
-  }
-
-  it('reads with the skip the reading reads with', async () => {
-    const held = heldWalk()
-    const { audiobook, set } = mount(page('Words.'), held.walk)
-    act(() => set.notes?.(true))
-    await act(async () => audiobook()?.run())
-    expect(held.seen.skip).toEqual({ notes: true })
-    await act(async () => held.finish(true))
-  })
-
-  it('leaves the notes out when the reader has never chosen', async () => {
-    /* The voice's own default: `skipOf` reads an unset choice as no notes. */
-    const held = heldWalk()
-    const { audiobook } = mount(page('Words.'), held.walk, {})
-    await act(async () => audiobook()?.run())
-    expect(held.seen.skip).toEqual({ notes: false })
-    await act(async () => held.finish(true))
-  })
-
-  it('is stopped by the reader, through the walk', async () => {
-    const held = heldWalk()
-    const { audiobook, say } = mount(page('Words.'), held.walk)
-    await act(async () => audiobook()?.run())
-    expect(held.seen.stop?.()).toBe(false)
-    await act(async () => audiobook()?.run())
-    expect(held.seen.stop?.(), 'the same command stops it').toBe(true)
-    await act(async () => held.finish(false))
-    expect(say).toHaveBeenLastCalledWith('The export was stopped. Nothing was left behind.')
-  })
-
-  it('is refused, not written, when another book opens under it', async () => {
-    /* ⚠️ **OR THE NEXT BOOK'S WORDS WOULD BE FILED UNDER THIS ONE'S TITLE.** */
-    const held = heldWalk()
-    const { audiobook, set, say } = mount(page('Words.'), held.walk)
-    await act(async () => audiobook()?.run())
-    expect(held.seen.stop?.()).toBe(false)
-    act(() => set.generation?.(2))
-    expect(held.seen.stop?.(), 'told by the generation, with nobody asking').toBe(true)
-    await act(async () => held.finish(false))
-    expect(say).toHaveBeenLastCalledWith(expect.stringContaining('stopped being readable'))
-  })
-
-  it('keeps its control while it runs, across a chapter turn', async () => {
-    const held = heldWalk()
-    const { audiobook, set } = mount(page('Words.'), held.walk)
-    await act(async () => audiobook()?.run())
-    act(() => set.doc?.(page('Later.')))
-    expect(audiobook()?.running).toBe(true)
-    expect(held.seen.stop?.(), 'the same opening').toBe(false)
-    await act(async () => held.finish(true))
   })
 })
