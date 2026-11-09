@@ -27,9 +27,9 @@ import { VoiceSettings } from './ui/VoiceSettings'
  * controls crossed together, in one change, because they could not cross
  * apart: the kernel cannot import a capability, a capability's settings are
  * scoped to its own keys, and the reducer that held the voice never saw the
- * store. The settings were carried from `kernel.*` to `narration.*` by the
- * kernel's own import (`carryLegacySettings`), in which a key already written
- * under the new name wins.
+ * store. The settings are carried from `kernel.*` to `narration.*` by the
+ * kernel's own import (`carryNarrationSettings`), run on every load, in which a
+ * key already written under the new name wins.
  *
  * ⚠️ **THE WINDOW NEVER NAMES A PATH THE PLUGIN OPENS AS GIVEN.** The reader
  * picks the destination in the plugin's own save dialog and the window gets a
