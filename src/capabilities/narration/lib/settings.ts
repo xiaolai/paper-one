@@ -26,6 +26,7 @@ import type { SpeakPrefs } from './speaker'
  * validated against is derived from the two ends, so the range a reader can
  * store and the range this offers cannot disagree.
  */
+// Stryker disable next-line ObjectLiteral: emptying this scale leaves `READING_RATE_MIN` below reading `.steps` off a missing array, at module scope — so the mutant throws while this module is being imported, every covering suite fails to LOAD, no test fails, and Stryker's vitest runner reports it Survived with nothing able to kill it (the shape `metrics.ts` measured 2026-09-14)
 export const READING_RATE: SteppedScale = {
   steps: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5],
   def: 2,
@@ -75,6 +76,7 @@ export const READING_RATE: SteppedScale = {
  * each engine and is worth doing; until then a stepper that starts at a short
  * pause is better than one that starts at none.
  */
+// Stryker disable next-line ObjectLiteral: emptying this scale leaves `SENTENCE_GAP_MIN` below reading `.steps` off a missing array, at module scope — `READING_RATE`'s mutant, one scale along, and unkillable for its reason
 export const SENTENCE_GAP: SteppedScale = {
   steps: [0, 150, 300, 500, 750, 1000],
   def: 1,
@@ -82,6 +84,7 @@ export const SENTENCE_GAP: SteppedScale = {
 }
 
 /** The silence at a paragraph end — see `SENTENCE_GAP`. */
+// Stryker disable next-line ObjectLiteral: emptying this scale leaves `PARAGRAPH_GAP_MIN` below reading `.steps` off a missing array, at module scope — `READING_RATE`'s mutant, one scale along, and unkillable for its reason
 export const PARAGRAPH_GAP: SteppedScale = {
   steps: [0, 300, 600, 900, 1400, 2000],
   def: 2,
