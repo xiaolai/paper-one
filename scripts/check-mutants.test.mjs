@@ -4737,7 +4737,10 @@ const AGGREGATE_TAIL = "  Its own error is in the log of the shard that ran it; 
  * mutants under the 100 % rule and left 97 unkilled, and fixing one word in a
  * comment in `scripts/word-snap-live.mjs` left 240. A one-line fix in a large old
  * file bills the fixer for years of accumulated debt, which argues for not making
- * the fix. See `dev-docs/adr/0002-mutation-gate-judges-what-a-change-adds.md`.
+ * the fix. The reasoning is in the body of commit `74f2367` ("Judge what a
+ * change adds, not what a file already owed"); no ADR 0002 was ever written —
+ * neither repository's history has one — and the later base-sampling rule is
+ * `dev-docs/decisions/2026-11-05-gate-base-remeasure.md`.
  *
  * So: the file is still mutated WHOLE, and at 100 % nothing else happens. With a
  * survivor, the same file is measured at the merge base and the two are compared
