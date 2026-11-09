@@ -486,12 +486,21 @@ export async function exportAudiobook(
          empty block, which Stryker makes no mutant of. */
       .catch(() => {})
     request.onProgress(request.chapters.length, request.chapters.length, 'joining the chapters')
-    const packaged = await platform.package({
-      chapters: written,
-      title: request.title,
-      author: request.author,
-      destination: request.destination,
-    })
+    const packaged = await platform
+      .package({
+        chapters: written,
+        title: request.title,
+        author: request.author,
+        destination: request.destination,
+      })
+      .catch((cause: unknown) => {
+        /* ⚠️ **A STOP DURING THE JOIN GIVES THE DESTINATION BACK AT ONCE, AND
+           THE PLUGIN THEN REFUSES TO WRITE IT** — see `useAudiobook`'s `letGo`.
+           That refusal is the stop working, not a failure, and nothing reached
+           the reader's name: only the commit writes there. */
+        if (request.cancelled()) throw new ExportCancelled()
+        throw cause
+      })
     /**
      * ⚠️ **AND AGAIN AFTER THE JOIN, BECAUSE THE JOIN CANNOT BE INTERRUPTED AND
      * THE OLD CODE REPORTED SUCCESS FOR AN EXPORT THE READER HAD STOPPED.**

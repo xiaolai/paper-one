@@ -1058,6 +1058,39 @@ describe('the destination the reader picked', () => {
     expect(tauri.released).toEqual([TOKEN])
   })
 
+  it('is given back the moment the reader stops during the join, so the join cannot write it', async () => {
+    /* ⚠️ **IT WAS GIVEN BACK ONLY AFTER THE JOIN RETURNED**, by which time the
+       plugin had moved the book onto the reader's file. This fake does what the
+       plugin's commit does: a released token is refused. */
+    const joining = gate()
+    let reached = false
+    const { books } = engine({
+      package: async (job) => {
+        reached = true
+        await joining.shut
+        if (tauri.released.includes(TOKEN)) {
+          throw new Error('the export was cancelled before the book was written')
+        }
+        return { name: 'A Measured Book.m4b', durationMs: 180_000, chapters: job.chapters.length }
+      },
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+      await vi.waitFor(() => expect(reached).toBe(true))
+    })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(tauri.released, 'given back while the join was still running').toEqual([TOKEN])
+    await act(async () => {
+      joining.open()
+    })
+    expect(say).toHaveBeenLastCalledWith('The export was stopped. Nothing was left behind.')
+    expect(books, 'nothing was written, so nothing is removed').toEqual([])
+    expect(tauri.released, 'and given back once').toEqual([TOKEN])
+  })
+
   it('is not given back where none was picked', async () => {
     engine()
     tauri.path = null

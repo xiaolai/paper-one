@@ -533,6 +533,25 @@ describe('exportAudiobook', () => {
     expect((cause as ExportCancelled).leftBehind, 'the book is not scratch').toBe(0)
   })
 
+  it('reports a join the plugin refused after a stop as the stop, with nothing at the reader’s name', async () => {
+    /* The window gives the destination back the moment the stop lands, so the
+       plugin's commit refuses — that refusal is the stop working. */
+    let joining = false
+    const { platform, books } = fake({
+      package: vi.fn(async () => {
+        joining = true
+        throw new Error('the export was cancelled before the book was written')
+      }),
+    })
+    const cause = await exportAudiobook(platform, request({ cancelled: () => joining })).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(cause).toBeInstanceOf(ExportCancelled)
+    expect((cause as ExportCancelled).book).toBe('gone')
+    expect(books, 'nothing was written, so nothing is removed').toEqual([])
+  })
+
   it('keeps the book where the plugin says a file was there, whatever the question before the join answered', async () => {
     /* ⚠️ **THE TWO CAN DISAGREE**: the question before the join can be refused,
        which reads as "nothing there", and a file can arrive between it and the

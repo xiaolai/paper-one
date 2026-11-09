@@ -75,6 +75,16 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
    * export starts with it false, and a second reset at the start would be a line
    * no test could tell from its absence. */
   const stop = useRef(false)
+  /**
+   * Gives the picked destination back now — a no-op until one is picked.
+   *
+   * ⚠️ **A STOP DURING THE JOIN USED TO WAIT FOR THE JOIN, AND THE JOIN THEN
+   * WROTE OVER THE READER'S FILE.** The token was released only in the
+   * `finally`, after `package` had returned, so the plugin's commit never saw
+   * the release and moved the book onto the name the reader chose. Released
+   * when the stop lands, the commit refuses and whatever was there survives.
+   */
+  const letGo = useRef<() => void>(() => {})
 
   const { source, chosen, rate, engine, say } = deps
 
@@ -116,6 +126,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
       /* The same command stops it — see the capability's `commands`. Nothing is awaited here:
        * the loop notices between chapters and unwinds itself. */
       stop.current = true
+      letGo.current()
       say('Stopping the export after this chapter…')
       return
     }
@@ -216,6 +227,13 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
          * reader who picks a file name and is then told the book has nothing to
          * read has been made to do work for an answer that was already known. */
         if (!destination) return
+        /* ONCE, whichever comes first: the stop, or the way out below. */
+        let given: Promise<void> | null = null
+        const giveBack = (): Promise<void> =>
+          (given ??= releaseDestination(destination.token).catch(() => {}))
+        letGo.current = () => {
+          void giveBack()
+        }
 
         try {
           const platform = await narrationPlatform(packs, engine)
@@ -246,7 +264,8 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
              bounded number of picked destinations, so one left behind by a failed
              or stopped export is a place the next pick cannot have. A release
              that fails is not the reader's news: the export's own outcome is. */
-          await releaseDestination(destination.token).catch(() => {})
+          letGo.current = () => {}
+          await giveBack()
         }
       } catch (cause) {
         if (cause instanceof ExportCancelled) {
