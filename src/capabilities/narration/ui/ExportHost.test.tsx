@@ -22,6 +22,8 @@ const dialog = vi.hoisted(() => ({
   picks: false,
   /** The engine the host handed the platform, once a case gets that far. */
   engine: null as unknown,
+  /** The platform handed back, for a case that goes past the engine; otherwise the export stops there. */
+  platform: null as unknown,
 }))
 vi.mock('../lib/wire', () => ({
   pickDestination: async () => {
@@ -31,6 +33,7 @@ vi.mock('../lib/wire', () => ({
   releaseDestination: async () => {},
   narrationPlatform: async (_packs: unknown, engine: unknown) => {
     dialog.engine = engine
+    if (dialog.platform) return dialog.platform
     throw new Error('the test goes no further than the engine')
   },
 }))
@@ -112,7 +115,10 @@ function mount({
 } = {}) {
   const { surface, set } = surfaceOf(book)
   const notify = vi.fn()
-  const services = { speechEngines: () => port, notify } as unknown as KernelServices
+  let bound = port
+  const servicesWith = (tell: (text: string) => void) =>
+    ({ speechEngines: () => bound, notify: tell }) as unknown as KernelServices
+  let services = servicesWith(notify)
   const context = (over: Partial<ReaderContext> = {}): ReaderContext => ({
     sectionKey: null,
     surface,
@@ -125,6 +131,15 @@ function mount({
     set,
     view,
     redraw: (over: Partial<ReaderContext>) => view.rerender(<ExportHost context={context(over)} services={services} />),
+    /** A port bound after the host mounted, as the voices' `start` binds one; seen at the next render. */
+    bindPort: (next: SpeechEnginePort | null) => {
+      bound = next
+    },
+    /** The kernel's services handed again as a new object, with its own notice line. */
+    rehost: (tell: (text: string) => void) => {
+      services = servicesWith(tell)
+      view.rerender(<ExportHost context={context()} services={services} />)
+    },
   }
 }
 
@@ -132,6 +147,7 @@ beforeEach(() => {
   dialog.asked = 0
   dialog.picks = false
   dialog.engine = null
+  dialog.platform = null
 })
 afterEach(cleanup)
 
@@ -257,5 +273,63 @@ describe('an export through the surface', () => {
     expect(currentControl()?.running).toBe(true)
     expect(held.seen.stop?.(), 'the same opening').toBe(false)
     await act(async () => held.finish(true))
+  })
+})
+
+describe('what it follows after it mounts', () => {
+  it('takes up a port bound after it mounted', () => {
+    const { bindPort, redraw } = mount({ port: null })
+    expect(currentControl()).toBeNull()
+    bindPort(portOf())
+    redraw({})
+    expect(currentControl(), 'the voices started after the window did').not.toBeNull()
+  })
+
+  it('tells the notice line it holds now, not the one it was first handed', async () => {
+    const held = heldWalk()
+    const { notify, rehost } = mount({ book: bookOf(held.walk) })
+    const later = vi.fn()
+    rehost(later)
+    await act(async () => currentControl()?.run())
+    expect(later).toHaveBeenCalledWith('Reading the book…')
+    expect(notify).not.toHaveBeenCalled()
+    await act(async () => held.finish(true))
+  })
+})
+
+describe('the voice and pace it exports in', () => {
+  it('is the voice the reader chose for the language, at the pace they read at', async () => {
+    /* A second voice, so the choice is visible: without it the export takes the
+       pack's first voice. */
+    const pack: VoicePack = {
+      ...PACK,
+      voices: [...PACK.voices, { id: 'am_adam', name: 'Adam', language: 'en-US', note: '' }],
+    }
+    const jobs: { voice: string; rate: number }[] = []
+    dialog.picks = true
+    dialog.platform = {
+      scratchFor: (index: number) => `scratch-${index}`,
+      render: async (job: { voice: string; rate: number }) => {
+        jobs.push({ voice: job.voice, rate: job.rate })
+        throw new Error('the test goes no further than the first render')
+      },
+      releaseClips: async () => {},
+      package: async () => {
+        throw new Error('not reached')
+      },
+      discard: async () => {},
+      discardBook: async () => {},
+      discardScratch: async () => {},
+      exists: async () => false,
+    }
+    const port = { ...portOf(), catalogue: async () => [pack] } as unknown as SpeechEnginePort
+    const sections = [{ index: 0, title: 'One', text: 'Words.', textDigest: 'd' }]
+    mount({
+      port,
+      book: bookOf(async () => ({ sections, complete: true })),
+      voice: { chosen: { en: 'kokoro:am_adam' }, rate: 1.5, notesAloud: false },
+    })
+    await act(async () => currentControl()?.run())
+    expect(jobs).toEqual([{ voice: 'kokoro:am_adam', rate: 1.5 }])
   })
 })

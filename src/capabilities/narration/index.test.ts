@@ -86,6 +86,14 @@ describe('the palette row', () => {
     expect(row(narration.commands!({ ...ctx, hasBook: false }))).toBeUndefined()
   })
 
+  it('contributes no rows at all where it offers no export', () => {
+    /* Not merely "no export row": the capability has one row to give, so where
+       that is withheld the palette gets nothing from it. */
+    expect(narration.commands!(ctx)).toEqual([])
+    offer(false)
+    expect(narration.commands!({ ...ctx, hasBook: false })).toEqual([])
+  })
+
   it('files the export under Book, and can be found by the words a reader would type', () => {
     /* ⚠️ **THE KEYWORDS ARE THE ONLY WAY IN.** A reader looking for it types
        what they want — "audiobook", "m4b", "read aloud" — not the label's own

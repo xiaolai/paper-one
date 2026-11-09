@@ -2206,6 +2206,37 @@ describe('what a capability adds around the reader', () => {
     expect(seen.context?.surface.book()?.title).toBeTruthy()
   })
 
+  it('hands a host the voice, pace and notes the reading has stored', async () => {
+    /* What an audiobook export reads in, so the file says what the reading
+       would have said, in the voice it would have said it in. */
+    const { seen, capability } = reaching()
+    const storage = new Map<string, string>([
+      [
+        SETTINGS_STORAGE_KEY,
+        JSON.stringify({
+          version: SETTINGS_VERSION,
+          values: {
+            'kernel.readingVoice': { en: 'kokoro:am_adam' },
+            'kernel.readingRate': 1.5,
+            'kernel.readingNotesAloud': true,
+          },
+        }),
+      ],
+    ])
+    const services = createKernelServices({
+      fs: null,
+      storage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => void storage.set(key, value),
+      },
+      initialBooks: [],
+    })
+    const composition = await composeCapabilities([capability], kernelApi(services), new AbortController().signal)
+    render(<App services={services} fs={null} composition={composition} />)
+    await settle()
+    expect(seen.context?.voice).toEqual({ chosen: { en: 'kokoro:am_adam' }, rate: 1.5, notesAloud: true })
+  })
+
   it('draws a reader control in the title bar, on the reader and nowhere else', async () => {
     reader.prose = 'Call me Ishmael.'
     const moby = await shelved(BYTES, 'Moby-Dick')
