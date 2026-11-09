@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,6 +16,7 @@ import {
   selectPlatform,
   webSpeechOutsideNarration,
 } from './vite/assert-bundle.mjs'
+import { DELETED_ENV } from './verify-without.mjs'
 
 /**
  * The bundle assertion, both halves. The decision itself
@@ -445,6 +446,47 @@ describe('webSpeechOutsideNarration', () => {
     expect(errors).toEqual([])
     expect(threw).toBeNull()
     expect(logged.at(-1)).toBe('assert-bundle: desktop: 2 capability modules from {both, narration}')
+  })
+})
+
+/**
+ * THE VOICE CODE STAYS OFF THE PHONE AND THE WEB, against the real manifest.
+ *
+ * Step 5.5 moved read-aloud out of the kernel into `narration`, beside the
+ * `voices` downloads, and both are desktop-only. Before the move the kernel
+ * entry carried `engineVoice` and `voiceChoice` into every bundle; now any
+ * module of either capability in a phone or web bundle is refused by name.
+ * The fixture manifest above cannot hold this: it is the REAL manifest's
+ * platforms that keep the voice code out, so a widened `platforms` list is
+ * what this case exists to catch.
+ */
+describe('the voice code, against the real manifest', () => {
+  const planted = [
+    'src/capabilities/narration/ui/useSpeech.ts',
+    'src/capabilities/narration/lib/voiceChoice.ts',
+    'src/capabilities/voices/index.ts',
+  ]
+  /* INSIDE A `pnpm verify:without` COPY ONE OF THE TWO IS ALREADY GONE, and
+     `capability:remove` takes its manifest entry with its directory, so its
+     modules belong to nothing the manifest declares and no rule refuses them.
+     The other's modules still owe their refusal. Only the id
+     `PAPER_VERIFY_WITHOUT` names is let off, and only once its directory is
+     gone; on the real tree the variable is unset and all three are owed. */
+  const cut = process.env[DELETED_ENV]
+  const gone = cut !== undefined && !existsSync(path.join(REPO_ROOT, 'src', 'capabilities', cut))
+  const owed = gone ? planted.filter((file) => !file.startsWith(`src/capabilities/${cut}/`)) : planted
+
+  it.each(['ios', 'android', 'web'])('refuses the %s bundle when it carries any of it, naming each module', (platform) => {
+    const ids = [path.join(REPO_ROOT, compositionFile(platform)), ...planted.map((file) => path.join(REPO_ROOT, file))]
+    const decision = decideBundle(platform, ids, loadManifest(REPO_ROOT), bundleRoots(REPO_ROOT))
+    expect(decision.ok).toBe(false)
+    expect(decision.findings.filter((f) => f.code === 'BUNDLE_FOREIGN_CAPABILITY').map((f) => f.where)).toEqual(owed)
+  })
+
+  it('passes the same modules in a desktop bundle, where both are composed', () => {
+    const ids = [path.join(REPO_ROOT, compositionFile('desktop')), ...planted.map((file) => path.join(REPO_ROOT, file))]
+    const decision = decideBundle('desktop', ids, loadManifest(REPO_ROOT), bundleRoots(REPO_ROOT))
+    expect(decision.findings.filter((f) => f.code === 'BUNDLE_FOREIGN_CAPABILITY')).toEqual([])
   })
 })
 
