@@ -333,9 +333,182 @@ mod tests {
         let (dir, runs) = runs();
         let elsewhere = tempfile::tempdir().expect("elsewhere");
         std::fs::write(elsewhere.path().join("keep"), b"theirs").expect("keep");
-        std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("run-1-link")).expect("plant");
+        let link = dir.path().join("run-1-link");
+        std::os::unix::fs::symlink(elsewhere.path(), &link).expect("plant");
         runs.begin().expect("begin sweeps");
-        assert!(elsewhere.path().join("keep").exists());
+        /* The LINK must still be there. `remove_dir_all` unlinks a top-level
+         * link without following it, so the target surviving says nothing about
+         * whether the sweep passed the link over; the link surviving does. */
+        let kept = std::fs::symlink_metadata(&link).expect("the sweep removed the link");
+        assert!(kept.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read(elsewhere.path().join("keep")).expect("the target's file"),
+            b"theirs"
+        );
+    }
+
+    #[test]
+    fn the_sweep_leaves_a_file_whose_name_reads_as_an_old_run() {
+        let (dir, runs) = runs();
+        let file = dir.path().join("run-1-file");
+        std::fs::write(&file, b"theirs").expect("plant");
+        runs.begin().expect("begin sweeps");
+        assert_eq!(std::fs::read(&file).expect("the file"), b"theirs");
+    }
+
+    #[test]
+    fn a_clock_that_jumped_back_never_removes_the_run_just_made() {
+        let (dir, runs) = runs();
+        let now = SystemTime::now();
+        let made = runs.begin_at(now).expect("begin");
+        let earlier = now - ABANDONED_AFTER - Duration::from_secs(60);
+        /* The same process, its clock stepped back: the run is live. */
+        runs.begin_at(earlier).expect("begin, earlier");
+        assert!(
+            dir.path().join(&made.run).is_dir(),
+            "the live run was swept"
+        );
+        /* A relaunch on the stepped-back clock: the run is no longer live, and
+         * its stamp is AHEAD of now, which is what `saturating_sub` is for. A
+         * wrapping difference reads it as ancient; a plain one overflows. */
+        Runs::new(dir.path().to_path_buf())
+            .begin_at(earlier)
+            .expect("begin, relaunched");
+        assert!(
+            dir.path().join(&made.run).is_dir(),
+            "a run from the future was swept"
+        );
+    }
+
+    /// Warnings the sweep logs, kept so a test can read them.
+    struct Captured;
+
+    static WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    impl log::Log for Captured {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Warn
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                if let Ok(mut warnings) = WARNINGS.lock() {
+                    warnings.push(record.args().to_string());
+                }
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    /// Route this test binary's warnings into [`WARNINGS`], once.
+    fn capture_warnings() {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            log::set_logger(&Captured).expect("no other logger in this crate's tests");
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+    }
+
+    /// The warnings logged so far that contain `needle`.
+    fn warned(needle: &str) -> Vec<String> {
+        WARNINGS
+            .lock()
+            .expect("warnings")
+            .iter()
+            .filter(|warning| warning.contains(needle))
+            .cloned()
+            .collect()
+    }
+
+    /// Sets a mode, and puts the directory back to an ordinary one when
+    /// dropped, so the temporary directory can be removed even after a panic.
+    #[cfg(unix)]
+    struct Mode<'a>(&'a Path);
+
+    #[cfg(unix)]
+    impl<'a> Mode<'a> {
+        fn set(path: &'a Path, mode: u32) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+            Self(path)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Mode<'_> {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_logs_a_run_it_cannot_remove_and_goes_on_to_the_rest() {
+        let (dir, runs) = runs();
+        capture_warnings();
+        let stuck = dir.path().join("run-1-stuck");
+        let locked = stuck.join("locked");
+        std::fs::create_dir_all(&locked).expect("plant");
+        std::fs::write(locked.join("chapter-0.wav"), b"audio").expect("plant");
+        /* Several on either side of it in whatever order the directory lists,
+         * so a sweep that stops at the first failure leaves one of them. */
+        let removable: Vec<PathBuf> = (0..8)
+            .map(|n| dir.path().join(format!("run-1-gone{n}")))
+            .collect();
+        for made in &removable {
+            std::fs::create_dir(made).expect("plant");
+        }
+        let _restore = Mode::set(&locked, 0o500);
+        if std::fs::write(locked.join("probe"), b"").is_ok() {
+            eprintln!("skipped: permissions do not bind this user (root?)");
+            return;
+        }
+        runs.begin()
+            .expect("a run it cannot remove does not stop the export");
+        assert!(
+            locked.join("chapter-0.wav").exists(),
+            "the stuck run was removed after all"
+        );
+        for made in &removable {
+            assert!(
+                !made.exists(),
+                "the sweep stopped before {}",
+                made.display()
+            );
+        }
+        assert_eq!(
+            warned("cannot remove the abandoned export run-1-stuck").len(),
+            1,
+            "the run it could not remove was not logged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_logs_a_listing_it_cannot_read_and_the_export_goes_on() {
+        let (dir, runs) = runs();
+        capture_warnings();
+        let abandoned = dir.path().join("run-1-dead");
+        std::fs::create_dir(&abandoned).expect("plant");
+        /* Write and search, no read: a run can still be made in it. */
+        let _restore = Mode::set(dir.path(), 0o300);
+        if std::fs::read_dir(dir.path()).is_ok() {
+            eprintln!("skipped: permissions do not bind this user (root?)");
+            return;
+        }
+        let before = warned("cannot list the scratch directory").len();
+        let begun = runs
+            .begin()
+            .expect("an unreadable listing does not stop the export");
+        assert!(dir.path().join(&begun.run).is_dir());
+        assert!(
+            abandoned.is_dir(),
+            "nothing can be swept from a listing it cannot read"
+        );
+        assert!(
+            warned("cannot list the scratch directory").len() > before,
+            "the listing it could not read was not logged"
+        );
     }
 
     #[test]
