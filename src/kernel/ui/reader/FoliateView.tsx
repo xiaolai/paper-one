@@ -578,8 +578,10 @@ export function FoliateView({
    * the book renders can change its height — which is the property that makes
    * this safe where the `vh` it replaces was not. Equal heights are skipped:
    * the observer also reports width changes, which the cap does not read. */
+  // Stryker disable ArrayDeclaration: the only list here is the effect's dependencies, and any constant list never changes between renders, so the effect runs once either way
   useLayoutEffect(() => {
     const host = hostRef.current
+    // Stryker disable next-line ConditionalExpression: the host div is rendered unconditionally, so a layout effect always finds it; the guard is for the ref's type
     if (!host) return
     pageHeight.current = host.clientHeight
     const observer = new ResizeObserver(() => {
@@ -597,6 +599,7 @@ export function FoliateView({
     observer.observe(host)
     return () => observer.disconnect()
   }, [])
+  // Stryker restore ArrayDeclaration
 
   /* ⚠️ **A LAYOUT EFFECT, BECAUSE OF WHEN ITS CLEANUP RUNS.** React removes
    * the host from the document before it runs passive cleanups, and runs
@@ -731,6 +734,7 @@ export function FoliateView({
                   return
                 }
                 const request: PasswordAsk = {
+                  // Stryker disable next-line UpdateOperator: the id is only the sheet's React key, and counting down gives every asking a distinct key just as counting up does
                   id: askSeq.current++,
                   name: typeof input === 'string' ? input : input.name,
                   reason,
@@ -755,6 +759,7 @@ export function FoliateView({
         lastLocation: () => lastLocationRef.current,
       })
       .then(() => {
+        // Stryker disable next-line ArithmeticOperator: `ready` is only ever compared with 0 and watched for change, and counting down from 0 never returns to 0 and changes every time
         if (!session.disposed) setReady((n) => n + 1)
       })
       /* `start` reports the failures it expects through `onError`; anything

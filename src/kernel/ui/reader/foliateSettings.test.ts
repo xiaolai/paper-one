@@ -220,6 +220,14 @@ describe('applySettings', () => {
     expect(second).toHaveBeenCalledOnce()
   })
 
+  /* THE VARIABLES ARE THE CHANGE ITSELF, onto every document on screen, and
+     the figure cap among them is a share of the page height handed in. */
+  it('writes the variables onto every document on screen', () => {
+    const doc = document.implementation.createHTMLDocument('section')
+    applySettings(fakeRenderer({ getContents: () => [{ doc }] } as unknown as Partial<Renderer>), settings(), 800)
+    expect(doc.documentElement.style.getPropertyValue('--paper-figure-height')).toBe('760px')
+  })
+
   /* `setStyles` IS OPTIONAL — the fixed-layout renderer does not implement it,
      and a PDF must not crash the settings path. */
   it('survives a renderer that cannot take styles', () => {
