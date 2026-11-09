@@ -186,7 +186,15 @@ impl Destinations {
             _ => return Err(unknown()),
         }
         let existed = std::fs::symlink_metadata(&entry.target).is_ok();
-        staged.commit(&entry.target)?;
+        /* ⚠️ **A FAILED MOVE FORGETS THE TOKEN HERE, NOT IN THE CALLER.** The
+         * caller settles its claim before it reads this answer, so an entry left
+         * in `Packaging` would never be abandoned, and each failed rename (a
+         * locked or occupied target) would hold one of the live places until
+         * the app restarted. */
+        if let Err(error) = staged.commit(&entry.target) {
+            book.entries.remove(token);
+            return Err(error);
+        }
         let id = std::fs::symlink_metadata(&entry.target)
             .ok()
             .and_then(|meta| FileId::of(&meta));
@@ -464,6 +472,32 @@ mod tests {
         assert!(destinations
             .commit(&token, staged_with(&target, b"x"))
             .is_err());
+    }
+
+    #[test]
+    fn a_commit_whose_move_fails_forgets_its_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destinations = Destinations::default();
+        /* MORE FAILURES THAN THERE ARE LIVE PLACES, so a leak would show as
+         * a refused pick. */
+        for index in 0..MAX_LIVE_TOKENS + 1 {
+            /* A NON-EMPTY DIRECTORY AT THE NAME, which no rename of a file
+             * can replace. */
+            let target = dir.path().join(format!("{index}.m4b"));
+            std::fs::create_dir(&target).expect("dir");
+            std::fs::write(target.join("inside"), b"x").expect("inside");
+            destinations.room().expect("a failed commit held a place");
+            let token = destinations.insert(target.clone()).expect("insert");
+            destinations.claim(&token).expect("claim");
+            let staged = staged_with(&target, b"book");
+            let scratch = staged.path().to_path_buf();
+            let error = destinations.commit(&token, staged).expect_err("refuses");
+            assert!(error.contains("cannot move"), "{error}");
+            assert_eq!(destinations.phase(&token), None);
+            assert!(!scratch.exists(), "the unmoved book was left beside it");
+            assert!(target.join("inside").exists());
+        }
+        destinations.room().expect("room");
     }
 
     #[test]
