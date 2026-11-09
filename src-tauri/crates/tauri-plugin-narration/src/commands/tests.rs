@@ -251,6 +251,7 @@ fn a_clip_outside_the_voices_store_is_refused() {
 
 #[test]
 fn a_token_never_picked_is_refused() {
+    let _serial = apple::serial();
     let f = fixture();
     render(&f, 0, 1);
     let mut request = request(&f, vec![scratch(0)]);
@@ -300,6 +301,7 @@ fn a_suggested_name_is_a_bare_file_name() {
 fn a_package_that_fails_after_the_claim_spends_its_token() {
     /* Chapter 0 was never rendered, so the read fails inside the join — after
      * the claim, before any encoder runs. */
+    let _serial = apple::serial();
     let f = fixture();
     let request = request(&f, vec![scratch(0)]);
     let error = f.ready.package(&request).expect_err("nothing to read");
@@ -307,6 +309,25 @@ fn a_package_that_fails_after_the_claim_spends_its_token() {
     render(&f, 0, 1);
     let again = f.ready.package(&request).expect_err("spent");
     assert!(again.contains("never picked"), "{again}");
+    assert!(!f.out.join("book.m4b").exists());
+}
+
+/// ⚠️ **THE GATE COMES BEFORE THE CLAIM.** It was taken after, so a second
+/// export refused as busy spent the destination it had been given.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_package_refused_as_busy_leaves_its_token_picked() {
+    let _serial = apple::serial();
+    let f = fixture();
+    render(&f, 0, 1);
+    let held = apple::Admission::take("package").expect("admission");
+    let error = f
+        .ready
+        .package(&request(&f, vec![scratch(0)]))
+        .expect_err("busy");
+    assert!(error.contains("already packaging"), "{error}");
+    drop(held);
+    still_picked(&f);
     assert!(!f.out.join("book.m4b").exists());
 }
 
@@ -391,6 +412,7 @@ for locale in try await asset.load(.availableChapterLocales) {
 #[test]
 #[ignore]
 fn a_real_m4b_through_the_plugin() {
+    let _serial = apple::serial();
     let f = fixture();
     render(&f, 0, 2);
     render(&f, 1, 3);
@@ -480,6 +502,7 @@ fn a_real_m4b_through_the_plugin() {
 #[test]
 #[ignore]
 fn a_book_that_replaced_a_file_is_never_discarded() {
+    let _serial = apple::serial();
     let f = fixture();
     let book = f.out.join("book.m4b");
     std::fs::write(&book, b"the reader's own").expect("theirs");

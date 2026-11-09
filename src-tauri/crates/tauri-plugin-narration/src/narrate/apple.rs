@@ -23,10 +23,15 @@ static BUSY: Mutex<bool> = Mutex::new(false);
 /// Holds the gate for as long as it is alive, and releases it however the work
 /// ends — including a panic, which is what makes this a guard and not a pair of
 /// calls somebody has to remember to balance.
-struct Admission;
+///
+/// ⚠️ **TAKEN BY THE CALLER, BEFORE IT CLAIMS THE DESTINATION, AND HANDED IN.**
+/// It was taken inside `package`, after `commands` had already claimed the
+/// token, so a second export refused as busy spent a destination it never
+/// wrote. `package` asks for one by reference so it cannot be called without it.
+pub(crate) struct Admission;
 
 impl Admission {
-    fn take(what: &str) -> Result<Self, String> {
+    pub(crate) fn take(what: &str) -> Result<Self, String> {
         let mut busy = BUSY
             .lock()
             .map_err(|_| "the narration gate was poisoned".to_owned())?;
@@ -46,6 +51,16 @@ impl Drop for Admission {
             *busy = false;
         }
     }
+}
+
+/// Tests that take the gate run one at a time, so one holding it on purpose
+/// cannot make another fail as busy.
+#[cfg(test)]
+pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A packaged book, staged beside its destination and not yet moved onto it —
@@ -141,7 +156,8 @@ fn encode(_joined: &Path, _aac: &Path) -> Result<(), String> {
 /// The join and the encoded audio are written into `scratch`, the export's own
 /// directory under the app's data; only the finished book is written beside the
 /// destination, because only a rename within one directory is atomic.
-pub fn package(
+pub(crate) fn package(
+    _admission: &Admission,
     titles: &[String],
     read: impl FnMut(usize) -> Result<Vec<u8>, String>,
     meta: m4b::BookMeta,
@@ -151,7 +167,6 @@ pub fn package(
     if titles.is_empty() {
         return Err("there are no chapters to package".to_owned());
     }
-    let _admission = Admission::take("package")?;
     let inside = scratch.join("book");
 
     let (staged_audio, mut joined) = Staged::beside(&inside, "join")?;
@@ -293,8 +308,10 @@ pub(crate) mod tests {
 
     #[test]
     fn a_book_of_no_chapters_is_refused_before_anything_is_written() {
+        let _serial = serial();
         let dir = tempfile::tempdir().expect("tempdir");
         let error = package(
+            &Admission::take("package").expect("admission"),
             &[],
             |_| Ok(Vec::new()),
             m4b::BookMeta::default(),
@@ -330,7 +347,9 @@ pub(crate) mod tests {
             .map(|t| (*t).to_owned())
             .collect();
         let out = dir.path().join("packaged.m4b");
+        let _serial = serial();
         let book = package(
+            &Admission::take("package").expect("admission"),
             &names,
             |i| Ok(chapters[i].clone()),
             m4b::BookMeta {

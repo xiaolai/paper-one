@@ -88,6 +88,9 @@ impl Ready {
         if !SUPPORTED {
             return Err(UNSUPPORTED.to_owned());
         }
+        /* THE GATE BEFORE THE CLAIM, so an export refused as busy leaves its
+         * token picked — see `apple::Admission`. */
+        let admission = apple::Admission::take("package")?;
         let target = self.destinations.claim(&request.destination)?;
         let claimed = Claimed {
             destinations: &self.destinations,
@@ -95,6 +98,7 @@ impl Ready {
             done: false,
         };
         let book = apple::package(
+            &admission,
             &titles,
             |index| read_chapter(&paths[index]).map_err(|error| error.for_chapter(index + 1)),
             m4b::BookMeta {
