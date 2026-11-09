@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { speechAvailable } from '../reader/speaker'
-import type { VoiceFacts } from '../reader/voiceChoice'
+import { speechAvailable } from '../lib/speaker'
+import type { VoiceFacts } from '../lib/voiceChoice'
 
 /**
  * The voices this machine can read aloud with.

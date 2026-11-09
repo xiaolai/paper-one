@@ -80,7 +80,7 @@ export interface SpeakPrefs {
   readonly rate?: number
   /**
    * How loud, from 0 (silent) to 1 (as the voice produces it) — the
-   * `kernel.readingVolume` setting as a fraction.
+   * `narration.readingVolume` setting as a fraction.
    *
    * ⚠️ **PLAYBACK'S ALONE, AND 0 IS NOT STOPPING.** No render request and no
    * audiobook hears of it, so a clip is the same clip at any volume; and nothing

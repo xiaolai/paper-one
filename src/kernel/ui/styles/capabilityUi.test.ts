@@ -26,6 +26,13 @@ const PANE_CSS = readFileSync(
   'utf8',
 )
 
+/** The kernel's own title bar, whose actions a contributed bar control stands
+ *  beside. */
+const BAR_CSS = readFileSync(
+  fileURLToPath(new URL('../shell/TitleBar.module.css', import.meta.url)),
+  'utf8',
+)
+
 /**
  * One declaration out of one rule, comments stripped.
  *
@@ -154,6 +161,37 @@ describe('the capability vocabulary, measured against the kernel it sits in', ()
     for (const property of ['border-radius', 'font-size', 'line-height', 'resize', 'padding'] as const) {
       expect(declared(CSS, '.paper-cap-textarea', property), property).toBe(
         declared(PANE_CSS, '.noteInput', property),
+      )
+    }
+  })
+
+  /**
+   * A STEPPED SETTING IS ONE CONTROL, whoever contributes it.
+   *
+   * Read aloud's speed and pauses were kernel rows until step 5.5 moved them
+   * into narration, and they sit in the same pane as the kernel's spacing
+   * steppers. Two steppers that differ by a radius or a pip size read as two
+   * controls that mean different things.
+   */
+  it('gives a contributed stepper the kernel stepper’s shape', () => {
+    for (const property of ['width', 'height', 'border-radius', 'background'] as const) {
+      expect(declared(CSS, '.paper-cap-stepper-button', property), property).toBe(
+        declared(PANE_CSS, '.stepperButton', property),
+      )
+    }
+    for (const property of ['inline-size', 'block-size', 'background'] as const) {
+      expect(declared(CSS, '.paper-cap-pip', property), property).toBe(
+        declared(PANE_CSS, '.pip', property),
+      )
+    }
+  })
+
+  /* The Listen button stands in the title bar between the kernel's own
+     actions, so it is their size and their colour, or the bar has a visitor. */
+  it('gives a contributed bar control the kernel title-bar action’s shape', () => {
+    for (const property of ['width', 'height', 'border-radius', 'color'] as const) {
+      expect(declared(CSS, '.paper-cap-bar-button', property), property).toBe(
+        declared(BAR_CSS, '.action', property),
       )
     }
   })

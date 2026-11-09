@@ -6,16 +6,10 @@ import {
   FIGURE_HEIGHTS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
-  PARAGRAPH_GAP,
-  READING_RATE,
-  SENTENCE_GAP,
   READING_STEPS,
   SPACING,
   readingStep,
-  stepAt,
-  stepIndexOf,
 } from '../../core/metrics'
-import { READING_VOLUME_MAX, READING_VOLUME_MIN } from '../../core/settings'
 import { THEMES } from '../panes'
 
 /* A settings section is about no book — no section reads the context, so what
@@ -28,7 +22,6 @@ import { THEMES } from '../panes'
    directive and without it, 269 with `as const` removed. */
 const NO_BOOK = { bookId: null } as const
 import type { Face } from '../../core/typefaces'
-import type { VoicePack } from '../../core/ports'
 import { FacePicker } from './FacePicker'
 import type {
   Align,
@@ -61,8 +54,6 @@ import { PaneBand } from './PaneBand'
 import type { PluginSwitches } from '../../core/pluginSwitches'
 import type { Standing } from '../../core/registry'
 import { PaneGroup } from './PaneGroup'
-import { engineVoiceFor, installedPacksFor, packVoiceOf, qualify, unqualify } from '../reader/engineVoice'
-import { bestVoice, chosenVoice, voiceFor, voiceGroups, voiceKey, type ReadableTier, type VoiceFacts } from '../reader/voiceChoice'
 import { StepRow } from './StepRow'
 import styles from './SidePane.module.css'
 import { ContributionBoundary, ContributionBody } from '../ContributionBoundary'
@@ -105,7 +96,6 @@ const GROUP = {
   blocks: 'blocks',
   figures: 'figures',
   page: 'page',
-  voice: 'voice',
   optionalFeatures: 'optionalFeatures',
   /* ⚠️ **NO COLON, AND THESE WERE `developer:unfinished`.** A colon is the
      CONTRIBUTED-pane and contributed-section convention — `<capability>:<name>`
@@ -141,51 +131,6 @@ const GROUP = {
    Spacing — and open, the three of them would push Flow, the ruler and the
    side pane off the bottom of a 400px pane. */
 const OPEN_AT_REST: readonly string[] = [GROUP.appearance, GROUP.text, GROUP.page]
-
-/**
- * Read aloud's voice and speed — ABSENT WHEN NO BOOK IS OPEN, and the whole
- * group goes with it.
- *
- * The language a voice has to answer for is the BOOK's, not the interface's
- * (`ui/reader/voiceChoice.ts` argues it), so with no book there is no question
- * to ask: a picker offering every voice on the machine would be asking the
- * reader to choose a voice for a language nothing has named. Same rule as the
- * ruler row, which appears only in scrolled flow — shown where it means
- * something rather than greyed out everywhere else.
- */
-export interface Narration {
-  /** The open book's declared language — `documentLang`. */
-  readonly lang: string | null
-  /** Everything the engine offers, unfiltered; the picker narrows it. */
-  readonly voices: readonly VoiceFacts[]
-  /**
-   * The catalogue, so the picker can offer a DOWNLOADED voice.
-   *
-   * ⚠️ **WITHOUT THIS THE ROW SAID "None" WHILE A PACK WAS READING THE
-   * BOOK.** Measured in the running app on 2026-09-23 with the English
-   * pack installed: `engineVoiceFor` had already resolved Heart and the
-   * reading used it, while this picker — which knew only about the
-   * platform's voices, every one of them below the floor on a Mac — told
-   * the reader no high-quality voice was available. A settings row that
-   * contradicts what is being heard is worse than no row.
-   */
-  readonly packs: readonly VoicePack[]
-  readonly chosen: Readonly<Record<string, string>>
-  readonly rate: number
-  /** How loud Paper reads aloud, 0 to 100 — apart from the system's volume. */
-  readonly volume: number
-  /** Silence after a sentence and after a paragraph, in ms. */
-  readonly sentenceGapMs: number
-  readonly paragraphGapMs: number
-  /** Whether a note's BODY is read — see `NOTE_BODIES` in `speechSkip.ts`. */
-  readonly notesAloud: boolean
-  readonly onVoice: (lang: string, voice: string) => void
-  readonly onRate: (rate: number) => void
-  readonly onVolume: (volume: number) => void
-  readonly onSentenceGap: (ms: number) => void
-  readonly onParagraphGap: (ms: number) => void
-  readonly onNotesAloud: (on: boolean) => void
-}
 
 /**
  * Only what this panel reads and changes.
@@ -263,7 +208,6 @@ export interface SettingsProps {
    * accusing a working store.
    */
   persistent?: boolean | undefined
-  narration?: Narration | undefined
   onTheme: (theme: Theme) => void
   onFollowOs: (follows: boolean) => void
   /**
@@ -353,125 +297,6 @@ const STYLE_LABELS = {
  * take the shared components now, and what remains here is the only thing that
  * genuinely differed between them, which is what each state is CALLED.
  */
-/**
- * What a reader is told each offered voice tier is.
- *
- * APPLE'S OWN WORDS — its Manage Voices sheet says Enhanced and Premium — and
- * `unknown` is every non-Apple engine, where the tier genuinely is not known.
- *
- * ONLY THE TIERS AT OR ABOVE THE FLOOR, because nothing below it is ever
- * offered (see `voiceChoice.ts`): Standard, Compact and Classic had labels here,
- * and a heading for a tier the picker can no longer show is a promise the list
- * does not keep. TYPED OVER `ReadableTier`, so a tier that becomes offerable
- * without a label is a compile error rather than a blank heading — the rule
- * `CONTRIBUTION_ICONS` states for its own map.
- */
-const TIER_LABELS: Record<ReadableTier, string> = {
-  premium: 'Premium',
-  enhanced: 'Enhanced',
-  unknown: 'Other',
-}
-
-/** One `<optgroup>` in a [`SelectRow`], with the rows inside it. */
-interface SelectGroup {
-  readonly label: string
-  readonly options: readonly { readonly value: string; readonly label: string }[]
-}
-
-/**
- * The groups the Voice picker offers: the downloaded packs first, then the
- * platform's own tiers.
- *
- * ⚠️ **THE PACKS COME FIRST BECAUSE THE READING ASKS THEM FIRST.**
- * `engineVoiceFor` runs in front of `voiceFor` — a pack is not subject to the
- * floor, since its voices are in the catalogue because the owner listened to
- * them — so a list that put the platform's voices above them would name a
- * second-choice voice in its first row. The same drift `voiceGroups` records
- * for the tiers, one level up.
- *
- * A PACK IS ITS OWN GROUP, labelled with the pack's name, because that is what
- * a reader is choosing between: Heart and Bella are the English pack's, and
- * saying so is how the row explains where the voice came from.
- */
-function voicePickerGroups(narration: Narration): readonly SelectGroup[] {
-  const packs = installedPacksFor(narration.packs, narration.lang).map((pack) => ({
-    label: pack.name,
-    options: pack.voices.map((voice) => ({ value: qualify(pack.family, voice.id), label: voice.name })),
-  }))
-  const platform = voiceGroups(narration.voices, narration.lang).map((group) => ({
-    label: TIER_LABELS[group.tier],
-    options: group.voices.map((voice) => ({ value: voice.voiceURI, label: voice.name })),
-  }))
-  return [...packs, ...platform]
-}
-
-/**
- * The value the Voice row shows — the reader's OWN choice, or `''` for the
- * Automatic row.
- *
- * A stored engine choice is read back through the same two steps the reading
- * takes, so a preference naming a pack that has since been removed falls
- * through to Automatic here exactly as it does there, rather than selecting an
- * option the list no longer carries.
- *
- * ⚠️ **EXPORTED BECAUSE THE DOM CANNOT TELL ITS ANSWERS APART.** A
- * `<select>` handed a value no `<option>` carries reports the EMPTY STRING and
- * shows its first row — measured, not assumed — which is exactly what the
- * fall-through produces. So three of the four decisions below render
- * identically, and a case driving the pane can only ever see one of them. The
- * function is pure; it is asserted directly.
- */
-export function voicePickerValue(narration: Narration): string {
-  /* ABSENT AND `''` ALIKE, which is the rule `chosenVoice` states for its own
-     side: `''` is what the Automatic row stores, and `unqualify` refuses it.
-     Asked as "is there one", rather than with a `?? ''` in front of it: the
-     two are the same answer here, so substituting one for the other was a
-     value no test could tell from any other. */
-  const stored = narration.chosen[voiceKey(narration.lang)]
-  if (stored !== undefined) {
-    const named = unqualify(stored)
-    if (named) {
-      const pack = installedPacksFor(narration.packs, narration.lang).find(
-        (candidate) => candidate.family === named.family,
-      )
-      if (pack?.voices.some((voice) => voice.id === named.voiceId)) return stored
-    }
-  }
-  /* Stryker disable next-line StringLiteral: a `<select>` handed a value
-     no `<option>` carries reports the empty string anyway, so the
-     fallback and any other absent value render alike. */
-  return chosenVoice(narration.voices, narration.lang, narration.chosen)?.voiceURI ?? ''
-}
-
-/**
- * What Automatic currently means, named rather than left to the reader to
- * guess.
- *
- * ⚠️ **IT ASKS THE PACKS FIRST, AND THAT IS THE DEFECT THIS EXISTS FOR.**
- * Measured in the running app on 2026-09-23: with the English pack installed
- * this row said *"None — no high-quality voice is available here"* while the
- * reading was being read by Heart. The floor refuses every voice a Mac's
- * WebView offers, so asking only `voiceFor` answers `none` on a Mac forever,
- * however many packs are downloaded.
- */
-function voicePickerLead(narration: Narration): string {
-  /* ⚠️ **ASKED WITH NO STORED CHOICE, BECAUSE THAT IS WHAT THIS ROW OFFERS.**
-     `engineVoiceFor` honours a stored voice, so passing `narration.chosen` made
-     the label say "Automatic (Bella)" to a reader who had explicitly CHOSEN
-     Bella — naming the choice back as though it were the automatic pick, and
-     promising the wrong voice to anybody who then selected this row. Selecting
-     it stores `''`, which is the empty record this asks with. `bestVoice`, one
-     branch below, has always been asked this way. */
-  const engine = engineVoiceFor(narration.packs, narration.lang, {})
-  const detail = engine ? packVoiceOf(narration.packs, engine) : null
-  if (detail) return `Automatic (${detail.voice.name})`
-  if (voiceFor(narration.voices, narration.lang, narration.chosen).kind === 'none') {
-    return 'None — no high-quality voice is available here'
-  }
-  const best = bestVoice(narration.voices, narration.lang)
-  return best ? `Automatic (${best.name})` : 'Automatic (system default)'
-}
-
 const FLOW_LABELS = { scrolled: 'Scrolled', paginated: 'Paged' } as const
 const SIDE_LABELS = { left: 'Left', right: 'Right' } as const
 const SHOWN_HIDDEN = { on: 'Shown', off: 'Hidden' } as const
@@ -539,90 +364,6 @@ function CycleRow<T extends string>({
       <span style={ROW_LABEL}>{label}</span>
       <span className={styles.settingValue}>{labels[value]}</span>
     </button>
-  )
-}
-
-/**
- * A row whose setting is one of MANY, chosen from a list.
- *
- * ⚠️ **A NATIVE `<select>`, WHERE `FacePicker` BUILDS ITS OWN MENU, AND THE
- * DIFFERENCE IS THE SAMPLE.** A typeface list has to be drawn IN the typefaces
- * — the sample is the description, which is the whole argument that component
- * makes — and no stock control can do that. A voice list is proper nouns; there
- * is nothing to render. What is left is a long, machine-dependent list that
- * wants grouping, keyboard walking and type-ahead, all of which the platform
- * control has and a hand-built menu would have to grow.
- *
- * `CycleRow` is wrong for the same reason in the other direction: it advances
- * one state per press, which is fine for two flows and absurd for twenty
- * voices.
- *
- * The idiom is already here — `DevPane` has the app's other `<select>`, and
- * `global.css` styles `select:focus-visible` — so this introduces a control
- * rather than a precedent.
- */
-function SelectRow({
-  label,
-  value,
-  lead,
-  groups,
-  onChange,
-}: {
-  readonly label: string
-  readonly value: string
-  /**
-   * One option ABOVE the groups, for the choice that is not one of them.
-   *
-   * Ungrouped on purpose: "let the app decide" is not a member of any tier, and
-   * an `<optgroup>` holding one row states a category that does not exist.
-   */
-  readonly lead?: { readonly value: string; readonly label: string } | undefined
-  /** Rendered as `<optgroup>`s in order; a group with no rows is dropped. */
-  readonly groups: readonly SelectGroup[]
-  readonly onChange: (value: string) => void
-}) {
-  return (
-    <div className={`${styles.settingRow} ${styles.settingStatic}`}>
-      <span style={ROW_LABEL}>{label}</span>
-      <select
-        className={styles.settingSelect}
-        value={value}
-        aria-label={label}
-        onChange={(event) => onChange(event.currentTarget.value)}
-      >
-        {lead && (
-          <option key="lead" value={lead.value}>
-            {lead.label}
-          </option>
-        )}
-        {groups.map((group, at) =>
-          /* ⚠️ **A PACK CAN BE EMPTY, SO THIS IS REACHABLE — AND IT WAS NOT.**
-             The directive here said `voiceGroups` appends a voice as it opens
-             each run, so no caller ever emits an empty group. That stopped
-             being true when the picker began offering DOWNLOADED packs:
-             `VoicePack.voices` is data from a manifest, and a pack with none
-             would draw a heading with nothing under it. Tested rather than
-             disabled now. */
-          group.options.length === 0 ? null : (
-            /* KEYED BY POSITION AS WELL AS LABEL. `voiceGroups` deliberately
-               emits non-contiguous groups from one tier — the same label twice —
-               so a label alone gave two siblings one key, and React reconciled
-               the second into the first whenever the installed voices changed. */
-            /* Stryker disable next-line StringLiteral: a React key is not in
-               the DOM, so no rendered output can tell one spelling from
-               another — what it prevents is a reconciliation, and the comment
-               above records the case. */
-            <optgroup key={`${group.label}-${at}`} label={group.label}>
-              {group.options.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </optgroup>
-          ),
-        )}
-      </select>
-    </div>
   )
 }
 
@@ -751,7 +492,6 @@ export function Settings({
   missing,
   optionalFeatures,
   unfinishedPanes = [],
-  narration,
   persistent = true,
   onTheme,
   onFollowOs,
@@ -783,8 +523,9 @@ export function Settings({
      reason. */
   /* ⚠️ **NAMED `stepAt` UNTIL 2026-09-20, WHICH SHADOWED THE FUNCTION OF THAT
      NAME IN `core/metrics` — a number standing in front of a helper this file
-     imports.** It cost nothing for as long as nothing here called the real one,
-     and then the Voice group did: `stepAt(READING_RATE, idx)` resolved to the
+     imported.** It cost nothing for as long as nothing here called the real one,
+     and then the Voice group did (it is narration's since step 5.5, and the
+     import went with it): `stepAt(READING_RATE, idx)` resolved to the
      number and `tsc` said "Type 'Number' has no call signatures", which names
      the symptom and not the shadow. Renamed rather than the import aliased,
      because an alias leaves the trap for the next caller. */
@@ -1260,108 +1001,6 @@ export function Settings({
       {onSide !== undefined && (
         <CycleRow label="Side pane position" states={SIDES} value={side} labels={SIDE_LABELS} onChange={onSide} />
       )}
-      </PaneGroup>
-      )}
-
-      {/* ⚠️ **ONLY WITH A BOOK OPEN, BECAUSE THE LANGUAGE IS THE BOOK'S.** A
-          voice has to answer for the language of what it is reading — see
-          `voiceChoice.ts` — so with nothing open there is no question to put to
-          the reader — so `bestVoice` refuses to guess one and the app keeps the
-          platform's default.
-
-          ⚠️ **THE GROUP USED TO BE HIDDEN IN THAT CASE, WHICH LEFT THE READER
-          NOTHING TO SAY.** A book with no `dc:language` is exactly where the
-          automatic pick declines, so hiding the control meant the one situation
-          the reader most needed to correct was the one with no control in it.
-          The picker offers every selectable voice there instead, and the choice
-          is stored under `voiceKey`'s `''`. */}
-      {narration && (
-      <PaneGroup
-        title="Voice"
-        open={groupOpen(GROUP.voice)}
-        onToggle={() => toggleGroup(GROUP.voice)}
-      >
-        <SelectRow
-          label="Voice"
-          /* THE VOICE THE READING WILL USE, SAID EXPLICITLY RATHER THAN LEFT
-             TO THE DOM. This was `chosen[voiceKey(lang)]`, and an audit said a
-             stored choice the machine no longer has would make the control draw
-             BLANK. Measured on 2026-09-21, it does not: a single `<select>` whose
-             value matches no option selects its FIRST option, and the first is
-             the Automatic lead — so the raw string and this rendered the same
-             row in every case. Nor can a listed voice be one the reading
-             refuses, because the options are `voiceOptions` and `chosenVoice`
-             applies the same two tests.
-
-             It is kept because the old binding was correct only by that
-             coincidence: it relied on Automatic being first. `chosenVoice` is
-             the speech path's own answer, so the picker now shows what the
-             reader will hear however the options are ordered. */
-          value={voicePickerValue(narration)}
-          /* NAMES WHAT AUTOMATIC CURRENTLY MEANS, rather than saying
-             "Automatic" and leaving the reader to guess. It is the same answer
-             the reading will reach, because both ask the packs and then the
-             floor, in that order — and where neither has anything it says so,
-             which is the one case where the reader needs to be told to go and
-             get a voice. */
-          lead={{ value: '', label: voicePickerLead(narration) }}
-          groups={voicePickerGroups(narration)}
-          onChange={(voice) => narration.onVoice(voiceKey(narration.lang), voice)}
-        />
-        <StepRow
-          label="Speed"
-          scale={READING_RATE}
-          value={stepIndexOf(READING_RATE, narration.rate)}
-          onChange={(idx) => narration.onRate(stepAt(READING_RATE, idx))}
-        />
-        {/* ⚠️ **A SLIDER, WHERE EVERY ROW AROUND IT STEPS.** `StepRow`'s argument is
-            that a value between two steps is not a decision anybody made, which is
-            true of a line height and not of how loud: this is set by ear, against
-            a voice that is already speaking. The 5s are only so that the keyboard
-            moves it by something audible. */}
-        <div className={`${styles.settingRow} ${styles.settingStatic}`}>
-          <span style={ROW_LABEL}>Volume</span>
-          <input
-            type="range"
-            className={styles.volume}
-            min={READING_VOLUME_MIN}
-            max={READING_VOLUME_MAX}
-            step={5}
-            value={narration.volume}
-            aria-label="Reading volume"
-            aria-valuetext={`${narration.volume}%`}
-            onChange={(event) => narration.onVolume(Number(event.target.value))}
-          />
-          <span className={styles.settingValue}>{narration.volume}%</span>
-        </div>
-        {/* ⚠️ **THE PAUSES ARE ADDITIVE TO WHATEVER THE ENGINE ALREADY LEAVES**,
-            and how much that is has not been measured — see `SENTENCE_GAP`. So
-            the labels say what the reader is adding, not what they will hear in
-            total, which is the only claim that is true. */}
-        <StepRow
-          label="Pause between sentences"
-          scale={SENTENCE_GAP}
-          value={stepIndexOf(SENTENCE_GAP, narration.sentenceGapMs)}
-          onChange={(idx) => narration.onSentenceGap(stepAt(SENTENCE_GAP, idx))}
-        />
-        <StepRow
-          label="Pause between paragraphs"
-          scale={PARAGRAPH_GAP}
-          value={stepIndexOf(PARAGRAPH_GAP, narration.paragraphGapMs)}
-          onChange={(idx) => narration.onParagraphGap(stepAt(PARAGRAPH_GAP, idx))}
-        />
-        {/* ⚠️ **OFF IS THE QUIETER DEFAULT, AND IT IS A CHOICE RATHER THAN A
-            POLICY.** EPUB calls a note body SKIPPABLE — content a reading system
-            offers to leave out — and this app used to drop it with no way to ask
-            for it. Most are hidden and never reach the voice; the ones that are
-            not are a print-style block at the foot of a section, so ON means a
-            run of citations arriving mid-chapter. The label names what is added,
-            like the pauses above. */}
-        <ToggleRow
-          label="Read footnotes"
-          on={narration.notesAloud}
-          onChange={narration.onNotesAloud}
-        />
       </PaneGroup>
       )}
 

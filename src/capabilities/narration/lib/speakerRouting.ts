@@ -23,7 +23,7 @@
  * since a stop on a speaker that is not speaking is a no-op on both.
  */
 
-import type { VoicePack } from '../../core/ports'
+import type { VoicePack } from '../../../kernel'
 import { engineVoiceFor } from './engineVoice'
 import type { SpeakPrefs } from './speaker'
 

@@ -62,7 +62,7 @@ import { OverlaySheet } from './overlays/OverlaySheet'
 import { listTrash, type TrashedBook } from '../core/bookTrash'
 import { TrashSheet } from './overlays/TrashSheet'
 import { WindowShell } from './shell/WindowShell'
-import { READING_VOLUME_MAX } from '../core/settings'
+import { TitleBar } from './shell/TitleBar'
 import { Library } from './screens/Library'
 import { Reader } from './screens/Reader'
 import { TagEditor } from './screens/TagEditor'
@@ -71,14 +71,8 @@ import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
 import { chapterSteps } from './tocOrder'
 import { ReaderControls, WindowHosts } from './reader/readerContributions'
-import { createHostStore, HostedTitleBar, ReadingHost } from './reader/readingHost'
 import { useReadingSurface } from './reader/readingSurface'
 import { useAutoAdvance } from './reader/useAutoAdvance'
-import { documentLang } from './reader/speech'
-import { NO_GOOD_VOICE, voiceFor } from './reader/voiceChoice'
-import { engineVoiceFor, missingPackNotice } from './reader/engineVoice'
-import { useVoicePacks } from './hooks/useVoicePacks'
-import { useVoices } from './hooks/useVoices'
 
 
 /**
@@ -221,11 +215,6 @@ export function App({
    * hook, which explains why there is deliberately no control for it. */
   const reducedMotion = usePrefersReducedMotion()
   const [state, dispatch] = useAppState(services.settings, composition.panes)
-  /* The downloadable voices: what this device has, and the engine the reading
-   * uses when a pack can read the book on screen. Empty and null in a build
-   * with no voices capability — a phone, a browser client — where everything
-   * below reads exactly as it did before. */
-  const { packs: voicePacks, engine: voiceEngine } = useVoicePacks(services)
   /* ⚠️ IT SUBSCRIBES TO THE FLAG, NOT TO THE VALUES, and that is the whole
      point. `persistent` flips the first time the store's write is REFUSED, and
      that refusal happens after `values` has already changed and been published
@@ -310,26 +299,6 @@ export function App({
     [fs],
   )
   const library = useLibrary(services.library)
-  /* Reading aloud follows the spine document and turns its pages: the session
-   * is the paging — `next`, in reading order — and `doc` is what is read. */
-  const speechPrefs = useMemo(
-    () => ({
-      voices: state.readingVoice,
-      rate: state.readingRate,
-      volume: state.readingVolume / READING_VOLUME_MAX,
-      sentenceGapMs: state.sentenceGapMs,
-      paragraphGapMs: state.paragraphGapMs,
-      notesAloud: state.readingNotesAloud,
-    }),
-    [
-      state.readingVoice,
-      state.readingRate,
-      state.readingVolume,
-      state.sentenceGapMs,
-      state.paragraphGapMs,
-      state.readingNotesAloud,
-    ],
-  )
   /**
    * The paging the reading needs, and a chapter step over the book's contents.
    *
@@ -390,22 +359,19 @@ export function App({
     }),
     [book.generation, book.bookId, book.doc, book.meta, book.toc, book.fixedLayout, book.sectionTexts],
   )
-  /* ⚠️ **COMMITTED HERE, READ BY `ReadingHost` BELOW**, which is a child, so its
-     effects run before this component's: see `readingSurface.ts` for what makes
-     that safe. */
+  /* ⚠️ **COMMITTED HERE, READ BY THE WINDOW HOSTS BELOW** — narration's reading
+     among them — which are children, so their effects run before this
+     component's: see `readingSurface.ts` for what makes that safe. */
   const readingSurface = useReadingSurface({
     doc: book.doc,
     place: speechPlace,
     paging: speechPaging,
     book: speechBook,
   })
-  const [hostStore] = useState(createHostStore)
   /* The reading below and every contribution around it are told one thing. */
   const readerContext = {
     sectionKey: book.doc,
     surface: readingSurface.surface,
-    /* Until step 5.5 moves the reading's settings out: see `ReaderContext.voice`. */
-    voice: { chosen: state.readingVoice, rate: state.readingRate, notesAloud: state.readingNotesAloud },
   }
   /**
    * The book turning itself, at the pace the time-left estimate uses.
@@ -428,51 +394,6 @@ export function App({
        thing that tells it the book it was advancing has been replaced. */
     generation: book.generation,
   })
-  /* What the Voice group in Settings needs that app state cannot answer: the
-     language of the book on screen, and what this machine can actually say.
-     `documentLang` is the same fact the utterance is given, read from the same
-     place, so the picker offers voices for the language the reading will ask
-     for rather than for the interface's. */
-  const voices = useVoices()
-  /* ⚠️ **THE CATALOGUE IS PART OF THIS, AND ITS ABSENCE WAS A ROW THAT LIED.**
-     Measured in the running app on 2026-09-23: with the English pack installed
-     the Voice row said *"None — no high-quality voice is available here"* while
-     Heart was reading the book. The picker asked only `voiceFor`, which refuses
-     every voice a Mac's WebView offers — so on a Mac it answered `none` however
-     many packs had been downloaded. Passed live rather than as a snapshot, for
-     the reason `speakerRouting` gives: a reader who downloads a pack mid-chapter
-     should see it in the picker without relaunching. */
-  const narration = useMemo(
-    () => ({ lang: book.doc ? documentLang(book.doc) : null, voices, packs: voicePacks }),
-    [book.doc, voices, voicePacks],
-  )
-  /* ⚠️ **THE SAME ANSWER THE SPEAKER WILL REACH, ASKED BEFORE THE PRESS.** The
-     floor refuses every voice a Mac's WebView offers (see `voiceChoice.ts`), so
-     the Listen control says so up front rather than starting a reading that
-     stops at its first sentence. Same function, same list, same language and
-     same stored choice as `Speaker.speak` — so the control cannot promise a
-     reading the speaker then refuses, or refuse one it would have read. */
-  /**
-   * Why this book cannot be read aloud, or `null` when it can.
-   *
-   * ⚠️ **THE DOWNLOADED VOICES ARE ASKED FIRST, AND THE FLOOR IS UNCHANGED
-   * BEHIND THEM.** `voiceFor` refuses every platform voice below Enhanced
-   * wherever the tier is legible, which on a Mac is all of them; a pack is not
-   * subject to that and does not need to be, since its voices are in the
-   * catalogue because the owner listened to them. So a book a pack can read is
-   * never refused, whatever the platform offers.
-   *
-   * And where nothing can read it, the sentence says what would: a pack that
-   * exists for the language names itself and its size. That is advice a reader
-   * can act on, which *"install a system voice"* would not have been — macOS
-   * withholds the good ones from this app however they are installed.
-   */
-  const listenRefusal = useMemo((): string | null => {
-    if (engineVoiceFor(voicePacks, narration.lang, state.readingVoice)) return null
-    if (voiceFor(narration.voices, narration.lang, state.readingVoice).kind !== 'none') return null
-    return missingPackNotice(voicePacks, narration.lang) ?? NO_GOOD_VOICE
-  }, [voicePacks, narration.voices, narration.lang, state.readingVoice])
-
   /* One file picker for the window. The reader's empty state, the palette and
    * the switcher all ask for books, and one input serves all three rather than
    * each surface growing its own. */
@@ -2583,13 +2504,6 @@ export function App({
 
   return (
     <>
-      {/* ⚠️ **FIRST, BECAUSE IT PUBLISHES IN A LAYOUT EFFECT**: see its header. */}
-      <ReadingHost
-        context={readerContext}
-        prefs={speechPrefs}
-        engine={voiceEngine}
-        store={hostStore}
-      />
       {/* ⚠️ **HERE AND NOT UNDER A SCREEN**, so they outlive the reader; and ahead of
           the shell, so their layout effects run before those of a control that
           reads what they publish. */}
@@ -2598,14 +2512,12 @@ export function App({
         state={state}
         platform={platform}
         titleBar={
-          <HostedTitleBar
-            store={hostStore}
+          <TitleBar
             state={state}
             dispatch={dispatch}
             platform={platform}
             bookTitle={title}
             bookSubtitle={subtitle}
-            listenRefusal={listenRefusal}
             hasBook={book.source !== null}
             screens={composition.screens}
             readerControls={<ReaderControls controls={composition.readerControls} context={readerContext} />}
@@ -2708,7 +2620,6 @@ export function App({
             markFocus={marking.focus}
             onMarkFocusDone={marking.clearFocus}
             markControls={composition.markControls}
-            narration={narration}
             books={library.books}
             /* ⚠️ **ABSENT WHERE THE LIBRARY CANNOT BE SEARCHED, not a stub that
                answers nothing.** The kernel's slot is null on a host with no

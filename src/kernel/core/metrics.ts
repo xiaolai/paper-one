@@ -366,83 +366,6 @@ export const BRIGHTNESS: SteppedScale = {
 }
 
 /**
- * How fast the book is read aloud, as a multiplier on the engine's own speed.
- *
- * A SCALE RATHER THAN A SLIDER, for the reason every other scale here gives: a
- * value between two steps is not a decision anybody made. These particular
- * numbers are the ones listeners already know from every audiobook player, which
- * matters more than an even distribution — 1.25× and 1.5× are what somebody
- * reaches for by name.
- *
- * 1 IS THE ENGINE'S OWN DEFAULT and is therefore the default here, and `def`
- * is its INDEX, as on every scale in this file. `settings.ts` derives the
- * clamp it validates against from the two ends, so the range a reader can
- * store and the range this offers cannot disagree.
- */
-
-export const READING_RATE: SteppedScale = {
-  steps: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5],
-  def: 2,
-  unit: 'x',
-}
-
-/**
- * The silence read aloud leaves at a sentence end and at a paragraph end.
- *
- * ⚠️ **ONLY EXPRESSIBLE BECAUSE THE READING IS SENTENCE-AT-A-TIME.** With a whole
- * section queued as one utterance there is nowhere to put a pause: Web Speech
- * exposes no break, no SSML and no inter-utterance delay. One utterance per
- * sentence turns it into a timer between two of them, and the block index
- * `collectText` records is what tells the two boundaries apart.
- *
- * ⚠️ **IN MILLISECONDS, AND NOT SCALED BY THE READING RATE.** Scaling was the
- * other candidate and the argument for it is real — at 2.5× the words are shorter
- * so a fixed gap is proportionally more prominent, and the rhythm changes. It is
- * not taken because a SETTING must mean what it says: a reader who asks for 300ms
- * and hears 120ms at speed has been overruled by the app. The engine's own
- * sentence-final prosody already shortens with rate, so part of the total pause
- * scales anyway, and a reader who wants less at speed can ask for less.
- *
- * ⚠️ **THE DEFAULTS ARE ADDITIVE AND THE ENGINE'S OWN GAP IS UNMEASURED.** Web
- * Speech inserts some silence of its own between two utterances, engine by
- * engine, and nothing here knows how much — the app was not running when these
- * were chosen. So these are a judgement, not a measurement: a breath at a
- * sentence, a clear beat at a paragraph. Measure the engine's contribution in the
- * running app before defending either number.
- *
- * A paragraph boundary uses the paragraph value ALONE, not both added: the label
- * says "between paragraphs", and a reader setting it to zero means no pause there.
- */
-/**
- * ⚠️ **THE DEFAULT IS UNMEASURED AGAINST THE ENGINE'S OWN PAUSE, AND ZERO IS NOT
- * THE FIX.** An audit asked for neutral zero defaults, or for the feature to be
- * marked experimental, because Web Speech engines add different intrinsic pauses
- * and 150ms therefore sounds different on each. The premise is right and the
- * remedy is not: what is unmeasured is the ENGINE's baseline, not this value, and
- * zero would not make the rhythm consistent — it would leave whatever each
- * engine already does, unchanged and equally unmeasured, while removing the one
- * control a listener has over it.
- *
- * So the value stays and the CLAIM is narrow: every label says what the reader is
- * ADDING, never what they will hear in total, which is the only sentence that is
- * true on every platform. Measuring the baseline needs the app driven against
- * each engine and is worth doing; until then a stepper that starts at a short
- * pause is better than one that starts at none.
- */
-export const SENTENCE_GAP: SteppedScale = {
-  steps: [0, 150, 300, 500, 750, 1000],
-  def: 1,
-  unit: 'ms',
-}
-
-/** The silence at a paragraph end — see `SENTENCE_GAP`. */
-export const PARAGRAPH_GAP: SteppedScale = {
-  steps: [0, 300, 600, 900, 1400, 2000],
-  def: 2,
-  unit: 'ms',
-}
-
-/**
  * THE THEME IS THE CEILING. Contrast runs from softest up to the theme exactly
  * as designed, and stops there — it used to run past it, pushing the ink toward
  * pure black on a light theme and pure white on a dark one, which is a reader
@@ -492,7 +415,7 @@ export function stepAt(scale: SteppedScale, idx: number): number {
  * `stepAt`'s inverse: the step nearest a stored VALUE.
  *
  * Needed because a setting that stores what the reader chose rather than where
- * they chose it — `textSize`'s rule, and `readingRate` follows it — has to be
+ * they chose it — `textSize`'s rule, and narration's `readingRate` follows it — has to be
  * shown on a stepper that works in indices. `stepIndexForSize` is the same
  * function over `READING_STEPS`, whose steps are objects; this is the one for
  * the plain-number scales, so neither has to be written twice.

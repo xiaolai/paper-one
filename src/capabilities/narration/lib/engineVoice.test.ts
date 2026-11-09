@@ -8,8 +8,8 @@ import {
   qualify,
   unqualify,
 } from './engineVoice'
-import { packArrived, packSize } from '../../core/packSize'
-import type { VoicePack } from '../../core/ports'
+import { packArrived, packSize } from '../../../kernel'
+import type { VoicePack } from '../../../kernel'
 
 function pack(over: Partial<VoicePack> = {}): VoicePack {
   return {

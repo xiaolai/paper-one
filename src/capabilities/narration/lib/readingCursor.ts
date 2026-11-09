@@ -13,7 +13,7 @@
  * the hook knows how to do that. So the edge is reported, not absorbed.
  */
 
-import type { Span } from './wordSnap/sentenceOf'
+import type { Span } from '../../../kernel'
 
 export interface ReadingPlan {
   /**

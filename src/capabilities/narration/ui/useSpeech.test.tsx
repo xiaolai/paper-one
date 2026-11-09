@@ -2,9 +2,9 @@
 import { act, cleanup, render } from '@testing-library/react'
 import { useLayoutEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { FakeSynth, FakeUtterance } from './speechSynth.testkit'
-import { FakeAudioHost, pcmOf } from './enginePlayer.testkit'
-import type { SpeechRequest, SpokenAudio, VoicePack } from '../../core/ports'
+import { FakeSynth, FakeUtterance } from '../lib/speechSynth.testkit'
+import { FakeAudioHost, pcmOf } from '../lib/enginePlayer.testkit'
+import type { SpeechRequest, SpokenAudio, VoicePack } from '../../../kernel'
 import {
   CONTINUE_GRACE_MS,
   CONTINUE_TICK_MS,
@@ -16,11 +16,10 @@ import {
   type ReadingEngine,
   type Speech,
 } from './useSpeech'
-import { useReadingSurface, type BookFacts, type SpeechPlace } from './readingSurface'
-import { textDigest } from './clipKey'
-import { canonicalTextOf } from './passageText'
-import { Speaker, type SpeakPrefs } from './speaker'
-import { collectText } from './speech'
+import { useReadingSurface, type BookFacts, type SpeechPlace } from '../../../kernel/testkit'
+import { canonicalTextOf, textDigest } from '../../../kernel'
+import { Speaker, type SpeakPrefs } from '../lib/speaker'
+import { collectText } from '../../../kernel/testkit'
 
 /** Where the reader is before anything has resolved — the app's first render. */
 const NOWHERE: SpeechPlace = { bookId: null, sectionIndex: null }

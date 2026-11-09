@@ -1,9 +1,10 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { engineVoiceFor, messageOf, missingPackNotice, packVoiceOf, qualify } from '../../../kernel'
+import { messageOf } from '../../../kernel'
 import type { ReadyBook, SpeechSkipPrefs } from '../../../kernel'
 import { ExportCancelled, exportAudiobook, planChapters } from '../lib/audiobook'
 import { narrationPlatform, pickDestination, releaseDestination, type NarrationEngine } from '../lib/wire'
 import type { AudiobookControl } from '../lib/running'
+import { engineVoiceFor, missingPackNotice, packVoiceOf, qualify } from '../lib/engineVoice'
 
 /**
  * Exporting the open book, from the command palette.

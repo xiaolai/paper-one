@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { compositionFile, decideBundle } from './lib/compositions.mjs'
 import {
   MANIFEST_NAME,
@@ -14,7 +14,9 @@ import {
   loadManifest,
   paperComposition,
   selectPlatform,
+  webSpeechOutsideNarration,
 } from './vite/assert-bundle.mjs'
+import { DELETED_ENV } from './verify-without.mjs'
 
 /**
  * The bundle assertion, both halves. The decision itself
@@ -60,7 +62,7 @@ const MANIFEST = {
 }
 
 /** Drive the plugin's hooks the way Vite/Rollup would, capturing what it logs and errors. */
-function drive(root, platform, moduleIds) {
+function drive(root, platform, moduleIds, modules) {
   const logged = []
   const plugin = paperComposition({ platform, log: (line) => logged.push(line) })
   plugin.configResolved({ root, command: 'build' })
@@ -72,7 +74,9 @@ function drive(root, platform, moduleIds) {
     },
   }
   const bundle = {
-    'assets/index.js': { type: 'chunk', moduleIds },
+    /* Rollup renders every module it keeps, so a bundle given no code renders
+       a plain line for each: the Web Speech check refuses one it read nothing of. */
+    'assets/index.js': { type: 'chunk', moduleIds, modules: modules ?? Object.fromEntries(moduleIds.map((id) => [id, { code: 'export {};' }])) },
     'assets/index.css': { type: 'asset' },
   }
   let threw = null
@@ -274,6 +278,231 @@ describe('the plugin', () => {
     // A module named by the real path is accepted against a root given by the link.
     const d = decideBundle('ios', [path.join(real, 'target', 'src/app/composition.ios.ts')], { capabilities: [] }, bundleRoots(link))
     expect(d.ok).toBe(true)
+  })
+})
+
+/**
+ * WHAT A REFUSAL SAYS, WORD FOR WORD. A refusal is read by somebody whose build
+ * just failed, and every case above matches a fragment of it: the code, one
+ * module. These hold the rest — one finding per line, a root finding named as
+ * such, the cause an unreadable manifest came from, and the cap on a Tauri list.
+ */
+describe('what a refusal says', () => {
+  it('names an unreadable manifest by its filesystem code alone, and keeps the error as its cause', () => {
+    const missing = mkdtempSync(path.join(tmpdir(), 'assert-bundle-missing-'))
+    roots.push(missing)
+    let caught = null
+    try {
+      loadManifest(missing)
+    } catch (cause) {
+      caught = cause
+    }
+    expect(caught?.message).toBe(`paper:composition: cannot read ${path.join(missing, MANIFEST_NAME)}: ENOENT`)
+    expect(caught?.cause?.code).toBe('ENOENT')
+  })
+
+  it('reports a manifest that is not JSON as a finding at its root, not as a shape it was never parsed into', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'assert-bundle-unparsed-'))
+    roots.push(root)
+    writeFileSync(path.join(root, MANIFEST_NAME), '{not json')
+    let detail = ''
+    try {
+      JSON.parse('{not json')
+    } catch (cause) {
+      detail = cause.message
+    }
+    expect(() => loadManifest(root)).toThrow(
+      new Error(
+        `paper:composition: capabilities.manifest.json is invalid (1 findings; see pnpm architecture:check):\n  MANIFEST_PARSE (root): capabilities.manifest.json is not valid JSON: ${detail}`,
+      ),
+    )
+  })
+
+  it('lists each finding of an invalid manifest on a line of its own, at its path', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'assert-bundle-invalid-'))
+    roots.push(root)
+    writeFileSync(path.join(root, MANIFEST_NAME), JSON.stringify({ capabilities: [{ id: 'Bad Id', ts: 'x', platforms: ['desktop'] }], extra: 1 }))
+    expect(() => loadManifest(root)).toThrow(
+      new Error(
+        [
+          'paper:composition: capabilities.manifest.json is invalid (3 findings; see pnpm architecture:check):',
+          '  UNKNOWN_FIELD /extra: unknown field "extra" at the manifest root',
+          '  ID_INVALID /capabilities/0/id: id "Bad Id" must match ^[a-z][a-z0-9-]*$',
+          '  TS_DIR_ABSENT /capabilities/0/ts: ts "x": src/capabilities/x is not a directory',
+        ].join('\n'),
+      ),
+    )
+  })
+
+  it('lists each finding of a refused bundle on a line of its own', () => {
+    const root = fixture(MANIFEST)
+    const ids = [`${root}/src/app/composition.ios.ts`, `${root}/src/capabilities/both/index.ts`, `${root}/src/capabilities/desk/index.ts`, `${root}/src/capabilities/desk/lib/leak.ts`]
+    expect(drive(root, 'ios', ids).errors).toEqual([
+      [
+        "assert-bundle: the ios bundle is not the manifest's ios set (2 findings):",
+        '  BUNDLE_FOREIGN_CAPABILITY src/capabilities/desk/index.ts: src/capabilities/desk/index.ts is in the ios bundle but capability "desk" is composed on [desktop] only',
+        '  BUNDLE_FOREIGN_CAPABILITY src/capabilities/desk/lib/leak.ts: src/capabilities/desk/lib/leak.ts is in the ios bundle but capability "desk" is composed on [desktop] only',
+      ].join('\n'),
+    ])
+  })
+
+  it('counts every Tauri module in a web bundle and lists the first ten, one per line', () => {
+    const root = fixture(MANIFEST)
+    const tauri = Array.from({ length: 11 }, (_, n) => `${root}/node_modules/@tauri-apps/plugin-${n}/index.js`)
+    const { errors } = drive(root, 'web', [`${root}/src/app/composition.web.ts`, ...tauri])
+    expect(errors).toEqual([`assert-bundle: the web bundle reaches 11 Tauri module(s), which do not exist in a browser:\n  ${tauri.slice(0, 10).join('\n  ')}`])
+  })
+
+  it('says its lines on the console when it is given nowhere else to say them', () => {
+    const said = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      paperComposition({ env: { TAURI_ENV_PLATFORM: 'ios' } }).configResolved({ root: '/r', command: 'build' })
+      expect(said.mock.calls).toEqual([['paper:composition: TAURI_ENV_PLATFORM="ios" → ios → src/app/composition.ios.ts']])
+    } finally {
+      said.mockRestore()
+    }
+  })
+
+  it('answers the specifier the entries import by name, `virtual:paper-composition`', () => {
+    /* Spelled out, not read from VIRTUAL_ID: `main.tsx` and `main.mobile.tsx`
+       import this string, and a constant compared with itself cannot notice it
+       changed. */
+    const plugin = paperComposition({ platform: 'ios', log: () => {} })
+    plugin.configResolved({ root: '/r', command: 'build' })
+    expect(plugin.resolveId('virtual:paper-composition')).toBe(path.resolve('/r', compositionFile('ios')))
+  })
+})
+
+/**
+ * WEB SPEECH IN A BUNDLE THAT DOES NOT COMPOSE NARRATION. Every case above
+ * judges a module by its id, and a kernel id is legal everywhere, so code
+ * that reads aloud written outside narration would pass them all. These judge
+ * the code.
+ */
+const SPEAKING = {
+  both: { id: 'both', ts: 'both', platforms: ['desktop', 'ios', 'android'] },
+  narration: { id: 'narration', ts: 'narration', platforms: ['desktop'] },
+}
+
+/** One chunk whose modules render the given code, and an asset beside it. */
+function rendered(codeById) {
+  const modules = Object.fromEntries(Object.entries(codeById).map(([id, code]) => [id, { code }]))
+  return { 'assets/index.js': { type: 'chunk', moduleIds: Object.keys(codeById), modules }, 'assets/index.css': { type: 'asset' } }
+}
+
+const SPEAKER = {
+  '/r/src/kernel/ui/reader/speaker.ts': 'const synth = window.speechSynthesis;',
+  '/r/src/kernel/ui/reader/utterance.ts': 'export const say = (text) => new SpeechSynthesisUtterance(text);',
+  '/r/src/kernel/ui/reader/plain.ts': 'export const plain = 1;',
+  '/r/src/kernel/ui/reader/voice.ts': 'export const isVoice = (v) => v instanceof SpeechSynthesisVoice;',
+}
+
+describe('webSpeechOutsideNarration', () => {
+  it('names each module that reaches a Web Speech synthesis global, where narration is not composed', () => {
+    const manifest = { capabilities: [SPEAKING.both, SPEAKING.narration] }
+    for (const platform of ['web', 'ios', 'android']) {
+      expect(webSpeechOutsideNarration(platform, rendered(SPEAKER), manifest)).toEqual([
+        '/r/src/kernel/ui/reader/speaker.ts',
+        '/r/src/kernel/ui/reader/utterance.ts',
+        '/r/src/kernel/ui/reader/voice.ts',
+      ])
+    }
+  })
+
+  it('says nothing where narration is composed, since reading aloud is its job there', () => {
+    expect(webSpeechOutsideNarration('desktop', rendered(SPEAKER), { capabilities: [SPEAKING.both, SPEAKING.narration] })).toEqual([])
+  })
+
+  it('applies on every platform when the manifest has no narration to own it', () => {
+    for (const platform of ['desktop', 'web']) {
+      expect(webSpeechOutsideNarration(platform, rendered(SPEAKER), { capabilities: [SPEAKING.both] })).toHaveLength(3)
+    }
+  })
+
+  it('skips a module Rollup rendered nothing of, an asset, and a chunk with no module map', () => {
+    const bundle = {
+      ...rendered({ '/r/src/gone.ts': null, '/r/src/plain.ts': 'export const plain = 1;' }),
+      'assets/other.js': { type: 'chunk', moduleIds: ['/r/src/other.ts'] },
+    }
+    expect(webSpeechOutsideNarration('web', bundle, { capabilities: [SPEAKING.narration] })).toEqual([])
+  })
+
+  it('refuses a bundle it could read no code of, rather than passing it unread', () => {
+    /* An empty module map, or one Rollup rendered nothing of, names no API
+       only because nothing was looked at. */
+    const manifest = { capabilities: [SPEAKING.narration] }
+    const refusal = 'assert-bundle: the web bundle has no rendered module code, so whether it names the Web Speech API was never read'
+    expect(() => webSpeechOutsideNarration('web', {}, manifest)).toThrow(refusal)
+    expect(() => webSpeechOutsideNarration('web', rendered({}), manifest)).toThrow(refusal)
+    expect(() => webSpeechOutsideNarration('web', rendered({ '/r/src/gone.ts': null }), manifest)).toThrow(refusal)
+    expect(webSpeechOutsideNarration('desktop', {}, { capabilities: [SPEAKING.both, SPEAKING.narration] }), 'nothing is owed where narration is composed').toEqual([])
+  })
+
+  it('fails the build that carries it, naming the modules, one per line, and the platform', () => {
+    const root = fixture({ capabilities: [SPEAKING.both, SPEAKING.narration] })
+    const ids = [`${root}/src/app/composition.ios.ts`, `${root}/src/capabilities/both/index.ts`, `${root}/src/kernel/ui/reader/speaker.ts`, `${root}/src/kernel/ui/reader/utterance.ts`]
+    const modules = {
+      [`${root}/src/app/composition.ios.ts`]: { code: 'export default [];' },
+      [`${root}/src/kernel/ui/reader/speaker.ts`]: { code: 'speechSynthesis.cancel();' },
+      [`${root}/src/kernel/ui/reader/utterance.ts`]: { code: 'new SpeechSynthesisUtterance(t);' },
+    }
+    const { errors, threw, logged } = drive(root, 'ios', ids, modules)
+    expect(threw).not.toBeNull()
+    expect(errors).toEqual([
+      `assert-bundle: the ios bundle names the Web Speech API in 2 module(s), and the manifest does not compose narration on ios:\n  ${root}/src/kernel/ui/reader/speaker.ts\n  ${root}/src/kernel/ui/reader/utterance.ts`,
+    ])
+    expect(logged.some((l) => l.startsWith('assert-bundle:'))).toBe(false)
+  })
+
+  it('passes the desktop build that carries it beside narration, and prints its line', () => {
+    const root = fixture({ capabilities: [SPEAKING.both, SPEAKING.narration] })
+    const ids = [`${root}/src/app/composition.desktop.ts`, `${root}/src/capabilities/both/index.ts`, `${root}/src/capabilities/narration/index.ts`]
+    const modules = { [`${root}/src/capabilities/narration/index.ts`]: { code: 'speechSynthesis.speak(new SpeechSynthesisUtterance(t));' } }
+    const { errors, threw, logged } = drive(root, 'desktop', ids, modules)
+    expect(errors).toEqual([])
+    expect(threw).toBeNull()
+    expect(logged.at(-1)).toBe('assert-bundle: desktop: 2 capability modules from {both, narration}')
+  })
+})
+
+/**
+ * THE VOICE CODE STAYS OFF THE PHONE AND THE WEB, against the real manifest.
+ *
+ * Step 5.5 moved read-aloud out of the kernel into `narration`, beside the
+ * `voices` downloads, and both are desktop-only. Before the move the kernel
+ * entry carried `engineVoice` and `voiceChoice` into every bundle; now any
+ * module of either capability in a phone or web bundle is refused by name.
+ * The fixture manifest above cannot hold this: it is the REAL manifest's
+ * platforms that keep the voice code out, so a widened `platforms` list is
+ * what this case exists to catch.
+ */
+describe('the voice code, against the real manifest', () => {
+  const planted = [
+    'src/capabilities/narration/ui/useSpeech.ts',
+    'src/capabilities/narration/lib/voiceChoice.ts',
+    'src/capabilities/voices/index.ts',
+  ]
+  /* INSIDE A `pnpm verify:without` COPY ONE OF THE TWO IS ALREADY GONE, and
+     `capability:remove` takes its manifest entry with its directory, so its
+     modules belong to nothing the manifest declares and no rule refuses them.
+     The other's modules still owe their refusal. Only the id
+     `PAPER_VERIFY_WITHOUT` names is let off, and only once its directory is
+     gone; on the real tree the variable is unset and all three are owed. */
+  const cut = process.env[DELETED_ENV]
+  const gone = cut !== undefined && !existsSync(path.join(REPO_ROOT, 'src', 'capabilities', cut))
+  const owed = gone ? planted.filter((file) => !file.startsWith(`src/capabilities/${cut}/`)) : planted
+
+  it.each(['ios', 'android', 'web'])('refuses the %s bundle when it carries any of it, naming each module', (platform) => {
+    const ids = [path.join(REPO_ROOT, compositionFile(platform)), ...planted.map((file) => path.join(REPO_ROOT, file))]
+    const decision = decideBundle(platform, ids, loadManifest(REPO_ROOT), bundleRoots(REPO_ROOT))
+    expect(decision.ok).toBe(false)
+    expect(decision.findings.filter((f) => f.code === 'BUNDLE_FOREIGN_CAPABILITY').map((f) => f.where)).toEqual(owed)
+  })
+
+  it('passes the same modules in a desktop bundle, where both are composed', () => {
+    const ids = [path.join(REPO_ROOT, compositionFile('desktop')), ...planted.map((file) => path.join(REPO_ROOT, file))]
+    const decision = decideBundle('desktop', ids, loadManifest(REPO_ROOT), bundleRoots(REPO_ROOT))
+    expect(decision.findings.filter((f) => f.code === 'BUNDLE_FOREIGN_CAPABILITY')).toEqual([])
   })
 })
 

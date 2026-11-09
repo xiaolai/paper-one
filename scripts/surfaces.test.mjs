@@ -103,20 +103,26 @@ describe('the registries it evaluates', () => {
        (2026-09-21), which EPUB Media Overlays calls skippable content and this
        app had been dropping with no way to ask for it; 24 since the reader could
        set how loud Paper reads, apart from the system's — `readingVolume`
-       (2026-11-01).
+       (2026-11-01); 18 since those six went with read aloud to the narration
+       capability, as `narration.*` (step 5.5), which the kernel's settings
+       import still carries them to on every load.
 
        ⚠️ **THE NAMES ARE ASSERTED BESIDE THE COUNT, BECAUSE A COUNT ALONE CANNOT
        SAY WHICH.** Two preferences added and two removed leaves this number
        unchanged, and the point of the row is that a change to the persisted
        surface is a deliberate act with a note beside it. */
-    expect(surfaces.kernelSettings).toHaveLength(24)
-    expect(surfaces.kernelSettings).not.toContain('lookUpLanguage')
-    expect(surfaces.kernelSettings).toContain('readingVoice')
-    expect(surfaces.kernelSettings).toContain('readingRate')
-    expect(surfaces.kernelSettings).toContain('readingVolume')
-    expect(surfaces.kernelSettings).toContain('sentenceGapMs')
-    expect(surfaces.kernelSettings).toContain('paragraphGapMs')
-    expect(surfaces.kernelSettings).toContain('readingNotesAloud')
+    expect(surfaces.kernelSettings).toHaveLength(18)
+    for (const gone of [
+      'lookUpLanguage',
+      'readingVoice',
+      'readingRate',
+      'readingVolume',
+      'sentenceGapMs',
+      'paragraphGapMs',
+      'readingNotesAloud',
+    ])
+      expect(surfaces.kernelSettings, `${gone} is not the kernel's`).not.toContain(gone)
+    expect(surfaces.kernelSettings, 'the kernel keeps its own reading typography').toContain('readingStyle')
     /* 32 since phase 31 added `passage.search` — the text INSIDE a book,
        which is a different question from `book.search`'s query over the
        index. See `SERVICE_NOUNS`, which says why it is its own noun. */

@@ -10,9 +10,6 @@ import {
   FIGURE_HEIGHTS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
-  PARAGRAPH_GAP,
-  READING_RATE,
-  SENTENCE_GAP,
   READING_STEPS,
   SPACING,
   type SteppedScale,
@@ -117,6 +114,56 @@ export const carryLegacySettings: SettingsMigration = (found) => {
   }
 
   return out
+}
+
+/**
+ * The read-aloud settings that left the kernel for the narration capability.
+ *
+ * Each was stored as `kernel.<name>` until step 5.5 and is read as
+ * `narration.<name>` from it on. The names are otherwise unchanged.
+ */
+export const NARRATION_IMPORT = [
+  'readingVoice',
+  'readingRate',
+  'readingVolume',
+  'readingNotesAloud',
+  'sentenceGapMs',
+  'paragraphGapMs',
+] as const
+
+/**
+ * Copy the read-aloud settings onto the keys the narration capability reads.
+ *
+ * It runs on every load, whatever the stored version, and is the kernel's
+ * rather than a migration hook's: a hook runs only when the version differs,
+ * and this move is made WITHOUT a version bump (plan, D6), so a hook would
+ * never see the file it exists for.
+ *
+ * ⚠️ **A COPY, NOT A RENAME, AND THE NEW KEY WINS.** The `kernel.*` keys stay
+ * in the file, so a build from before the move still finds the reader's voice
+ * and speed in it, and still saves a file this build reads. A `narration.*`
+ * key already there was written by a build that knew the narration
+ * capability, so it is the newer of the two and is never overwritten: a voice
+ * changed on a downgraded build stays on the old key and does not override the
+ * new one. That is also what makes the import safe to run twice.
+ *
+ * VALUES ARE NOT VALIDATED HERE, for the reason `carryLegacySettings` gives:
+ * the narration capability's own `parse` runs on `get`.
+ *
+ * Returns the record it was given when there is nothing to copy, so a file
+ * with no read-aloud settings is not rewritten in memory for nothing.
+ */
+export function carryNarrationSettings(values: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  let out: Record<string, unknown> | null = null
+  for (const name of NARRATION_IMPORT) {
+    const from = `kernel.${name}`
+    const to = `narration.${name}`
+    if (Object.hasOwn(values, from) && !Object.hasOwn(values, to)) {
+      out ??= { ...values }
+      out[to] = values[from]
+    }
+  }
+  return out ?? values
 }
 
 export interface SettingsStoreOptions {
@@ -322,9 +369,13 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
      caller's code — a getter on that record runs HERE, not above, so guarding
      only the `migrate` call left the second half of the same door open. A hook
      that returns a record whose getter throws would abort the store exactly as
-     a hook that threw outright did. Same degradation, one reason. */
+     a hook that threw outright did. Same degradation, one reason.
+
+     THE NARRATION IMPORT RUNS HERE, inside the same guard and on every path:
+     a current file, a migrated one and one from the future alike. The last is
+     imported in memory only, because that store never writes. */
   try {
-    values = frozen(values)
+    values = frozen(carryNarrationSettings(values))
   } catch (cause) {
     migrationFailed = true
     console.error('Paper: stored settings could not be read, so this session starts from the defaults', cause)
@@ -580,114 +631,6 @@ export const stringList = (raw: unknown): readonly string[] | undefined =>
   Array.isArray(raw) ? raw.filter((one): one is string => typeof one === 'string') : undefined
 
 /**
- * The ends of the rate scale, as the stored value's clamp.
- *
- * DERIVED FROM THE SCALE, never typed out again: the range a reader can store
- * and the range the stepper offers are the same range, and two literals is how
- * they stop being. See `READING_RATE` in `metrics.ts` for the steps themselves.
- *
- * CLAMPED, NOT REJECTED, for `textSize`'s reason one step along: a file written
- * by a build offering a wider range is not corrupt, it is a reader who chose
- * "as fast as it goes" on another build, and the nearest speed this build offers
- * honours that where falling back to 1 would throw it away.
- *
- * A MULTIPLIER RATHER THAN AN INDEX, also for `textSize`'s reason: an index
- * means nothing across a change to the ramp the UI offers, and this one is
- * likely to change — 1 is the engine's default for ever, where `steps[4]` is
- * whatever the fifth entry happens to be that month.
- */
-/* READ OFF THE ENDS, and ASSERTED rather than defaulted. `steps[0] ?? 1` and
-   `steps[length - 1] ?? 0` each carried a fallback for a scale with no steps —
-   which `metrics.test.ts` refuses for every scale in the file, so the fallback
-   is unreachable, and for a gap scale whose first step IS 0 it could not even
-   be told from the value it stood in for. `.at(-1)` says "the last one" without
-   arithmetic to get wrong. */
-export const READING_RATE_MIN = READING_RATE.steps.at(0)!
-export const READING_RATE_MAX = READING_RATE.steps.at(-1)!
-
-/**
- * The ends of a gap scale, as the stored value's clamp — `READING_RATE_MIN`'s
- * reasoning, one scale along, and derived for the same reason: the range a
- * reader can store and the range the stepper offers must be one range.
- */
-export const SENTENCE_GAP_MIN = SENTENCE_GAP.steps.at(0)!
-export const SENTENCE_GAP_MAX = SENTENCE_GAP.steps.at(-1)!
-export const PARAGRAPH_GAP_MIN = PARAGRAPH_GAP.steps.at(0)!
-export const PARAGRAPH_GAP_MAX = PARAGRAPH_GAP.steps.at(-1)!
-
-/**
- * A stored number on a continuous range — a gap in milliseconds, a speaking
- * rate — CLAMPED to it rather than rejected.
- *
- * As every other scale here is: a file written by a build offering a longer
- * pause, or a faster voice, is not corrupt. It is a reader who chose "as far as
- * it goes", and the nearest this build offers honours that where falling back
- * to the default would throw it away. Non-finite is refused, because `Infinity`
- * as a timer duration is a reading that never continues, and as a rate it is a
- * voice that never speaks.
- *
- * ⚠️ **THIS WAS TWO FUNCTIONS WITH ONE BODY.** `withinRange(min, max)` and a separate
- * `rate` differed only in where the bounds came from — the second had
- * `READING_RATE_MIN`/`MAX` written into it instead of taking them — so the
- * clamping rule for the reader's speaking rate could be changed without
- * touching the rule for the pauses around it, and neither would look wrong.
- *
- * `index` below is deliberately NOT folded in with them, though it also clamps:
- * its acceptance test is `Number.isInteger`, not `Number.isFinite`, because it
- * addresses a position on a discrete ramp rather than a quantity. Two clamps
- * that accept different things are two rules, and the comment there says why.
- */
-const withinRange =
-  (min: number, max: number) =>
-  (raw: unknown): number | undefined =>
-    /* `Number.isFinite` IS THE WHOLE CHECK: it does not coerce, so it answers
-       false for a string, an object and a null as surely as for a NaN — and a
-       `typeof raw === 'number'` beside it could change no outcome. */
-    Number.isFinite(raw) ? Math.max(min, Math.min(max, raw as number)) : undefined
-
-const rate = withinRange(READING_RATE_MIN, READING_RATE_MAX)
-
-/**
- * How loud Paper reads aloud, in percent of what the voice produces.
- *
- * ONE SCALE FROM THE DISK TO THE CONTROL, and a fraction only at the speakers:
- * both Web Audio and Web Speech take 0 to 1, and `App` makes that one division.
- * The system volume is never read or changed; this sits underneath it.
- */
-export const READING_VOLUME_MIN = 0
-export const READING_VOLUME_MAX = 100
-
-/**
- * The voice the reader chose, per primary language subtag — `{ en: '…', zh: '…' }`.
- *
- * ONE VOICE PER LANGUAGE, not one for the app: a single stored voice is the
- * shape where a reader who picks an English voice they like then opens a Chinese
- * book and hears it read in English. `voiceChoice.ts` holds the matching rule
- * and the argument.
- *
- * A BAD ENTRY COSTS ITSELF, exactly as in `stringList`: a junk value for one
- * language must not take the reader's other choices with it. A non-object is
- * rejected, because that is a value of the wrong shape rather than a map with a
- * bad member.
- *
- * ⚠️ **THE KEYS ARE NOT NORMALISED HERE, DELIBERATELY.** Folding `en-US` to `en`
- * would need `primaryOf`, which lives with the reader — and `core` may not
- * import from `ui`. It is not worth moving: the picker only ever writes a
- * primary subtag, and a hand-written `en-US` key simply never matches, which
- * falls through to the automatic pick. A key that does nothing is a safe
- * outcome; a rule spelled out in two modules is not.
- */
-const voiceChoices = (raw: unknown): Readonly<Record<string, string>> | undefined => {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
-  const row = raw as Record<string, unknown>
-  const kept: Record<string, string> = {}
-  for (const [lang, voice] of Object.entries(row)) {
-    if (typeof voice === 'string' && voice !== '') kept[lang] = voice
-  }
-  return kept
-}
-
-/**
  * An index into one of §09's scales, CLAMPED to it rather than rejected.
  *
  * These are positions on a ramp, and a file written by a build with a longer
@@ -859,36 +802,6 @@ export const KERNEL_SETTINGS = {
      as long as it took an audit to notice that `theme`, `stepIdx`, `spacing`
      and `align` are all in this list and these fifteen were not. */
   readingStyle: defineSetting<ReadingStyle>('kernel.readingStyle', DEFAULT_READING_STYLE, readingStyle),
-  /* Read aloud's two, and the reason they are preferences at all: the reading
-     used to take whatever voice the platform handed it, which on macOS is the
-     most compressed one installed. See `ui/reader/voiceChoice.ts`. */
-  readingVoice: defineSetting<Readonly<Record<string, string>>>('kernel.readingVoice', {}, voiceChoices),
-  readingRate: defineSetting<number>('kernel.readingRate', 1, rate),
-  /* A `kernel.reading*` KEY ON PURPOSE, so that step 5.5's import carries it to
-     `narration.*` with the rest. See `dev-docs/decisions/2026-11-01-reading-volume.md`. */
-  readingVolume: defineSetting<number>(
-    'kernel.readingVolume',
-    READING_VOLUME_MAX,
-    withinRange(READING_VOLUME_MIN, READING_VOLUME_MAX),
-  ),
-  /* WHETHER A NOTE'S BODY IS READ. Off, which is the quieter of the two: most
-     note bodies are hidden and never reach the voice, and the ones that are not
-     are a print-style block at the foot of a section — so on by default means a
-     run of citations arriving mid-chapter, unannounced. See `NOTE_BODIES` in
-     `ui/reader/speechSkip.ts` for why this is the reader's choice at all. */
-  readingNotesAloud: defineSetting<boolean>('kernel.readingNotesAloud', false, boolean),
-  /* THE SILENCE BETWEEN UNITS OF PROSE — see `SENTENCE_GAP` in `metrics.ts` for
-     why this is expressible at all and why it is not scaled by the rate. */
-  sentenceGapMs: defineSetting<number>(
-    'kernel.sentenceGapMs',
-    SENTENCE_GAP.steps[SENTENCE_GAP.def] ?? 0,
-    withinRange(SENTENCE_GAP_MIN, SENTENCE_GAP_MAX),
-  ),
-  paragraphGapMs: defineSetting<number>(
-    'kernel.paragraphGapMs',
-    PARAGRAPH_GAP.steps[PARAGRAPH_GAP.def] ?? 0,
-    withinRange(PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX),
-  ),
 } as const satisfies Record<string, Setting<unknown>>
 
 export type KernelSettingName = keyof typeof KERNEL_SETTINGS
@@ -1011,12 +924,6 @@ export function readKernelPreferences(store: SettingsStore): KernelPreferences {
     markTint: store.get(KERNEL_SETTINGS.markTint),
     markStyle: store.get(KERNEL_SETTINGS.markStyle),
     readingStyle: store.get(KERNEL_SETTINGS.readingStyle),
-    readingVoice: store.get(KERNEL_SETTINGS.readingVoice),
-    readingRate: store.get(KERNEL_SETTINGS.readingRate),
-    readingVolume: store.get(KERNEL_SETTINGS.readingVolume),
-    readingNotesAloud: store.get(KERNEL_SETTINGS.readingNotesAloud),
-    sentenceGapMs: store.get(KERNEL_SETTINGS.sentenceGapMs),
-    paragraphGapMs: store.get(KERNEL_SETTINGS.paragraphGapMs),
   }
 }
 

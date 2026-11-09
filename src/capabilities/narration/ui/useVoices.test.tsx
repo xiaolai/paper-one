@@ -2,8 +2,8 @@
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { useVoices } from './useVoices'
-import { FakeSynth, FakeUtterance } from '../reader/speechSynth.testkit'
-import type { VoiceFacts } from '../reader/voiceChoice'
+import { FakeSynth, FakeUtterance } from '../lib/speechSynth.testkit'
+import type { VoiceFacts } from '../lib/voiceChoice'
 
 /**
  * The voice list, as the engine announces it.

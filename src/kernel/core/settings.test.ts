@@ -1,10 +1,9 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   BRIGHTNESS,
   CONTRAST,
-  PARAGRAPH_GAP,
-  READING_RATE,
-  SENTENCE_GAP,
   DEFAULT_READING_STYLE,
   LEGACY_READING_SIZES,
   MINIMUM_SIZES,
@@ -17,15 +16,11 @@ import { defineSetting } from './ports'
 import type { ReadingStyle } from './uiTypes'
 import {
   KERNEL_SETTINGS,
-  PARAGRAPH_GAP_MAX,
-  PARAGRAPH_GAP_MIN,
-  READING_RATE_MAX,
-  READING_RATE_MIN,
-  SENTENCE_GAP_MAX,
-  SENTENCE_GAP_MIN,
   SETTINGS_STORAGE_KEY,
+  NARRATION_IMPORT,
   SETTINGS_VERSION,
   carryLegacySettings,
+  carryNarrationSettings,
   createSettingsStore,
   readKernelPreferences,
   writeKernelPreferences,
@@ -1284,114 +1279,16 @@ describe('what the store promises never to do', () => {
       }
       const store = createSettingsStore({ storage })
 
-      store.set(KERNEL_SETTINGS.readingRate, Number.NaN)
+      store.set(KERNEL_SETTINGS.brightness, Number.NaN)
 
-      expect(store.has(KERNEL_SETTINGS.readingRate), 'nothing was stored under the key').toBe(false)
-      expect(store.get(KERNEL_SETTINGS.readingRate)).toBe(KERNEL_SETTINGS.readingRate.fallback)
+      expect(store.has(KERNEL_SETTINGS.brightness), 'nothing was stored under the key').toBe(false)
+      expect(store.get(KERNEL_SETTINGS.brightness)).toBe(KERNEL_SETTINGS.brightness.fallback)
       expect(map.size, 'and nothing reached the storage').toBe(0)
       expect(error).toHaveBeenCalledWith(
-        `Paper: the setting ${KERNEL_SETTINGS.readingRate.key} was not changed, because its own parser cannot read that value back`,
+        `Paper: the setting ${KERNEL_SETTINGS.brightness.key} was not changed, because its own parser cannot read that value back`,
       )
     } finally {
       error.mockRestore()
-    }
-  })
-})
-
-describe('the range read aloud may be stored in', () => {
-  /**
-   * ⚠️ **THE RANGE A READER CAN STORE AND THE RANGE THE STEPPER OFFERS MUST BE
-   * ONE RANGE**, which is why these are derived from §09's scales rather than
-   * written down again. A clamp that disagreed with the stepper would refuse a
-   * value the pane had just produced.
-   */
-  it('is exactly the ends of the scale the pane steps through', () => {
-    expect([READING_RATE_MIN, READING_RATE_MAX]).toEqual([
-      READING_RATE.steps.at(0),
-      READING_RATE.steps.at(-1),
-    ])
-    expect([SENTENCE_GAP_MIN, SENTENCE_GAP_MAX]).toEqual([
-      SENTENCE_GAP.steps.at(0),
-      SENTENCE_GAP.steps.at(-1),
-    ])
-    expect([PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX]).toEqual([
-      PARAGRAPH_GAP.steps.at(0),
-      PARAGRAPH_GAP.steps.at(-1),
-    ])
-  })
-
-  it('clamps a stored speed to those ends rather than refusing it', () => {
-    /* A file written by a build with a wider ramp is not corrupt — it is
-       describing a speed this build offers less of. */
-    expect(readingBack(envelope({ 'kernel.readingRate': 99 })).readingRate).toBe(READING_RATE_MAX)
-    expect(readingBack(envelope({ 'kernel.readingRate': 0.01 })).readingRate).toBe(READING_RATE_MIN)
-    expect(readingBack(envelope({ 'kernel.sentenceGapMs': 99_999 })).sentenceGapMs).toBe(SENTENCE_GAP_MAX)
-    expect(readingBack(envelope({ 'kernel.paragraphGapMs': -20 })).paragraphGapMs).toBe(PARAGRAPH_GAP_MIN)
-  })
-
-  it('refuses a speed that is not a finite number, rather than clamping it', () => {
-    /* `Math.min` over a NaN answers NaN, and a NaN rate makes the engine refuse
-       the utterance — so this is rejected at the door and the default stands. */
-    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, '1.5', null, {}]) {
-      expect(readingBack(envelope({ 'kernel.readingRate': bad })).readingRate).toBe(DEFAULTS.readingRate)
-    }
-  })
-})
-
-describe('the reading volume', () => {
-  it('is stored under the key the narration import looks for, at full volume by default', () => {
-    /* ⚠️ **THE KEY IS THE DECISION'S.** Step 5.5 carries `kernel.reading*` to
-       `narration.*`, so a name outside that prefix is a setting the import
-       silently drops. The default is what makes this change inaudible. */
-    expect(KERNEL_SETTINGS.readingVolume.key).toBe('kernel.readingVolume')
-    expect(KERNEL_SETTINGS.readingVolume.fallback).toBe(100)
-    expect(readingBack(envelope({})).readingVolume).toBe(100)
-  })
-
-  it('reads back what is in range, both ends included', () => {
-    /* 0 is the end that matters: a falsy value lost on the way back from disk
-       is the reading run playing aloud. */
-    for (const stored of [0, 37, 100]) {
-      expect(readingBack(envelope({ 'kernel.readingVolume': stored })).readingVolume).toBe(stored)
-    }
-  })
-
-  it('clamps a stored number to the ends, as the speed does', () => {
-    expect(readingBack(envelope({ 'kernel.readingVolume': 150 })).readingVolume).toBe(100)
-    expect(readingBack(envelope({ 'kernel.readingVolume': -5 })).readingVolume).toBe(0)
-  })
-
-  it('refuses what is not a finite number, and the default stands', () => {
-    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, '40', null, {}, true]) {
-      expect(readingBack(envelope({ 'kernel.readingVolume': bad })).readingVolume).toBe(100)
-      expect(KERNEL_SETTINGS.readingVolume.parse(bad), `${String(bad)} was taken as a volume`).toBeUndefined()
-    }
-  })
-})
-
-describe('the voice a reader chose, per language', () => {
-  /**
-   * ONE VOICE PER LANGUAGE, and a bad entry costs itself. A junk value for one
-   * language must not take the reader's other choices with it; a value of the
-   * wrong SHAPE — anything that is not a map — is refused whole, because that
-   * is not a map with a bad member.
-   */
-  it('keeps every language that names a voice', () => {
-    const stored = { en: 'com.apple.voice.enhanced.en-US.Zoe', zh: 'com.apple.voice.enhanced.zh-CN.Tingting' }
-    expect(readingBack(envelope({ 'kernel.readingVoice': stored })).readingVoice).toEqual(stored)
-  })
-
-  it('drops the entry that is not a voice, and keeps the rest', () => {
-    expect(
-      readingBack(
-        envelope({ 'kernel.readingVoice': { en: 'com.apple.voice.enhanced.en-US.Zoe', zh: '', fr: 7, de: null } }),
-      ).readingVoice,
-    ).toEqual({ en: 'com.apple.voice.enhanced.en-US.Zoe' })
-  })
-
-  it('refuses a value that is not a map of languages at all', () => {
-    for (const bad of ['com.apple.voice.enhanced.en-US.Zoe', 7, ['en'], null]) {
-      expect(readingBack(envelope({ 'kernel.readingVoice': bad })).readingVoice).toEqual(DEFAULTS.readingVoice)
     }
   })
 })
@@ -1464,49 +1361,139 @@ describe('a migration that cannot finish', () => {
   })
 })
 
-describe('a stored value the parser is handed directly', () => {
-  /**
-   * ⚠️ **`get` PROMISES NEVER TO FAIL, WHICH HIDES A PARSER THAT WOULD.** The
-   * store catches a parser that throws and answers the fallback — the same
-   * answer a parser that REFUSES the value gives — so a refusal and a crash
-   * are indistinguishable from outside it. These call the parsers themselves,
-   * where the difference is visible.
-   */
-  it('refuses a voice map that is null, rather than throwing on it', () => {
-    /* `typeof null` is 'object', so the null check is what stands between
-       `Object.entries(null)` and a throw. */
-    expect(KERNEL_SETTINGS.readingVoice.parse(null)).toBeUndefined()
-    expect(KERNEL_SETTINGS.readingVoice.parse(['en'])).toBeUndefined()
-    expect(KERNEL_SETTINGS.readingVoice.parse('a voice')).toBeUndefined()
-    expect(KERNEL_SETTINGS.readingVoice.parse({ en: 'voice:en' })).toEqual({ en: 'voice:en' })
+/**
+ * THE READ-ALOUD SETTINGS, CARRIED TO THE NARRATION CAPABILITY (plan, D6).
+ *
+ * The files under `tests/fixtures/settings/` with `5.4` in their name were
+ * written by the code as it stood at step 5.4, before these settings moved:
+ * there were no stored envelopes in the repo, so they were captured from what
+ * that build's own `writeKernelPreferences` put in storage. Never regenerate
+ * them to make this pass — they are what a reader's disk already holds.
+ */
+describe('the read-aloud settings, carried to the narration capability', () => {
+  const fixture = (name: string): string =>
+    readFileSync(fileURLToPath(new URL(`../../../tests/fixtures/settings/${name}`, import.meta.url)), 'utf8').trim()
+
+  /** A store over storage holding exactly `text`, with the storage to read back. */
+  const over = (text: string | null) => {
+    const storage = fakeStorage()
+    if (text !== null) storage.setItem(SETTINGS_STORAGE_KEY, text)
+    return { storage, store: createSettingsStore({ storage, migrate: carryLegacySettings }) }
+  }
+
+  /** What `name` reads as under its new key, through a setting declared there. */
+  const narration = (store: ReturnType<typeof over>['store'], name: string) =>
+    store.get(defineSetting<unknown>(`narration.${name}`, undefined, (raw) => raw))
+
+  /** Any write at all, which is what makes the store save the whole file. */
+  const touch = (store: ReturnType<typeof over>['store']) => store.set(KERNEL_SETTINGS.theme, 'sage')
+
+  const saved = (storage: ReturnType<typeof fakeStorage>) =>
+    JSON.parse(storage.getItem(SETTINGS_STORAGE_KEY) ?? 'null') as { version: number; values: Record<string, unknown> }
+
+  it('reads every read-aloud choice a 5.4 file holds under its new key', () => {
+    /* Spelled out rather than looped over `NARRATION_IMPORT`: a name dropped
+       from that list would drop out of a loop over it too, and still pass. */
+    const { store } = over(fixture('voice-chosen-5.4.json'))
+    expect(narration(store, 'readingVoice')).toEqual({
+      en: 'kokoro:af_heart',
+      zh: 'com.apple.voice.premium.zh-CN.Lilian',
+    })
+    expect(narration(store, 'readingRate')).toBe(1.25)
+    expect(narration(store, 'readingVolume')).toBe(40)
+    expect(narration(store, 'readingNotesAloud')).toBe(true)
+    expect(narration(store, 'sentenceGapMs')).toBe(500)
+    expect(narration(store, 'paragraphGapMs')).toBe(1400)
   })
 
-  it('refuses a speed that is not a finite number, whatever kind of value it is', () => {
-    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '1.5', null, {}, []]) {
-      expect(KERNEL_SETTINGS.readingRate.parse(bad), `${String(bad)} was taken as a speed`).toBeUndefined()
-    }
-    expect(KERNEL_SETTINGS.readingRate.parse(99), 'and a number is clamped, not refused').toBe(
-      READING_RATE_MAX,
+  it('carries only what the file holds, so an unchosen setting keeps its fallback', () => {
+    const { store } = over(fixture('rate-only-5.4.json'))
+    expect(narration(store, 'readingRate')).toBe(0.75)
+    expect(Object.keys(store.getSnapshot()).sort()).toEqual(['kernel.readingRate', 'narration.readingRate'])
+  })
+
+  it('carries a pre-kernel file through both moves, the namespace first', () => {
+    /* The flat file the 5.4 build rewrote, and the flat file itself: the
+       legacy migration runs before the import, on the same load. */
+    expect(narration(over(fixture('pre-kernel-carried-5.4.json')).store, 'readingRate')).toBe(1.5)
+    const { store } = over(
+      JSON.stringify({ theme: 'sage', readingRate: 1.5, readingVoice: { en: 'com.apple.voice.compact.en-US.Samantha' } }),
+    )
+    expect(narration(store, 'readingRate')).toBe(1.5)
+    expect(narration(store, 'readingVoice')).toEqual({ en: 'com.apple.voice.compact.en-US.Samantha' })
+  })
+
+  it('is the same file however many times it runs', () => {
+    const first = over(fixture('voice-chosen-5.4.json'))
+    touch(first.store)
+    const once = first.storage.getItem(SETTINGS_STORAGE_KEY)!
+    const second = over(once)
+    touch(second.store)
+    second.store.set(KERNEL_SETTINGS.theme, 'night')
+    second.store.set(KERNEL_SETTINGS.theme, 'sage')
+    expect(second.storage.getItem(SETTINGS_STORAGE_KEY), 'a second load changed the file').toBe(once)
+    expect(carryNarrationSettings(second.store.getSnapshot()), 'nothing left to carry').toBe(
+      second.store.getSnapshot(),
     )
   })
-})
 
-describe('an envelope written with a number JSON cannot hold', () => {
-  it('reads an infinite speed as no speed at all', () => {
-    /* `JSON.stringify(Infinity)` is `null`, so this can only arrive as source
-       text — `1e999` parses to Infinity. It is the one route by which a
-       non-finite number reaches the clamp, and the clamp must refuse it:
-       `Math.min` over an Infinity answers the bound, which would store a speed
-       the reader never chose. */
-    const map = new Map<string, string>([
-      [SETTINGS_STORAGE_KEY, `{"version":${SETTINGS_VERSION},"values":{"kernel.readingRate":1e999}}`],
-    ])
-    const store = createSettingsStore({
-      storage: {
-        getItem: (key: string) => map.get(key) ?? null,
-        setItem: (key: string, value: string) => void map.set(key, value),
-      },
+  it('never overwrites a new key with the old one', () => {
+    /* ⚠️ A `narration.*` key was written by a build that knew the capability,
+       so it is the newer: a voice changed on a downgraded build stays on the
+       old key and does not override it. */
+    const values = JSON.parse(fixture('voice-chosen-5.4.json')).values as Record<string, unknown>
+    const { store } = over(
+      JSON.stringify(
+        envelope({ ...values, 'narration.readingRate': 2, 'narration.readingVoice': { en: 'kokoro:am_adam' } }),
+      ),
+    )
+    expect(narration(store, 'readingRate')).toBe(2)
+    expect(narration(store, 'readingVoice')).toEqual({ en: 'kokoro:am_adam' })
+    /* The rest, which had no new key, are still carried. */
+    expect(narration(store, 'readingVolume')).toBe(40)
+  })
+
+  it('leaves the file one a 5.4 build reads: the same version, every old key in place', () => {
+    const before = JSON.parse(fixture('voice-chosen-5.4.json')) as { version: number; values: Record<string, unknown> }
+    const { storage, store } = over(fixture('voice-chosen-5.4.json'))
+    touch(store)
+    const after = saved(storage)
+    expect(after.version, 'a version bump would send the 5.4 build down its migration').toBe(before.version)
+    expect(after.version).toBe(1)
+    for (const name of NARRATION_IMPORT) {
+      expect(after.values[`kernel.${name}`], `kernel.${name} left the file`).toEqual(before.values[`kernel.${name}`])
+      expect(after.values[`narration.${name}`], `narration.${name} was not saved`).toEqual(
+        before.values[`kernel.${name}`],
+      )
+    }
+  })
+
+  it('writes nothing until the reader changes something', () => {
+    const text = fixture('voice-chosen-5.4.json')
+    const { storage, store } = over(text)
+    expect(narration(store, 'readingRate')).toBe(1.25)
+    expect(storage.getItem(SETTINGS_STORAGE_KEY), 'loading rewrote the file').toBe(text)
+  })
+
+  it('carries a file from a newer build in memory, and still never writes it', () => {
+    const values = JSON.parse(fixture('voice-chosen-5.4.json')).values as Record<string, unknown>
+    const text = JSON.stringify({ version: SETTINGS_VERSION + 1, values })
+    const { storage, store } = over(text)
+    expect(narration(store, 'readingRate')).toBe(1.25)
+    touch(store)
+    expect(store.persistent).toBe(false)
+    expect(storage.getItem(SETTINGS_STORAGE_KEY)).toBe(text)
+  })
+
+  it('answers the record it was given when there is nothing to carry', () => {
+    const values = { 'kernel.theme': 'night' }
+    expect(carryNarrationSettings(values)).toBe(values)
+    /* An inherited key is not a stored one. */
+    const inherited = Object.create({ 'kernel.readingRate': 2 }) as Record<string, unknown>
+    expect(carryNarrationSettings(inherited)).toBe(inherited)
+    expect(carryNarrationSettings({ 'kernel.readingRate': 2 })).toEqual({
+      'kernel.readingRate': 2,
+      'narration.readingRate': 2,
     })
-    expect(readKernelPreferences(store).readingRate).toBe(DEFAULTS.readingRate)
   })
 })

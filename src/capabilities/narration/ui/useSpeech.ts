@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { Speaker, speechAvailable, type DoneReason, type SpeakPrefs, type SpeakerCallbacks } from './speaker'
+import { Speaker, speechAvailable, type DoneReason, type SpeakPrefs, type SpeakerCallbacks } from '../lib/speaker'
 import {
   blockIndexAt,
   sentenceIndexAt,
   stepParagraph as paragraphStep,
   stepSentence as sentenceStep,
   type ReadingPlan,
-} from './readingCursor'
-import type { ReaderContext } from '../../core/capability'
-import { EngineSpeaker } from './engineSpeaker'
-import type { AudioHost } from './enginePlayer'
-import { engineVoiceFor } from './engineVoice'
-import { routedSpeaker, speakerFor, type SeekingSpeaker } from './speakerRouting'
+} from '../lib/readingCursor'
+import type { ReaderContext } from '../../../kernel'
+import { EngineSpeaker } from '../lib/engineSpeaker'
+import type { AudioHost } from '../lib/enginePlayer'
+import { engineVoiceFor } from '../lib/engineVoice'
+import { routedSpeaker, speakerFor, type SeekingSpeaker } from '../lib/speakerRouting'
 import type {
   ClipKey,
   SpeechRequest,
@@ -19,7 +19,7 @@ import type {
   SpokenAudio,
   SpokenSection,
   VoicePack,
-} from '../../core/ports'
+} from '../../../kernel'
 
 /**
  * Reading the book aloud, with the spoken word followed on the page.

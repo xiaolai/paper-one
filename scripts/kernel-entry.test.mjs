@@ -40,13 +40,21 @@ const MANIFEST = 'capabilities.manifest.json'
  * stays. Anything else orphaned by a cut is a finding, cut or no cut.
  */
 const ORPHANED_BY_A_CUT = Object.freeze({
-  archives: ['./core/markMatch'],
+  archives: ['./core/markMatch', './core/tags'],
   cards: ['./core/bookAccent'],
   circle: ['./core/coverFacts'],
-  narration: ['./ui/reader/engineVoice'],
   passages: ['./ui/reader/bookScripts', './ui/reader/passageText'],
   voices: ['./ui/reader/clipKey'],
 })
+
+/**
+ * A CAPABILITY'S TEST IS NOT AN IMPORTER. The kernel exports a name for a
+ * capability's code; a test in another capability that imports it too is not a
+ * reason for the clause, and counted as one it hid the rows above — narration's
+ * `useSpeech` test kept `clipKey` and `passageText` alive with voices or passages
+ * cut, and peer's `readServices` test kept `tags` alive with archives cut.
+ */
+const countsAsImporter = (file) => !(file.includes(`${sep}src${sep}capabilities${sep}`) && /\.test\.(ts|tsx|mts|mjs)$/.test(file))
 
 /** The clauses that load a module for names `used` does not hold. */
 const orphansIn = (byModule, used) =>
@@ -86,11 +94,11 @@ function sourcesUnder(dir, into = []) {
   return into
 }
 
-/** Every name anything imports — or re-exports — THROUGH the kernel entry. */
+/** Every name anything but a capability's test imports — or re-exports — THROUGH the kernel entry. */
 function importedThroughTheEntry(files) {
   const used = new Set()
   for (const file of files) {
-    if (file.endsWith(ENTRY)) continue
+    if (file.endsWith(ENTRY) || !countsAsImporter(file)) continue
     const text = readFileSync(file, 'utf8')
     for (const found of text.matchAll(/(?:import|export)\s+(?:type\s+)?\{([\s\S]*?)\}\s*from\s*'([^']*)'/g)) {
       const from = found[2]
@@ -151,6 +159,15 @@ describe("the kernel's public entry", () => {
       const orphans = orphansIn(byModule, importedThroughTheEntry(files.filter((file) => !file.startsWith(home))))
       expect(orphans.sort(), `cutting ${id}`).toEqual([...(ORPHANED_BY_A_CUT[id] ?? [])].sort())
     }
+  })
+
+  it("counts a capability's code and the kernel's own tests as importers, and no capability's test", () => {
+    const at = (...parts) => join(ROOT, ...parts)
+    expect(countsAsImporter(at('src', 'capabilities', 'voices', 'lib', 'port.ts'))).toBe(true)
+    expect(countsAsImporter(at('src', 'kernel', 'core', 'tags.test.ts'))).toBe(true)
+    expect(countsAsImporter(at('scripts', 'kernel-entry.test.mjs'))).toBe(true)
+    expect(countsAsImporter(at('src', 'capabilities', 'narration', 'ui', 'useSpeech.test.tsx'))).toBe(false)
+    expect(countsAsImporter(at('src', 'capabilities', 'peer', 'lib', 'readServices.test.ts'))).toBe(false)
   })
 
   it('excuses an orphan only for the capability whose cut it is listed under', () => {

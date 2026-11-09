@@ -42,3 +42,14 @@ export { BUILD_IDS, CORPUS_BUILDS, CORPUS_PASSAGES, type BuildId } from './core/
    passes on a rejection of `undefined`, so neither form can tell a refusal from
    a crash. */
 export { refusalOf } from './core/refusal.testkit'
+
+/* The reading surface as App builds it, for a capability test that drives a
+   reader contribution through the same port the app hands it — a book, a
+   place, a chapter turn — without rendering App around it. */
+export { useReadingSurface, type BookFacts, type SpeechPlace, type SurfaceDriver, type SurfaceSource } from './ui/reader/readingSurface'
+
+/* What the reader would read aloud, and where its sentences break, for the
+   narration tests that build a spoken section from a document by hand. The
+   app reaches both through `ReadingSurface.speakable`. */
+export { collectText } from './ui/reader/speech'
+export { sentenceSpansOf } from './ui/reader/wordSnap/sentenceOf'

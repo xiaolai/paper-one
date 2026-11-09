@@ -15,8 +15,7 @@
  * platform voice the floor admits, or nothing.
  */
 
-import { packSize } from '../../core/packSize'
-import type { VoiceChoice, VoicePack } from '../../core/ports'
+import { packSize, type VoiceChoice, type VoicePack } from '../../../kernel'
 import { primaryOf } from './voiceChoice'
 
 /** A voice inside an installed pack. */
