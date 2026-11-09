@@ -1208,11 +1208,13 @@ describe('the voice the picker shows', () => {
         packs,
         chosen,
         rate: 1,
+        volume: 100,
         sentenceGapMs: 150,
         paragraphGapMs: 600,
         notesAloud: false,
         onVoice: vi.fn(),
         onRate: vi.fn(),
+        onVolume: vi.fn(),
         onSentenceGap: vi.fn(),
         onParagraphGap: vi.fn(),
         onNotesAloud: vi.fn(),
@@ -1237,11 +1239,13 @@ describe('the voice the picker shows', () => {
         packs,
         chosen,
         rate: 1,
+        volume: 40,
         sentenceGapMs: 150,
         paragraphGapMs: 600,
         notesAloud: false,
         onVoice: (lang: string, voice: string) => asked.push(['voice', [lang, voice]]),
         onRate: (rate: number) => asked.push(['rate', rate]),
+        onVolume: (volume: number) => asked.push(['volume', volume]),
         onSentenceGap: (ms: number) => asked.push(['sentenceGap', ms]),
         onParagraphGap: (ms: number) => asked.push(['paragraphGap', ms]),
         onNotesAloud: (on: boolean) => asked.push(['notesAloud', on]),
@@ -1283,6 +1287,32 @@ describe('the voice the picker shows', () => {
       fireEvent.click(screen.getByRole('button', { name: control }))
       expect(asked.at(-1), `${control} asked for the wrong thing`).toEqual(expected)
     }
+  })
+
+  it('offers the volume as a slider with a name, standing where the reader left it', () => {
+    voiceGroup()
+    const slider = screen.getByRole('slider', { name: 'Reading volume' }) as HTMLInputElement
+    expect(slider.type).toBe('range')
+    expect([slider.min, slider.max]).toEqual(['0', '100'])
+    expect(slider.value).toBe('40')
+    /* Said in words as well as drawn, for the reader who cannot see the thumb. */
+    expect(slider.getAttribute('aria-valuetext')).toBe('40%')
+    expect(screen.getByText('40%')).toBeTruthy()
+  })
+
+  it('writes the volume the slider was moved to, as a number', () => {
+    const asked = voiceGroup()
+    fireEvent.change(screen.getByRole('slider', { name: 'Reading volume' }), { target: { value: '0' } })
+    expect(asked).toEqual([['volume', 0]])
+  })
+
+  it('sets the volume in a static row, like the steppers around it', () => {
+    /* The slider is the one row in §07 that does not step, but it stands in the
+       same band: a row without these classes would sit at its own height and
+       light up under the pointer as if it could be pressed. */
+    voiceGroup()
+    const row = screen.getByRole('slider', { name: 'Reading volume' }).parentElement
+    expect(row?.className).toBe(`${styles.settingRow} ${styles.settingStatic}`)
   })
 
   it('names each tier it groups by, whichever tiers are installed', () => {
@@ -1439,11 +1469,13 @@ describe('the voice the picker shows', () => {
       packs,
       chosen,
       rate: 1,
+      volume: 100,
       sentenceGapMs: 150,
       paragraphGapMs: 600,
       notesAloud: false,
       onVoice: vi.fn(),
       onRate: vi.fn(),
+      onVolume: vi.fn(),
       onSentenceGap: vi.fn(),
       onParagraphGap: vi.fn(),
       onNotesAloud: vi.fn(),

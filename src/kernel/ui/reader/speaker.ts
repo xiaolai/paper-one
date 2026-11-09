@@ -79,6 +79,16 @@ export interface SpeakPrefs {
   /** A multiplier on the engine's own default; 1 is that default. */
   readonly rate?: number
   /**
+   * How loud, from 0 (silent) to 1 (as the voice produces it) — the
+   * `kernel.readingVolume` setting as a fraction.
+   *
+   * ⚠️ **PLAYBACK'S ALONE, AND 0 IS NOT STOPPING.** No render request and no
+   * audiobook hears of it, so a clip is the same clip at any volume; and nothing
+   * may branch on it being 0, because a reading's band, page turns and next
+   * section all hang off the voice going through the motions.
+   */
+  readonly volume?: number
+  /**
    * Silence after a sentence and after a paragraph, in milliseconds.
    *
    * ⚠️ **NOT THE ENGINE'S TO HONOUR — `useSpeech` WAITS.** Web Speech has no
@@ -187,6 +197,7 @@ export class Speaker {
    * unless it is still the current one.
    */
   #generation = 0
+  /* Stryker disable next-line BooleanLiteral: `speak` writes this before it wires the only reader, the grace timer its utterance arms */
   #sawBoundary = false
   #graceTimer: ReturnType<typeof setTimeout> | null = null
   /**
@@ -310,6 +321,13 @@ export class Speaker {
       utterance.rate = rate
     }
 
+    /* EVERY UTTERANCE, and this is the only place one is made: every road through
+     * `useSpeech` — a start, the next sentence, a step, a section turn — comes
+     * here with the preferences as they stand. An utterance's volume is fixed when
+     * it starts, so a change lands at the next sentence. 1 is the spec's own
+     * default, so assigning it changes nothing. */
+    utterance.volume = prefs.volume ?? 1
+
     this.#sawBoundary = false
 
     utterance.addEventListener('boundary', (event) => {
@@ -323,7 +341,12 @@ export class Speaker {
       // whole sentence.
       if (name && name !== 'word') return
       this.#sawBoundary = true
-      this.#cb.onWord(charIndex, charLength && charLength > 0 ? charLength : wordLengthAt(text, charIndex))
+      /* THE ENGINE'S OWN LENGTH WHEN IT GIVES A USABLE ONE, the word's span in
+         the text otherwise. This read `charLength && charLength > 0`, whose
+         first half could not change the answer — 0 and absence both fail the
+         second — so a mutation of it failed no test by construction. */
+      const length = charLength ?? 0
+      this.#cb.onWord(charIndex, length > 0 ? length : wordLengthAt(text, charIndex))
     })
 
     /* Both guarded by generation. `cancel()` does not suppress the cancelled
@@ -444,10 +467,10 @@ export class Speaker {
   }
 
   #clearGrace(): void {
-    if (this.#graceTimer !== null) {
-      clearTimeout(this.#graceTimer)
-      this.#graceTimer = null
-    }
+    /* UNCONDITIONAL: clearing no timer is a no-op by the spec, so a guard here
+       could not change what happens and no test could tell it was there. */
+    clearTimeout(this.#graceTimer ?? undefined)
+    this.#graceTimer = null
   }
 
   /**

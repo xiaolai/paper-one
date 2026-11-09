@@ -123,6 +123,7 @@ describe('every preference a reader changes is saved', () => {
     readingStyle: setReadingStyle('separation', 'both'),
     readingVoice: { type: 'setReadingVoice', lang: 'en', voice: 'com.apple.voice.premium.en-US.Ava' },
     readingRate: { type: 'setReadingRate', rate: 1.25 },
+    readingVolume: { type: 'setReadingVolume', volume: 40 },
     readingNotesAloud: { type: 'toggleReadingNotes' },
     sentenceGapMs: { type: 'setSentenceGap', ms: 300 },
     paragraphGapMs: { type: 'setParagraphGap', ms: 900 },

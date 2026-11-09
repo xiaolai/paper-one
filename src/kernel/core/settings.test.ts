@@ -1191,12 +1191,15 @@ describe('what the store promises never to do', () => {
         },
       }
       const store = createSettingsStore({ storage, migrate: () => ({ 'test.count': BigInt(10) }) })
+      const heard: boolean[] = []
+      store.subscribe(() => heard.push(store.persistent))
 
       store.set(KERNEL_SETTINGS.theme, 'night')
 
       expect(store.get(KERNEL_SETTINGS.theme), 'the session still sees what it chose').toBe('night')
       expect(writes, 'nothing reached the storage').toBe(0)
       expect(store.persistent, 'and the store says so, instead of reporting a save it did not make').toBe(false)
+      expect(heard, '`set` notifies before it persists, so only the failure itself can publish the flip').toContain(false)
       expect(error).toHaveBeenCalledWith(
         'Paper: settings could not be serialised, so they will not be saved on this device',
         expect.any(TypeError),
@@ -1331,6 +1334,37 @@ describe('the range read aloud may be stored in', () => {
        the utterance — so this is rejected at the door and the default stands. */
     for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, '1.5', null, {}]) {
       expect(readingBack(envelope({ 'kernel.readingRate': bad })).readingRate).toBe(DEFAULTS.readingRate)
+    }
+  })
+})
+
+describe('the reading volume', () => {
+  it('is stored under the key the narration import looks for, at full volume by default', () => {
+    /* ⚠️ **THE KEY IS THE DECISION'S.** Step 5.5 carries `kernel.reading*` to
+       `narration.*`, so a name outside that prefix is a setting the import
+       silently drops. The default is what makes this change inaudible. */
+    expect(KERNEL_SETTINGS.readingVolume.key).toBe('kernel.readingVolume')
+    expect(KERNEL_SETTINGS.readingVolume.fallback).toBe(100)
+    expect(readingBack(envelope({})).readingVolume).toBe(100)
+  })
+
+  it('reads back what is in range, both ends included', () => {
+    /* 0 is the end that matters: a falsy value lost on the way back from disk
+       is the reading run playing aloud. */
+    for (const stored of [0, 37, 100]) {
+      expect(readingBack(envelope({ 'kernel.readingVolume': stored })).readingVolume).toBe(stored)
+    }
+  })
+
+  it('clamps a stored number to the ends, as the speed does', () => {
+    expect(readingBack(envelope({ 'kernel.readingVolume': 150 })).readingVolume).toBe(100)
+    expect(readingBack(envelope({ 'kernel.readingVolume': -5 })).readingVolume).toBe(0)
+  })
+
+  it('refuses what is not a finite number, and the default stands', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, '40', null, {}, true]) {
+      expect(readingBack(envelope({ 'kernel.readingVolume': bad })).readingVolume).toBe(100)
+      expect(KERNEL_SETTINGS.readingVolume.parse(bad), `${String(bad)} was taken as a volume`).toBeUndefined()
     }
   })
 })

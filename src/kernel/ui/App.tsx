@@ -62,6 +62,7 @@ import { OverlaySheet } from './overlays/OverlaySheet'
 import { listTrash, type TrashedBook } from '../core/bookTrash'
 import { TrashSheet } from './overlays/TrashSheet'
 import { WindowShell } from './shell/WindowShell'
+import { READING_VOLUME_MAX } from '../core/settings'
 import { Library } from './screens/Library'
 import { Reader } from './screens/Reader'
 import { TagEditor } from './screens/TagEditor'
@@ -322,6 +323,7 @@ export function App({
     () => ({
       voices: state.readingVoice,
       rate: state.readingRate,
+      volume: state.readingVolume / READING_VOLUME_MAX,
       sentenceGapMs: state.sentenceGapMs,
       paragraphGapMs: state.paragraphGapMs,
       notesAloud: state.readingNotesAloud,
@@ -329,6 +331,7 @@ export function App({
     [
       state.readingVoice,
       state.readingRate,
+      state.readingVolume,
       state.sentenceGapMs,
       state.paragraphGapMs,
       state.readingNotesAloud,
@@ -2301,6 +2304,7 @@ export function App({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
+        // Stryker disable next-line ConditionalExpression: with no layer open, `dismissTop` finds no top layer and the reducer returns the SAME state object, so `useReducer` bails out: nothing re-renders, no effect runs, no listener sees it. The guard and the reducer ask one question (`LAYER_ORDER`); they could differ only for an Escape landing after a layer was dispatched open and before this effect re-subscribed, and React commits a key or click update and flushes its effects before the next such event.
         if (hasOpenLayer(state)) dispatch({ type: 'dismissTop' })
         return
       }

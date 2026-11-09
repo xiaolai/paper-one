@@ -296,3 +296,40 @@ describe('seeking, which only the speaker that is reading can do', () => {
     expect(speaker.seekToMs?.(500)).toBe(false)
   })
 })
+
+describe('a live change of volume', () => {
+  const withVolume = () => {
+    const self = fake()
+    const volumes: number[] = []
+    return { self: Object.assign(self, { setVolume: (v: number) => void volumes.push(v) }), volumes }
+  }
+
+  it('reaches the speaker that is reading', () => {
+    const engine = withVolume()
+    const platform = fake()
+    const speaker = routedSpeaker(engine.self, platform, () => [pack()])
+    speaker.speak('a passage', 'en')
+    speaker.setVolume(0.5)
+    expect(engine.volumes).toEqual([0.5])
+  })
+
+  it('reaches nothing between readings, because the next one carries it', () => {
+    const engine = withVolume()
+    const speaker = routedSpeaker(engine.self, fake(), () => [pack()])
+    speaker.setVolume(0.5)
+    expect(engine.volumes).toEqual([])
+    speaker.speak('a passage', 'en')
+    speaker.stop()
+    speaker.setVolume(0.25)
+    expect(engine.volumes).toEqual([])
+  })
+
+  it('is no error where the speaker cannot change a sound already begun', () => {
+    /* Web Speech fixes an utterance's volume when it starts: the next sentence
+       carries the change, and that is a few seconds away. */
+    const speaker = routedSpeaker(fake(), fake(), () => [])
+    speaker.speak('a passage', 'fr')
+    expect(() => speaker.setVolume(0.5)).not.toThrow()
+  })
+})
+

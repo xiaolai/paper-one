@@ -6,7 +6,7 @@
  * for real time measures the machine.
  */
 
-import type { AudioBufferLike, AudioHost, SourceLike } from './enginePlayer'
+import type { AudioBufferLike, AudioHost, GainLike, SourceLike } from './enginePlayer'
 
 export interface FakeSource extends SourceLike {
   readonly started: { when: number | undefined; offset: number | undefined }[]
@@ -18,12 +18,19 @@ export interface FakeSource extends SourceLike {
   end(): void
 }
 
+export interface FakeGain extends GainLike {
+  readonly disconnects: number
+  /** What it was wired to. A gain that reaches no destination silences the source behind it. */
+  readonly connections: unknown[]
+}
+
 export class FakeAudioHost implements AudioHost {
   currentTime = 0
   sampleRate = 24_000
   state = 'running'
   readonly destination = {}
   readonly sources: FakeSource[] = []
+  readonly gains: FakeGain[] = []
   readonly buffers: { channels: number; length: number; sampleRate: number; written: Float32Array | null }[] = []
 
   createBuffer(channels: number, length: number, sampleRate: number): AudioBufferLike {
@@ -37,6 +44,22 @@ export class FakeAudioHost implements AudioHost {
         return length / sampleRate
       },
     }
+  }
+
+  createGain(): GainLike {
+    const gain: FakeGain = {
+      gain: { value: 1 },
+      disconnects: 0,
+      connections: [],
+      connect(destination: unknown) {
+        ;(this as { connections: unknown[] }).connections.push(destination)
+      },
+      disconnect() {
+        ;(this as { disconnects: number }).disconnects += 1
+      },
+    }
+    this.gains.push(gain)
+    return gain
   }
 
   createBufferSource(): SourceLike {
@@ -81,6 +104,13 @@ export class FakeAudioHost implements AudioHost {
   async close(): Promise<void> {
     this.closes += 1
     this.state = 'closed'
+  }
+
+  /** The gain of the sound playing now, which is always the last one made. */
+  get latestGain(): FakeGain {
+    const last = this.gains.at(-1)
+    if (!last) throw new Error('nothing has played yet')
+    return last
   }
 
   /** Move the context's clock, in milliseconds. */

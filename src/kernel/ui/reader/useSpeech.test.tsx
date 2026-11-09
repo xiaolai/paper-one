@@ -289,6 +289,40 @@ describe('following the voice across pages', () => {
     a.remove()
   })
 
+  it('turns no page for a word once the follow-along has been dropped', () => {
+    /* A voice that reports no boundary in its first 2.5 s loses the
+       follow-along for the reading. A boundary that turns up after that must not
+       start turning pages again: the transport has told the reader the highlight
+       is off, and pages moving on their own would contradict it. */
+    const a = section('Bonjour le monde')
+    const { speech, next } = mount(a.doc)
+    act(() => speech().start())
+    act(() => {
+      synth.queued[0]?.dispatchEvent(new Event('start'))
+      vi.advanceTimersByTime(2500)
+    })
+    expect(speech().followsWords, 'the follow-along was dropped').toBe(false)
+
+    a.wordAt(1200)
+    boundary(8, 2)
+    expect(next, 'a late boundary turns nothing').not.toHaveBeenCalled()
+    a.remove()
+  })
+
+  it('turns for the first word off the page whatever the clock reads', () => {
+    /* The settle throttle measures from the LAST turn, and before the first
+       there is none. A clock near zero must not read "no turn yet" as "a turn
+       at 0 ms" and swallow the first page the voice walks off. */
+    vi.setSystemTime(0)
+    const a = section('Bonjour le monde')
+    const { speech, next } = mount(a.doc)
+    act(() => speech().start())
+    a.wordAt(1200)
+    boundary(0, 7)
+    expect(next).toHaveBeenCalledTimes(1)
+    a.remove()
+  })
+
   it('never turns for a word behind the page', () => {
     // The reader flipped forward to peek. The voice keeps its place; the
     // page is theirs.
@@ -416,6 +450,76 @@ describe('the end of a section', () => {
     })
     expect(speech().speaking).toBe(false)
     expect(next.mock.calls.length).toBeLessThanOrEqual(CONTINUE_GRACE_MS / CONTINUE_TICK_MS + 1)
+    a.remove()
+  })
+
+  it('gives up exactly when the grace runs out, not a tick later', () => {
+    /* The grace is how long a slow section is waited for before the book counts
+       as finished. At that moment the reading ends; one more tick would turn a
+       page past the last one before the control went out. */
+    const a = section('Last chapter.')
+    const { speech, next } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    act(() => {
+      vi.advanceTimersByTime(CONTINUE_GRACE_MS)
+    })
+    expect(speech().speaking, 'the book is over').toBe(false)
+    expect(next, 'one turn a tick until then, and no more').toHaveBeenCalledTimes(
+      CONTINUE_GRACE_MS / CONTINUE_TICK_MS,
+    )
+    a.remove()
+  })
+
+  it('a Listen pressed while the walk looks for the next section takes the walk down', () => {
+    /* The reader starts the section over. The walk belonged to the reading that
+       ran out, and left running it would turn pages away from the sentence now
+       being read. */
+    const a = section('Only this.')
+    const { speech, next } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    act(() => speech().start())
+    expect(spoken(), 'the section is read again').toEqual(['Only this.', 'Only this.'])
+    next.mockClear()
+    act(() => {
+      vi.advanceTimersByTime(CONTINUE_TICK_MS * 2)
+    })
+    expect(next, 'and no page turns under it').not.toHaveBeenCalled()
+    a.remove()
+  })
+
+  it('turns no page once a Listen that found nothing has ended the reading', () => {
+    /* A Listen on a section with nothing to read ends the reading — but the
+       empty section reports itself done before `speak` returns, which sets a walk
+       going first. The walk must notice the reading is over and stop, or pages
+       would go on turning under a transport that says nothing is playing. */
+    const a = section('First chapter.')
+    const plate = section('')
+    const { speech, next, show } = mount(a.doc)
+    act(() => speech().start())
+    show(plate.doc)
+    act(() => speech().start())
+    expect(speech().speaking, 'the Listen found nothing to read').toBe(false)
+    next.mockClear()
+    act(() => {
+      vi.advanceTimersByTime(CONTINUE_TICK_MS * 3)
+    })
+    expect(next, 'and nothing walks on behind it').not.toHaveBeenCalled()
+    a.remove()
+    plate.remove()
+  })
+
+  it('a stop during the walk leaves no timer behind', () => {
+    /* Invisible through the transport — the next tick would see the reading is
+       over and do nothing — so the timers are counted, as the position tick's
+       case counts them: a stopped reading should wake nothing up. */
+    const a = section('Only this.')
+    const { speech } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    act(() => speech().stop())
+    expect(vi.getTimerCount(), 'nothing left to fire').toBe(0)
     a.remove()
   })
 
@@ -918,6 +1022,34 @@ describe('stepping by chapter', () => {
     a.remove()
   })
 
+  it('a step that lands drops the sentence the gap was waiting for', () => {
+    /* The reader asked for another chapter. Until it arrives the old one must
+       not go on into its next sentence: that would read on in the chapter they
+       have just left. */
+    const a = section('One here. Two there.')
+    const { speech } = mount(a.doc, { chapters: true, prefs: { sentenceGapMs: 300 } })
+    act(() => speech().start())
+    ends()
+    act(() => speech().stepChapter(1))
+    act(() => vi.advanceTimersByTime(300))
+    expect(spoken(), 'nothing more of the old chapter').toEqual(['One here.'])
+    a.remove()
+  })
+
+  it('a step that lands takes down the walk looking for the next section', () => {
+    /* The same between sections: the walk would turn the pages of whatever the
+       reader is now waiting for. */
+    const a = section('Only this.')
+    const { speech, next } = mount(a.doc, { chapters: true })
+    act(() => speech().start())
+    ends()
+    act(() => speech().stepChapter(1))
+    next.mockClear()
+    act(() => vi.advanceTimersByTime(CONTINUE_TICK_MS * 2))
+    expect(next).not.toHaveBeenCalled()
+    a.remove()
+  })
+
   it('does nothing at all when the book cannot step chapters', () => {
     const a = section('One here.')
     const { speech } = mount(a.doc)
@@ -1153,6 +1285,25 @@ describe('pausing between two sections', () => {
     a.remove()
   })
 
+  it('a resume spends the hold, so a later pause holds the voice and not a walk', () => {
+    /* Kept after the walk restarted, the hold would make a later pause and
+       resume — here while a chapter the reader asked for is on its way — start
+       the walk again and turn a page away from that chapter before it arrived. */
+    const a = section('Only this.')
+    const { speech, next } = mount(a.doc, { chapters: true })
+    act(() => speech().start())
+    ends()
+    act(() => speech().pause())
+    act(() => speech().resume())
+    act(() => speech().stepChapter(1))
+    next.mockClear()
+    act(() => speech().pause())
+    act(() => speech().resume())
+    act(() => vi.advanceTimersByTime(CONTINUE_TICK_MS * 2))
+    expect(next, 'no walk was restarted').not.toHaveBeenCalled()
+    a.remove()
+  })
+
   it('does not let the walk run out its grace while held', () => {
     /* The grace is what ends a reading at the end of the book. Counted over a
        pause it would end the reading on the reader's own hold. */
@@ -1300,6 +1451,17 @@ describe('the controls with no engine behind them', () => {
      and a disabled control is still a control somebody can reach by keyboard or
      by a stale command. Every one of them has to be a no-op rather than a throw.
   */
+  it('answers false for a seek without one, rather than throwing', () => {
+    /* The scrubber and a tap reach the seeks directly, and with no engine there
+       is no reading to seek in — the same no-op as every other control. */
+    delete (window as { speechSynthesis?: unknown }).speechSynthesis
+    const a = section('One.')
+    const { speech } = mount(a.doc)
+    expect(speech().seekToFraction(0.5)).toBe(false)
+    expect(speech().seekToOffset(0)).toBe(false)
+    a.remove()
+  })
+
   it('does nothing, and throws nothing, without one', () => {
     delete (window as { speechSynthesis?: unknown }).speechSynthesis
     const a = section('One.')
@@ -2182,6 +2344,32 @@ describe('five defects an independent audit found', () => {
     page.remove()
   })
 
+  it('does not chase back for a word that has no box on the page', async () => {
+    /* A word can have no box at all — inside something not laid out, or in a
+       frame still attaching. With nothing to measure there is no telling which
+       way the page should go, so the chase waits for a word it can place rather
+       than turning back blind. */
+    const { engine } = downloaded()
+    const page = section(['One sentence.', 'Two sentence.'], 'en')
+    const { speech, prev, next, unmount } = mount(page.doc, { engine })
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    act(() => {
+      speech().seekToOffset(0)
+    })
+    const realm = page.doc.defaultView as Window & { Range: { prototype: Range } }
+    realm.Range.prototype.getBoundingClientRect = () => rect(0, 0, 0, 0)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    expect(prev, 'no turn back').not.toHaveBeenCalled()
+    expect(next, 'and none forward').not.toHaveBeenCalled()
+    unmount()
+    page.remove()
+  })
+
   it('stops chasing the page once the voice is on it again', async () => {
     /* The reading follows itself back exactly as far as it needs to and then
        stops competing with the reader for the page — otherwise one seek would
@@ -2348,6 +2536,60 @@ describe('stepping through a section that is one buffer', () => {
     page.remove()
   })
 
+  it('steps from the sentence the voice has reached, not the one it began in', async () => {
+    /* On one buffer only the word boundaries say how far the reading has got.
+       A reader who listens into the second sentence and presses Next expects the
+       third, not the second again. */
+    const { speech, host, page, unmount } = await reading()
+    act(() => vi.advanceTimersByTime(600))
+    act(() => speech().stepSentence(1))
+    expect(landedAt(host), 'the third sentence, at 900 ms').toBeCloseTo(0.9, 3)
+    unmount()
+    page.remove()
+  })
+
+  it('turns the page back to a sentence a step went back to', async () => {
+    /* A step back can land above the page the reader is looking at, and the
+       page follows the voice there, as it does after a tap or a scrub. */
+    const { speech, prev, page, unmount } = await reading()
+    act(() => vi.advanceTimersByTime(1000))
+    page.wordAt(-500)
+    act(() => speech().stepSentence(-1))
+    act(() => vi.advanceTimersByTime(10))
+    expect(prev, 'the page followed the voice back').toHaveBeenCalled()
+    unmount()
+    page.remove()
+  })
+
+  it('turns the page back to where a scrub went back to', async () => {
+    /* The scrubber's own road back: dragged left to the start, the voice is
+       above the page, and the page follows it. */
+    const { speech, prev, page, unmount } = await reading()
+    act(() => vi.advanceTimersByTime(1000))
+    page.wordAt(-500)
+    act(() => {
+      speech().seekToFraction(0)
+    })
+    act(() => vi.advanceTimersByTime(150))
+    expect(prev, 'the page followed the voice back').toHaveBeenCalled()
+    unmount()
+    page.remove()
+  })
+
+  it('says a tap moved the voice when it did', async () => {
+    /* The caller is told whether the voice went where it was asked; a landing
+       reported as a refusal would leave the transport claiming nothing moved. */
+    const { speech, host, page, unmount } = await reading()
+    let moved: boolean | null = null
+    act(() => {
+      moved = speech().seekToOffset(14)
+    })
+    expect(moved, 'it moved').toBe(true)
+    expect(landedAt(host), 'to the second sentence').toBeCloseTo(0.5, 3)
+    unmount()
+    page.remove()
+  })
+
   it('stepping back from the first sentence says it again', async () => {
     /* The rule `stepParagraph`'s back button already had: a reader pressing back
        at the start of a chapter means "say that again". */
@@ -2504,6 +2746,73 @@ describe('the position the transport draws from', () => {
     expect(speech().at, 'nothing to scrub once the reading is over').toBeNull()
     unmount()
     page.remove()
+  })
+
+  it('goes back to null when the sound runs out under a reading that goes on', async () => {
+    /* The section's audio ends and the reading walks on to find the next one:
+       the transport stays up, with nothing to scrub until the next section
+       plays. */
+    const { engine, host } = downloaded()
+    const page = section('Hello there.', 'en')
+    const { speech, unmount } = mount(page.doc, { engine })
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POSITION_TICK_MS)
+    })
+    expect(speech().at).not.toBeNull()
+
+    await act(async () => {
+      host.latest.end()
+      await vi.advanceTimersByTimeAsync(POSITION_TICK_MS)
+    })
+    expect(speech().speaking, 'the walk goes on').toBe(true)
+    expect(speech().at, 'with nothing to scrub').toBeNull()
+    unmount()
+    page.remove()
+  })
+
+  it('takes the new length when the next section starts at the same position', async () => {
+    /* Two sections both at 0:00 are still two lengths, and the scrubber's scale
+       and its second clock come from the length. */
+    const host = new FakeAudioHost()
+    const engine: ReadingEngine = {
+      packs: () => [ENGLISH],
+      host: () => host,
+      render: async (request) => ({
+        pcm: pcmOf(request.text.startsWith('Hello') ? 48_000 : 96_000),
+        sampleRate: 24_000,
+        words: [],
+        skipped: [],
+        evicted: { clips: 0, bytes: 0 },
+        clipPath: '/tmp/audio/clips/x.wav',
+      }),
+    }
+    const a = section('Hello there.', 'en')
+    const b = section('Goodbye now.', 'en')
+    const { speech, show, unmount } = mount(a.doc, { engine })
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POSITION_TICK_MS)
+    })
+    expect(speech().at, 'two seconds').toEqual({ positionMs: 0, durationMs: 2000 })
+
+    show(b.doc)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POSITION_TICK_MS)
+    })
+    expect(speech().at, 'four seconds, at the same 0:00').toEqual({ positionMs: 0, durationMs: 4000 })
+    unmount()
+    a.remove()
+    b.remove()
   })
 
   it('notices a seek at the next tick', async () => {
@@ -2941,6 +3250,38 @@ describe('the downloaded engine going away under an open book', () => {
  * that has not been asked for.
  */
 describe('what the transport says before anything has been pressed', () => {
+  it('follows the words until a voice shows it cannot', () => {
+    /* The follow-along is on by default: it is dropped only once a voice has
+       shown it reports no boundaries, and nothing has spoken yet. */
+    const page = section('Hello there.', 'en')
+    const { speech, unmount } = mount(page.doc)
+    expect(speech().followsWords).toBe(true)
+    unmount()
+    page.remove()
+  })
+
+  it('does not claim a render on the very first frame either', () => {
+    /* Every render counts here, not only the settled one: an effect clears the
+       flag after the first commit, so a wrong starting value would still show
+       "Making this chapter's audio…" for a frame on every book opened. */
+    const page = section('Hello there.', 'en')
+    const paging = { next: vi.fn(), prev: vi.fn() }
+    const seen: boolean[] = []
+    function Reading({ sectionKey, surface }: ReadingContext) {
+      seen.push(useSpeech({ sectionKey, surface }).preparing)
+      return null
+    }
+    function Probe() {
+      const { surface } = useReadingSurface({ doc: page.doc, place: NOWHERE, paging, book: NO_BOOK })
+      return <Reading sectionKey={page.doc} surface={surface} />
+    }
+    const view = render(<Probe />)
+    expect(seen.length, 'it rendered').toBeGreaterThan(0)
+    expect(seen, 'and never claimed a render').not.toContain(true)
+    view.unmount()
+    page.remove()
+  })
+
   it('is not reading, not preparing, not paused, and has nowhere to scrub', () => {
     const page = section('Hello there.', 'en')
     const { speech, unmount } = mount(page.doc)
@@ -3045,6 +3386,30 @@ describe('when the wait for a render is over', () => {
     }
     return { engine, host, land: () => land() }
   }
+
+  it('stops claiming a render the moment the reader stops', async () => {
+    /* A stop during the wait is the reader giving up on it: the transport goes
+       back to Listen rather than going on saying the chapter is being made. */
+    const { engine, land } = slow()
+    const page = section('Hello there.', 'en')
+    const { speech, unmount } = mount(page.doc, { engine })
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(speech().preparing, 'the render is running').toBe(true)
+
+    act(() => speech().stop())
+    expect(speech().preparing, 'and the wait is over at once').toBe(false)
+    land()
+    await act(async () => {
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(POSITION_TICK_MS)
+    })
+    expect(speech().preparing, 'the render landing late does not bring it back').toBe(false)
+    unmount()
+    page.remove()
+  })
 
   it('says it is preparing until a position arrives, and not a moment longer', async () => {
     /* ⚠️ **A POSITION IS THE END OF THE WAIT, AND IT IS THE ONLY HONEST SIGNAL.**
@@ -3605,5 +3970,252 @@ describe('a reading under a host that keys its own sections', () => {
     expect(bandIn(a.doc)).toBeNull()
     unmount()
     a.remove()
+  })
+})
+
+describe('the reading volume, on every road to an utterance', () => {
+  /**
+   * ⚠️ **ONE CONSTRUCTOR, BUT THE VOLUME HAS TO ARRIVE BY EVERY CALLER.** All of
+   * these reach `Speaker.speak` by a different road through the hook: starting,
+   * the next sentence, a step, a press at a dead end, and the turn into a new
+   * section. Written as the roads rather than as one case so that a road that
+   * grows its own `speak` with its own prefs is caught here.
+   */
+  const VOLUME = { volume: 0.4 }
+
+  it('on starting', () => {
+    const a = section('One here. Two there.')
+    const { speech } = mount(a.doc, { prefs: VOLUME })
+    act(() => speech().start())
+    expect(synth.queued.map((u) => u.volume)).toEqual([0.4])
+    a.remove()
+  })
+
+  it('on the next sentence, and that is where a change lands', () => {
+    const a = section('One here. Two there. Three anywhere.')
+    const { speech, setPrefs } = mount(a.doc, { prefs: VOLUME })
+    act(() => speech().start())
+    ends()
+    expect(synth.queued.at(-1)?.volume).toBe(0.4)
+    setPrefs({ volume: 0.7 })
+    expect(synth.queued, 'a change does not re-read the sentence').toHaveLength(2)
+    ends()
+    expect(synth.queued.at(-1)?.volume).toBe(0.7)
+    a.remove()
+  })
+
+  it('on a sentence step and a paragraph step, which are this speaker’s seek', () => {
+    const a = section(['One here. Two there.', 'Three anywhere.'])
+    const { speech } = mount(a.doc, { prefs: VOLUME })
+    act(() => speech().start())
+    act(() => speech().stepSentence(1))
+    expect(synth.queued.at(-1)?.text).toContain('Two')
+    expect(synth.queued.at(-1)?.volume).toBe(0.4)
+    act(() => speech().stepParagraph(1))
+    expect(synth.queued.at(-1)?.text).toContain('Three')
+    expect(synth.queued.at(-1)?.volume).toBe(0.4)
+    a.remove()
+  })
+
+  it('on a pause and resume across a gap', () => {
+    const a = section('One here. Two there.')
+    const { speech } = mount(a.doc, { prefs: { ...VOLUME, sentenceGapMs: 300 } })
+    act(() => speech().start())
+    ends()
+    act(() => speech().pause())
+    act(() => speech().resume())
+    expect(synth.queued.at(-1)?.text).toContain('Two')
+    expect(synth.queued.at(-1)?.volume).toBe(0.4)
+    a.remove()
+  })
+
+  it('on the turn into the next section, at the volume as it now stands', () => {
+    const a = section('First chapter.')
+    const b = section('Second chapter.')
+    const { speech, show, setPrefs } = mount(a.doc, { prefs: VOLUME })
+    act(() => speech().start())
+    setPrefs({ volume: 0.7 })
+    ends()
+    show(b.doc)
+    expect(synth.queued.at(-1)?.text).toBe('Second chapter.')
+    expect(synth.queued.at(-1)?.volume).toBe(0.7)
+    a.remove()
+    b.remove()
+  })
+
+  it('on a chapter the reader asked for', () => {
+    const a = section('First chapter.')
+    const b = section('Second chapter.')
+    const { speech, show } = mount(a.doc, { prefs: VOLUME, chapters: true })
+    act(() => speech().start())
+    act(() => speech().stepChapter(1))
+    show(b.doc)
+    expect(synth.queued.at(-1)?.text).toBe('Second chapter.')
+    expect(synth.queued.at(-1)?.volume).toBe(0.4)
+    a.remove()
+    b.remove()
+  })
+
+  it('reads exactly the same at 0 as at full, section turn and band included', () => {
+    /* ⚠️ **SILENCE IS NOT STOPPING: THE DECISION'S OWN SENTENCE.** The same
+       script at two volumes, comparing everything a reader would see move. */
+    const script = (volume: number) => {
+      const a = section('One here. Two there.')
+      const b = section('Second chapter.')
+      const { speech, next, show, paceHeld } = mount(a.doc, { prefs: { volume } })
+      const seen: unknown[] = []
+      const see = () =>
+        seen.push({
+          said: synth.queued.map((u) => u.text),
+          speaking: speech().speaking,
+          paused: speech().paused,
+          follows: speech().followsWords,
+          held: paceHeld(),
+          turns: next.mock.calls.length,
+          band: a.doc.getElementById('paper-spoken-word') !== null,
+        })
+      act(() => speech().start())
+      see()
+      boundary(0, 3)
+      see()
+      act(() => speech().pause())
+      see()
+      act(() => speech().resume())
+      see()
+      ends()
+      see()
+      ends()
+      see()
+      show(b.doc)
+      see()
+      ends()
+      see()
+      a.remove()
+      b.remove()
+      synth.queued.length = 0
+      cleanup()
+      return seen
+    }
+    expect(script(0)).toEqual(script(1))
+  })
+})
+
+describe('the reading volume on the downloaded voices', () => {
+  const ENGLISH: VoicePack = {
+    id: 'english-kokoro',
+    name: 'English',
+    summary: '',
+    family: 'kokoro',
+    languages: ['en'],
+    bytes: 1,
+    minimumMemoryGb: 4,
+    voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
+    installed: true,
+  }
+
+  function downloaded() {
+    const host = new FakeAudioHost()
+    const requests: SpeechRequest[] = []
+    const engine: ReadingEngine = {
+      packs: () => [ENGLISH],
+      host: () => host,
+      render: async (request) => {
+        requests.push(request)
+        return {
+          pcm: pcmOf(2_400),
+          sampleRate: 24_000,
+          words: [],
+          skipped: [],
+          evicted: { clips: 0, bytes: 0 },
+          clipPath: '/tmp/audio/clips/x.wav',
+        }
+      },
+    }
+    return { engine, requests, host }
+  }
+  const landed = () =>
+    act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+  it('starts at the reader’s volume, and a change is heard at once', async () => {
+    const { engine, requests, host } = downloaded()
+    const page = section('Hello there.', 'en')
+    const { speech, setPrefs, unmount } = mount(page.doc, { engine, prefs: { volume: 0.4 } })
+    act(() => speech().start())
+    await landed()
+    expect(host.latestGain.gain.value).toBe(0.4)
+
+    /* No seek and no re-render: the same source, playing on. */
+    setPrefs({ volume: 0.7 })
+    expect(host.latestGain.gain.value).toBe(0.7)
+    expect(host.sources).toHaveLength(1)
+    expect(host.latest.stops).toBe(0)
+    expect(requests).toHaveLength(1)
+    unmount()
+    page.remove()
+  })
+
+  it('takes a change to nothing at all as a change, and plays on', async () => {
+    /* Zero is a volume, not an absent one: `||` in place of `??` would have
+       turned it up to full. */
+    const { engine, host } = downloaded()
+    const page = section('Hello there.', 'en')
+    const { speech, setPrefs, unmount } = mount(page.doc, { engine, prefs: { volume: 0.4 } })
+    act(() => speech().start())
+    await landed()
+
+    setPrefs({ volume: 0 })
+    expect(host.latestGain.gain.value).toBe(0)
+    expect(host.sources).toHaveLength(1)
+    expect(host.latest.stops).toBe(0)
+    unmount()
+    page.remove()
+  })
+
+  it('leaves the gain alone when some other preference changes', async () => {
+    /* The change is what is forwarded, not every render: a gain written again
+       and again is harmless to hear and a lie about what the effect is for. */
+    const { engine, host } = downloaded()
+    const page = section('Hello there.', 'en')
+    const { speech, setPrefs, unmount } = mount(page.doc, { engine, prefs: { volume: 0.4 } })
+    act(() => speech().start())
+    await landed()
+    host.latestGain.gain.value = 0.9
+    setPrefs({ volume: 0.4, rate: 1.25 })
+    expect(host.latestGain.gain.value, 'a change of speed wrote the volume').toBe(0.9)
+    unmount()
+    page.remove()
+  })
+
+  it('keeps the volume across a seek', async () => {
+    const { engine, host } = downloaded()
+    const page = section('Hello there.', 'en')
+    const { speech, setPrefs, unmount } = mount(page.doc, { engine, prefs: { volume: 0.4 } })
+    act(() => speech().start())
+    await landed()
+    setPrefs({ volume: 0.7 })
+    expect(speech().seekToFraction(0.5)).toBe(true)
+    expect(host.latest.connections).toEqual([host.latestGain])
+    expect(host.latestGain.gain.value).toBe(0.7)
+    unmount()
+    page.remove()
+  })
+
+  it('asks the engine for the same clip at any volume', async () => {
+    const asked = async (volume: number) => {
+      const { engine, requests } = downloaded()
+      const page = section('Hello there.', 'en')
+      const { speech, unmount } = mount(page.doc, { engine, prefs: { volume } })
+      act(() => speech().start())
+      await landed()
+      unmount()
+      page.remove()
+      return requests
+    }
+    const whole = await asked(1)
+    expect(whole).toHaveLength(1)
+    expect(await asked(0)).toEqual(whole)
   })
 })

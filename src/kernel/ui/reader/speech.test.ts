@@ -59,13 +59,14 @@ describe('Speaker', () => {
   })
 
   const make = () => {
+    const onWord = vi.fn()
     const onDone = vi.fn()
     const onNoBoundaries = vi.fn()
     const speaker = new Speaker(
-      { onWord: vi.fn(), onDone, onNoBoundaries },
+      { onWord, onDone, onNoBoundaries },
       synth as unknown as SpeechSynthesis,
     )
-    return { speaker, onDone, onNoBoundaries }
+    return { speaker, onWord, onDone, onNoBoundaries }
   }
 
   /**
@@ -160,6 +161,36 @@ describe('Speaker', () => {
       const { speaker, onDone } = make()
       expect(speaker.speak('hello', null)).toBe(false)
       expect(onDone).toHaveBeenCalledWith('no-voice')
+    })
+  })
+
+  describe('the reading volume', () => {
+    it('sets the volume it was given', () => {
+      const { speaker } = make()
+      speaker.speak('hello', null, { volume: 0.4 })
+      expect(synth.queued[0]?.volume).toBe(0.4)
+    })
+
+    it('sets 0 as 0, rather than taking it for nothing chosen', () => {
+      const { speaker } = make()
+      speaker.speak('hello', null, { volume: 0 })
+      expect(synth.queued[0]?.volume).toBe(0)
+    })
+
+    it('sets the platform default of 1 where nothing was chosen', () => {
+      const { speaker } = make()
+      speaker.speak('hello', null)
+      expect(synth.queued[0]?.volume).toBe(1)
+    })
+
+    it('reads the same at 0: the utterance still goes to the engine and still ends', () => {
+      /* ⚠️ **NO "MUTED SO SKIP" BRANCH.** A reading depends on the utterance's
+         own events for its pace, so 0 must queue one exactly as 1 does. */
+      const { speaker, onDone } = make()
+      expect(speaker.speak('hello', null, { volume: 0 })).toBe(true)
+      expect(synth.queued).toHaveLength(1)
+      synth.queued[0]?.dispatchEvent(new Event('end'))
+      expect(onDone).toHaveBeenCalledWith('ended')
     })
   })
 
@@ -638,6 +669,74 @@ describe('Speaker', () => {
     speaker.stop()
     expect(synth.paused, 'stopped while paused, and the engine is free').toBe(false)
     expect(synth.resumed).toBe(1)
+  })
+
+  describe('the word it reports', () => {
+    const boundary = (index: number, fields: { charIndex: number; charLength?: number; name?: string }) =>
+      synth.queued[index]?.dispatchEvent(Object.assign(new Event('boundary'), fields))
+
+    /* A boundary is reported with the engine's length when that length is
+       usable, and with the word's own span in the text when it is absent, zero
+       or negative — an engine that reports `charLength: 0` must not draw an
+       empty highlight. */
+    it("uses the engine's length when it is positive, and the word's span otherwise", () => {
+      const { speaker, onWord } = make()
+      speaker.speak('Call me Ishmael', null)
+      boundary(0, { charIndex: 8, charLength: 3, name: 'word' })
+      boundary(0, { charIndex: 8, charLength: 0, name: 'word' })
+      boundary(0, { charIndex: 8, charLength: -1, name: 'word' })
+      boundary(0, { charIndex: 8, name: 'word' })
+      expect(onWord.mock.calls).toEqual([[8, 3], [8, 7], [8, 7], [8, 7]])
+    })
+
+    /* Sentence boundaries share the event in some engines; the highlight is per
+       word. An engine that names nothing is reporting words. */
+    it('ignores a boundary named anything but a word, and takes one named nothing', () => {
+      const { speaker, onWord } = make()
+      speaker.speak('Call me Ishmael', null)
+      boundary(0, { charIndex: 0, charLength: 15, name: 'sentence' })
+      expect(onWord).not.toHaveBeenCalled()
+      boundary(0, { charIndex: 5, charLength: 2 })
+      expect(onWord.mock.calls).toEqual([[5, 2]])
+    })
+
+    /* A replaced utterance can still deliver a late boundary; reported, it
+       would move the highlight to a word in text no longer being read. */
+    it('reports nothing from an utterance a newer one replaced', () => {
+      const { speaker, onWord } = make()
+      speaker.speak('first sentence', null)
+      speaker.speak('second', null)
+      boundary(0, { charIndex: 0, charLength: 5, name: 'word' })
+      expect(onWord).not.toHaveBeenCalled()
+    })
+  })
+
+  /* A pause or resume issued in the wrong state is still a command on the one
+     shared engine. Pausing an engine that is not speaking leaves it paused for
+     whatever comes next; resuming one that is not paused re-arms a grace over
+     no speech. */
+  it('pauses only what is speaking, and resumes only what is paused', () => {
+    const { speaker } = make()
+    speaker.speak('first', null)
+    synth.speaking = false
+    speaker.pause()
+    expect(synth.paused, 'nothing was speaking, so nothing was paused').toBe(false)
+
+    speaker.resume()
+    expect(synth.resumed, 'nothing was paused, so nothing was resumed').toBe(0)
+  })
+
+  /* `#finish` retires the generation FORWARD. Stepped back instead, the very
+     next retirement — a `stop()` after the reading ended — hands the finished
+     utterance its own number again, and its late duplicate (WebKit sends
+     `error` and `end` for one utterance on some voices) reports a second end. */
+  it('reports an utterance finished once, even when a stop comes between its two endings', () => {
+    const { speaker, onDone } = make()
+    speaker.speak('first', null)
+    synth.queued[0]?.dispatchEvent(new Event('end'))
+    speaker.stop()
+    synth.queued[0]?.dispatchEvent(new Event('error'))
+    expect(onDone.mock.calls).toEqual([['ended']])
   })
 })
 

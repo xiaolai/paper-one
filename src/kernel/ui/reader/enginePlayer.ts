@@ -23,6 +23,7 @@ export interface AudioHost {
   readonly state: string
   createBuffer(channels: number, length: number, sampleRate: number): AudioBufferLike
   createBufferSource(): SourceLike
+  createGain(): GainLike
   readonly destination: unknown
   resume(): Promise<void>
   /**
@@ -52,6 +53,13 @@ export interface SourceLike {
   stop(when?: number): void
 }
 
+/** The volume stage between a sound and the output. */
+export interface GainLike {
+  readonly gain: { value: number }
+  connect(destination: unknown): void
+  disconnect(): void
+}
+
 /** A sound in progress. */
 export interface Playing {
   /** Where the sound has got to, in milliseconds, counting only time spent playing. */
@@ -75,6 +83,8 @@ export interface Playing {
    * repeat the bound, and a bound repeated is a bound that drifts.
    */
   seekToMs(ms: number): void
+  /** How loud, from 0 to 1. Heard at once: no new source, so nothing moves. */
+  setVolume(volume: number): void
   /** End it. `onEnded` is NOT called for a stop: the caller already knows. */
   stop(): void
   readonly paused: boolean
@@ -88,6 +98,12 @@ export interface Playing {
  * a `stop()`, and never twice. A source that is stopped still delivers its
  * `onended`, which is the same shape as `Speaker`'s late-`end` problem and is
  * why `stopped` is checked rather than assumed.
+ *
+ * ⚠️ **THE VOLUME IS A GAIN NODE AND NEVER THE SAMPLES.** The buffer is what a
+ * reader has rendered, and neither a cached clip nor an audiobook is ever scaled;
+ * the gain is playback's alone. At 1 it is a multiplication by one, with no delay
+ * and no effect on the clock below. There is ONE for the whole sound, because a
+ * pause and a seek are new sources, and the gain is what they have in common.
  */
 export function playPcm(
   host: AudioHost,
@@ -95,10 +111,15 @@ export function playPcm(
   sampleRate: number,
   onEnded: () => void,
   rate = 1,
+  volume = 1,
 ): Playing {
   const floats = toFloats(pcm)
   const buffer = host.createBuffer(1, Math.max(1, floats.length), sampleRate)
   buffer.copyToChannel(floats, 0)
+
+  const output = host.createGain()
+  output.gain.value = volume
+  output.connect(host.destination)
 
   /* Milliseconds already played, before the current run. */
   let playedMs = 0
@@ -175,7 +196,7 @@ export function playPcm(
     node.playbackRate.value = speed
     /* Without this the sound is rendered and reaches no output at all — a
        reading that runs to the end of the chapter in silence. */
-    node.connect(host.destination)
+    node.connect(output)
     node.onended = () => {
       /* Only once. A source is only ever reached here having run OUT: every
          other road out of this player clears the handler first (`release`). */
@@ -183,6 +204,7 @@ export function playPcm(
       finished = true
       live = null
       playedMs = wholeMs
+      output.disconnect()
       onEnded()
     }
     live = { node, startedAt: host.currentTime }
@@ -211,6 +233,7 @@ export function playPcm(
        * buffer, which some engines play as silence and others refuse. */
       if (playedMs >= wholeMs) {
         finished = true
+        output.disconnect()
         onEnded()
         return
       }
@@ -240,10 +263,14 @@ export function playPcm(
       playedMs = wanted
       begin(wanted)
     },
+    setVolume(next: number) {
+      output.gain.value = next
+    },
     stop() {
       /* Marked before the early answer below, so a stop while paused is still
          a stop — and a second stop has nothing left to take down. */
       stopped = true
+      output.disconnect()
       const sounding = live
       if (sounding === null) return
       settle(sounding)

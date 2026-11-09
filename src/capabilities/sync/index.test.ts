@@ -1547,14 +1547,19 @@ describe('a runtime with no transport', () => {
   it('watches nothing when it was stopped before the launch finished', async () => {
     const answer = gate()
     const before = native.p2pOn
+    /* Abort only once the launch is parked in `p2pOn`: a count of turns is no
+       bound on the journal's opening, which goes off the event loop, and an
+       abort that lands there takes the other path — start throws. */
+    let entered = false
     native.p2pOn = async () => {
+      entered = true
       await answer.promise
       return false
     }
     try {
       const controller = new AbortController()
       const starting = start({ fs: crashableFs(book('book:a', 'Alpha', 'bytes')), noPlugin: true, controller })
-      await settled(10)
+      await until(() => expect(entered).toBe(true))
       controller.abort()
       answer.open()
       await starting
@@ -1825,7 +1830,8 @@ describe('what a satchel says about a session', () => {
         }),
     })
     await until(() => expect(named(run.events, 'sync.session-ok')).toHaveLength(1))
-    await settled()
+    /* Stop only once the next naming is parked — not after a count of turns. */
+    await until(() => expect(asked).toBeGreaterThan(1))
 
     run.handle.dispose()
     naming.open()
@@ -2964,7 +2970,8 @@ describe('whose sentence a failure is', () => {
     syncStatus.set({ state: 'idle', detail: null })
 
     const pressed = action('sync:download').run('book:a')
-    await settled()
+    /* Stop only once the download's naming is parked — not after a count of turns. */
+    await until(() => expect(asked).toBeGreaterThan(2))
     run.handle.dispose()
     naming.open()
     await pressed

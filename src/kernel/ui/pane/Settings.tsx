@@ -15,6 +15,7 @@ import {
   stepAt,
   stepIndexOf,
 } from '../../core/metrics'
+import { READING_VOLUME_MAX, READING_VOLUME_MIN } from '../../core/settings'
 import { THEMES } from '../panes'
 
 /* A settings section is about no book — no section reads the context, so what
@@ -171,6 +172,8 @@ export interface Narration {
   readonly packs: readonly VoicePack[]
   readonly chosen: Readonly<Record<string, string>>
   readonly rate: number
+  /** How loud Paper reads aloud, 0 to 100 — apart from the system's volume. */
+  readonly volume: number
   /** Silence after a sentence and after a paragraph, in ms. */
   readonly sentenceGapMs: number
   readonly paragraphGapMs: number
@@ -178,6 +181,7 @@ export interface Narration {
   readonly notesAloud: boolean
   readonly onVoice: (lang: string, voice: string) => void
   readonly onRate: (rate: number) => void
+  readonly onVolume: (volume: number) => void
   readonly onSentenceGap: (ms: number) => void
   readonly onParagraphGap: (ms: number) => void
   readonly onNotesAloud: (on: boolean) => void
@@ -1310,6 +1314,26 @@ export function Settings({
           value={stepIndexOf(READING_RATE, narration.rate)}
           onChange={(idx) => narration.onRate(stepAt(READING_RATE, idx))}
         />
+        {/* ⚠️ **A SLIDER, WHERE EVERY ROW AROUND IT STEPS.** `StepRow`'s argument is
+            that a value between two steps is not a decision anybody made, which is
+            true of a line height and not of how loud: this is set by ear, against
+            a voice that is already speaking. The 5s are only so that the keyboard
+            moves it by something audible. */}
+        <div className={`${styles.settingRow} ${styles.settingStatic}`}>
+          <span style={ROW_LABEL}>Volume</span>
+          <input
+            type="range"
+            className={styles.volume}
+            min={READING_VOLUME_MIN}
+            max={READING_VOLUME_MAX}
+            step={5}
+            value={narration.volume}
+            aria-label="Reading volume"
+            aria-valuetext={`${narration.volume}%`}
+            onChange={(event) => narration.onVolume(Number(event.target.value))}
+          />
+          <span className={styles.settingValue}>{narration.volume}%</span>
+        </div>
         {/* ⚠️ **THE PAUSES ARE ADDITIVE TO WHATEVER THE ENGINE ALREADY LEAVES**,
             and how much that is has not been measured — see `SENTENCE_GAP`. So
             the labels say what the reader is adding, not what they will hear in

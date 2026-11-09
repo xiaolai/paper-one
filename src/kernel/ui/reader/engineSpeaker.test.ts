@@ -1169,3 +1169,94 @@ describe('the reader’s speed, on the request', () => {
     expect(requests.at(-1)).not.toHaveProperty('rate')
   })
 })
+
+describe('the volume', () => {
+  const landed = () => vi.advanceTimersByTimeAsync(0)
+
+  it('plays at the volume the passage was spoken with', async () => {
+    const { speaker, host } = speakerOver(async () => audio())
+    speaker.speak('a passage', 'en', { volume: 0.25 })
+    await landed()
+    expect(host.latestGain.gain.value).toBe(0.25)
+  })
+
+  it('plays at full volume where nothing was chosen, even after a quiet passage', async () => {
+    const { speaker, host } = speakerOver(async () => audio())
+    speaker.speak('a passage', 'en', { volume: 0.25 })
+    await landed()
+    speaker.speak('another', 'en')
+    await landed()
+    expect(host.latestGain.gain.value).toBe(1)
+  })
+
+  it('plays silently at 0, rather than treating it as nothing chosen', async () => {
+    const { speaker, host } = speakerOver(async () => audio())
+    speaker.speak('a passage', 'en', { volume: 0 })
+    await landed()
+    expect(host.latestGain.gain.value).toBe(0)
+  })
+
+  it('follows a live change, with no new source and no second render', async () => {
+    const { speaker, host, requests } = speakerOver(async () => audio())
+    speaker.speak('a passage', 'en', { volume: 1 })
+    await landed()
+    host.advance(300)
+    speaker.setVolume(0.5)
+    expect(host.latestGain.gain.value).toBe(0.5)
+    expect(host.sources).toHaveLength(1)
+    expect(requests).toHaveLength(1)
+    expect(speaker.at()?.positionMs).toBeCloseTo(300, 6)
+  })
+
+  it('takes a change made while the render was still in flight', async () => {
+    /* A section can take minutes to render, and there is no player to tell yet.
+       Read when the sound lands, or the first thing heard is the old volume. */
+    const { speaker, host } = speakerOver(async () => audio())
+    speaker.speak('a passage', 'en', { volume: 1 })
+    speaker.setVolume(0.5)
+    await landed()
+    expect(host.latestGain.gain.value).toBe(0.5)
+  })
+
+  it('answers a change with nothing playing by doing nothing', () => {
+    const { speaker, host } = speakerOver(async () => audio())
+    speaker.setVolume(0.5)
+    expect(host.gains).toHaveLength(0)
+  })
+
+  it('never reaches the render, so a clip is the same clip at any volume', async () => {
+    /* ⚠️ **THE STORE KEYS A CLIP ON THE REQUEST.** A volume in it would render
+       the same chapter again per volume, and bake the volume into the file. */
+    const asked = (prefs: { volume?: number }) => {
+      const { speaker, requests } = speakerOver(async () => audio())
+      speaker.speak('a passage', 'en', { rate: 1.25, ...prefs })
+      return requests
+    }
+    const whole = asked({})
+    expect(asked({ volume: 0 })).toEqual(whole)
+    expect(asked({ volume: 0.5 })).toEqual(whole)
+    expect(Object.keys(whole[0] ?? {}).sort()).toEqual(['clip', 'packId', 'rate', 'text', 'voiceId'])
+  })
+
+  it('reads the same at 0 as at full: the same words at the same times, and the same ending', async () => {
+    const words = [
+      { start: 0, length: 3, startMs: 0, endMs: 100 },
+      { start: 4, length: 3, startMs: 100, endMs: 200 },
+    ]
+    const run = async (volume: number) => {
+      const { speaker, cb, host } = speakerOver(async () => audio({ words }))
+      speaker.speak('One two', 'en', { volume })
+      await landed()
+      await vi.advanceTimersByTimeAsync(150)
+      host.advance(150)
+      const midway = cb.onWord.mock.calls.length
+      host.advance(850)
+      host.latest.end()
+      return { midway, words: cb.onWord.mock.calls, done: (cb.onDone as never as { mock: { calls: unknown[] } }).mock.calls }
+    }
+    const silent = await run(0)
+    expect(silent).toEqual(await run(1))
+    expect(silent.midway, 'the words were still reported').toBeGreaterThan(0)
+    expect(silent.done).toEqual([['ended']])
+  })
+})

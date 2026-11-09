@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 import {
   useAudiobook,
   type AudiobookControl,
@@ -8,7 +8,7 @@ import {
   type AudiobookSource,
 } from './useAudiobook'
 import type { AudiobookPlatform } from '../reader/audiobook'
-import type { VoicePack } from '../../core/ports'
+import type { SpeechRequest, VoicePack } from '../../core/ports'
 
 /* THE PLATFORM HALF IS THE ONLY THING REPLACED. `audiobookTauri` is the save
    dialog and the engine, neither of which exists in a test; `exportAudiobook`
@@ -1039,3 +1039,17 @@ describe('exporting on a downloaded voice', () => {
     expect(say).toHaveBeenCalledWith('No downloadable voice reads this book’s language yet.')
   })
 })
+
+describe('the reading volume stays out of the export', () => {
+  it('has no way in: not in what the export is given, nor in what the engine is asked', () => {
+    /* ⚠️ **PINNED IN THE TYPES, WHICH `tsc -b` CHECKS.** An audiobook is never
+       scaled, and the way to guarantee that is for the export not to be able to
+       hear of a volume. `ReadingHost` passes these and nothing else; `SpeechRequest`
+       is what a clip is keyed on and `AudiobookPlatform`'s job is what is packaged. */
+    expectTypeOf<AudiobookDeps>().not.toHaveProperty('volume')
+    expectTypeOf<AudiobookDeps>().not.toHaveProperty('readingVolume')
+    expectTypeOf<SpeechRequest>().not.toHaveProperty('volume')
+    expectTypeOf<Parameters<AudiobookPlatform['render']>[0]>().not.toHaveProperty('volume')
+  })
+})
+

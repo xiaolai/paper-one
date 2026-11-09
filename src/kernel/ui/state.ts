@@ -7,6 +7,8 @@ import {
   PARAGRAPH_GAP_MIN,
   READING_RATE_MAX,
   READING_RATE_MIN,
+  READING_VOLUME_MAX,
+  READING_VOLUME_MIN,
   SENTENCE_GAP_MAX,
   SENTENCE_GAP_MIN,
   readKernelPreferences,
@@ -207,6 +209,8 @@ export interface AppState {
    */
   readonly readingVoice: Readonly<Record<string, string>>
   readonly readingRate: number
+  /** How loud Paper reads aloud, 0 to 100 — see `READING_VOLUME_MAX`. */
+  readonly readingVolume: number
   /** Whether a note's BODY is read aloud — see `NOTE_BODIES` in `speechSkip.ts`. */
   readonly readingNotesAloud: boolean
   /** Silence after a sentence, in ms — see `SENTENCE_GAP` in `metrics.ts`. */
@@ -261,6 +265,7 @@ export const initialState: AppState = {
      that choice. */
   readingVoice: {},
   readingRate: 1,
+  readingVolume: READING_VOLUME_MAX,
   readingNotesAloud: false,
   sentenceGapMs: SENTENCE_GAP.steps[SENTENCE_GAP.def] ?? 0,
   paragraphGapMs: PARAGRAPH_GAP.steps[PARAGRAPH_GAP.def] ?? 0,
@@ -338,6 +343,7 @@ export type Action =
      render overwrite a choice made for another language. */
   | { type: 'setReadingVoice'; lang: string; voice: string }
   | { type: 'setReadingRate'; rate: number }
+  | { type: 'setReadingVolume'; volume: number }
   | { type: 'setSentenceGap'; ms: number }
   | { type: 'setParagraphGap'; ms: number }
   /**
@@ -682,6 +688,11 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
          and the two are different doors into the same value. */
       const rate = bounded(action.rate, READING_RATE_MIN, READING_RATE_MAX)
       return rate === null ? state : { ...state, readingRate: rate }
+    }
+
+    case 'setReadingVolume': {
+      const volume = bounded(action.volume, READING_VOLUME_MIN, READING_VOLUME_MAX)
+      return volume === null ? state : { ...state, readingVolume: volume }
     }
 
     case 'setSentenceGap': {
@@ -1159,6 +1170,7 @@ export function preferencesOf(state: AppState): KernelPreferences {
     readingStyle: state.readingStyle,
     readingVoice: state.readingVoice,
     readingRate: state.readingRate,
+    readingVolume: state.readingVolume,
     readingNotesAloud: state.readingNotesAloud,
     sentenceGapMs: state.sentenceGapMs,
     paragraphGapMs: state.paragraphGapMs,

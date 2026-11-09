@@ -157,12 +157,13 @@ describe('the buffer it builds', () => {
 })
 
 describe('the wiring, and the states this player cannot be in', () => {
-  it('wires the source to the output, or the reading runs in silence', () => {
+  it('wires the source to the output through its gain, or the reading runs in silence', () => {
     /* Nothing throws and nothing reports an error when a source is never
        connected: the chapter plays to the end and the reader hears nothing. */
     const host = new FakeAudioHost()
     playPcm(host, ONE_SECOND, 24_000, () => {})
-    expect(host.latest.connections).toEqual([host.destination])
+    expect(host.latest.connections).toEqual([host.latestGain])
+    expect(host.latestGain.connections).toEqual([host.destination])
   })
 
   it('is not done while it is playing', () => {
@@ -405,5 +406,101 @@ describe('seeking, which is a new source and not a moved one', () => {
     expect(ran.sources, 'nor after the sound ran out').toHaveLength(wasRun)
     expect(afterEnd.positionMs(), 'nor did the mark').toBe(atEnd)
     expect(ended, 'and the ending was not reported twice').toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the volume', () => {
+  it('passes the sound through untouched unless asked otherwise', () => {
+    const host = new FakeAudioHost()
+    playPcm(host, ONE_SECOND, 24_000, () => {})
+    expect(host.gains).toHaveLength(1)
+    expect(host.latestGain.gain.value).toBe(1)
+  })
+
+  it('starts at the volume it is given, so the first sample is already right', () => {
+    const host = new FakeAudioHost()
+    playPcm(host, ONE_SECOND, 24_000, () => {}, 1, 0.25)
+    expect(host.latestGain.gain.value).toBe(0.25)
+  })
+
+  it('follows a live change at once, without touching the source', () => {
+    /* ⚠️ **A NEW SOURCE WOULD BE A SEEK.** A change that restarted the sound
+       would be heard as a stumble, and would reset what `positionMs` counts. */
+    const host = new FakeAudioHost()
+    const playing = playPcm(host, ONE_SECOND, 24_000, () => {})
+    host.advance(400)
+    playing.setVolume(0.5)
+    expect(host.latestGain.gain.value).toBe(0.5)
+    expect(host.sources, 'a change of volume started a new source').toHaveLength(1)
+    expect(host.latest.stops).toBe(0)
+    expect(playing.positionMs()).toBeCloseTo(400, 6)
+  })
+
+  it('keeps the one gain across a pause and a seek, so neither loses the volume', () => {
+    /* Web Audio's sources are single-use (see the file's header), so a resume
+       and a seek are new sources. The gain is what outlives them. */
+    const host = new FakeAudioHost()
+    const playing = playPcm(host, ONE_SECOND, 24_000, () => {}, 1, 0.25)
+    playing.pause()
+    playing.setVolume(0.5)
+    playing.resume()
+    expect(host.latest.connections, 'the resumed source').toEqual([host.latestGain])
+    playing.seekToMs(100)
+    expect(host.sources).toHaveLength(3)
+    expect(host.latest.connections, 'the seeked source').toEqual([host.latestGain])
+    expect(host.gains, 'one gain for the whole sound').toHaveLength(1)
+    expect(host.latestGain.gain.value).toBe(0.5)
+  })
+
+  it('never scales the audio itself', () => {
+    /* The buffer is what a cached clip and an audiobook are made of, and the
+       decision is that neither is ever scaled. */
+    const host = new FakeAudioHost()
+    playPcm(host, pcmOf(4), 24_000, () => {})
+    const whole = host.buffers[0]?.written
+    const quiet = new FakeAudioHost()
+    playPcm(quiet, pcmOf(4), 24_000, () => {}, 1, 0.1)
+    expect(quiet.buffers[0]?.written).toEqual(whole)
+  })
+
+  it('at 0 keeps the same clock and the same ending as at 1', () => {
+    /* ⚠️ **SILENCE IS NOT STOPPING.** The band, the page turns and the next
+       section all hang off this clock and this ending. */
+    const run = (volume: number) => {
+      const host = new FakeAudioHost()
+      const ended = vi.fn()
+      const playing = playPcm(host, ONE_SECOND, 24_000, ended, 1, volume)
+      host.advance(400)
+      const at = playing.positionMs()
+      host.advance(600)
+      host.latest.end()
+      return { at, started: host.latest.started, ended: ended.mock.calls.length, done: playing.done }
+    }
+    expect(run(0)).toEqual(run(1))
+  })
+
+  it('lets the gain go when the sound is over, however it got there', () => {
+    const ran = new FakeAudioHost()
+    playPcm(ran, ONE_SECOND, 24_000, () => {})
+    ran.latest.end()
+    expect(ran.latestGain.disconnects, 'it ran out').toBe(1)
+
+    const stopped = new FakeAudioHost()
+    playPcm(stopped, ONE_SECOND, 24_000, () => {}).stop()
+    expect(stopped.latestGain.disconnects, 'it was stopped').toBe(1)
+
+    const stoppedPaused = new FakeAudioHost()
+    const paused = playPcm(stoppedPaused, ONE_SECOND, 24_000, () => {})
+    paused.pause()
+    expect(stoppedPaused.latestGain.disconnects, 'a pause keeps it').toBe(0)
+    paused.stop()
+    expect(stoppedPaused.latestGain.disconnects, 'it was stopped while paused').toBe(1)
+
+    const past = new FakeAudioHost()
+    const overrun = playPcm(past, ONE_SECOND, 24_000, () => {})
+    past.advance(1200)
+    overrun.pause()
+    overrun.resume()
+    expect(past.latestGain.disconnects, 'it was resumed past its end').toBe(1)
   })
 })
