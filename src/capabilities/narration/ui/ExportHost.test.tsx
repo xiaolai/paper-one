@@ -1,16 +1,21 @@
 // @vitest-environment jsdom
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type {
-  KernelServices,
-  ReaderContext,
-  ReadingSurface,
-  ReadyBook,
-  SpeechEnginePort,
-  VoicePack,
+import {
+  createSettingsStore,
+  KERNEL_SETTINGS,
+  scopeSettings,
+  type KernelServices,
+  type ReaderContext,
+  type ReadingSurface,
+  type ReadyBook,
+  type SettingsStore,
+  type SpeechEnginePort,
+  type VoicePack,
 } from '../../../kernel'
 import type { NarrationEngine } from '../lib/wire'
 import { currentControl } from '../lib/running'
+import { chooseVoice, NOTES_ALOUD_SETTING, setRate } from '../lib/settings'
 import { ExportHost } from './ExportHost'
 
 /* THE SAVE DIALOG IS THE ONLY THING REPLACED, and nothing here gets past it:
@@ -107,11 +112,15 @@ function bookOf(walk: ReadyBook['sectionTexts'] = async () => ({ sections: [], c
   return { bookId: 'book:1', title: 'Le Horla', author: 'Maupassant', lang: 'en', toc: [], fixedLayout: false, sectionTexts: walk, ...over }
 }
 
+/** Narration's own settings, as the registry hands them to its `start`. */
+function narrationSettings(): SettingsStore {
+  return scopeSettings(createSettingsStore({ storage: null }), 'narration')
+}
+
 function mount({
   book = bookOf() as ReadyBook | null,
   port = portOf() as SpeechEnginePort | null,
-  /* Null for "no voice context": an `undefined` argument would take the default. */
-  voice = { chosen: {}, rate: 1, notesAloud: false } as NonNullable<ReaderContext['voice']> | null,
+  settings = narrationSettings(),
 } = {}) {
   const { surface, set } = surfaceOf(book)
   const notify = vi.fn()
@@ -119,18 +128,14 @@ function mount({
   const servicesWith = (tell: (text: string) => void) =>
     ({ speechEngines: () => bound, notify: tell }) as unknown as KernelServices
   let services = servicesWith(notify)
-  const context = (over: Partial<ReaderContext> = {}): ReaderContext => ({
-    sectionKey: null,
-    surface,
-    ...(voice ? { voice } : {}),
-    ...over,
-  })
-  const view = render(<ExportHost context={context()} services={services} />)
+  const context: ReaderContext = { sectionKey: null, surface }
+  const view = render(<ExportHost context={context} services={services} settings={settings} />)
   return {
     notify,
     set,
     view,
-    redraw: (over: Partial<ReaderContext>) => view.rerender(<ExportHost context={context(over)} services={services} />),
+    settings,
+    redraw: () => view.rerender(<ExportHost context={context} services={services} settings={settings} />),
     /** A port bound after the host mounted, as the voices' `start` binds one; seen at the next render. */
     bindPort: (next: SpeechEnginePort | null) => {
       bound = next
@@ -138,7 +143,7 @@ function mount({
     /** The kernel's services handed again as a new object, with its own notice line. */
     rehost: (tell: (text: string) => void) => {
       services = servicesWith(tell)
-      view.rerender(<ExportHost context={context()} services={services} />)
+      view.rerender(<ExportHost context={context} services={services} settings={settings} />)
     },
   }
 }
@@ -225,19 +230,21 @@ describe('the engine it hands the export', () => {
 })
 
 describe('an export through the surface', () => {
-  it('reads with the skip the reading reads with', async () => {
+  it('reads with the skip the reading reads with, as the reader sets it', async () => {
+    /* Set AFTER the host mounted, through the store: the export follows the
+       settings as they are, not as they were when the window opened. */
     const held = heldWalk()
-    const { redraw } = mount({ book: bookOf(held.walk) })
-    redraw({ voice: { chosen: {}, rate: 1, notesAloud: true } })
+    const { settings } = mount({ book: bookOf(held.walk) })
+    act(() => settings.set(NOTES_ALOUD_SETTING, true))
     await act(async () => currentControl()?.run())
     expect(held.seen.skip).toEqual({ notes: true })
     await act(async () => held.finish(true))
   })
 
-  it('leaves the notes out when there is no voice context', async () => {
-    /* The voice's own default: an unset choice reads as no notes. */
+  it('leaves the notes out when the reader has not asked for them', async () => {
+    /* The setting's own default: an unset choice reads as no notes. */
     const held = heldWalk()
-    mount({ book: bookOf(held.walk), voice: null })
+    mount({ book: bookOf(held.walk) })
     await act(async () => currentControl()?.run())
     expect(held.seen.skip).toEqual({ notes: false })
     await act(async () => held.finish(true))
@@ -281,7 +288,7 @@ describe('what it follows after it mounts', () => {
     const { bindPort, redraw } = mount({ port: null })
     expect(currentControl()).toBeNull()
     bindPort(portOf())
-    redraw({})
+    redraw()
     expect(currentControl(), 'the voices started after the window did').not.toBeNull()
   })
 
@@ -297,39 +304,65 @@ describe('what it follows after it mounts', () => {
   })
 })
 
+/** The pack with a second voice, so a choice is visible: without one the export takes the pack's first voice. */
+const TWO_VOICES: VoicePack = {
+  ...PACK,
+  voices: [...PACK.voices, { id: 'am_adam', name: 'Adam', language: 'en-US', note: '' }],
+}
+
+/** A platform that records the first job it is asked to render and goes no further. */
+function stopsAtFirstRender(seen: (job: { voice: string; rate: number }) => void) {
+  return {
+    scratchFor: (index: number) => `scratch-${index}`,
+    render: async (job: { voice: string; rate: number }) => {
+      seen(job)
+      throw new Error('the test goes no further than the first render')
+    },
+    releaseClips: async () => {},
+    package: async () => {
+      throw new Error('not reached')
+    },
+    discard: async () => {},
+    discardBook: async () => 'removed' as const,
+    discardScratch: async () => {},
+    exists: async () => false,
+  }
+}
+
 describe('the voice and pace it exports in', () => {
   it('is the voice the reader chose for the language, at the pace they read at', async () => {
-    /* A second voice, so the choice is visible: without it the export takes the
-       pack's first voice. */
-    const pack: VoicePack = {
-      ...PACK,
-      voices: [...PACK.voices, { id: 'am_adam', name: 'Adam', language: 'en-US', note: '' }],
-    }
     const jobs: { voice: string; rate: number }[] = []
     dialog.picks = true
-    dialog.platform = {
-      scratchFor: (index: number) => `scratch-${index}`,
-      render: async (job: { voice: string; rate: number }) => {
-        jobs.push({ voice: job.voice, rate: job.rate })
-        throw new Error('the test goes no further than the first render')
-      },
-      releaseClips: async () => {},
-      package: async () => {
-        throw new Error('not reached')
-      },
-      discard: async () => {},
-      discardBook: async () => 'removed' as const,
-      discardScratch: async () => {},
-      exists: async () => false,
-    }
-    const port = { ...portOf(), catalogue: async () => [pack] } as unknown as SpeechEnginePort
+    dialog.platform = stopsAtFirstRender((job) => jobs.push({ voice: job.voice, rate: job.rate }))
+    const port = { ...portOf(), catalogue: async () => [TWO_VOICES] } as unknown as SpeechEnginePort
     const sections = [{ index: 0, title: 'One', text: 'Words.', textDigest: 'd' }]
-    mount({
-      port,
-      book: bookOf(async () => ({ sections, complete: true })),
-      voice: { chosen: { en: 'kokoro:am_adam' }, rate: 1.5, notesAloud: false },
-    })
+    const settings = narrationSettings()
+    chooseVoice(settings, 'en', 'kokoro:am_adam')
+    setRate(settings, 1.5)
+    mount({ port, settings, book: bookOf(async () => ({ sections, complete: true })) })
     await act(async () => currentControl()?.run())
     expect(jobs).toEqual([{ voice: 'kokoro:am_adam', rate: 1.5 }])
+  })
+
+  it('follows a voice chosen after it mounted, and keeps its command through any other setting', async () => {
+    /* ⚠️ The voice map is memoised on its own stored value, so it has two ways
+       to be wrong: never moving, which exports in a voice the reader has
+       left, and moving with every setting, which hands the palette a new
+       command whenever the theme changes. Both are asked here. */
+    const jobs: string[] = []
+    dialog.picks = true
+    dialog.platform = stopsAtFirstRender((job) => jobs.push(job.voice))
+    const port = { ...portOf(), catalogue: async () => [TWO_VOICES] } as unknown as SpeechEnginePort
+    const sections = [{ index: 0, title: 'One', text: 'Words.', textDigest: 'd' }]
+    const underneath = createSettingsStore({ storage: null })
+    const settings = scopeSettings(underneath, 'narration')
+    mount({ port, settings, book: bookOf(async () => ({ sections, complete: true })) })
+    const first = currentControl()
+    act(() => underneath.set(KERNEL_SETTINGS.theme, 'night'))
+    expect(currentControl(), 'a theme change is not a new export').toBe(first)
+    act(() => chooseVoice(settings, 'en', 'kokoro:am_adam'))
+    expect(currentControl(), 'a new voice is').not.toBe(first)
+    await act(async () => currentControl()?.run())
+    expect(jobs).toEqual(['kokoro:am_adam'])
   })
 })

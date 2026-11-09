@@ -15,10 +15,10 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { KernelServices } from '../../core/services'
-import type { VoicePack } from '../../core/ports'
-import type { AudioHost } from '../reader/enginePlayer'
-import type { ReadingEngine } from '../reader/useSpeech'
+import type { KernelServices } from '../../../kernel'
+import type { VoicePack } from '../../../kernel'
+import type { AudioHost } from '../lib/enginePlayer'
+import type { ReadingEngine } from './useSpeech'
 
 /** How often the catalogue is re-read. */
 export const PACKS_POLL_MS = 4000

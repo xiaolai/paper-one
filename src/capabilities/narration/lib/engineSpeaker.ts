@@ -56,7 +56,7 @@ import { playPcm, type AudioHost, type Playing } from './enginePlayer'
 import type { EngineVoice } from './engineVoice'
 import { audible } from './pcm'
 import type { DoneReason, SpeakPrefs, SpeakerCallbacks } from './speaker'
-import type { ClipKey, SpeechRequest, SpokenAudio } from '../../core/ports'
+import type { ClipKey, SpeechRequest, SpokenAudio } from '../../../kernel'
 
 /** A reading in progress: the sound, its words, and how many have been said. */
 interface Reading {

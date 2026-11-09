@@ -114,34 +114,6 @@
       "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
     },
     {
-      "id": "voices",
-      "file": "src/kernel/ui/App.tsx",
-      "match": "voices:",
-      "count": 2,
-      "reason": "A field naming reader voices in the reading settings, which belong to read-aloud in the kernel until Phase 5"
-    },
-    {
-      "id": "voices",
-      "file": "src/kernel/ui/reader/voiceChoice.ts",
-      "match": "voices:",
-      "count": 1,
-      "reason": "A field naming a tier's system voices in read-aloud code, ordinary vocabulary and not the voices capability; moves in Phase 5"
-    },
-    {
-      "id": "narration",
-      "file": "src/kernel/ui/App.tsx",
-      "match": "narration=",
-      "count": 1,
-      "reason": "The reading's voice settings handed to the side pane, named for read-aloud and not the narration capability's export; step 5.5 moves them to narration.*"
-    },
-    {
-      "id": "narration",
-      "file": "src/kernel/ui/pane/SidePane.tsx",
-      "match": "narration:",
-      "count": 1,
-      "reason": "The reading's voice settings composed for the Settings pane, named for read-aloud and not the narration capability's export; step 5.5 moves them to narration.*"
-    },
-    {
       "id": "cards",
       "file": "src/kernel/core/cardStore.ts",
       "match": "./cards",

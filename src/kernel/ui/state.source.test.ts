@@ -155,8 +155,8 @@ describe('the write effect names every preference', () => {
       .map((name) => (name === 'spacing' ? 'prefs.spacing.letter' : `prefs.${name}`))
       .join(', ')
     expect(missingFrom(complete), 'a complete hand list').toEqual([])
-    const forgot = complete.replace('prefs.readingNotesAloud', '')
-    expect(missingFrom(forgot), 'one setting left out').toEqual(['readingNotesAloud'])
+    const forgot = complete.replace('prefs.readingStyle', '')
+    expect(missingFrom(forgot), 'one setting left out').toEqual(['readingStyle'])
   })
 })
 

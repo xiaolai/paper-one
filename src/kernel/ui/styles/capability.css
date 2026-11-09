@@ -641,6 +641,200 @@
   outline-offset: calc(-1 * var(--space-2));
 }
 
+/* --- the title bar --------------------------------------------------------- *
+ *
+ * READ ALOUD'S CONTROLS, which were the kernel's until step 5.5 moved the
+ * reading into the narration capability. They sit in the title bar beside the
+ * kernel's own actions, so each rule here is the kernel's `TitleBar.module.css`
+ * rule of the same purpose, written from the same tokens: `.action` for the
+ * button, and the transport rules that followed it. `capabilityUi.test.ts`
+ * holds the button to `.action`'s size.
+ */
+.paper-cap-bar-button {
+  width: var(--control-titlebar);
+  height: var(--control-titlebar);
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.paper-cap-bar-button:hover {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+/* §07 Disabled — 45% opacity, no pointer events, and the reason stated in the
+ * control's title. */
+.paper-cap-bar-button[data-disabled='true'] {
+  opacity: var(--opacity-disabled);
+  pointer-events: none;
+}
+
+/* The Listen button expands IN PLACE while a reading is under way: the row
+ * replaces the single button rather than floating over the page, so the book
+ * keeps its full height and nothing covers the text.
+ *
+ * It reads as ONE control rather than nine, because the reader is choosing
+ * within a single activity — hence the shared wash behind the group and a gap
+ * tighter than the one between the bar's unrelated toggles. */
+.paper-cap-transport {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-inline: var(--space-4);
+  border-radius: var(--radius-chip);
+  background: var(--wash);
+}
+
+/* `--control-xs` is the design system's "an icon and nothing else", which is
+ * what each of these is. The bar button's own `--control-titlebar` would make
+ * the row wide enough to push the book's title out of the bar. The HEIGHT
+ * stays the titlebar's, so the row lines up with the controls beside it. */
+.paper-cap-transport-button {
+  width: var(--control-xs);
+  height: var(--control-titlebar);
+}
+
+/* The speed is a VALUE, not an action, and is written as one.
+ *
+ * A fixed width so that cycling 0.75 → 1 → 1.25 does not shuffle the buttons
+ * beside it, and tabular figures so the digits do not shift inside that width
+ * either — a control that moves while you use it is one you stop trusting. */
+.paper-cap-rate {
+  width: var(--control-lg);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--track-snug);
+}
+
+/* A section being made into audio.
+ *
+ * ⚠️ **IT REPLACES THE WHOLE TRANSPORT RATHER THAN SITTING BESIDE IT**, because
+ * there is nothing yet for the other controls to act on: no position to scrub,
+ * no sentence to step, nothing to pause. Only a stop is honest, and only a stop
+ * is drawn. WI-34.0 measured a real section at 315 s, so this is a state a
+ * reader spends minutes in and not a flicker.
+ *
+ * `--ink-2` rather than `--ink`: it is a state, not the title of anything. */
+.paper-cap-preparing {
+  padding-inline: var(--space-2);
+  color: var(--ink-2);
+  font-size: var(--text-small);
+  white-space: nowrap;
+}
+
+/* How far through the chapter, and how the reader moves it.
+ *
+ * ⚠️ **A NATIVE `range`, WHICH IS A DECISION AND NOT A SHORTCUT.** It is
+ * keyboard-operable, it has a value a screen reader can read, and it drags the
+ * way every other slider on the machine drags — none of which a div with a
+ * pointer handler gets for free, and all of which a reader scrubbing a
+ * forty-eight-minute chapter needs. What it costs is that the thumb and the
+ * track are the platform's; §07 accepts that for the same reason the
+ * form-control reset does.
+ *
+ * `--control-lg` twice over: wide enough that one step of an hour-long section
+ * is more than a pixel, narrow enough that the book's title survives beside it. */
+.paper-cap-scrub {
+  width: calc(var(--control-lg) * 2);
+  height: var(--control-titlebar);
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* --- stepped, chosen and slid settings -------------------------------------- *
+ *
+ * The Voice section's controls, which were the kernel's Settings rows until
+ * step 5.5: each rule is the side pane's rule of the same purpose, written from
+ * the same tokens, so a narration row and a kernel Spacing row read as one
+ * control. The select and the volume slider left the side pane's stylesheet
+ * with the Voice group, so these are their only rules now; the stepper and the
+ * pips are still shared, and `capabilityUi.test.ts` holds them to the kernel's.
+ */
+
+/* `--ink` rather than `--muted`: this is a reader's own choice being reported,
+   not a diagnostic filter, so it carries the same weight as the value on every
+   other row. `max-width` keeps a long voice name from pushing the label off the
+   row in a 400px pane; the name truncates instead, and the full list is one
+   click away. */
+.paper-cap-select {
+  height: var(--control-sm);
+  max-width: 60%;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: var(--text-small);
+  padding: 0 var(--space-8);
+}
+
+/* `<input type="range">` for what `scrub` gives for it: the keyboard, the
+   accessibility tree and the pointer handling come free, and the thumb and
+   track are the platform's. */
+.paper-cap-volume {
+  width: calc(var(--control-lg) * 2);
+  accent-color: var(--accent);
+}
+
+.paper-cap-stepper {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Round, so the pair reads as two of one thing rather than two keys. */
+.paper-cap-stepper-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--wash);
+  font-family: inherit;
+  line-height: 1;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.paper-cap-stepper-button:hover:not(:disabled) {
+  background: var(--line-2);
+}
+
+/* Disabled, not hidden: the ends of a scale are part of what the control tells
+   the reader, and a button that vanishes at the limit reads as a bug. */
+.paper-cap-stepper-button:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: default;
+}
+
+/* The position in a scale, as pips: how much room is left in each direction,
+   which is the only thing a reader needs from a stepper. */
+.paper-cap-pips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-4);
+}
+
+.paper-cap-pip {
+  inline-size: var(--track-w);
+  block-size: var(--track-w);
+  border-radius: var(--radius-pill);
+  background: var(--line-3);
+}
+
+.paper-cap-pip[data-on='true'] {
+  background: var(--accent);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .paper-cap-button {
     transition: none;

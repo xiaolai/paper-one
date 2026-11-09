@@ -351,21 +351,6 @@ export interface MarkControlTools {
 export interface ReaderContext {
   readonly sectionKey: unknown
   readonly surface: ReadingSurface
-  /**
-   * The reader's voice settings, as the reading uses them.
-   *
-   * ⚠️ **TEMPORARY: STEP 5.5 DELETES IT.** The reading and its settings still
-   * live in the kernel, and the audiobook export, which has left it, must speak
-   * in the voice the reader listens with. When the reading moves out with its
-   * settings, the export reads them where they then live and this field goes.
-   */
-  readonly voice?: {
-    /** The stored choice per primary language tag. */
-    readonly chosen: Readonly<Record<string, string>>
-    readonly rate: number
-    /** Whether a footnote or endnote body is read aloud. */
-    readonly notesAloud: boolean
-  }
 }
 
 /** Opaque for the reason `PaneRenderer` is: this file is React-free. */

@@ -86,10 +86,6 @@ export { packArrived, packSize } from './core/packSize'
    capability's port, which is the one place a `spokenDigest` is computed —
    see `SpeechRequest.clip`. */
 export { textDigest } from './ui/reader/clipKey'
-/* Which downloaded voice reads a book, and how a choice is written down —
-   published for the narration capability, whose export must pick the voice the
-   reading would, by the same rule rather than a copy of it. */
-export { engineVoiceFor, missingPackNotice, packVoiceOf, qualify, unqualify } from './ui/reader/engineVoice'
 /* THE EXTRACTOR, published because the `passages` capability is what drives it
  * and a capability may import nothing of the kernel but this entry.
  *
@@ -576,6 +572,14 @@ export type { ContributedPaneId, KernelPaneId, PageLayout, PaneId, Screen, Side,
  * own list draws a 22px thumb at `COVER_ASPECT`; a jacket in a capability's row
  * is the same object and should be the same size. */
 export { COVER_ASPECT, ICON, LIST_COL } from './core/metrics'
+/* A stepped scale and the two walks over it, for a capability whose setting is
+ * a row of named steps: narration's speed and pauses are each one, and a
+ * stored value that falls between two steps has to land on the nearer one by
+ * the same rule the kernel's own stepped rows use. */
+export { stepAt, stepIndexOf, type SteppedScale } from './core/metrics'
+/* A run of text by its offsets in a section, for the reading cursor that
+ * narration walks sentence by sentence. */
+export type { Span } from './ui/reader/wordSnap/sentenceOf'
 
 /* THE ENVELOPE — a service call as bytes, and bytes back.
  *

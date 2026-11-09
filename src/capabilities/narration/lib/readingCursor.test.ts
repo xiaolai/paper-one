@@ -6,7 +6,7 @@ import {
   stepSentence,
   type ReadingPlan,
 } from './readingCursor'
-import { sentenceSpansOf } from './wordSnap/sentenceOf'
+import { sentenceSpansOf } from '../../../kernel/testkit'
 
 /**
  * A plan built the way the hook builds one: real sentence spans over real text,

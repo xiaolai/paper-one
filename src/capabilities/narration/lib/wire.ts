@@ -19,7 +19,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core'
-import { unqualify } from '../../../kernel'
+import { unqualify } from './engineVoice'
 import type { RenderedFile, SpeechFileRequest, SpeechRequest, SpokenClip, VoicePack } from '../../../kernel'
 import type { AudiobookPlatform } from './audiobook'
 

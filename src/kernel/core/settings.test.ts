@@ -4,9 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   BRIGHTNESS,
   CONTRAST,
-  PARAGRAPH_GAP,
-  READING_RATE,
-  SENTENCE_GAP,
   DEFAULT_READING_STYLE,
   LEGACY_READING_SIZES,
   MINIMUM_SIZES,
@@ -19,12 +16,6 @@ import { defineSetting } from './ports'
 import type { ReadingStyle } from './uiTypes'
 import {
   KERNEL_SETTINGS,
-  PARAGRAPH_GAP_MAX,
-  PARAGRAPH_GAP_MIN,
-  READING_RATE_MAX,
-  READING_RATE_MIN,
-  SENTENCE_GAP_MAX,
-  SENTENCE_GAP_MIN,
   SETTINGS_STORAGE_KEY,
   NARRATION_IMPORT,
   SETTINGS_VERSION,
@@ -1288,114 +1279,16 @@ describe('what the store promises never to do', () => {
       }
       const store = createSettingsStore({ storage })
 
-      store.set(KERNEL_SETTINGS.readingRate, Number.NaN)
+      store.set(KERNEL_SETTINGS.brightness, Number.NaN)
 
-      expect(store.has(KERNEL_SETTINGS.readingRate), 'nothing was stored under the key').toBe(false)
-      expect(store.get(KERNEL_SETTINGS.readingRate)).toBe(KERNEL_SETTINGS.readingRate.fallback)
+      expect(store.has(KERNEL_SETTINGS.brightness), 'nothing was stored under the key').toBe(false)
+      expect(store.get(KERNEL_SETTINGS.brightness)).toBe(KERNEL_SETTINGS.brightness.fallback)
       expect(map.size, 'and nothing reached the storage').toBe(0)
       expect(error).toHaveBeenCalledWith(
-        `Paper: the setting ${KERNEL_SETTINGS.readingRate.key} was not changed, because its own parser cannot read that value back`,
+        `Paper: the setting ${KERNEL_SETTINGS.brightness.key} was not changed, because its own parser cannot read that value back`,
       )
     } finally {
       error.mockRestore()
-    }
-  })
-})
-
-describe('the range read aloud may be stored in', () => {
-  /**
-   * ⚠️ **THE RANGE A READER CAN STORE AND THE RANGE THE STEPPER OFFERS MUST BE
-   * ONE RANGE**, which is why these are derived from §09's scales rather than
-   * written down again. A clamp that disagreed with the stepper would refuse a
-   * value the pane had just produced.
-   */
-  it('is exactly the ends of the scale the pane steps through', () => {
-    expect([READING_RATE_MIN, READING_RATE_MAX]).toEqual([
-      READING_RATE.steps.at(0),
-      READING_RATE.steps.at(-1),
-    ])
-    expect([SENTENCE_GAP_MIN, SENTENCE_GAP_MAX]).toEqual([
-      SENTENCE_GAP.steps.at(0),
-      SENTENCE_GAP.steps.at(-1),
-    ])
-    expect([PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX]).toEqual([
-      PARAGRAPH_GAP.steps.at(0),
-      PARAGRAPH_GAP.steps.at(-1),
-    ])
-  })
-
-  it('clamps a stored speed to those ends rather than refusing it', () => {
-    /* A file written by a build with a wider ramp is not corrupt — it is
-       describing a speed this build offers less of. */
-    expect(readingBack(envelope({ 'kernel.readingRate': 99 })).readingRate).toBe(READING_RATE_MAX)
-    expect(readingBack(envelope({ 'kernel.readingRate': 0.01 })).readingRate).toBe(READING_RATE_MIN)
-    expect(readingBack(envelope({ 'kernel.sentenceGapMs': 99_999 })).sentenceGapMs).toBe(SENTENCE_GAP_MAX)
-    expect(readingBack(envelope({ 'kernel.paragraphGapMs': -20 })).paragraphGapMs).toBe(PARAGRAPH_GAP_MIN)
-  })
-
-  it('refuses a speed that is not a finite number, rather than clamping it', () => {
-    /* `Math.min` over a NaN answers NaN, and a NaN rate makes the engine refuse
-       the utterance — so this is rejected at the door and the default stands. */
-    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, '1.5', null, {}]) {
-      expect(readingBack(envelope({ 'kernel.readingRate': bad })).readingRate).toBe(DEFAULTS.readingRate)
-    }
-  })
-})
-
-describe('the reading volume', () => {
-  it('is stored under the key the narration import looks for, at full volume by default', () => {
-    /* ⚠️ **THE KEY IS THE DECISION'S.** Step 5.5 carries `kernel.reading*` to
-       `narration.*`, so a name outside that prefix is a setting the import
-       silently drops. The default is what makes this change inaudible. */
-    expect(KERNEL_SETTINGS.readingVolume.key).toBe('kernel.readingVolume')
-    expect(KERNEL_SETTINGS.readingVolume.fallback).toBe(100)
-    expect(readingBack(envelope({})).readingVolume).toBe(100)
-  })
-
-  it('reads back what is in range, both ends included', () => {
-    /* 0 is the end that matters: a falsy value lost on the way back from disk
-       is the reading run playing aloud. */
-    for (const stored of [0, 37, 100]) {
-      expect(readingBack(envelope({ 'kernel.readingVolume': stored })).readingVolume).toBe(stored)
-    }
-  })
-
-  it('clamps a stored number to the ends, as the speed does', () => {
-    expect(readingBack(envelope({ 'kernel.readingVolume': 150 })).readingVolume).toBe(100)
-    expect(readingBack(envelope({ 'kernel.readingVolume': -5 })).readingVolume).toBe(0)
-  })
-
-  it('refuses what is not a finite number, and the default stands', () => {
-    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, '40', null, {}, true]) {
-      expect(readingBack(envelope({ 'kernel.readingVolume': bad })).readingVolume).toBe(100)
-      expect(KERNEL_SETTINGS.readingVolume.parse(bad), `${String(bad)} was taken as a volume`).toBeUndefined()
-    }
-  })
-})
-
-describe('the voice a reader chose, per language', () => {
-  /**
-   * ONE VOICE PER LANGUAGE, and a bad entry costs itself. A junk value for one
-   * language must not take the reader's other choices with it; a value of the
-   * wrong SHAPE — anything that is not a map — is refused whole, because that
-   * is not a map with a bad member.
-   */
-  it('keeps every language that names a voice', () => {
-    const stored = { en: 'com.apple.voice.enhanced.en-US.Zoe', zh: 'com.apple.voice.enhanced.zh-CN.Tingting' }
-    expect(readingBack(envelope({ 'kernel.readingVoice': stored })).readingVoice).toEqual(stored)
-  })
-
-  it('drops the entry that is not a voice, and keeps the rest', () => {
-    expect(
-      readingBack(
-        envelope({ 'kernel.readingVoice': { en: 'com.apple.voice.enhanced.en-US.Zoe', zh: '', fr: 7, de: null } }),
-      ).readingVoice,
-    ).toEqual({ en: 'com.apple.voice.enhanced.en-US.Zoe' })
-  })
-
-  it('refuses a value that is not a map of languages at all', () => {
-    for (const bad of ['com.apple.voice.enhanced.en-US.Zoe', 7, ['en'], null]) {
-      expect(readingBack(envelope({ 'kernel.readingVoice': bad })).readingVoice).toEqual(DEFAULTS.readingVoice)
     }
   })
 })
@@ -1465,53 +1358,6 @@ describe('a migration that cannot finish', () => {
     } finally {
       said.mockRestore()
     }
-  })
-})
-
-describe('a stored value the parser is handed directly', () => {
-  /**
-   * ⚠️ **`get` PROMISES NEVER TO FAIL, WHICH HIDES A PARSER THAT WOULD.** The
-   * store catches a parser that throws and answers the fallback — the same
-   * answer a parser that REFUSES the value gives — so a refusal and a crash
-   * are indistinguishable from outside it. These call the parsers themselves,
-   * where the difference is visible.
-   */
-  it('refuses a voice map that is null, rather than throwing on it', () => {
-    /* `typeof null` is 'object', so the null check is what stands between
-       `Object.entries(null)` and a throw. */
-    expect(KERNEL_SETTINGS.readingVoice.parse(null)).toBeUndefined()
-    expect(KERNEL_SETTINGS.readingVoice.parse(['en'])).toBeUndefined()
-    expect(KERNEL_SETTINGS.readingVoice.parse('a voice')).toBeUndefined()
-    expect(KERNEL_SETTINGS.readingVoice.parse({ en: 'voice:en' })).toEqual({ en: 'voice:en' })
-  })
-
-  it('refuses a speed that is not a finite number, whatever kind of value it is', () => {
-    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '1.5', null, {}, []]) {
-      expect(KERNEL_SETTINGS.readingRate.parse(bad), `${String(bad)} was taken as a speed`).toBeUndefined()
-    }
-    expect(KERNEL_SETTINGS.readingRate.parse(99), 'and a number is clamped, not refused').toBe(
-      READING_RATE_MAX,
-    )
-  })
-})
-
-describe('an envelope written with a number JSON cannot hold', () => {
-  it('reads an infinite speed as no speed at all', () => {
-    /* `JSON.stringify(Infinity)` is `null`, so this can only arrive as source
-       text — `1e999` parses to Infinity. It is the one route by which a
-       non-finite number reaches the clamp, and the clamp must refuse it:
-       `Math.min` over an Infinity answers the bound, which would store a speed
-       the reader never chose. */
-    const map = new Map<string, string>([
-      [SETTINGS_STORAGE_KEY, `{"version":${SETTINGS_VERSION},"values":{"kernel.readingRate":1e999}}`],
-    ])
-    const store = createSettingsStore({
-      storage: {
-        getItem: (key: string) => map.get(key) ?? null,
-        setItem: (key: string, value: string) => void map.set(key, value),
-      },
-    })
-    expect(readKernelPreferences(store).readingRate).toBe(DEFAULTS.readingRate)
   })
 })
 

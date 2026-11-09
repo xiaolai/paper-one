@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createKernelServices } from '../../core/services'
+import { createKernelServices } from '../../../kernel'
 import { speakerFor } from './speakerRouting'
 import { NO_GOOD_VOICE, voiceFor } from './voiceChoice'
 

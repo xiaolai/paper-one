@@ -561,43 +561,6 @@ describe('bootState', () => {
  * survive being unloaded by its OS. Only the preferences travel; the transient
  * state (screen, layers, query) is decided fresh, as it always was.
  */
-describe('a control that sends something that is not a number', () => {
-  /**
-   * ⚠️ **`Math.max(min, Math.min(max, NaN))` IS `NaN`**, and all three of these
-   * clamped that way — so `NaN` reached live state, serialised as `null`, and the
-   * setting stayed broken for the session. The settings validator beside them asks
-   * `Number.isFinite` first; the reducer is the other door into the same value and
-   * did not.
-   *
-   * The state is returned UNCHANGED rather than falling back to a bound: a control
-   * sending a non-number has a defect, and substituting the minimum would hide it
-   * while silently changing what the reader chose.
-   */
-  const table: readonly [string, (v: number) => Action, (s: AppState) => number][] = [
-    ['reading rate', (v) => ({ type: 'setReadingRate', rate: v }), (s) => s.readingRate],
-    ['reading volume', (v) => ({ type: 'setReadingVolume', volume: v }), (s) => s.readingVolume],
-    ['sentence gap', (v) => ({ type: 'setSentenceGap', ms: v }), (s) => s.sentenceGapMs],
-    ['paragraph gap', (v) => ({ type: 'setParagraphGap', ms: v }), (s) => s.paragraphGapMs],
-  ]
-  for (const [what, action, read] of table) {
-    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
-      it(`keeps the ${what} when handed ${bad}`, () => {
-        const before = initialState
-        const after = reducer(before, action(bad))
-        expect(read(after)).toBe(read(before))
-        expect(Number.isFinite(read(after))).toBe(true)
-      })
-    }
-
-    it(`still clamps a real ${what} that is out of range`, () => {
-      /* So the refusal cannot pass by refusing everything. */
-      const after = reducer(initialState, action(-9999))
-      expect(Number.isFinite(read(after))).toBe(true)
-      expect(read(after)).toBeGreaterThanOrEqual(0)
-    })
-  }
-})
-
 describe('bootState with remembered preferences', () => {
   it('starts from what was remembered, and from the defaults for the rest', () => {
     const boot = bootState('', { theme: 'night', themeFollowsOs: false, typeface: 'crimson-pro', textSize: 19 })
@@ -666,19 +629,6 @@ describe('bootState with remembered preferences', () => {
       },
       /* WI-17.5, and NOT the default `reader`, for the reason the fifteen above
          give. */
-      /* Read aloud's four, and NOT their defaults either — an empty map and a
-         rate of 1 are exactly what a dropped field looks like, so seeding the
-         defaults here would prove nothing. The two pauses are off their own
-         defaults (150 and 600) for the same reason. */
-      readingVoice: { en: 'com.apple.voice.premium.en-US.Ava' },
-      readingRate: 1.25,
-      readingVolume: 40,
-      /* OFF ITS DEFAULT (false) for the same reason as the two pauses: a boolean
-         that happens to equal the default is exactly what a dropped field looks
-         like, so seeding it would prove nothing. */
-      readingNotesAloud: true,
-      sentenceGapMs: 300,
-      paragraphGapMs: 1400,
     }
     expect(preferencesOf(bootState('', remembered))).toEqual(remembered)
   })
@@ -979,83 +929,6 @@ describe('what lastPane may record', () => {
   it('remembers a kernel panel as before', () => {
     const next = reducer(reading, { type: 'openPane', pane: 'search' } as Action, contributed)
     expect(next.lastPane).toBe('search')
-  })
-})
-
-describe('the voice a reader chooses, and the speeds beside it', () => {
-  /**
-   * ⚠️ **MERGED INTO THE MAP, NEVER REPLACING IT.** One voice per language is
-   * the whole shape: a reader who picks an English voice, opens a Chinese book
-   * and picks one there must still have the first. And an EMPTY voice removes
-   * the entry rather than storing `''` — that is how a reader goes back to
-   * letting the app choose, and a stored empty string would leave a dead key
-   * per language they ever visited.
-   */
-  it('keeps every other language’s voice', () => {
-    const en = reducer(initialState, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })
-    const both = reducer(en, { type: 'setReadingVoice', lang: 'zh', voice: 'voice:zh' })
-    expect(both.readingVoice).toEqual({ en: 'voice:en', zh: 'voice:zh' })
-  })
-
-  it('is the same state when the voice chosen is the one already stored', () => {
-    const en = reducer(initialState, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })
-    expect(reducer(en, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })).toBe(en)
-  })
-
-  it('takes the entry out for an empty voice, and changes nothing when there was none', () => {
-    const en = reducer(initialState, { type: 'setReadingVoice', lang: 'en', voice: 'voice:en' })
-    const cleared = reducer(en, { type: 'setReadingVoice', lang: 'en', voice: '' })
-    expect(cleared.readingVoice).toEqual({})
-    expect(reducer(cleared, { type: 'setReadingVoice', lang: 'en', voice: '' }), 'nothing moved').toBe(
-      cleared,
-    )
-  })
-
-  /**
-   * CLAMPED HERE TOO, not only in the settings validator: that guards what
-   * arrives from disk, this guards what arrives from a control, and they are
-   * two doors into one value. A value that is not a finite number is refused
-   * outright — `Math.min` over a NaN answers NaN, and a NaN rate makes the
-   * engine refuse the utterance.
-   */
-  it.each([
-    ['setReadingRate', 'readingRate', 1.25, 99, 2.5, 0.01, 0.5],
-    ['setSentenceGap', 'sentenceGapMs', 300, 99_999, 1000, -5, 0],
-    ['setParagraphGap', 'paragraphGapMs', 900, 99_999, 2000, -5, 0],
-  ] as const)(
-    '%s stores what is in range and clamps what is not',
-    (type, field, inRange, tooHigh, top, tooLow, bottom) => {
-      const value = (state: AppState) => state[field]
-      const set = (v: number): AppState =>
-        reducer(initialState, { type, ...(type === 'setReadingRate' ? { rate: v } : { ms: v }) } as never)
-      expect(value(set(inRange))).toBe(inRange)
-      expect(value(set(tooHigh)), 'a build with a wider ramp is not corrupt').toBe(top)
-      expect(value(set(tooLow))).toBe(bottom)
-      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
-        expect(set(bad), 'a value that is not a number changed the state').toBe(initialState)
-      }
-    },
-  )
-})
-
-describe('the reading volume, from a control', () => {
-  const set = (volume: number): AppState => reducer(initialState, { type: 'setReadingVolume', volume })
-
-  it('starts at full volume', () => {
-    expect(initialState.readingVolume).toBe(100)
-  })
-
-  it('stores what is in range and clamps what is not', () => {
-    /* A second door into the same value, the one the settings validator does
-       not guard: see `setReadingRate`. */
-    expect(set(40).readingVolume).toBe(40)
-    expect(set(0).readingVolume).toBe(0)
-    expect(set(250).readingVolume).toBe(100)
-    expect(set(-1).readingVolume).toBe(0)
-  })
-
-  it('refuses a value that is not a number', () => {
-    expect(set(Number.NaN)).toBe(initialState)
   })
 })
 

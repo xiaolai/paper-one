@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { routedSpeaker, speakerFor, type SpeakerLike } from './speakerRouting'
 import { qualify } from './engineVoice'
-import type { VoicePack } from '../../core/ports'
+import type { VoicePack } from '../../../kernel'
 
 function pack(over: Partial<VoicePack> = {}): VoicePack {
   return {

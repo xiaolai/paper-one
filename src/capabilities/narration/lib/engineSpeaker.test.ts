@@ -9,7 +9,7 @@ import {
   wordAtOffset,
 } from './engineSpeaker'
 import { FakeAudioHost, pcmOf } from './enginePlayer.testkit'
-import type { ClipKey, SpeechRequest, SpokenAudio } from '../../core/ports'
+import type { ClipKey, SpeechRequest, SpokenAudio } from '../../../kernel'
 import type { SpeakerCallbacks } from './speaker'
 
 const RATE = 24_000

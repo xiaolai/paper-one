@@ -1,36 +1,25 @@
 import { SCREEN_JUMP_COMBO, paneAvailable, paneFits, screenJump } from '../state'
 import {
-  AudioLines,
   BookOpen,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
   Library as LibraryIcon,
   ListTree,
   Minus,
   PanelLeft,
   PanelRight,
-  Pause,
-  Play,
   Search,
-  SkipBack,
-  SkipForward,
   Square,
   Type,
   X,
 } from 'lucide-react'
 import type { ReactNode } from 'react'
-import type { LucideIcon } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { ICON, READING_RATE } from '../../core/metrics'
+import { ICON } from '../../core/metrics'
 import type { Platform } from '../../core/metrics'
 import { inTauri } from '../inTauri'
 import { PANE_TITLES, comboFor } from '../panes'
 import type { ScreenContribution } from '../../core/capability'
 import { CONTRIBUTION_ICONS } from '../contributionIcon'
 import type { AppDispatch, AppState, KernelPaneId } from '../state'
-import type { Speech } from '../reader/useSpeech'
 import styles from './TitleBar.module.css'
 
 /** Traffic-light fills, in AppKit's order. Preview only — see below. */
@@ -66,25 +55,13 @@ export interface TitleBarProps {
   platform: Platform
   bookTitle: string
   bookSubtitle: string
-  /** Reading aloud — the Listen control drives this directly. */
-  speech: Speech
   /**
    * What capabilities put beside the reading controls, already drawn: `App` holds
    * the context they are given. Required for the reason `screens` is; null says
    * there are none.
    */
   readerControls: ReactNode
-  /**
-   * Why no voice can read the book on screen, or `null` when one can.
-   *
-   * ⚠️ **THE REASON AND THE REFUSAL ARE ONE VALUE**, so a control cannot be
-   * disabled with nothing to say — which is what a boolean beside a message
-   * allows, and what a reader meets as a greyed-out button and no explanation.
-   * The sentence differs by what would fix it: a pack that can be downloaded
-   * names itself and its size, and a language nothing can read says so.
-   */
-  listenRefusal: string | null
-  /** False with no book open: there is nothing to read aloud. */
+  /** False with no book open: the screen jump names the reader's empty state, and the chip marks it. */
   hasBook: boolean
   /**
    * The screens capabilities contributed — see `ScreenContribution`.
@@ -112,8 +89,10 @@ export interface TitleBarProps {
 
 /**
  * KNOWN DEBT: this component holds more than one job — window IPC, the
- * platform's own controls, the chrome fade, the reading shortcuts, speech and the
- * palette. An audit flagged it and it was left deliberately.
+ * platform's own controls, the chrome fade, the reading shortcuts and the
+ * palette. An audit flagged it and it was left deliberately. (Speech left it at
+ * step 5.5: the Listen control and the transport are narration's, drawn into
+ * `readerControls`.)
  *
  * ⚠️ **THIS SAID "about 200 lines" AND THE FILE IS 534**, with the component
  * itself over 300 — so the one number offered to judge whether the debt had grown
@@ -124,9 +103,8 @@ export interface TitleBarProps {
  * AND THE BUTTONS ARE NOT ONE COMPONENT, THOUGH THEY SHARE A CLASS. A later audit
  * asked for the icon-button skeleton to be extracted. The sites differ in their
  * ARIA contract rather than in their markup: three are toggles (`aria-pressed`),
- * the palette is a dialog trigger (`aria-haspopup` + `aria-expanded`), Listen is
- * an action that can be disabled with its reason in the title, and the screen jump
- * has three names. One component would take every one of those as a prop and
+ * the palette is a dialog trigger (`aria-haspopup` + `aria-expanded`), and the
+ * screen jump has three names. One component would take every one of those as a prop and
  * render them back — the attribute surface moved, not reduced.
  *
  * The reason is that nothing here is WRONG, and the split is not obvious: the
@@ -142,8 +120,6 @@ export function TitleBar({
   platform,
   bookTitle,
   bookSubtitle,
-  speech,
-  listenRefusal,
   hasBook,
   screens,
   readerControls,
@@ -370,52 +346,6 @@ export function TitleBar({
                 </button>
               ))}
             </div>
-            {/* Live where the engine can do it. §07 keeps the disabled state
-                for the case that remains real — a WebView built without Web
-                Speech — rather than for a feature that is simply unwritten. */}
-            {speech.speaking ? (
-              <ReadingTransport
-                speech={speech}
-                rate={state.readingRate}
-                onRate={(rate) => dispatch({ type: 'setReadingRate', rate })}
-              />
-            ) : (
-              <button
-                type="button"
-                className={styles.action}
-                /* ⚠️ **A REFUSAL THE READING ITSELF REPORTED IS SHOWN HERE, AND
-                   IT USED TO BE SHOWN NOWHERE.** A chapter that could not be made
-                   into audio left this control back where it was with nothing
-                   said — indistinguishable from a chapter that had finished.
-                   `listenRefusal` outranks it: that one says the reading cannot
-                   START, which is the more actionable news, and it is why the
-                   control is disabled. */
-                title={
-                  !speech.available
-                    ? 'Listen — this build has no speech engine'
-                    : listenRefusal !== null
-                      ? `Listen — ${listenRefusal}`
-                      : speech.refusal !== null
-                        ? `Listen — ${speech.refusal}`
-                        : 'Read this chapter aloud'
-                }
-                aria-label="Read aloud"
-                aria-pressed={false}
-                /* ⚠️ **THE SENTENCE ITSELF, WHERE IT USED TO BE AN EMPTY STRING —
-                   FOUND BY THE MUTATION SWEEP.** A presence attribute's value is
-                   whatever you like, so `''` had a mutant no test could tell from
-                   it. Carrying the refusal makes the attribute say WHY as well as
-                   THAT, which is worth having on a control a reader is looking at,
-                   and gives it one value a test can be wrong about. Nothing styles
-                   on it today; `[data-refused]` matches either way. */
-                data-refused={speech.refusal ?? undefined}
-                disabled={!speech.available || !hasBook || listenRefusal !== null}
-                data-disabled={!speech.available || !hasBook || listenRefusal !== null}
-                onClick={() => speech.start()}
-              >
-                <AudioLines size={ICON.control} strokeWidth={ICON.stroke} />
-              </button>
-            )}
             {readerControls}
             <button
               type="button"
@@ -513,201 +443,4 @@ export function TitleBar({
       </div>
     </div>
   )
-}
-
-interface ReadingTransportProps {
-  speech: Speech
-  rate: number
-  onRate: (rate: number) => void
-}
-
-/**
- * The reading's controls, drawn where the Listen toggle was.
- *
- * ⚠️ **IT REPLACES THE TOGGLE RATHER THAN FLOATING OVER THE PAGE**, which is the
- * choice that keeps the book at full height and puts nothing over the text. The
- * cost is width, and it is paid by the title chip, which shrinks — so every
- * control here is `--control-xs`, the design system's "an icon and nothing
- * else", rather than the titlebar size `.action` uses.
- *
- * ⚠️ **THE CHAPTER BUTTONS ARE ABSENT, NOT DISABLED, WHERE THE BOOK CANNOT STEP
- * CHAPTERS.** `SurfacePaging.chapter` is optional because a reader can be in a
- * spine item no contents entry points at, and there is genuinely no next chapter
- * to go to. A disabled control says "not now"; an absent one says "not here",
- * and the second is the true statement.
- */
-function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps) {
-  const step = (label: string, Icon: LucideIcon, run: () => void) => (
-    <button
-      type="button"
-      className={`${styles.action} ${styles.transportButton}`}
-      title={label}
-      aria-label={label}
-      onClick={run}
-    >
-      <Icon size={ICON.window} strokeWidth={ICON.stroke} />
-    </button>
-  )
-
-  /**
-   * A section being made into audio.
-   *
-   * ⚠️ **"MAKING" AND NOT "LOADING", AND THE WORD IS THE WHOLE POINT.** WI-34.0
-   * measured a real section at 315 s on an idle M4 Max. Nothing is arriving over
-   * a wire — the machine is synthesising a voice — so calling it buffering would
-   * be a lie about a five-minute wait. WI-34.5 asks for that sentence to be
-   * written honestly, and asks for the stop beside it, because a wait a reader
-   * cannot leave is worse than a wait they can.
-   *
-   * ⚠️ **AND IT SAYS THE WAIT IS WORTH IT ONCE.** A reader who stops during a
-   * render and presses Listen again gets it at once: the render finishes into the
-   * store whether or not anybody is listening, which is a promise the transport
-   * can make because `staging`-then-rename-then-checkpoint makes it true.
-   */
-  if (speech.preparing) {
-    return (
-      <div className={styles.transport} role="group" aria-label="Reading aloud">
-        <span className={styles.preparing} role="status">
-          Making this chapter’s audio…
-        </span>
-        {step('Stop reading aloud', Square, () => speech.stop())}
-      </div>
-    )
-  }
-
-  return (
-    <div className={styles.transport} role="group" aria-label="Reading aloud">
-      {speech.chapters.back ? step('Previous chapter', ChevronsLeft, () => speech.stepChapter(-1)) : null}
-      {step('Previous paragraph', SkipBack, () => speech.stepParagraph(-1))}
-      {step('Previous sentence', ChevronLeft, () => speech.stepSentence(-1))}
-      <button
-        type="button"
-        className={`${styles.action} ${styles.transportButton}`}
-        title={speech.paused ? 'Go on reading' : 'Pause'}
-        aria-label={speech.paused ? 'Go on reading' : 'Pause'}
-        aria-pressed={speech.paused}
-        onClick={() => (speech.paused ? speech.resume() : speech.pause())}
-      >
-        {speech.paused ? (
-          <Play size={ICON.window} strokeWidth={ICON.stroke} />
-        ) : (
-          <Pause size={ICON.window} strokeWidth={ICON.stroke} />
-        )}
-      </button>
-      {step('Next sentence', ChevronRight, () => speech.stepSentence(1))}
-      {step('Next paragraph', SkipForward, () => speech.stepParagraph(1))}
-      {speech.chapters.forward ? step('Next chapter', ChevronsRight, () => speech.stepChapter(1)) : null}
-      {/* ⚠️ **PRESENT ONLY WHERE THERE IS SOMETHING TO SCRUB.** `speech.at` is
-          null on the platform speaker, which cannot report a position or seek at
-          all, so the control is ABSENT there rather than disabled: a disabled
-          scrubber says "not now", and the true statement is "not on this voice".
-          The same reasoning as the chapter buttons above. */}
-      {speech.at === null ? null : (
-        <input
-          type="range"
-          className={styles.scrub}
-          min={0}
-          max={SCRUB_STEPS}
-          /* ROUNDED TO A STEP, so the thumb does not jitter between two pixels
-             four times a second while the value it stands for has not visibly
-             moved. The fraction that goes back out is computed from the step. */
-          value={Math.round(fractionOf(speech.at) * SCRUB_STEPS)}
-          title={`${clockOf(speech.at.positionMs)} of ${clockOf(speech.at.durationMs)}`}
-          aria-label="How far through the chapter"
-          aria-valuetext={`${clockOf(speech.at.positionMs)} of ${clockOf(speech.at.durationMs)}`}
-          onChange={(event) => speech.seekToFraction(Number(event.target.value) / SCRUB_STEPS)}
-        />
-      )}
-      <button
-        type="button"
-        className={`${styles.action} ${styles.transportButton} ${styles.rate}`}
-        /* ⚠️ **THE STEPS ARE `READING_RATE`'s, NOT A SECOND LIST.** Settings
-           offers the same ramp from the same constant, so the speed a reader
-           sets in one place is a speed the other can show. A literal here would
-           be a second answer to which speeds exist, and the two would drift the
-           first time the ramp changed. */
-        title={`Reading speed — ${formatRate(rate)}, tap for the next`}
-        aria-label={`Reading speed ${formatRate(rate)}`}
-        onClick={() => onRate(nextRate(rate))}
-      >
-        {formatRate(rate)}
-      </button>
-      {step('Stop reading aloud', Square, () => speech.stop())}
-    </div>
-  )
-}
-
-/**
- * How many positions the scrubber has.
- *
- * A thousand, so one step of a 48-minute section is under three seconds — finer
- * than a reader can aim — while the value stays an integer the element can hold
- * without a floating-point round trip.
- */
-const SCRUB_STEPS = 1000
-
-/**
- * How far through, as a fraction — 0 where the section has no length yet.
- *
- * ⚠️ **A ZERO DURATION IS NOT A DIVISION.** A section of one sample rounds to
- * 0 ms, and `0 / 0` is `NaN`, which a `<input type="range">` takes as its
- * minimum silently — so the thumb would sit at the start of a chapter that had
- * finished, with nothing saying why.
- */
-export function fractionOf(at: { readonly positionMs: number; readonly durationMs: number }): number {
-  if (at.durationMs <= 0) return 0
-  return Math.min(1, Math.max(0, at.positionMs / at.durationMs))
-}
-
-/**
- * Milliseconds as a clock a reader reads — `4:07`, or `1:02:30` past an hour.
- *
- * ⚠️ **HOURS ARE NOT OPTIONAL HERE.** WI-34.0 measured the character-weighted
- * median section of this shelf at 48.6 minutes and its p95 at over an hour, so a
- * `m:ss` format would show `68:12` for a real chapter — which reads as
- * sixty-eight minutes only if you already knew it could not be sixty-eight
- * seconds.
- */
-export function clockOf(ms: number): string {
-  /* ⚠️ **`Math.max` RATHER THAN `ms > 0` — FOUND BY THE MUTATION SWEEP.** The
-     clause is there to refuse a NEGATIVE, and at zero `> 0` and `>= 0` give the
-     same answer — so the comparison had a mutant nothing could kill. Clamping says
-     the same thing with no boundary to be wrong about. */
-  const whole = Number.isFinite(ms) ? Math.floor(Math.max(0, ms) / 1000) : 0
-  const seconds = whole % 60
-  const minutes = Math.floor(whole / 60) % 60
-  const hours = Math.floor(whole / 3600)
-  const pad = (value: number) => String(value).padStart(2, '0')
-  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
-}
-
-/**
- * The next speed up the ramp, wrapping to the slowest at the top.
- *
- * WRAPS rather than stopping, because this is one button doing a stepper's job:
- * stopping at 2.5× would leave a reader who overshot with no way back except the
- * settings pane. The ramp is short enough that going round is quicker.
- *
- * ⚠️ **THE FIRST STEP ABOVE THE CURRENT RATE, NOT ONE PAST THE NEAREST.** This
- * found the nearest step and advanced from it, which is right on the ramp and
- * wrong off it — and off it is exactly the case the nearest-match existed for: a
- * rate stored by a build with a different ramp. Measured: `1.4` advanced to
- * `1.75`, skipping `1.5`, because its nearest step is `1.5` and the one after
- * that is `1.75`; and `2.4` WRAPPED to `0.5`, skipping `2.5` entirely, because
- * its nearest step is the top one. "Faster" should never skip a speed the ramp
- * offers, and it should never go slower while a faster one exists.
- *
- * So: the smallest step strictly greater than the rate, and the slowest only
- * when nothing is. On the ramp the two rules give the same answer; off it, only
- * this one is right.
- */
-function nextRate(rate: number): number {
-  const steps = READING_RATE.steps
-  const faster = steps.find((step) => step > rate)
-  return faster ?? steps[0] ?? 1
-}
-
-/** `1×`, `1.25×` — no trailing zero, because `1.00×` reads as a measurement. */
-function formatRate(rate: number): string {
-  return `${Number(rate.toFixed(2))}×`
 }

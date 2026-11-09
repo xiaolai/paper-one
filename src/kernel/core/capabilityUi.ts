@@ -114,6 +114,34 @@ export const CAPABILITY_UI = Object.freeze({
    * survive every theme. See `.paper-cap-qr` in `capability.css`.
    */
   qr: 'paper-cap-qr',
+  /**
+   * A control in the title bar, beside the reading controls: an icon the bar's
+   * height, as the kernel's own title-bar actions are. `data-disabled="true"`
+   * dims it and takes the pointer away; say why in its `title`.
+   */
+  barButton: 'paper-cap-bar-button',
+  /** A row of `barButton`s that are one activity — a reading's transport — on one wash. */
+  transport: 'paper-cap-transport',
+  /** With `barButton`, inside a `transport`: a step narrow enough for nine to fit. */
+  transportButton: 'paper-cap-transport-button',
+  /** With `barButton`: a value that cycles when pressed, in figures that do not shift. */
+  rate: 'paper-cap-rate',
+  /** A state that replaces a `transport` while there is nothing yet to act on. */
+  preparing: 'paper-cap-preparing',
+  /** A position slider in the title bar — a native `range`. */
+  scrub: 'paper-cap-scrub',
+  /** A native `<select>` at a row's end. Give it an `aria-label`. */
+  select: 'paper-cap-select',
+  /** A native `range` at a row's end, set by ear or by eye rather than by step. */
+  volume: 'paper-cap-volume',
+  /** A less button, `pips`, and a more button: a setting with a closed set of steps. */
+  stepper: 'paper-cap-stepper',
+  /** One of a `stepper`'s two ends. Disabled, not hidden, at the end of the scale. */
+  stepperButton: 'paper-cap-stepper-button',
+  /** Where in its scale a `stepper` is. Give it `role="img"` and an `aria-label`. */
+  pips: 'paper-cap-pips',
+  /** One step of `pips`. `data-on` says it is at or below the value. */
+  pip: 'paper-cap-pip',
 } as const)
 
 /** One of the kernel's capability class names. */

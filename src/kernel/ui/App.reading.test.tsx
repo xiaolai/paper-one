@@ -13,7 +13,6 @@ import { bookIdFor } from '../core/marks'
 import { fakeFs } from '../core/indexFsFake.testkit'
 import { composeCapabilities, kernelApi } from '../core/registry'
 import { createKernelServices } from '../core/services'
-import { SETTINGS_STORAGE_KEY, SETTINGS_VERSION } from '../core/settings'
 
 /**
  * `App` WITH A BOOK THAT ACTUALLY OPENS — the half of this window no test could
@@ -333,9 +332,9 @@ vi.mock('./reader/session', async (importActual) => {
       this.#callbacks.onDirection('ltr')
       this.#callbacks.onMeta(meta)
       if (reader.cover) this.#callbacks.onCover(reader.cover)
-      /* THE SECTION'S OWN DOCUMENT, which is what read-aloud reads: `useSpeech`
-         collects the text out of it, so a book that publishes none has nothing
-         to say and the transport never appears. */
+      /* THE SECTION'S OWN DOCUMENT, which is what read-aloud reads: the
+         surface's `speakable` collects the text out of it, so a book that
+         publishes none has nothing to say. */
       if (reader.prose !== null) {
         const doc = document.implementation.createHTMLDocument('section')
         if (reader.lang !== null) doc.documentElement.setAttribute('lang', reader.lang)
@@ -351,8 +350,6 @@ vi.mock('./reader/session', async (importActual) => {
 })
 
 import { App } from './App'
-import { FakeSynth, FakeUtterance } from './reader/speechSynth.testkit'
-import { NO_GOOD_VOICE } from './reader/voiceChoice'
 
 /* jsdom has no `scrollIntoView` (the palette's active row calls it) and no
    `ResizeObserver` (the reader measures its stage with one). */
@@ -1764,387 +1761,13 @@ describe('turning a page', () => {
 })
 
 /**
- * NO VOICE RATHER THAN A BAD ONE, THROUGH THE WHOLE APP.
- *
- * The rule lives in `voiceChoice.ts` and the button in `TitleBar`, and each is
- * tested alone; what neither can see is the wire between them — `App` reading
- * the engine's live list through `useVoices`, asking `voiceFor` about the book on
- * screen, and handing the answer to the Listen control. A wire that went nowhere
- * would leave the button enabled over a reading the speaker refuses.
- */
-describe('the Listen control and the voices this machine has', () => {
-  afterEach(() => {
-    delete (window as { speechSynthesis?: unknown }).speechSynthesis
-    delete (window as { SpeechSynthesisUtterance?: unknown }).SpeechSynthesisUtterance
-  })
-
-  /** A catalogue with one English pack, installed or not. */
-  function withEnglishPack(installed: boolean) {
-    return (services: ReturnType<typeof createKernelServices>) => {
-      services.bindSpeechEngines({
-        catalogue: async () => [
-          {
-            id: 'english-kokoro',
-            name: 'English',
-            summary: '',
-            family: 'kokoro',
-            languages: ['en'],
-            bytes: 336_822_660,
-            minimumMemoryGb: 4,
-            voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
-            installed,
-          },
-        ],
-        install: async () => {},
-        remove: async () => {},
-        render: async () => ({
-          pcm: new Uint8Array(0),
-          sampleRate: 24_000,
-          words: [],
-          skipped: [],
-          evicted: { clips: 0, bytes: 0 },
-          clipPath: '/tmp/audio/clips/x.wav',
-        }),
-        findClip: async () => null,
-        holdClips: async (stems: readonly string[]) => stems.length,
-        clipUsage: async () => ({ bytes: 0, budget: 5 * 1024 * 1024 * 1024, clips: 0 }),
-        forgetClips: async () => ({ clips: 0, bytes: 0 }),
-        release: async () => {},
-      })
-    }
-  }
-
-  async function listenWith(
-    voices: readonly { name: string; lang: string; voiceURI: string }[],
-    before?: (services: ReturnType<typeof createKernelServices>) => void,
-  ) {
-    const synth = new FakeSynth()
-    synth.voices = [...voices]
-    Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true, writable: true })
-    window.SpeechSynthesisUtterance = FakeUtterance as unknown as typeof SpeechSynthesisUtterance
-    const moby = await shelved(BYTES, 'Moby-Dick')
-    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [], undefined, before)
-    await open('Moby-Dick')
-    /* The catalogue is READ, not handed over: `useVoicePacks` asks the port in
-       an effect and publishes what comes back, so the first answer lands a few
-       turns after the mount. */
-    await settled()
-    /* BY ITS LABEL ATTRIBUTE, not by role and name: the reading chrome is faded
-       out until the pointer asks for it, which takes it out of the
-       accessibility tree, and an element there computes an empty accessible
-       name. What is under test is the control's state, not whether it shows. */
-    const button = document.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')
-    expect(button, 'the Listen control is not in the title bar').not.toBeNull()
-    return button!
-  }
-
-  it('is disabled, and says why, when every voice is below the floor — a Mac', async () => {
-    const button = await listenWith([
-      { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' },
-      { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.super-compact.en-US.Samantha' },
-    ])
-    expect(button).toHaveProperty('disabled', true)
-    expect(button.getAttribute('title')).toBe(`Listen — ${NO_GOOD_VOICE}`)
-  })
-
-  it('reads when a voice above the floor is there', async () => {
-    const button = await listenWith([
-      { name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' },
-      { name: 'Zoe', lang: 'en-US', voiceURI: 'com.apple.voice.enhanced.en-US.Zoe' },
-    ])
-    expect(button).toHaveProperty('disabled', false)
-    expect(button.getAttribute('title')).toBe('Read this chapter aloud')
-  })
-
-  /**
-   * ⚠️ **A DOWNLOADED PACK IS ASKED FIRST, AND NOTHING HELD `App` TO IT.** The
-   * mutation gate found it: `engineVoiceFor(...)` in `listenRefusal` could be
-   * replaced with `false` and every test still passed — so a Mac with the
-   * English pack installed, where no platform voice clears the floor, would
-   * show the control disabled saying no high-quality voice is available while
-   * the reading was perfectly able to read the book. That exact sentence over
-   * an installed pack is the defect WI-30.11 found in the running app.
-   */
-  it('reads on a downloaded pack even where every platform voice is below the floor', async () => {
-    reader.prose = '<p>Call me Ishmael.</p>'
-    reader.lang = 'en'
-    const button = await listenWith(
-      [{ name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }],
-      withEnglishPack(true),
-    )
-    expect(button).toHaveProperty('disabled', false)
-    expect(button.getAttribute('title')).toBe('Read this chapter aloud')
-  })
-
-  it('sends the book and the section the reader is IN, not the first render’s', async () => {
-    /* ⚠️ **`speechPlace` HAD NO CASE AT ALL — FOUND BY THE MUTATION SWEEP, which
-       reported the memo, its body and its dependency list as survivors.** It is
-       the whole of how a render is addressed: `bookId` is a content hash that
-       resolves asynchronously and `docSection` arrives WITH the document, so at
-       the first render both are null. The in-app run of WI-34.6 found exactly that
-       — every Listen died, because the value reaching the plugin was the one from
-       before the book had opened — and nothing here could see it.
-
-       Observed through the request the engine is handed, which is where the key
-       actually goes. */
-    reader.prose = '<p>Call me Ishmael.</p>'
-    reader.lang = 'en'
-    const asked: { clip?: { bookId: string; section: number | null } }[] = []
-    const button = await listenWith(
-      [{ name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }],
-      (services) => {
-        /* ⚠️ **ONE BIND, BECAUSE A PORT MAY ONLY BE BOUND ONCE** — `services.ts`
-           refuses a second and says so. The catalogue and the recording `render`
-           go in together rather than one over the other. */
-        services.bindSpeechEngines({
-          catalogue: async () => [
-            {
-              id: 'english-kokoro',
-              name: 'English',
-              summary: '',
-              family: 'kokoro',
-              languages: ['en'],
-              bytes: 336_822_660,
-              minimumMemoryGb: 4,
-              voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US', note: '' }],
-              installed: true,
-            },
-          ],
-          install: async () => {},
-          remove: async () => {},
-          render: async (request) => {
-            asked.push(request as { clip?: { bookId: string; section: number | null } })
-            throw new Error('nothing to play here — the request is what this case is about')
-          },
-          findClip: async () => null,
-          holdClips: async (stems: readonly string[]) => stems.length,
-          clipUsage: async () => ({ bytes: 0, budget: 5 * 1024 * 1024 * 1024, clips: 0 }),
-          forgetClips: async () => ({ clips: 0, bytes: 0 }),
-          release: async () => {},
-        })
-      },
-    )
-    await act(async () => {
-      button.click()
-    })
-    await settled()
-
-    expect(asked, 'the engine was asked to read').not.toHaveLength(0)
-    const clip = asked[0]?.clip
-    /* ⚠️ **`bookId` IS THE WHOLE OF WHAT THIS CAN OBSERVE, AND IT IS ENOUGH.** It
-       is a content hash that resolves asynchronously, so it is `null` at the first
-       render — which is the value a frozen memo would send for ever, and the value
-       the in-app run watched every Listen die on. All three mutants the sweep found
-       (`() => undefined`, `() => ({})` and an emptied dependency list) produce a
-       key with no book id, so this assertion refuses each of them.
-
-       ⚠️ **AND THE SECTION IS NOT OBSERVABLE HERE**, which is worth saying rather
-       than asserting around: this harness's renderer reports no section index, so
-       `docSection` is genuinely absent and the key carries that faithfully.
-       `useSpeech.test.tsx` is where the section half is driven, through a `place`
-       the case sets. */
-    expect(clip?.bookId, 'a real book id rather than the first render’s null').toBeTruthy()
-  })
-
-  /* And a pack that is OFFERED but not here names itself and its size, which is
-     advice a reader can act on where NO_GOOD_VOICE alone is a dead end. */
-  it('names the pack that would read it, when the pack is not installed', async () => {
-    reader.prose = '<p>Call me Ishmael.</p>'
-    reader.lang = 'en'
-    const button = await listenWith(
-      [{ name: 'Samantha', lang: 'en-US', voiceURI: 'com.apple.voice.compact.en-US.Samantha' }],
-      withEnglishPack(false),
-    )
-    expect(button).toHaveProperty('disabled', true)
-    expect(button.getAttribute('title')).toMatch(/Download the English voice \(321 MB\)/u)
-  })
-})
-
-describe('the reading transport over a real book', () => {
-  /**
-   * ⚠️ **ONE LOOKUP SERVES THE CONTROL AND THE STEP**, so what the transport
-   * DRAWS and what the step TAKES cannot disagree. They were computed
-   * separately once — a `stepChapter` here and another inside the action — and
-   * the two were reconciled only by both being correct.
-   *
-   * This is the host's half of read-aloud: the hook knows how to speak, and
-   * only the host knows what the next chapter is.
-   */
-  afterEach(() => {
-    delete (window as { speechSynthesis?: unknown }).speechSynthesis
-    delete (window as { SpeechSynthesisUtterance?: unknown }).SpeechSynthesisUtterance
-  })
-
-  /** A machine with one voice the floor accepts. */
-  function engine() {
-    const synth = new FakeSynth()
-    synth.voices = [
-      { name: 'Zoe', lang: 'en-US', voiceURI: 'com.apple.voice.enhanced.en-US.Zoe', localService: true },
-    ]
-    Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true, writable: true })
-    window.SpeechSynthesisUtterance = FakeUtterance as unknown as typeof SpeechSynthesisUtterance
-    return synth
-  }
-
-  /** A book open, read aloud, with the transport on screen. */
-  async function reading(toc: readonly { label: string; href: string }[]) {
-    const synth = engine()
-    reader.toc = [...toc]
-    reader.prose = '<p>Call me Ishmael. Some years ago.</p><p>It is a way I have.</p>'
-    const moby = await shelved(BYTES, 'Moby-Dick')
-    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
-    await open('Moby-Dick')
-    const listen = document.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')
-    expect(listen, 'the Listen control is not in the title bar').not.toBeNull()
-    await act(async () => {
-      listen!.click()
-    })
-    await settled()
-    return { synth, session: reader.opened.at(-1)! }
-  }
-
-  const control = (label: string) => document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
-
-  it('offers the chapter ahead, and takes the reader there', async () => {
-    const { session } = await reading([
-      { label: 'One', href: 'chapter-1.xhtml' },
-      { label: 'Two', href: 'chapter-2.xhtml' },
-    ])
-    expect(control('Next chapter'), 'the chapter ahead was not offered').not.toBeNull()
-    expect(control('Previous chapter'), 'there is no chapter before the first').toBeNull()
-
-    await act(async () => {
-      control('Next chapter')!.click()
-    })
-    expect(session.goTo, 'the step did not take the reader anywhere').toContain('chapter-2.xhtml')
-  })
-
-  it('follows the reader into the next chapter, and offers the way back from there', async () => {
-    /* ⚠️ **THE STEP IS A MEMO OVER THE READER'S PLACE**, and one that never
-       recomputed would go on offering what was true where the reading began:
-       forward from the first chapter for ever, and never back. */
-    await reading([
-      { label: 'One', href: 'chapter-1.xhtml' },
-      { label: 'Two', href: 'chapter-2.xhtml' },
-    ])
-    expect(control('Previous chapter')).toBeNull()
-
-    reader.chapterHref = 'chapter-2.xhtml'
-    await act(async () => {
-      reader.live!.relocate('epubcfi(/6/6!/4/2)')
-    })
-    await settled()
-    expect(control('Previous chapter'), 'the step did not follow the reader').not.toBeNull()
-    expect(control('Next chapter'), 'there is no chapter after the last').toBeNull()
-  })
-
-  it('offers no chapter step in a book whose contents names none', async () => {
-    /* The transport is still there — sentences and paragraphs are the reader's
-       whatever the contents says — and the chapter controls are absent rather
-       than disabled, because there is genuinely nowhere to go. */
-    await reading([])
-    expect(control('Stop reading aloud'), 'the transport itself is missing').not.toBeNull()
-    expect(control('Next chapter')).toBeNull()
-    expect(control('Previous chapter')).toBeNull()
-  })
-
-  it('offers no chapter step from a section the contents does not name', async () => {
-    /* A reader can be in a spine item no contents entry points at, and guessing
-       a neighbour for it would move them somewhere they did not ask for. */
-    reader.chapterHref = ''
-    await reading([
-      { label: 'One', href: 'chapter-1.xhtml' },
-      { label: 'Two', href: 'chapter-2.xhtml' },
-    ])
-    expect(control('Next chapter')).toBeNull()
-    expect(control('Previous chapter')).toBeNull()
-  })
-
-  it('reads at the speed the reader has stored, and at the one they change it to', async () => {
-    /* ⚠️ **THE PREFERENCES ARE A MEMO OVER APP STATE**, and the engine reads
-       them per utterance: a memo that never recomputed would hold the speed the
-       session started at, so the transport's own speed control would move a
-       number nobody hears. */
-    const synth = engine()
-    reader.prose = '<p>Call me Ishmael. Some years ago.</p><p>It is a way I have.</p>'
-    const moby = await shelved(BYTES, 'Moby-Dick')
-    const storage = new Map<string, string>([
-      [SETTINGS_STORAGE_KEY, JSON.stringify({ version: SETTINGS_VERSION, values: { 'kernel.readingRate': 1.5 } })],
-    ])
-    const services = createKernelServices({
-      fs: fakeFs(moby.files) as unknown as IndexFs,
-      storage: {
-        getItem: (key: string) => storage.get(key) ?? null,
-        setItem: (key: string, value: string) => void storage.set(key, value),
-      },
-      initialBooks: [moby.row],
-    })
-    const composition = await composeCapabilities([], kernelApi(services), new AbortController().signal)
-    render(<App services={services} fs={fakeFs(moby.files) as unknown as IndexFs} composition={composition} />)
-    await settle()
-    await open('Moby-Dick')
-    await act(async () => {
-      document.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')!.click()
-    })
-    await settled()
-    expect(synth.queued.at(0)?.rate, 'the stored speed did not reach the engine').toBe(1.5)
-
-    await act(async () => {
-      document.querySelector<HTMLButtonElement>('button[aria-label^="Reading speed"]')!.click()
-    })
-    await settled()
-    expect(
-      document.querySelector('button[aria-label^="Reading speed"]')?.getAttribute('aria-label'),
-      'the speed control did not move',
-    ).toBe('Reading speed 1.75×')
-
-    /* AND THE VOICE HEARS IT at the next sentence — the control moving is the
-       state; the engine being given it is the memo the reading reads from. */
-    await act(async () => {
-      synth.queued.at(-1)?.dispatchEvent(new Event('end'))
-    })
-    /* After the sentence gap, which is a real timer here. */
-    await waitFor(() => expect(synth.queued).toHaveLength(2))
-    expect(synth.queued.at(-1)?.text.trim()).toBe('Some years ago.')
-    expect(synth.queued.at(-1)?.rate, 'the next sentence was read at the old speed').toBe(1.75)
-  })
-
-  it('reaches the voice as a fraction of what is stored', async () => {
-    /* ⚠️ **THE ONE DIVISION.** The setting is in percent and both speakers take 0
-       to 1, and 40 handed to `utterance.volume` is a voice at full. */
-    const synth = engine()
-    reader.prose = '<p>Call me Ishmael.</p>'
-    const moby = await shelved(BYTES, 'Moby-Dick')
-    const storage = new Map<string, string>([
-      [SETTINGS_STORAGE_KEY, JSON.stringify({ version: SETTINGS_VERSION, values: { 'kernel.readingVolume': 40 } })],
-    ])
-    const services = createKernelServices({
-      fs: fakeFs(moby.files) as unknown as IndexFs,
-      storage: {
-        getItem: (key: string) => storage.get(key) ?? null,
-        setItem: (key: string, value: string) => void storage.set(key, value),
-      },
-      initialBooks: [moby.row],
-    })
-    const composition = await composeCapabilities([], kernelApi(services), new AbortController().signal)
-    render(<App services={services} fs={fakeFs(moby.files) as unknown as IndexFs} composition={composition} />)
-    await settle()
-    await open('Moby-Dick')
-    await act(async () => {
-      document.querySelector<HTMLButtonElement>('button[aria-label="Read aloud"]')!.click()
-    })
-    await settled()
-    expect(synth.queued.at(0)?.volume, 'the stored volume did not reach the engine').toBe(0.4)
-  })
-})
-
-/**
  * The audiobook export's three gates, as the window answers them.
  *
  * ⚠️ **THE EXPORT IS THE NARRATION CAPABILITY'S, AND THE KERNEL MAY NOT IMPORT
  * IT** (`no-kernel-to-capabilities`), so the capability here is a stand-in that
  * asks what `ExportHost` and `narration.commands` ask: whether the plugin can
- * package (`available`), whether the voices bound an engine that writes files,
+ * package (`exportable`, asked once at start), whether the voices bound an
+ * engine that writes files,
  * and whether the surface has a ready book. What only this file can see is that
  * the window answers them truthfully — through the real palette, the real
  * composition, and a book that is not ready until its document is. The
@@ -2197,8 +1820,7 @@ describe('the audiobook export', () => {
     }
     return {
       id: 'narration',
-      available: () => canPackage,
-      windowHosts: [{ id: 'narration:export', render: (context) => <Host context={context} /> }],
+      windowHosts: [{ id: 'narration:export', render: (context) => (canPackage ? <Host context={context} /> : null) }],
       commands: (ctx) =>
         control && ctx.hasBook
           ? [{ id: 'narration:audiobook', label: LABEL, group: 'Book', keywords: 'audiobook', run: () => control?.run() }]
@@ -2316,35 +1938,105 @@ describe('what a capability adds around the reader', () => {
     expect(seen.context?.surface.book()?.title).toBeTruthy()
   })
 
-  it('hands a host the voice, pace and notes the reading has stored', async () => {
-    /* What an audiobook export reads in, so the file says what the reading
-       would have said, in the voice it would have said it in. */
+  it('sends the book and the section the reader is IN, not the first render’s', async () => {
+    /* ⚠️ **`speechPlace` HAD NO CASE AT ALL — FOUND BY THE MUTATION SWEEP, which
+       reported the memo, its body and its dependency list as survivors.** It is
+       the whole of how a render is addressed: `bookId` is a content hash that
+       resolves asynchronously and `docSection` arrives WITH the document, so at
+       the first render both are null. The in-app run of WI-34.6 found exactly that
+       — every Listen died, because the value reaching the plugin was the one from
+       before the book had opened.
+
+       ⚠️ **`bookId` IS WHAT THIS CAN OBSERVE, AND IT IS ENOUGH.** A frozen memo
+       sends the first render's null for ever, which `speakable` spells `''`.
+       This harness's renderer reports no section index, so the section half is
+       not observable here; `readingSurface.test.tsx` drives it. */
+    reader.prose = '<p>Call me Ishmael.</p>'
+    reader.lang = 'en'
     const { seen, capability } = reaching()
-    const storage = new Map<string, string>([
-      [
-        SETTINGS_STORAGE_KEY,
-        JSON.stringify({
-          version: SETTINGS_VERSION,
-          values: {
-            'kernel.readingVoice': { en: 'kokoro:am_adam' },
-            'kernel.readingRate': 1.5,
-            'kernel.readingNotesAloud': true,
-          },
-        }),
-      ],
-    ])
-    const services = createKernelServices({
-      fs: null,
-      storage: {
-        getItem: (key: string) => storage.get(key) ?? null,
-        setItem: (key: string, value: string) => void storage.set(key, value),
-      },
-      initialBooks: [],
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [capability])
+    await open('Moby-Dick')
+    const section = seen.context?.surface.speakable({ notes: false })
+    expect(section?.bookId, 'a real book id rather than the first render’s null').toBeTruthy()
+    expect(section?.lang, 'the language the section declares').toBe('en')
+  })
+
+  /**
+   * ⚠️ **ONE LOOKUP SERVES THE CONTROL AND THE STEP**, so what a transport DRAWS
+   * and what its step TAKES cannot disagree: `chapter.can` and `chapter.go` both
+   * read the paging `App` builds from the contents. They were computed
+   * separately once, and reconciled only by both being correct.
+   *
+   * This is the window's half of read-aloud: narration knows how to speak, and
+   * only the window knows what the next chapter is.
+   */
+  const TWO_CHAPTERS = [
+    { label: 'One', href: 'chapter-1.xhtml' },
+    { label: 'Two', href: 'chapter-2.xhtml' },
+  ]
+
+  /** A book open with these contents, and the surface a host was handed over it. */
+  async function chaptered(toc: readonly { label: string; href: string }[]) {
+    reader.toc = [...toc]
+    reader.prose = '<p>Call me Ishmael. Some years ago.</p><p>It is a way I have.</p>'
+    const { seen, capability } = reaching()
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], [capability])
+    await open('Moby-Dick')
+    return { chapter: () => seen.context!.surface.chapter, session: reader.opened.at(-1)! }
+  }
+
+  it('offers the chapter ahead, and takes the reader there', async () => {
+    const { chapter, session } = await chaptered(TWO_CHAPTERS)
+    expect(chapter().can(1), 'the chapter ahead was not offered').toBe(true)
+    expect(chapter().can(-1), 'there is no chapter before the first').toBe(false)
+
+    let went = false
+    await act(async () => {
+      went = chapter().go(1)
     })
-    const composition = await composeCapabilities([capability], kernelApi(services), new AbortController().signal)
-    render(<App services={services} fs={null} composition={composition} />)
-    await settle()
-    expect(seen.context?.voice).toEqual({ chosen: { en: 'kokoro:am_adam' }, rate: 1.5, notesAloud: true })
+    expect(went).toBe(true)
+    expect(session.goTo, 'the step did not take the reader anywhere').toContain('chapter-2.xhtml')
+  })
+
+  it('follows the reader into the next chapter, and offers the way back from there', async () => {
+    /* ⚠️ **THE STEP IS A MEMO OVER THE READER'S PLACE**, and one that never
+       recomputed would go on offering what was true where the reading began:
+       forward from the first chapter for ever, and never back. And a host is
+       TOLD, or a transport drawn from the first answer would keep drawing it. */
+    const { chapter } = await chaptered(TWO_CHAPTERS)
+    expect(chapter().can(-1)).toBe(false)
+    const told = vi.fn()
+    const stop = chapter().subscribe(told)
+
+    reader.chapterHref = 'chapter-2.xhtml'
+    await act(async () => {
+      reader.live!.relocate('epubcfi(/6/6!/4/2)')
+    })
+    await settled()
+    expect(chapter().can(-1), 'the step did not follow the reader').toBe(true)
+    expect(chapter().can(1), 'there is no chapter after the last').toBe(false)
+    expect(told, 'a host was not told the chapters moved').toHaveBeenCalled()
+    stop()
+  })
+
+  it('offers no chapter step in a book whose contents names none', async () => {
+    /* Sentences and paragraphs are the reader's whatever the contents says; the
+       chapter steps are not offered, because there is genuinely nowhere to go. */
+    const { chapter } = await chaptered([])
+    expect(chapter().can(1)).toBe(false)
+    expect(chapter().can(-1)).toBe(false)
+    expect(chapter().go(1), 'a step to nowhere was taken').toBe(false)
+  })
+
+  it('offers no chapter step from a section the contents does not name', async () => {
+    /* A reader can be in a spine item no contents entry points at, and guessing
+       a neighbour for it would move them somewhere they did not ask for. */
+    reader.chapterHref = ''
+    const { chapter } = await chaptered(TWO_CHAPTERS)
+    expect(chapter().can(1)).toBe(false)
+    expect(chapter().can(-1)).toBe(false)
   })
 
   it('draws a reader control in the title bar, on the reader and nowhere else', async () => {
@@ -2405,8 +2097,8 @@ describe('what a capability adds around the reader', () => {
   })
 
   it('commits a host before a control, so what a host publishes is there for the control to read', async () => {
-    /* The first commit cannot show this, because the title bar waits for the
-       kernel's own host to publish. A later one can. */
+    /* Measured on a later commit than the first, because the order has to hold
+       on every render rather than only at mount. */
     const order: string[] = []
     const Note = ({ name }: { readonly name: string }) => {
       useLayoutEffect(() => {

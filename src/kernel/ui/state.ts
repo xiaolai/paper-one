@@ -1,16 +1,8 @@
 import { useCallback, useEffect, useReducer, type Dispatch } from 'react'
 import type { MarkStyle, MarkTint } from '../core/marks'
-import { BRIGHTNESS, CONTRAST, PARAGRAPH_GAP, SENTENCE_GAP, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SteppedScale } from '../core/metrics'
+import { BRIGHTNESS, CONTRAST, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SteppedScale } from '../core/metrics'
 import type { SettingsStore } from '../core/ports'
 import {
-  PARAGRAPH_GAP_MAX,
-  PARAGRAPH_GAP_MIN,
-  READING_RATE_MAX,
-  READING_RATE_MIN,
-  READING_VOLUME_MAX,
-  READING_VOLUME_MIN,
-  SENTENCE_GAP_MAX,
-  SENTENCE_GAP_MIN,
   readKernelPreferences,
   writeKernelPreferences,
   type KernelPreferences,
@@ -199,27 +191,6 @@ export interface AppState {
   readonly markTint: MarkTint
   readonly markStyle: MarkStyle
   /**
-   * Read aloud's voice per language, and its speed.
-   *
-   * PER LANGUAGE because one voice for the app reads a Chinese book in English
-   * — see `ui/reader/voiceChoice.ts`. The value is a `voiceURI`, which is the
-   * only stable identity a `SpeechSynthesisVoice` has: `name` collides (this Mac
-   * offers two voices called Samantha and two called Tingting, differing only in
-   * tier) and the object itself does not survive a relaunch.
-   */
-  readonly readingVoice: Readonly<Record<string, string>>
-  readonly readingRate: number
-  /** How loud Paper reads aloud, 0 to 100 — see `READING_VOLUME_MAX`. */
-  readonly readingVolume: number
-  /** Whether a note's BODY is read aloud — see `NOTE_BODIES` in `speechSkip.ts`. */
-  readonly readingNotesAloud: boolean
-  /** Silence after a sentence, in ms — see `SENTENCE_GAP` in `metrics.ts`. */
-  readonly sentenceGapMs: number
-  /** Silence after a paragraph, in ms. Used ALONE at a paragraph end, not added
-   *  to the sentence gap: the label says "between paragraphs", so a reader who
-   *  sets it to zero means no pause there. */
-  readonly paragraphGapMs: number
-  /**
    * How the book is SET — WI-14.4's fifteen, the fidelity dial among them.
    *
    * ONE FIELD RATHER THAN FIFTEEN, exactly as `spacing` is one rather than
@@ -259,16 +230,6 @@ export const initialState: AppState = {
   screen: 'library',
   developer: false,
   hiddenPanes: [],
-  /* NO VOICE CHOSEN AND THE ENGINE'S OWN SPEED. Empty is not "no voice" — it is
-     "the app picks", which `voiceFor` answers with the best voice installed for
-     the book's language. A reader only lands in this map by disagreeing with
-     that choice. */
-  readingVoice: {},
-  readingRate: 1,
-  readingVolume: READING_VOLUME_MAX,
-  readingNotesAloud: false,
-  sentenceGapMs: SENTENCE_GAP.steps[SENTENCE_GAP.def] ?? 0,
-  paragraphGapMs: PARAGRAPH_GAP.steps[PARAGRAPH_GAP.def] ?? 0,
   theme: DEFAULT_THEME,
   themeFollowsOs: true,
   /* The screen's own panel — `paneFits('library', 'library')` holds, so the
@@ -324,7 +285,6 @@ export type Action =
   /** Esc dismisses the topmost layer only (§11 keyboard map). */
   | { type: 'dismissTop' }
   | { type: 'setChrome'; on: boolean }
-  | { type: 'toggleReadingNotes' }
   | { type: 'toggleRuler' }
   | { type: 'pinRuler' }
   | { type: 'setStepIdx'; idx: number }
@@ -338,14 +298,6 @@ export type Action =
   | { type: 'setPageLayout'; layout: PageLayout }
   | { type: 'setMarkTint'; tint: MarkTint }
   | { type: 'setMarkStyle'; style: MarkStyle }
-  /* The VOICE for one language, not the whole map: a picker changes the voice
-     for the book in hand, and an action carrying the map would let a stale
-     render overwrite a choice made for another language. */
-  | { type: 'setReadingVoice'; lang: string; voice: string }
-  | { type: 'setReadingRate'; rate: number }
-  | { type: 'setReadingVolume'; volume: number }
-  | { type: 'setSentenceGap'; ms: number }
-  | { type: 'setParagraphGap'; ms: number }
   /**
    * One action for all fifteen — see `readingStyle`.
    *
@@ -576,8 +528,6 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
     case 'setChrome':
       return put(state, 'chromeOn', action.on)
 
-    case 'toggleReadingNotes':
-      return { ...state, readingNotesAloud: !state.readingNotesAloud }
     case 'toggleRuler':
       /* §06: THE RULER IS SCROLLED-FLOW ONLY. The palette already omits the
        * command in paginated mode, but the reducer is the boundary every
@@ -670,61 +620,9 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
     case 'setMarkStyle':
       return put(state, 'markStyle', action.style)
 
-    /* MERGED INTO THE MAP, never replacing it, so choosing a Chinese voice
-       leaves the English one alone. An empty voice REMOVES the entry rather
-       than storing `''`, which is how a reader goes back to letting the app
-       choose — `chosenVoice` treats an empty string as no choice, but leaving
-       one behind would mean the map grew a dead key per language visited. */
-    case 'setReadingVoice': {
-      const { [action.lang]: had, ...rest } = state.readingVoice
-      if (action.voice === '') return had === undefined ? state : { ...state, readingVoice: rest }
-      if (had === action.voice) return state
-      return { ...state, readingVoice: { ...rest, [action.lang]: action.voice } }
-    }
-
-    case 'setReadingRate': {
-      /* CLAMPED HERE TOO, not only in the settings validator. The validator
-         guards what arrives from disk; this guards what arrives from a control,
-         and the two are different doors into the same value. */
-      const rate = bounded(action.rate, READING_RATE_MIN, READING_RATE_MAX)
-      return rate === null ? state : { ...state, readingRate: rate }
-    }
-
-    case 'setReadingVolume': {
-      const volume = bounded(action.volume, READING_VOLUME_MIN, READING_VOLUME_MAX)
-      return volume === null ? state : { ...state, readingVolume: volume }
-    }
-
-    case 'setSentenceGap': {
-      const ms = bounded(action.ms, SENTENCE_GAP_MIN, SENTENCE_GAP_MAX)
-      return ms === null ? state : { ...state, sentenceGapMs: ms }
-    }
-
-    case 'setParagraphGap': {
-      const ms = bounded(action.ms, PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX)
-      return ms === null ? state : { ...state, paragraphGapMs: ms }
-    }
-
   }
 }
 
-/**
- * A number inside `[min, max]`, or null when it is not a number at all.
- *
- * ⚠️ **`Math.max(min, Math.min(max, NaN))` IS `NaN`**, and three reducer branches
- * clamped that way — so `NaN` reached live state, serialised as `null`, and broke
- * the session until a relaunch reset it. The settings validator beside them asks
- * `Number.isFinite` first; the reducer is the OTHER door into the same value and
- * did not, which is precisely the asymmetry `setReadingRate`'s own comment warns
- * about.
- *
- * `null` for a refusal rather than a fallback: a control that sends a
- * non-number has a defect, and silently substituting the minimum would hide it
- * while changing the reader's setting. The caller returns the state unchanged.
- *
- * One helper for all three, because the duplication is what let two of them
- * inherit the omission from the first.
- */
 /**
  * `state` with one field set — or `state` ITSELF when the field already holds it.
  *
@@ -741,11 +639,6 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
  */
 function put<K extends keyof AppState>(state: AppState, key: K, value: AppState[K]): AppState {
   return Object.is(state[key], value) ? state : { ...state, [key]: value }
-}
-
-function bounded(value: number, min: number, max: number): number | null {
-  if (!Number.isFinite(value)) return null
-  return Math.max(min, Math.min(max, value))
 }
 
 export type AppDispatch = Dispatch<Action>
@@ -1135,8 +1028,8 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
      * keystroke. Its VALUES are stable where nothing moved, which is what makes
      * the spread safe: every field is either a primitive or passed through from
      * `state` by reference, and each setter returns the SAME value when the
-     * reader's choice has not changed — `setSpacing`, `setReadingStyle`,
-     * `setPaneHidden` and `setReadingVoice` all say so beside themselves. The
+     * reader's choice has not changed — `setSpacing`, `setReadingStyle` and
+     * `setPaneHidden` all say so beside themselves. The
      * length is fixed by `KernelPreferences`' keys, which is the one thing React
      * requires of a dependency array. */
   }, [settings, ...Object.values(prefs)])
@@ -1168,12 +1061,6 @@ export function preferencesOf(state: AppState): KernelPreferences {
     markTint: state.markTint,
     markStyle: state.markStyle,
     readingStyle: state.readingStyle,
-    readingVoice: state.readingVoice,
-    readingRate: state.readingRate,
-    readingVolume: state.readingVolume,
-    readingNotesAloud: state.readingNotesAloud,
-    sentenceGapMs: state.sentenceGapMs,
-    paragraphGapMs: state.paragraphGapMs,
   }
 }
 

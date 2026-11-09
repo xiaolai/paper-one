@@ -3,15 +3,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   composeCapabilities,
   createKernelServices,
+  createSettingsStore,
   defineSetting,
   kernelApi,
+  NOOP_DIAGNOSTICS,
   readSwitchedOff,
+  scopeSettings,
   type CapabilityContext,
   type Command,
   type CommandContext,
-  type Disposable,
+  type Diagnostics,
   type KernelServices,
+  type PaneContext,
   type ReaderContext,
+  type SettingsStore,
 } from '../../kernel'
 
 const seam = vi.hoisted(() => ({ invoke: vi.fn<(command: string) => Promise<unknown>>() }))
@@ -29,6 +34,22 @@ import { publishControl } from './lib/running'
 const ctx: CommandContext = { screen: 'reader', pane: null, hasBook: true, openPane: () => {} }
 
 const row = (commands: Command[]) => commands.find((command) => command.id === 'narration:audiobook')
+
+/** The capability started as the registry starts it, with whatever a case needs to see. */
+async function start(
+  over: { services?: KernelServices; settings?: SettingsStore; diagnostics?: Diagnostics } = {},
+) {
+  const api = {
+    services: over.services ?? ({} as KernelServices),
+    settings: over.settings ?? scopeSettings(createSettingsStore({ storage: null }), 'narration'),
+    diagnostics: over.diagnostics ?? NOOP_DIAGNOSTICS,
+    onCleanup: () => {},
+  } as CapabilityContext
+  return narration.start!(api, new AbortController().signal)
+}
+
+/** The props of what a contribution drew. */
+const drawnProps = (drawn: unknown) => (drawn as { props: Record<string, unknown> }).props
 
 let withdraw: (() => void) | null = null
 const offer = (running: boolean, run: () => void = () => {}) => {
@@ -52,31 +73,121 @@ describe('what the app is offered', () => {
     expect(narration.requires).toEqual([])
   })
 
-  it('is available where the plugin says it can package, and not where it says not', async () => {
-    /* The question itself — and what a reply that is not a boolean means — is
-       `narrationSupported`'s, in `lib/wire.test.ts`. */
-    Object.assign(window, { __TAURI_INTERNALS__: {} })
-    seam.invoke.mockResolvedValueOnce(true)
-    await expect(narration.available!()).resolves.toBe(true)
-    seam.invoke.mockResolvedValueOnce(false)
-    await expect(narration.available!()).resolves.toBe(false)
-    expect(seam.invoke).toHaveBeenCalledWith('plugin:narration|narration_supported')
+  it('has no availability check, because whether a machine can package is the export’s question alone', () => {
+    /* ⚠️ The encoder is macOS's, so a capability gated on it would take Read
+       aloud away from every other desktop. */
+    expect(narration.available).toBeUndefined()
   })
 
-  it('runs one window host, which draws nothing until the capability has started', () => {
-    expect(narration.windowHosts?.map((host) => host.id)).toEqual(['narration:export'])
-    const host = narration.windowHosts![0]!
-    const context = {} as ReaderContext
-    expect(host.render(context)).toBeNull()
+  it('contributes the Voice section, between Reading and the downloadable voices', () => {
+    expect(narration.settings?.map(({ id, title, order }) => ({ id, title, order }))).toEqual([
+      { id: 'narration:voice', title: 'Voice', order: 12 },
+    ])
+  })
 
-    const services = {} as KernelServices
-    const started = narration.start!({ services } as unknown as CapabilityContext, new AbortController().signal) as Disposable
-    const drawn = host.render(context) as { props: { context: unknown; services: unknown } }
-    expect(drawn.props.context).toBe(context)
-    expect(drawn.props.services).toBe(services)
+  it('contributes Listen to the title bar', () => {
+    expect(narration.readerControls?.map((control) => control.id)).toEqual(['narration:listen'])
+  })
+
+  it('runs the reading ahead of the export, so the reading is published before Listen reads it', () => {
+    expect(narration.windowHosts?.map((host) => host.id)).toEqual(['narration:reading', 'narration:export'])
+  })
+
+  it('draws nothing until the capability has started, and nothing once it is disposed', async () => {
+    const context = {} as ReaderContext
+    const pane = {} as PaneContext
+    const drawnAll = () => [
+      ...narration.windowHosts!.map((host) => host.render(context)),
+      ...narration.readerControls!.map((control) => control.render(context)),
+      ...narration.settings!.map((section) => section.render(pane)),
+    ]
+    expect(drawnAll()).toEqual([null, null, null, null])
+
+    const started = await start()
+    expect(drawnAll().filter((drawn) => drawn === null), 'outside the app, every part is drawn').toEqual([])
 
     started.dispose()
-    expect(host.render(context), 'nothing once it is disposed').toBeNull()
+    expect(drawnAll()).toEqual([null, null, null, null])
+  })
+
+  it('hands every part the same services, settings and reading', async () => {
+    const services = {} as KernelServices
+    const settings = {} as SettingsStore
+    const started = await start({ services, settings })
+    const context = {} as ReaderContext
+    const [reading, exporting] = narration.windowHosts!.map((host) => drawnProps(host.render(context)))
+    const listen = drawnProps(narration.readerControls![0]!.render(context))
+    const voice = drawnProps(narration.settings![0]!.render({} as PaneContext))
+
+    expect(reading).toMatchObject({ context, services, settings })
+    expect(exporting).toMatchObject({ context, services, settings })
+    expect(listen!.settings).toBe(settings)
+    expect(voice!.settings).toBe(settings)
+    /* ONE store, or Listen and the Voice section would read a reading the host
+       never published. */
+    expect(reading!.store).toBeDefined()
+    expect(listen!.store).toBe(reading!.store)
+    expect(voice!.store).toBe(reading!.store)
+    started.dispose()
+  })
+
+  it('makes a new reading for each start, so a later start reads nothing an earlier one published', async () => {
+    const storeNow = () => drawnProps(narration.readerControls![0]!.render({} as ReaderContext))!.store
+    const first = await start()
+    const before = storeNow()
+    first.dispose()
+    const second = await start()
+    expect(storeNow()).not.toBe(before)
+    second.dispose()
+  })
+})
+
+describe('the export host', () => {
+  /* The question itself — and what a reply that is not a boolean means — is
+     `narrationSupported`'s, in `lib/wire.test.ts`. */
+  const hostOf = (id: string) => narration.windowHosts!.find((host) => host.id === id)!
+  const drawn = (id: string) => hostOf(id).render({} as ReaderContext)
+
+  it('is drawn where the plugin says it can package', async () => {
+    Object.assign(window, { __TAURI_INTERNALS__: {} })
+    seam.invoke.mockResolvedValueOnce(true)
+    const started = await start()
+    expect(seam.invoke).toHaveBeenCalledWith('plugin:narration|narration_supported')
+    expect(drawn('narration:export')).not.toBeNull()
+    started.dispose()
+  })
+
+  it('is not drawn where the plugin says it cannot, and the reading still is', async () => {
+    Object.assign(window, { __TAURI_INTERNALS__: {} })
+    seam.invoke.mockResolvedValueOnce(false)
+    const started = await start()
+    expect(drawn('narration:export')).toBeNull()
+    expect(drawn('narration:reading')).not.toBeNull()
+    started.dispose()
+  })
+
+  it('is not drawn where the answer cannot be read, which is reported, and the reading still is', async () => {
+    /* ⚠️ An unreadable answer costs the export and not the reading: Read aloud
+       needs nothing from the plugin. */
+    Object.assign(window, { __TAURI_INTERNALS__: {} })
+    seam.invoke.mockResolvedValueOnce('yes')
+    const error = vi.fn()
+    const started = await start({ diagnostics: { ...NOOP_DIAGNOSTICS, error } })
+    expect(error).toHaveBeenCalledWith('narration.support-unreadable', {
+      message: 'the narration plugin did not say whether it can package a book',
+    })
+    expect(drawn('narration:export')).toBeNull()
+    expect(drawn('narration:reading')).not.toBeNull()
+    started.dispose()
+  })
+
+  it('reports nothing where the answer was read', async () => {
+    Object.assign(window, { __TAURI_INTERNALS__: {} })
+    seam.invoke.mockResolvedValueOnce(false)
+    const error = vi.fn()
+    const started = await start({ diagnostics: { ...NOOP_DIAGNOSTICS, error } })
+    expect(error).not.toHaveBeenCalled()
+    started.dispose()
   })
 })
 
@@ -162,12 +273,14 @@ describe('its switch', () => {
   }
 
   it('words its switch without saying plugin or capability, and says what off does', () => {
-    expect(narration.toggle?.title).toBe('Audiobook export')
+    expect(narration.toggle?.title).toBe('Read aloud')
     expect(`${narration.toggle?.title} ${narration.toggle?.summary}`).not.toMatch(/plugin|capability/iu)
-    expect(narration.toggle?.summary).toMatch(/\bOff, the command is gone, and the audiobooks you made stay\b/u)
+    expect(narration.toggle?.summary).toMatch(
+      /\bOff, Listen, the voice settings and the export are gone, and the audiobooks you made stay\b/u,
+    )
   })
 
-  it('off, offers no row and draws no host, and does not ask the plugin', async () => {
+  it('off, offers no row, draws no host, control or section, and does not ask the plugin', async () => {
     Object.assign(window, { __TAURI_INTERNALS__: {} })
     seam.invoke.mockResolvedValue(true)
     const { composition } = await launch(new Set(['narration']))
@@ -176,6 +289,8 @@ describe('its switch', () => {
     offer(false)
     expect(composition.commands(ctx)).toEqual([])
     expect(composition.windowHosts).toEqual([])
+    expect(composition.readerControls).toEqual([])
+    expect(composition.settings).toEqual([])
     expect(seam.invoke).not.toHaveBeenCalled()
     composition.dispose()
   })
@@ -186,7 +301,9 @@ describe('its switch', () => {
     const { composition } = await launch(new Set())
     offer(false)
     expect(row(composition.commands(ctx))?.label).toBe('Export as audiobook…')
-    expect(composition.windowHosts.map((host) => host.id)).toEqual(['narration:export'])
+    expect(composition.windowHosts.map((host) => host.id)).toEqual(['narration:reading', 'narration:export'])
+    expect(composition.readerControls.map((control) => control.id)).toEqual(['narration:listen'])
+    expect(composition.settings.map((section) => section.id)).toEqual(['narration:voice'])
     composition.dispose()
   })
 

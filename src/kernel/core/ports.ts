@@ -219,7 +219,7 @@ export interface SizePort {
  *
  * Every field is what a reader decides with — how big it is, what it can read,
  * what it needs from the machine, and who may license it. The engine's name is
- * here rather than inferred from the id because `readingVoice` is stored
+ * here rather than inferred from the id because narration's `readingVoice` is stored
  * engine-qualified (`kokoro:af_heart`) and the interface must be able to build
  * that string without knowing which family a pack belongs to.
  */

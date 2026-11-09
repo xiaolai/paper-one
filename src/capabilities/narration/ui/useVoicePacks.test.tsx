@@ -2,8 +2,8 @@
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PACKS_POLL_MS, useVoicePacks, type VoicesState } from './useVoicePacks'
-import type { KernelServices } from '../../core/services'
-import type { SpeechEnginePort, VoicePack } from '../../core/ports'
+import type { KernelServices } from '../../../kernel'
+import type { SpeechEnginePort, VoicePack } from '../../../kernel'
 
 afterEach(cleanup)
 
