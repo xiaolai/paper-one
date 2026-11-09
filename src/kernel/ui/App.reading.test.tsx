@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, configure, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { useEffect, useLayoutEffect } from 'react'
+import { useEffect, useLayoutEffect, useSyncExternalStore } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Capability, ReaderContext } from '../core/capability'
 import type { IndexFs, IndexedBook } from '../core/bookIndex'
@@ -2135,6 +2135,116 @@ describe('the reading transport over a real book', () => {
     })
     await settled()
     expect(synth.queued.at(0)?.volume, 'the stored volume did not reach the engine').toBe(0.4)
+  })
+})
+
+/**
+ * The audiobook export's three gates, as the window answers them.
+ *
+ * ⚠️ **THE EXPORT IS THE NARRATION CAPABILITY'S, AND THE KERNEL MAY NOT IMPORT
+ * IT** (`no-kernel-to-capabilities`), so the capability here is a stand-in that
+ * asks what `ExportHost` and `narration.commands` ask: whether the plugin can
+ * package (`available`), whether the voices bound an engine that writes files,
+ * and whether the surface has a ready book. What only this file can see is that
+ * the window answers them truthfully — through the real palette, the real
+ * composition, and a book that is not ready until its document is. The
+ * capability's own half is `capabilities/narration/index.test.ts` and
+ * `ui/ExportHost.test.tsx`.
+ */
+describe('the audiobook export', () => {
+  const LABEL = 'Export as audiobook…'
+
+  /** The voices, as far as the export needs them: a bound engine that can write a file. */
+  const voicesStandIn: Capability = {
+    id: 'voices',
+    start: (api) =>
+      api.services.bindSpeechEngines({
+        catalogue: async () => [],
+        install: async () => {},
+        remove: async () => {},
+        render: async () => ({
+          pcm: new Uint8Array(0),
+          sampleRate: 24_000,
+          words: [],
+          skipped: [],
+          evicted: { clips: 0, bytes: 0 },
+          clipPath: '/tmp/audio/clips/x.wav',
+        }),
+        renderFile: async () => ({ sampleRate: 24_000, skipped: [] }),
+        findClip: async () => null,
+        holdClips: async (stems: readonly string[]) => stems.length,
+        clipUsage: async () => ({ bytes: 0, budget: 5 * 1024 * 1024 * 1024, clips: 0 }),
+        forgetClips: async () => ({ clips: 0, bytes: 0 }),
+        release: async () => {},
+      }),
+  }
+
+  /** The export's shape: a host that publishes a control, and a row that reads it. */
+  function narrationStandIn(canPackage: boolean): Capability {
+    let services: ReturnType<typeof createKernelServices> | null = null
+    let control: { readonly run: () => void } | null = null
+    function Host({ context }: { readonly context: ReaderContext }) {
+      const book = useSyncExternalStore(context.surface.subscribeBook, context.surface.book)
+      const ready = book !== null && services?.speechEngines()?.renderFile !== undefined
+      useEffect(() => {
+        if (!ready) return undefined
+        control = { run: () => {} }
+        return () => {
+          control = null
+        }
+      }, [ready])
+      return null
+    }
+    return {
+      id: 'narration',
+      available: () => canPackage,
+      windowHosts: [{ id: 'narration:export', render: (context) => <Host context={context} /> }],
+      commands: (ctx) =>
+        control && ctx.hasBook
+          ? [{ id: 'narration:audiobook', label: LABEL, group: 'Book', keywords: 'audiobook', run: () => control?.run() }]
+          : [],
+      start: (api) => {
+        services = api.services as ReturnType<typeof createKernelServices>
+        return {
+          dispose: () => {
+            services = null
+          },
+        }
+      },
+    }
+  }
+
+  async function openBook(capabilities: readonly Capability[]) {
+    reader.prose = '<p>Call me Ishmael.</p>'
+    const moby = await shelved(BYTES, 'Moby-Dick')
+    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row], capabilities)
+    return () => open('Moby-Dick')
+  }
+
+  it('is offered for an open book where the plugin can package and the voices bound an engine', async () => {
+    const opening = await openBook([voicesStandIn, narrationStandIn(true)])
+    expect(await paletteOffers('audiobook', LABEL), 'offered with no book open').toBe(false)
+    await opening()
+    expect(await paletteOffers('audiobook', LABEL), 'the open book was not offered').toBe(true)
+  })
+
+  it('is not offered where the plugin cannot package', async () => {
+    const opening = await openBook([voicesStandIn, narrationStandIn(false)])
+    await opening()
+    expect(await paletteOffers('audiobook', LABEL)).toBe(false)
+  })
+
+  it('is not offered where no voices bound an engine to write it', async () => {
+    const opening = await openBook([narrationStandIn(true)])
+    await opening()
+    expect(await paletteOffers('audiobook', LABEL)).toBe(false)
+  })
+
+  it('waits for the book’s document, which is what the walk runs over', async () => {
+    const opening = await openBook([voicesStandIn, narrationStandIn(true)])
+    reader.prose = null
+    await opening()
+    expect(await paletteOffers('audiobook', LABEL), 'a book with no document yet').toBe(false)
   })
 })
 
