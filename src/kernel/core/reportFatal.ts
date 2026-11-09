@@ -54,9 +54,42 @@ function host(): HTMLElement {
     'font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace',
     'white-space:pre-wrap',
   ].join(';')
+  el.append(dismissButton(el))
   document.body.append(el)
   return el
 }
+
+/**
+ * THE BANNER CAN BE PUT AWAY. It was append-only with no way to close it, and
+ * it is fixed over the page at up to 40vh: one error after a book was open —
+ * not a blank window at all — left the bottom of every page covered for the
+ * rest of the session. Dismissing removes the whole surface; the next error
+ * builds it again, so a new fault is never hidden by an old dismissal.
+ */
+function dismissButton(banner: HTMLElement): HTMLButtonElement {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.textContent = 'Dismiss'
+  button.setAttribute('aria-label', 'Dismiss the error report')
+  button.style.cssText = [
+    /* Sticky so it stays reachable while the report scrolls inside its cap. */
+    'position:sticky',
+    'top:0',
+    'float:right',
+    'margin-left:12px',
+    `border-radius:${RADIUS.chip}px`,
+    'border:1px solid var(--amber-line,#E7D6BE)',
+    'background:var(--amber-bg,#FBF6EE)',
+    'color:inherit',
+    'font:inherit',
+    'cursor:pointer',
+  ].join(';')
+  button.addEventListener('click', () => banner.remove())
+  return button
+}
+
+/** Each line's report and how many times it has arrived. */
+const reported = new WeakMap<Element, { readonly text: string; count: number }>()
 
 /**
  * An error, its stack, and EVERYTHING UNDERNEATH IT.
@@ -88,14 +121,31 @@ export function explainFatal(detail: unknown, depth = 0, seen = new Set<unknown>
   return inner.length === 0 ? head : `${head}\n${inner.join('\n')}`
 }
 
+/**
+ * A REPEAT IS COUNTED, NOT APPENDED. An error raised from a callback — a
+ * ResizeObserver, an animation frame — arrives once per frame, and every
+ * arrival was a new line until the banner filled its 40vh with copies of one
+ * report. Any line already showing the same text takes a count instead
+ * (`×N`), so a flood reads as one fault and distinct faults stay visible.
+ */
 export function reportFatal(label: string, detail: unknown): void {
-  const text = explainFatal(detail)
+  const text = `${label} — ${explainFatal(detail)}`
   // The console is still the better channel when devtools happen to be open;
   // the DOM surface below is the fallback for when they are not.
   console.error(label, detail)
+  const banner = host()
+  for (const line of Array.from(banner.children)) {
+    const seen = reported.get(line)
+    if (seen?.text !== text) continue
+    // Mutated in place: the count belongs to the line it labels.
+    seen.count += 1
+    line.textContent = `${text} (×${seen.count})`
+    return
+  }
   const line = document.createElement('div')
-  line.textContent = `${label} — ${text}`
-  host().append(line)
+  line.textContent = text
+  reported.set(line, { text, count: 1 })
+  banner.append(line)
 }
 
 export function installFatalHandlers(): void {
