@@ -168,16 +168,23 @@ describe('applyLayout', () => {
 
 describe('readingVars', () => {
   it('carries the stylesheet’s fields and the reading style with them', () => {
-    const vars = readingVars(settings())
+    const vars = readingVars(settings(), 720)
     expect(vars).toMatchObject({ stepIdx: 6, theme: 'paper', typeface: 'literata', align: 'justified' })
     expect(vars.style).toBe(DEFAULT_READING_STYLE)
+  })
+
+  /* THE PAGE'S HEIGHT RIDES ALONG, because the figure cap is a share of it and
+     nothing inside the book's iframe can measure the page — see
+     `BookCssOptions.pageHeight`. */
+  it('carries the page height it is given', () => {
+    expect(readingVars(settings(), 720).pageHeight).toBe(720)
   })
 
   /* THE MEASURE IS NOT A STYLESHEET FIELD. `Settings` carries it, the page
      margins, the flow and whether a turn animates; the stylesheet has never
      taken any of them, and passing one would be a variable nothing reads. */
   it('leaves out what the stylesheet does not take', () => {
-    const vars = readingVars(settings()) as unknown as Record<string, unknown>
+    const vars = readingVars(settings(), 720) as unknown as Record<string, unknown>
     for (const name of ['measure', 'pageMargins', 'paginated', 'animated']) {
       expect(vars[name], `${name} is not a stylesheet variable`).toBeUndefined()
     }
@@ -197,8 +204,8 @@ describe('applySettings', () => {
   it('does not rewrite the sheets when nothing about them moved', () => {
     const setStyles = vi.fn()
     const renderer = fakeRenderer({ setStyles } as Partial<Renderer>)
-    applySettings(renderer, settings())
-    applySettings(renderer, settings({ stepIdx: 9 }))
+    applySettings(renderer, settings(), 800)
+    applySettings(renderer, settings({ stepIdx: 9 }), 800)
     expect(setStyles).toHaveBeenCalledOnce()
   })
 
@@ -207,10 +214,18 @@ describe('applySettings', () => {
   it('writes them again for a different renderer', () => {
     const first = vi.fn()
     const second = vi.fn()
-    applySettings(fakeRenderer({ setStyles: first } as Partial<Renderer>), settings())
-    applySettings(fakeRenderer({ setStyles: second } as Partial<Renderer>), settings())
+    applySettings(fakeRenderer({ setStyles: first } as Partial<Renderer>), settings(), 800)
+    applySettings(fakeRenderer({ setStyles: second } as Partial<Renderer>), settings(), 800)
     expect(first).toHaveBeenCalledOnce()
     expect(second).toHaveBeenCalledOnce()
+  })
+
+  /* THE VARIABLES ARE THE CHANGE ITSELF, onto every document on screen, and
+     the figure cap among them is a share of the page height handed in. */
+  it('writes the variables onto every document on screen', () => {
+    const doc = document.implementation.createHTMLDocument('section')
+    applySettings(fakeRenderer({ getContents: () => [{ doc }] } as unknown as Partial<Renderer>), settings(), 800)
+    expect(doc.documentElement.style.getPropertyValue('--paper-figure-height')).toBe('760px')
   })
 
   /* `setStyles` IS OPTIONAL — the fixed-layout renderer does not implement it,
@@ -221,7 +236,7 @@ describe('applySettings', () => {
        `applySheets` is for. */
     const renderer = fakeRenderer()
     delete (renderer as { setStyles?: unknown }).setStyles
-    expect(() => applySettings(renderer, settings())).not.toThrow()
+    expect(() => applySettings(renderer, settings(), 800)).not.toThrow()
     expect(renderer.attributes.get('max-inline-size')).toBeTruthy()
   })
 })

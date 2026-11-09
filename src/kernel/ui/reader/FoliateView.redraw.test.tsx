@@ -61,6 +61,15 @@ vi.mock('./session', () => ({
 
 import { FoliateView } from './FoliateView'
 
+/* jsdom has no `ResizeObserver`, and the reader watches its stage's height
+   with one — the figure cap is a share of it. Observing nothing is enough
+   here; `FoliateView.session.test.tsx` drives the observer itself. */
+globalThis.ResizeObserver = class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as never
+
 afterEach(() => {
   cleanup()
   fake.redraws = 0
