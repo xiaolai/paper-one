@@ -1979,6 +1979,7 @@
     "scripts/gen-feature-ledger.test.mjs > the ledger’s Markdown table parser > splits on a delimiter that follows an escaped backslash",
     "scripts/gen-feature-ledger.test.mjs > the ledger’s Markdown table parser > still carries the cell the parser was originally written for",
     "scripts/gen-feature-ledger.test.mjs > the ledger’s Markdown table parser > treats the outer pipes as optional and an empty cell as a cell",
+    "scripts/kernel-entry.test.mjs > the kernel's public entry > counts a capability's code and the kernel's own tests as importers, and no capability's test",
     "scripts/kernel-entry.test.mjs > the kernel's public entry > excuses an orphan only for the capability whose cut it is listed under",
     "scripts/kernel-entry.test.mjs > the kernel's public entry > lists exactly what cutting each capability would orphan",
     "scripts/kernel-entry.test.mjs > the kernel's public entry > re-exports no module that nothing imports a name from",
