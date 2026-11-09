@@ -35,8 +35,14 @@ jobs:
         run: '! cargo tree --manifest-path src-tauri/Cargo.toml -i aws-lc-rs'
       - name: tauri ios build
         run: pnpm tauri ios build --ci --debug --target aarch64 --no-sign --archive-only -- --no-default-features --features ios
+      # Same fault as the apk step below: `**` is `*` to bash (3.2 here, which
+      # has no globstar), so the pattern never matched build/app_iOS.xcarchive
+      # and `|| true` passed the empty result. find, and fail on no archive.
       - name: Record archive size
-        run: du -sh src-tauri/gen/apple/build/**/*.xcarchive 2>/dev/null || true
+        run: |
+          archives=$(find src-tauri/gen/apple/build -name '*.xcarchive' -prune)
+          if [ -z "$archives" ]; then echo "::error::tauri ios build left no xcarchive"; exit 1; fi
+          echo "$archives" | while IFS= read -r a; do du -sh "$a"; done
   android:
     name: Android (aarch64, debug apk)
     runs-on: ubuntu-24.04
@@ -52,7 +58,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      # v3 installed the `tools` package by default, which current SDK
+      # repositories no longer carry, so the step failed before the NDK. v4
+      # installs only `platform-tools`; it is named here so a changed default
+      # cannot reintroduce a package that does not exist.
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
       - name: Install NDK
         run: sdkmanager "ndk;27.2.12479018" "platforms;android-34" "build-tools;34.0.0"
       - uses: dtolnay/rust-toolchain@stable
@@ -68,12 +80,26 @@ jobs:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
         run: pnpm tauri android init --ci
       - name: cargo check (android feature set)
+        # A bare cargo check runs outside the tauri CLI, which sets up the NDK for
+        # `tauri android build`; so crates with C code (ring) look for an unprefixed
+        # `aarch64-linux-android-clang` and fail. Point cc and the linker at the
+        # NDK's API-level wrapper; 24 is tauri's default minSdkVersion, which
+        # tauri.conf.json does not override.
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          CC_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          AR_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
         run: cargo check --manifest-path src-tauri/Cargo.toml -p app --target aarch64-linux-android --release --no-default-features --features android
       - name: tauri android build
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
         run: pnpm tauri android build --ci --debug --target aarch64 --apk -- --no-default-features --features android
+      # Without globstar bash reads `**` as `*`, so the old pattern missed the
+      # apk at apk/universal/debug/ and `|| true` hid it: the step printed
+      # nothing and passed. No apk is now a failure, not an empty line.
       - name: Record apk size
-        run: du -sh src-tauri/gen/android/app/build/outputs/apk/**/*.apk 2>/dev/null || true
+        run: |
+          apks=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk')
+          if [ -z "$apks" ]; then echo "::error::tauri android build left no apk"; exit 1; fi
+          echo "$apks" | while IFS= read -r a; do du -sh "$a"; done
