@@ -68,7 +68,7 @@
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-fs": "^2.5.1",
-    "foliate-js": "github:xiaolai/foliate-js#eef3cec5b1fb0e46c3417b67ae5175cb3c38603e",
+    "foliate-js": "github:xiaolai/foliate-js#f8754863fc2c2600db3dfa1a9c5f49ab6a32f7dc",
     "lucide-react": "^1.31.0",
     "pdfjs-dist": "6.2.108",
     "react": "^19.2.0",

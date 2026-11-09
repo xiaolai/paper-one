@@ -299,6 +299,25 @@ jobs:
         with:
           toolchain: 1.97.0
           components: rustfmt, clippy
+      # On 4730c0f `cargo test` died linking `libapp_lib.a` with "No space left
+      # on device"; later pushes passed, so the debug build of the whole
+      # workspace with `--all-targets` runs close to the runner's free space.
+      # The image's .NET, Android, Haskell and CodeQL toolchains are unused
+      # here, so they go. The 30 GB floor is about twice what the build used on
+      # run 42551546122: 107 GB free after this step, 93 GB in "Disk left after
+      # the build", with a warm rust-cache. Resize it from those two lines. It
+      # turns a full disk into a named failure before the build, not a link
+      # error halfway through it.
+      - name: Free disk for the Rust build
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+          free_gb=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          if [ "$free_gb" -lt 30 ]; then
+            echo "::error::only ${free_gb} GB free on /; the Rust build needs 30"
+            exit 1
+          fi
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
@@ -314,6 +333,9 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
+      - name: Disk left after the build
+        if: always()
+        run: df -h /
 
   # ⚠️ **THE MUTATION GATE, WHICH GATED NOTHING UNTIL NOW.**
   #

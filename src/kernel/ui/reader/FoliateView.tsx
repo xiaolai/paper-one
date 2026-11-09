@@ -182,13 +182,23 @@ interface Settings {
  * them — and `setStyles` is optional because the fixed-layout renderer does
  * not implement it.
  */
-export function applySettings(renderer: Renderer, settings: Settings): void {
+export function applySettings(renderer: Renderer, settings: Settings, pageHeight: number): void {
   applyLayout(renderer, settings)
   applySheets(renderer)
-  /* THE CHANGE ITSELF IS THE VARIABLES, and the sheets above almost never move.
-     Every document already on screen is written to here; one that arrives later
-     is written to as it loads — see `applyVars` in the session's deps. */
-  for (const { doc } of renderer.getContents()) applyBookVars(doc, readingVars(settings))
+  applyVarsToContents(renderer, settings, pageHeight)
+}
+
+/**
+ * The variables, onto every document the renderer has on screen.
+ *
+ * THE CHANGE ITSELF IS THE VARIABLES, and the sheets almost never move. Every
+ * document already on screen is written to here; one that arrives later is
+ * written to as it loads — see `applyVars` in the session's deps. Also run on
+ * its own when the stage changes height, because the figure cap is a share of
+ * it — see `BookCssOptions.pageHeight`.
+ */
+export function applyVarsToContents(renderer: Renderer, settings: Settings, pageHeight: number): void {
+  for (const { doc } of renderer.getContents()) applyBookVars(doc, readingVars(settings, pageHeight))
 }
 
 /**
@@ -198,7 +208,7 @@ export function applySettings(renderer: Renderer, settings: Settings): void {
  * measure, the page margins, the flow and whether a turn animates, none of
  * which the stylesheet has ever taken.
  */
-export function readingVars(settings: Settings): Parameters<typeof applyBookVars>[1] {
+export function readingVars(settings: Settings, pageHeight: number): Parameters<typeof applyBookVars>[1] {
   const base = {
     stepIdx: settings.stepIdx,
     theme: settings.theme,
@@ -208,7 +218,7 @@ export function readingVars(settings: Settings): Parameters<typeof applyBookVars
     contrast: settings.contrast,
     align: settings.align,
   }
-  return { ...base, style: settings.style }
+  return { ...base, style: settings.style, pageHeight }
 }
 
 /**
@@ -544,6 +554,10 @@ export function FoliateView({
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
    * the answer exists; the session reads this once, after the book is parsed. */
   const lastLocationRef = useRef(lastLocation)
+  /* THE STAGE'S HEIGHT, which the figure cap is a share of — see
+   * `BookCssOptions.pageHeight`. A ref, measured by the observer below, so a
+   * resize rewrites the variables without re-running any settings effect. */
+  const pageHeight = useRef(0)
 
   /* All four refs commit together, after render — see the note on `handlers`.
    * `useLayoutEffect` rather than `useEffect` because it runs before the
@@ -557,7 +571,46 @@ export function FoliateView({
     lastLocationRef.current = lastLocation
   })
 
-  useEffect(() => {
+  /* WATCH THE STAGE'S HEIGHT, and rewrite only the variables when it moves.
+   *
+   * A layout effect declared before the session's, so the first measurement
+   * is taken before startup reads it. The stage is `inset: 0` in its parent, so nothing
+   * the book renders can change its height — which is the property that makes
+   * this safe where the `vh` it replaces was not. Equal heights are skipped:
+   * the observer also reports width changes, which the cap does not read. */
+  // Stryker disable ArrayDeclaration: the only list here is the effect's dependencies, and any constant list never changes between renders, so the effect runs once either way
+  useLayoutEffect(() => {
+    const host = hostRef.current
+    // Stryker disable next-line ConditionalExpression: the host div is rendered unconditionally, so a layout effect always finds it; the guard is for the ref's type
+    if (!host) return
+    pageHeight.current = host.clientHeight
+    const observer = new ResizeObserver(() => {
+      const height = host.clientHeight
+      if (height === pageHeight.current) return
+      pageHeight.current = height
+      const renderer = sessionRef.current?.view?.renderer
+      if (!renderer) return
+      try {
+        applyVarsToContents(renderer, settings.current, height)
+      } catch (cause) {
+        console.error('Paper: resizing the figure cap failed', cause)
+      }
+    })
+    observer.observe(host)
+    return () => observer.disconnect()
+  }, [])
+  // Stryker restore ArrayDeclaration
+
+  /* ⚠️ **A LAYOUT EFFECT, BECAUSE OF WHEN ITS CLEANUP RUNS.** React removes
+   * the host from the document before it runs passive cleanups, and runs
+   * layout cleanups before it removes anything. Disposing tears foliate down,
+   * and foliate's `View.destroy` stops watching the section through
+   * `iframe.contentDocument` — null once the iframe is out of the document. So
+   * from a passive cleanup the section's ResizeObserver was never unobserved,
+   * fired on the dead iframe, and `View.expand()` threw a TypeError on every
+   * close. Starting here as well costs nothing: `start` is asynchronous, and
+   * the paint it would delay is of an empty stage. */
+  useLayoutEffect(() => {
     const host = hostRef.current
     if (!host || !file) return
 
@@ -681,6 +734,7 @@ export function FoliateView({
                   return
                 }
                 const request: PasswordAsk = {
+                  // Stryker disable next-line UpdateOperator: the id is only the sheet's React key, and counting down gives every asking a distinct key just as counting up does
                   id: askSeq.current++,
                   name: typeof input === 'string' ? input : input.name,
                   reason,
@@ -699,12 +753,13 @@ export function FoliateView({
         /* Asked after the fork has parsed the archive and before any section
          * loads — a DRM'd book is refused by name, not rendered as noise. */
         protection: protectionOf,
-        applySettings: (view: View) => applySettings(view.renderer, settings.current),
-        applyVars: (doc: Document) => applyBookVars(doc, readingVars(settings.current)),
+        applySettings: (view: View) => applySettings(view.renderer, settings.current, pageHeight.current),
+        applyVars: (doc: Document) => applyBookVars(doc, readingVars(settings.current, pageHeight.current)),
         styleNote: (view: View) => styleNoteView(view.renderer),
         lastLocation: () => lastLocationRef.current,
       })
       .then(() => {
+        // Stryker disable next-line ArithmeticOperator: `ready` is only ever compared with 0 and watched for change, and counting down from 0 never returns to 0 and changes every time
         if (!session.disposed) setReady((n) => n + 1)
       })
       /* `start` reports the failures it expects through `onError`; anything
@@ -747,7 +802,7 @@ export function FoliateView({
        * what keeps this the third construction site no longer (audit round 1,
        * #484). The deps below still say which props re-run this effect;
        * `measure` and `pageMargins` are deliberately not among them. */
-      applySettings(renderer, settings.current)
+      applySettings(renderer, settings.current, pageHeight.current)
       /* A theme change reaches open documents as VARIABLES — `applySettings`
        * writes `applyBookVars` into each; the sheets themselves are
        * identity-cached and almost never move — so no section rebuilds, no

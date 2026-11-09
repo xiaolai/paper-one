@@ -61,8 +61,8 @@ function fakeRenderer(): Renderer & { setStyles: ReturnType<typeof vi.fn> } {
 describe('pushing the book stylesheet', () => {
   it('writes it once, and not again when nothing has moved', () => {
     const renderer = fakeRenderer()
-    applySettings(renderer, settingsFor('sage'))
-    applySettings(renderer, settingsFor('sage'))
+    applySettings(renderer, settingsFor('sage'), 800)
+    applySettings(renderer, settingsFor('sage'), 800)
     /* The skip is the feature, not an optimisation — a second identical write
        re-parses the sheet in every open document. */
     expect(renderer.setStyles).toHaveBeenCalledTimes(1)
@@ -73,8 +73,8 @@ describe('pushing the book stylesheet', () => {
        made this tempting was foliate repainting its page edges here as a side
        effect; that is now the host's job, and this stays a skip. */
     const renderer = fakeRenderer()
-    applySettings(renderer, settingsFor('sage'))
-    applySettings(renderer, settingsFor('night'))
+    applySettings(renderer, settingsFor('sage'), 800)
+    applySettings(renderer, settingsFor('night'), 800)
     expect(renderer.setStyles).toHaveBeenCalledTimes(1)
   })
 
@@ -83,7 +83,7 @@ describe('pushing the book stylesheet', () => {
        the skip exists to stop. */
     const renderer = fakeRenderer()
     for (const measure of [660, 640, 628, 620]) {
-      applySettings(renderer, { ...settingsFor('sage'), measure })
+      applySettings(renderer, { ...settingsFor('sage'), measure }, 800)
     }
     expect(renderer.setStyles).toHaveBeenCalledTimes(1)
   })
@@ -91,8 +91,8 @@ describe('pushing the book stylesheet', () => {
   it('keys per renderer, because a note view has style elements of its own', () => {
     const page = fakeRenderer()
     const note = fakeRenderer()
-    applySettings(page, settingsFor('sage'))
-    applySettings(note, settingsFor('sage'))
+    applySettings(page, settingsFor('sage'), 800)
+    applySettings(note, settingsFor('sage'), 800)
     expect(page.setStyles).toHaveBeenCalledTimes(1)
     expect(note.setStyles).toHaveBeenCalledTimes(1)
   })

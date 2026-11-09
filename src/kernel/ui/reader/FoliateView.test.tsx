@@ -54,6 +54,15 @@ import { DEFAULT_READING_STYLE, DEFAULT_SPACING } from '../../core/metrics'
  * The browser client's own suite opens real books, over a real socket.
  */
 
+/* jsdom has no `ResizeObserver`, and the reader watches its stage's height
+   with one — the figure cap is a share of it. Observing nothing is enough
+   here; `FoliateView.session.test.tsx` drives the observer itself. */
+globalThis.ResizeObserver = class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as never
+
 afterEach(cleanup)
 
 const callbacks = () => ({

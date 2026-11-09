@@ -54,6 +54,7 @@ const settings = (style: Partial<ReadingStyle> = {}) => ({
   spacing: { letter: 1, word: 1, line: 1, paragraph: 1 },
   brightness: 1,
   contrast: 0,
+  pageHeight: 800,
   style,
 })
 
@@ -123,7 +124,33 @@ describe('the defaults are what Paper rendered before the settings existed', () 
     expect(stepAt(FIGURE_WIDTHS, DEFAULT_READING_STYLE.figureWidth)).toBe(95)
     expect(vars()['--paper-figure-width']).toBe('95%')
     expect(stepAt(FIGURE_HEIGHTS, DEFAULT_READING_STYLE.figureHeight)).toBe(95)
-    expect(vars()['--paper-figure-height']).toBe('95vh')
+    expect(vars()['--paper-figure-height']).toBe('760px')
+  })
+
+  /* THE CAP IS A SHARE OF THE PAGE, IN PIXELS, AND NEVER A VIEWPORT UNIT.
+     It was `95vh`, and inside the book's iframe `vh` is the iframe. In
+     scrolled flow foliate sizes the iframe to its content, so the cap grew
+     with the figure it capped: a ResizeObserver loop on every illustrated
+     Gutenberg book, and a page count that fell to zero. */
+  it('caps a figure by the measured page, never by the viewport', () => {
+    FIGURE_HEIGHTS.steps.forEach((share, figureHeight) => {
+      const cap = bookVars({ ...settings({ figureHeight }), pageHeight: 641 })['--paper-figure-height']
+      expect(cap, `step ${figureHeight}`).toBe(`${Math.round((share * 641) / 100)}px`)
+    })
+    expect(bookVars({ ...settings(), pageHeight: 641 })['--paper-figure-height']).toBe('609px')
+    for (const [name, value] of Object.entries(vars())) {
+      expect(value ?? '', name).not.toMatch(/\d[dsl]?v(?:h|w|min|max|b|i)\b/)
+    }
+  })
+
+  /* BEFORE THE STAGE IS MEASURED there is no page to take a share of. The
+     property is removed — `max-height` then falls back to `none` — rather
+     than written as a zero cap that would collapse every figure to nothing. */
+  it('leaves the cap off until the page has a height', () => {
+    for (const pageHeight of [0, -1, Number.NaN]) {
+      expect(bookVars({ ...settings(), pageHeight })['--paper-figure-height'], String(pageHeight)).toBeNull()
+    }
+    expect(bookVars({ ...settings(), pageHeight: 1 })['--paper-figure-height']).toBe('1px')
   })
 
   it('leaves the accessibility floor off', () => {
@@ -149,6 +176,24 @@ describe('the defaults are what Paper rendered before the settings existed', () 
        reset its blocks to the base since the 11.2px regression was fixed. */
     expect(v['--paper-fidelity-paper']).toBe('1')
     expect(v['--paper-note-prose']).toBe('1')
+  })
+
+  /* A SWITCH IS ON AS A VALUE. `setProperty(name, '')` removes the property,
+     so an empty string written for "on" would leave the switch off. */
+  it('turns each switch on with a value, never an empty string', () => {
+    const switches: [Partial<ReadingStyle>, string][] = [
+      [{ flourish: 'drop-cap' }, '--paper-drop-cap'],
+      [{ flourish: 'small-caps' }, '--paper-small-caps'],
+      [{ blockquote: 'tint' }, '--paper-quote-rule'],
+      [{ blockquote: 'tint' }, '--paper-quote-tint'],
+      [{ codeWrap: 'wrap' }, '--paper-code-wrap'],
+      [{ figureFrame: 'hairline' }, '--paper-figure-hairline'],
+      [{ figureFrame: 'shadow' }, '--paper-figure-shadow'],
+      [{ wideTables: 'shrink' }, '--paper-table-shrink'],
+      [{ figureScalesWithText: true }, '--paper-figure-scale'],
+      [{ cjkSpacing: true }, '--paper-cjk-space'],
+    ]
+    for (const [style, name] of switches) expect(vars(style)[name as keyof ReturnType<typeof vars>], name).toBe('1')
   })
 
   it('is the seed the app actually starts from', () => {

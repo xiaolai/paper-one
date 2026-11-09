@@ -76,7 +76,7 @@ describe('the stepped scales', () => {
     ['brightness', BRIGHTNESS, 'x', 1],
     ['contrast', CONTRAST, 'x', 0],
     ['figure width', FIGURE_WIDTHS, '%', 95],
-    ['figure height', FIGURE_HEIGHTS, 'vh', 95],
+    ['figure height', FIGURE_HEIGHTS, '%', 95],
     ['minimum size', MINIMUM_SIZES, 'px', 0],
     /* ⚠️ **THESE THREE WERE MISSING, AND THEY ARE THE NEWEST SCALES IN THE
        FILE.** The invariant this case holds — ordered, own unit, a default step
