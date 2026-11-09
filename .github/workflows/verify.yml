@@ -303,11 +303,11 @@ jobs:
       # on device"; later pushes passed, so the debug build of the whole
       # workspace with `--all-targets` runs close to the runner's free space.
       # The image's .NET, Android, Haskell and CodeQL toolchains are unused
-      # here, so they go. The 30 GB floor is a margin, not a measurement: what
-      # the build needs is the second `df` here minus the one in "Disk left
-      # after the build", and that is what to resize it from. It turns a full
-      # disk into a named failure before the build, not a link error halfway
-      # through it.
+      # here, so they go. The 30 GB floor is about twice what the build used on
+      # run 42551546122: 107 GB free after this step, 93 GB in "Disk left after
+      # the build", with a warm rust-cache. Resize it from those two lines. It
+      # turns a full disk into a named failure before the build, not a link
+      # error halfway through it.
       - name: Free disk for the Rust build
         run: |
           df -h /
