@@ -1,6 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { CapabilityContext, Command, CommandContext, Disposable, KernelServices, ReaderContext } from '../../kernel'
+import {
+  composeCapabilities,
+  createKernelServices,
+  defineSetting,
+  kernelApi,
+  readSwitchedOff,
+  type CapabilityContext,
+  type Command,
+  type CommandContext,
+  type Disposable,
+  type KernelServices,
+  type ReaderContext,
+} from '../../kernel'
 
 const seam = vi.hoisted(() => ({ invoke: vi.fn<(command: string) => Promise<unknown>>() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: seam.invoke }))
@@ -38,7 +50,6 @@ describe('what the app is offered', () => {
        them composes and simply has no row. */
     expect(narration.id).toBe('narration')
     expect(narration.requires).toEqual([])
-    expect(narration.toggle).toBeUndefined()
   })
 
   it('is available where the plugin says it can package, and not where it says not', async () => {
@@ -139,6 +150,69 @@ describe('the palette row', () => {
     withdraw = null
     expect(() => found.run(), 'a press after the host has gone does nothing').not.toThrow()
     expect(second).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('its switch', () => {
+  const launch = (switchedOff: ReadonlySet<string>) => {
+    const services = createKernelServices({ fs: null, storage: null })
+    return composeCapabilities([narration], kernelApi(services), new AbortController().signal, { switchedOff }).then(
+      (composition) => ({ services, composition }),
+    )
+  }
+
+  it('words its switch without saying plugin or capability, and says what off does', () => {
+    expect(narration.toggle?.title).toBe('Audiobook export')
+    expect(`${narration.toggle?.title} ${narration.toggle?.summary}`).not.toMatch(/plugin|capability/iu)
+    expect(narration.toggle?.summary).toMatch(/\bOff, the command is gone, and the audiobooks you made stay\b/u)
+  })
+
+  it('off, offers no row and draws no host, and does not ask the plugin', async () => {
+    Object.assign(window, { __TAURI_INTERNALS__: {} })
+    seam.invoke.mockResolvedValue(true)
+    const { composition } = await launch(new Set(['narration']))
+    /* A control left over from anything else would otherwise be offered: off
+       must mean the capability contributes nothing at all. */
+    offer(false)
+    expect(composition.commands(ctx)).toEqual([])
+    expect(composition.windowHosts).toEqual([])
+    expect(seam.invoke).not.toHaveBeenCalled()
+    composition.dispose()
+  })
+
+  it('on, offers the row through the composition', async () => {
+    Object.assign(window, { __TAURI_INTERNALS__: {} })
+    seam.invoke.mockResolvedValue(true)
+    const { composition } = await launch(new Set())
+    offer(false)
+    expect(row(composition.commands(ctx))?.label).toBe('Export as audiobook…')
+    expect(composition.windowHosts.map((host) => host.id)).toEqual(['narration:export'])
+    composition.dispose()
+  })
+
+  it('turned off during an export, leaves that export running and its stop in the palette', async () => {
+    /* ⚠️ **A SWITCH TAKES EFFECT AT THE NEXT LAUNCH**, because nothing can take
+       one capability down mid-run. So the export the reader started goes on,
+       and the stop row stays, because a running export the reader cannot stop
+       is the one outcome a switch must not produce. */
+    Object.assign(window, { __TAURI_INTERNALS__: {} })
+    seam.invoke.mockResolvedValue(true)
+    const { services, composition } = await launch(new Set())
+    const press = vi.fn()
+    offer(true, press)
+    /* THE READER'S OFF-LIST, written where Optional features writes it; the
+       next launch reads it back through `readSwitchedOff`. */
+    const pluginsOff = defineSetting<readonly string[]>('kernel.pluginsOff', [], (raw) =>
+      Array.isArray(raw) ? (raw as string[]) : undefined,
+    )
+    services.settings.set(pluginsOff, ['narration'])
+    expect(readSwitchedOff(services.settings).has('narration'), 'switched off for the next launch').toBe(true)
+
+    const stop = row(composition.commands({ ...ctx, hasBook: false }))
+    expect(stop?.label).toBe('Stop exporting the audiobook')
+    void stop?.run()
+    expect(press).toHaveBeenCalledTimes(1)
+    composition.dispose()
   })
 })
 

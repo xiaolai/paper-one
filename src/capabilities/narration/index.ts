@@ -18,9 +18,12 @@ import { ExportHost } from './ui/ExportHost'
  * offer, and the host answers no control — but a build without voices still
  * composes with this, and simply has no row.
  *
- * ⚠️ **NO SWITCH OF ITS OWN**, because one would switch nothing: switching the
- * voices off already takes the row away, and its crate opens nothing until a
- * command asks it to (`NarrationState`).
+ * ⚠️ **ITS OWN SWITCH, BESIDE THE VOICES'.** A reader who keeps the voices
+ * for reading aloud may not want the export, so this switch takes away only the
+ * row. Off means off because its crate opens nothing until a command asks it to
+ * (`NarrationState`). Like every switch it takes effect at the next launch, so
+ * an export running when it is turned off goes on, and keeps its stop row,
+ * until it ends or is stopped (`dev-docs/decisions/2026-10-31-plugin-boundary.md`, D5).
  */
 
 /** The kernel's services, from `start` until its disposer. */
@@ -29,6 +32,11 @@ let services: KernelServices | null = null
 export const narration: Capability = {
   id: 'narration',
   requires: [],
+  toggle: {
+    title: 'Audiobook export',
+    summary:
+      'Make an audiobook of the open book, read in the voice you listen with. Off, the command is gone, and the audiobooks you made stay where you saved them.',
+  },
 
   /* THE PLUGIN SAYS WHETHER IT CAN PACKAGE HERE — see `narrationSupported`. */
   available: () => narrationSupported(),
