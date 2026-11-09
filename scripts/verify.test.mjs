@@ -56,6 +56,8 @@ describe('the steps', () => {
       'typecheck',
       'test:coverage',
       'build',
+      'build:ios',
+      'build:android',
       'build:web',
       'build:cli',
       'cargo metadata --locked',
@@ -128,6 +130,8 @@ describe('the command each step runs', () => {
       'pnpm typecheck',
       'pnpm test:coverage',
       'pnpm build',
+      'pnpm build:ios',
+      'pnpm build:android',
       'pnpm build:web',
       'pnpm build:cli',
       `cargo metadata --locked --format-version 1 ${cargo}`,
@@ -216,7 +220,7 @@ describe('spawnStep', () => {
 describe('parseArgs', () => {
   it('selects steps with --from and --only, lists with --list, refuses the rest', () => {
     expect(parseArgs([]).steps.map((s) => s.name)).toEqual(STEPS.map((s) => s.name))
-    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'build:web', 'build:cli', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace', 'docs:rust-notices --check'])
+    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'build:ios', 'build:android', 'build:web', 'build:cli', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace', 'docs:rust-notices --check'])
     expect(parseArgs(['--only', 'boundaries']).steps.map((s) => s.name)).toEqual(['boundaries'])
     expect(parseArgs(['--from', 'build', '--only', 'cargo fmt --check']).steps.map((s) => s.name)).toEqual(['cargo fmt --check'])
     expect(parseArgs(['--list'])).toEqual({ list: true })
@@ -253,7 +257,7 @@ describe('parseArgs', () => {
     expect(parseArgs(['--until', 'compositions:check']).steps.map((s) => s.name)).toEqual(['architecture:check', 'compositions:check'])
     expect(parseArgs(['--until', 'build:cli']).steps.map((s) => s.name).at(-1)).toBe('build:cli')
     expect(parseArgs(['--until', 'build:cli']).steps.map((s) => s.name)).not.toContain('cargo metadata --locked')
-    expect(parseArgs(['--from', 'build', '--until', 'build:web']).steps.map((s) => s.name)).toEqual(['build', 'build:web'])
+    expect(parseArgs(['--from', 'build', '--until', 'build:web']).steps.map((s) => s.name)).toEqual(['build', 'build:ios', 'build:android', 'build:web'])
     expect(parseArgs(['--from', 'build:web', '--until', 'build'])).toEqual({
       error: '--from "build:web" and --until "build" select no steps; --until and --only must name a step at or after --from',
     })

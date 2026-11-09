@@ -96,6 +96,17 @@ export const STEPS = Object.freeze([
   { name: 'typecheck', cmd: 'pnpm', args: ['typecheck'] },
   { name: 'test:coverage', cmd: 'pnpm', args: ['test:coverage'] },
   { name: 'build', cmd: 'pnpm', args: ['build'] },
+  /* THE PHONE BUILDS, each asserting its own bundle. `assert-bundle` refuses a
+   * capability module on a platform the manifest does not list, and a module
+   * outside `narration` that names the Web Speech API on a platform without
+   * it. Those refusals are what keep read-aloud off the phone: since step 5.5
+   * the voice code lives in `narration`, which is desktop-only. Before
+   * these steps the canonical gate built iOS only inside `test:coverage`, as
+   * `assert-bundle`'s real-build case, and Android not at all, so an Android
+   * bundle that grew a desktop module was caught only by `verify:without`.
+   * About 5s each. */
+  { name: 'build:ios', cmd: 'pnpm', args: ['build:ios'] },
+  { name: 'build:android', cmd: 'pnpm', args: ['build:android'] },
   /* THE BROWSER CLIENT IS A THIRD BUILD, and until phase 18 nothing here ran
    * it. `build` is the DESKTOP bundle: a different Vite config, a different
    * entry (`src/main.web.tsx`), a different composition root, and its own
