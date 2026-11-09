@@ -368,11 +368,17 @@ export async function narrationPlatform(
     },
     /**
      * Remove the book at the destination the reader chose — only ever called
-     * for a book this export wrote, and refused by the plugin for one that was
+     * for a book this export wrote, and kept by the plugin for one that was
      * there before the export committed.
      */
     discardBook: async (destination) => {
-      await invoke('plugin:narration|narration_discard_book', { destination })
+      const answer: unknown = await invoke('plugin:narration|narration_discard_book', { destination })
+      /* A missing answer read as "removed" would tell the reader their book was
+         gone while it sat at the name they chose. */
+      if (answer !== 'removed' && answer !== 'kept') {
+        throw new Error('the plugin could not say what became of the book')
+      }
+      return answer
     },
   }
 }

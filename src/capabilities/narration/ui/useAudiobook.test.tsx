@@ -550,6 +550,7 @@ function engine(over: Partial<AudiobookPlatform> = {}) {
     },
     discardBook: async (destination: string) => {
       books.push(destination)
+      return 'removed' as const
     },
     discardScratch: async () => {},
     exists: async () => false,
@@ -764,6 +765,36 @@ describe('a stop that came too late to undo the file', () => {
 
     expect(say).toHaveBeenLastCalledWith(
       'The export was stopped, but the book had already been written over the file you chose.',
+    )
+  })
+
+  it('says the book is still where the reader chose when it could not be removed', async () => {
+    /* ⚠️ **THIS WAS CALLED "One temporary audio file could not be removed."** —
+       about the audiobook at the name the reader typed, which is not where a
+       temporary file would be looked for. */
+    const joining = gate()
+    let reached = false
+    engine({
+      package: async (job) => {
+        reached = true
+        await joining.shut
+        return { name: 'A Measured Book.m4b', durationMs: 180_000, chapters: job.chapters.length }
+      },
+      discardBook: async () => {
+        throw new Error('the book is open elsewhere')
+      },
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+      await vi.waitFor(() => expect(reached).toBe(true))
+    })
+    await act(async () => {
+      seen.at(-1)?.run()
+      joining.open()
+    })
+    expect(say).toHaveBeenLastCalledWith(
+      'The export was stopped, but the book it had written could not be removed from where you chose.',
     )
   })
 })

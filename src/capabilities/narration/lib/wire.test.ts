@@ -298,8 +298,19 @@ describe('the lease, the destination, and the book', () => {
        token and never the path. */
     const platform = await narrationPlatform([PACK], voices())
     tauri.invoked = []
-    await platform.discardBook('destination:1')
+    tauri.answers.set('plugin:narration|narration_discard_book', 'removed')
+    await expect(platform.discardBook('destination:1')).resolves.toBe('removed')
     expect(tauri.invoked).toEqual([['plugin:narration|narration_discard_book', { destination: 'destination:1' }]])
+  })
+
+  it('passes on a book the plugin kept, and refuses any other answer about it', async () => {
+    /* A missing answer read as "removed" would tell the reader their book was
+       gone while it sat at the name they chose. */
+    const platform = await narrationPlatform([PACK], voices())
+    tauri.answers.set('plugin:narration|narration_discard_book', 'kept')
+    await expect(platform.discardBook('destination:1')).resolves.toBe('kept')
+    tauri.answers.set('plugin:narration|narration_discard_book', undefined)
+    expect((await refusalOf(platform.discardBook('destination:1'))).message).toMatch(/what became of the book/u)
   })
 
   it('asks the plugin whether the destination is already there', async () => {

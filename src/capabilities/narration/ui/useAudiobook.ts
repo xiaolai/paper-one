@@ -263,9 +263,18 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
            * NEITHER — so it is kept, and this is the sentence that says so. Without
            * it the notice claimed *"Nothing was left behind"* over a file that had
            * replaced one of theirs. */
-          if (cause.kept) {
+          if (cause.book === 'replaced') {
             say(
               `The export was stopped, but the book had already been written over the file you chose.${leftBehindNote(cause.leftBehind)}`,
+            )
+            return
+          }
+          /* THE BOOK ITSELF, NAMED AS THE BOOK. A removal the plugin refused
+             leaves the audiobook at the name the reader typed, and calling it a
+             temporary file would send them looking in the wrong place. */
+          if (cause.book === 'stuck') {
+            say(
+              `The export was stopped, but the book it had written could not be removed from where you chose.${leftBehindNote(cause.leftBehind)}`,
             )
             return
           }

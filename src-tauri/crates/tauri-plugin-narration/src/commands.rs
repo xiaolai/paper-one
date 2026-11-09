@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::destination::Destinations;
+use crate::destination::{Destinations, Discard};
 use crate::inputs::{read_chapter, Roots};
 use crate::limits;
 use crate::narrate::{apple, m4b, offload, Packaged, SUPPORTED, UNSUPPORTED};
@@ -340,12 +340,13 @@ pub async fn narration_exists(
     state.ready()?.destinations.exists(&destination)
 }
 
-/// Remove the book an export wrote — see `Destinations::discard_book`.
+/// Remove the book an export wrote, or say it was kept — see
+/// `Destinations::discard_book`.
 #[tauri::command]
 pub async fn narration_discard_book(
     state: State<'_, NarrationState>,
     destination: String,
-) -> Result<(), String> {
+) -> Result<Discard, String> {
     state.ready()?.destinations.discard_book(&destination)
 }
 

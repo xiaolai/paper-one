@@ -510,12 +510,13 @@ fn a_book_that_replaced_a_file_is_never_discarded() {
     f.ready
         .package(&request(&f, vec![scratch(0)]))
         .expect("packages");
-    let error = f
-        .ready
-        .destinations
-        .discard_book(&f.token)
-        .expect_err("kept");
-    assert!(error.contains("already at that destination"), "{error}");
+    assert_eq!(
+        f.ready
+            .destinations
+            .discard_book(&f.token)
+            .expect("answers"),
+        crate::destination::Discard::Kept
+    );
     assert!(book.is_file());
 }
 

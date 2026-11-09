@@ -318,7 +318,7 @@ describe('the voice and pace it exports in', () => {
         throw new Error('not reached')
       },
       discard: async () => {},
-      discardBook: async () => {},
+      discardBook: async () => 'removed' as const,
       discardScratch: async () => {},
       exists: async () => false,
     }

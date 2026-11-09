@@ -150,10 +150,16 @@ export interface AudiobookPlatform {
    *
    * The two are separate because the AUTHORITY is: scratch is the plugin's own
    * directory, and the destination is the one the reader named in the save
-   * dialog, held by the plugin behind a token. The plugin also refuses this for
-   * a destination that existed before the export wrote it.
+   * dialog, held by the plugin behind a token.
+   *
+   * ⚠️ **IT ANSWERS `'kept'` FOR A DESTINATION THAT EXISTED BEFORE THE EXPORT
+   * WROTE IT, RATHER THAN REFUSING.** It refused, so a book kept over the
+   * reader's own file was counted as a temporary file that would not go, and the
+   * reader was told exactly that. The plugin checked at the moment it wrote the
+   * file, which is later and truer than `exists` before the join, so its answer
+   * wins where the two disagree.
    */
-  discardBook: (destination: string) => Promise<void>
+  discardBook: (destination: string) => Promise<'removed' | 'kept'>
   /**
    * Remove whatever is left of THIS export's scratch, once the chapters are gone.
    *
@@ -240,6 +246,22 @@ export interface AudiobookResult {
 }
 
 /** A stop the reader asked for — not a failure, and reported as neither. */
+/**
+ * What a stopped export left at the name the reader chose.
+ *
+ * - `gone`: nothing of this export is there — it never wrote the book, or it
+ *   removed it.
+ * - `replaced`: it wrote the book over a file the reader already had, and kept
+ *   it, because removing it would leave them with neither.
+ * - `stuck`: it wrote the book and the removal was refused, so the book is
+ *   still there.
+ *
+ * ⚠️ **NOT A COUNT OF FILES.** A book that would not go was added to
+ * `leftBehind`, and the reader was told one temporary audio file could not be
+ * removed — about the audiobook at the name they had typed.
+ */
+export type StoppedBook = 'gone' | 'replaced' | 'stuck'
+
 export class ExportCancelled extends Error {
   /**
    * @param leftBehind How many scratch files survived the tidy-up, for the same
@@ -257,14 +279,14 @@ export class ExportCancelled extends Error {
   constructor(
     readonly leftBehind = 0,
     /**
-     * Whether the book was written anyway, over one that was already there.
+     * What became of the book — see `StoppedBook`.
      *
-     * ⚠️ **THE STOP CAME TOO LATE TO UNDO IT, AND SAYING SO IS THE ONLY HONEST
-     * THING LEFT.** The join cannot be interrupted; once it has run over a file
-     * the reader already had, removing the result would leave them with neither.
-     * So it is kept, and this is what lets the caller say why.
+     * ⚠️ **THE STOP CAN COME TOO LATE TO UNDO IT, AND SAYING SO IS THE ONLY
+     * HONEST THING LEFT.** The join cannot be interrupted; once it has run over a
+     * file the reader already had, removing the result would leave them with
+     * neither. So it is kept, and this is what lets the caller say why.
      */
-    readonly kept = false,
+    readonly book: StoppedBook = 'gone',
   ) {
     super('the export was stopped')
     this.name = 'ExportCancelled'
@@ -491,14 +513,21 @@ export async function exportAudiobook(
          REPLACED leaves the reader with neither book, because the join has
          already overwritten what was there. */
       if (replaced) {
-        throw new ExportCancelled(leftBehind, true)
+        throw new ExportCancelled(leftBehind, 'replaced')
       }
       /* THE BOOK AT THE READER'S OWN NAME, through the operation that can reach
-         it — see `discardBook`, which records what calling `discard` here cost. */
-      await platform.discardBook(request.destination).catch(() => {
-        leftBehind += 1
-      })
-      throw new ExportCancelled()
+         it — see `discardBook`, which records what calling `discard` here cost.
+         ⚠️ **ITS ANSWER WINS OVER `replaced`**: the plugin looked when it wrote
+         the file. A refusal leaves the book where it is, which is `stuck`, and
+         is not a temporary file. */
+      let book: StoppedBook = 'stuck'
+      await platform.discardBook(request.destination).then(
+        (answer) => {
+          book = answer === 'kept' ? 'replaced' : 'gone'
+        },
+        () => {},
+      )
+      throw new ExportCancelled(leftBehind, book)
     }
     await tidy()
     return {
@@ -514,6 +543,6 @@ export async function exportAudiobook(
        to assert "nothing was left behind" with nothing checking it. A genuine
        failure carries the engine's sentence instead and says nothing about
        scratch — `narrate` names what it refused, and that is what to show. */
-    throw cause instanceof ExportCancelled ? new ExportCancelled(leftBehind, cause.kept) : cause
+    throw cause instanceof ExportCancelled ? new ExportCancelled(leftBehind, cause.book) : cause
   }
 }

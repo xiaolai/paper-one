@@ -22,6 +22,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use serde::Serialize;
+
 use crate::limits::{Refused, MAX_LIVE_TOKENS};
 use crate::scratch::random_hex;
 use crate::staged::Staged;
@@ -29,6 +31,22 @@ use crate::staged::Staged;
 /// How many finished tokens are remembered, so a late `exists` or `discard`
 /// still has an answer. The oldest are forgotten first.
 const KEPT_FINISHED: usize = 32;
+
+/// What a discard did with the book at a token's destination.
+///
+/// ⚠️ **A KEPT BOOK IS AN ANSWER, NOT A REFUSAL.** It was an error, so the
+/// window could not tell it from a removal that failed, and counted the book it
+/// had written over the reader's file as a temporary file left behind. Only
+/// this side knows what was there at the commit, so it says which it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Discard {
+    /// The book this export wrote is gone.
+    Removed,
+    /// A file was at the destination before the export wrote it, so the book
+    /// is kept: removing it would leave the reader with neither.
+    Kept,
+}
 
 /// A file's identity, so a discard removes the file this export wrote and not
 /// one that took its name afterwards.
@@ -240,18 +258,14 @@ impl Destinations {
     }
 
     /// Remove the book a token's package wrote — only once, only after the
-    /// package, and only where nothing was at the destination before it.
-    pub fn discard_book(&self, token: &str) -> Result<(), String> {
+    /// package, and only where nothing was at the destination before it; where
+    /// something was, the book is kept and the answer says so.
+    pub fn discard_book(&self, token: &str) -> Result<Discard, String> {
         let mut book = self.lock()?;
         let entry = book.entries.get_mut(token).ok_or_else(unknown)?;
         let id = match entry.phase {
             Phase::Committed { existed: false, id } => id,
-            Phase::Committed { existed: true, .. } => {
-                return Err(
-                    "a file was already at that destination before the export, so it is kept"
-                        .to_owned(),
-                )
-            }
+            Phase::Committed { existed: true, .. } => return Ok(Discard::Kept),
             Phase::Discarded => return Err("that book has already been removed".to_owned()),
             Phase::Picked | Phase::Packaging { .. } => {
                 return Err("that book has not been written".to_owned())
@@ -267,7 +281,7 @@ impl Destinations {
         std::fs::remove_file(&entry.target)
             .map_err(|error| format!("cannot remove the exported book: {error}"))?;
         entry.phase = Phase::Discarded;
-        Ok(())
+        Ok(Discard::Removed)
     }
 
     /// The phase of a token, for tests.
@@ -393,7 +407,10 @@ mod tests {
         destinations
             .commit(&token, staged_with(&target, b"book"))
             .expect("commit");
-        destinations.discard_book(&token).expect("discard");
+        assert_eq!(
+            destinations.discard_book(&token).expect("discard"),
+            Discard::Removed
+        );
         assert_eq!(destinations.phase(&token), Some(Phase::Discarded));
         /* A NEW FILE AT THE NAME IS NOT TAKEN BY A SECOND DISCARD. */
         std::fs::write(&target, b"new").expect("new");
@@ -402,16 +419,18 @@ mod tests {
     }
 
     #[test]
-    fn a_discard_refuses_where_the_destination_existed_before_the_commit() {
+    fn a_discard_keeps_a_book_where_the_destination_existed_before_the_commit() {
         let (_dir, target, destinations, token) = picked();
         std::fs::write(&target, b"an earlier book").expect("earlier");
         destinations.claim(&token).expect("claim");
         destinations
             .commit(&token, staged_with(&target, b"book"))
             .expect("commit");
-        let error = destinations.discard_book(&token).expect_err("refuses");
-        assert!(error.contains("already at that destination"), "{error}");
-        assert!(target.exists());
+        assert_eq!(
+            destinations.discard_book(&token).expect("answers"),
+            Discard::Kept
+        );
+        assert_eq!(std::fs::read(&target).expect("read"), b"book");
     }
 
     #[cfg(unix)]
@@ -555,6 +574,16 @@ mod tests {
         }
         assert_eq!(destinations.phase(&tokens[0]), None);
         assert!(destinations.phase(&tokens[KEPT_FINISHED + 2]).is_some());
+    }
+
+    /// The two words the window reads — see `wire.ts`'s `discardBook`.
+    #[test]
+    fn a_discard_answers_the_window_in_its_own_words() {
+        assert_eq!(
+            serde_json::to_value(Discard::Removed).expect("json"),
+            "removed"
+        );
+        assert_eq!(serde_json::to_value(Discard::Kept).expect("json"), "kept");
     }
 
     #[test]

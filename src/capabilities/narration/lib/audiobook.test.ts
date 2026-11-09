@@ -74,6 +74,7 @@ function fake(overrides: Partial<AudiobookPlatform> = {}) {
     }),
     discardBook: vi.fn(async (destination: string) => {
       books.push(destination)
+      return 'removed' as const
     }),
     releaseClips: vi.fn(async (paths: readonly string[]) => {
       released.push([...paths])
@@ -152,10 +153,10 @@ describe('exportAudiobook', () => {
     )
 
     expect(stopped).toBeInstanceOf(ExportCancelled)
-    expect((stopped as ExportCancelled).kept, 'the caller can say why').toBe(true)
-    /* ⚠️ **AND THE DEFAULT IS `false`, WHICH ONLY AN ORDINARY STOP CAN SHOW —
+    expect((stopped as ExportCancelled).book, 'the caller can say why').toBe('replaced')
+    /* ⚠️ **AND THE DEFAULT IS `'gone'`, WHICH ONLY AN ORDINARY STOP CAN SHOW —
        FOUND BY THE MUTATION SWEEP.** Every `new ExportCancelled()` in this file
-       takes it, so a default of `true` would have every stopped export tell the
+       takes it, so a default of `'replaced'` would have every stopped export tell the
        reader their own file had been written over. The case below is the same
        export with nothing at the destination. */
     expect(books, 'the book the reader already had is not taken from them too').toEqual([])
@@ -313,7 +314,7 @@ describe('exportAudiobook', () => {
       () => null,
       (cause: unknown) => cause,
     )
-    expect((stopped as ExportCancelled).kept, 'nothing of the reader’s was replaced').toBe(false)
+    expect((stopped as ExportCancelled).book, 'nothing of the reader’s was replaced').toBe('gone')
   })
 
   it('reports a stop asked for while the chapters are being joined', async () => {
@@ -506,10 +507,10 @@ describe('exportAudiobook', () => {
     expect(discarded).toEqual([0, 1])
   })
 
-  it('counts a part-joined book it could not remove after a stop during the join', async () => {
+  it('reports a part-joined book it could not remove as the book, not as a temporary file', async () => {
     /* The book at the reader's chosen name is removed on the way out of a stop
-       during the join; when that removal fails, it is one more file left behind
-       — and the reader is told, rather than told nothing was. */
+       during the join; when that removal fails, the book is still there — and
+       the reader is told that, rather than that a temporary file was left. */
     let joining = false
     const { platform } = fake({
       package: vi.fn(async () => {
@@ -528,7 +529,32 @@ describe('exportAudiobook', () => {
       (e: unknown) => e,
     )
     expect(cause).toBeInstanceOf(ExportCancelled)
-    expect((cause as ExportCancelled).leftBehind, 'the part-joined book, and nothing else').toBe(1)
+    expect((cause as ExportCancelled).book).toBe('stuck')
+    expect((cause as ExportCancelled).leftBehind, 'the book is not scratch').toBe(0)
+  })
+
+  it('keeps the book where the plugin says a file was there, whatever the question before the join answered', async () => {
+    /* ⚠️ **THE TWO CAN DISAGREE**: the question before the join can be refused,
+       which reads as "nothing there", and a file can arrive between it and the
+       write. The plugin looked when it wrote, so its answer is the one told. */
+    let joining = false
+    const { platform } = fake({
+      exists: vi.fn(async () => {
+        throw new Error('the destination could not be read')
+      }),
+      package: vi.fn(async () => {
+        joining = true
+        return { name: 'book.m4b', durationMs: 1234, chapters: 2 }
+      }),
+      discardBook: vi.fn(async () => 'kept' as const),
+    })
+    const cause = await exportAudiobook(platform, request({ cancelled: () => joining })).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(cause).toBeInstanceOf(ExportCancelled)
+    expect((cause as ExportCancelled).book).toBe('replaced')
+    expect((cause as ExportCancelled).leftBehind, 'a kept book is not scratch').toBe(0)
   })
 
   it('passes a genuine failure out as the engine’s own error, carrying no count', async () => {
@@ -554,6 +580,7 @@ describe('exportAudiobook', () => {
     expect(stop.message).toBe('the export was stopped')
     expect(stop.leftBehind).toBe(3)
     expect(new ExportCancelled().leftBehind, 'a stop with nothing counted left nothing').toBe(0)
+    expect(new ExportCancelled().book, 'a stop with nothing said wrote nothing').toBe('gone')
   })
 
   it('reports progress per chapter and once for the join', async () => {
