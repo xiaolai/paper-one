@@ -6218,6 +6218,7 @@
     "src/capabilities/narration/ui/ReadingHost.test.tsx > the host > reaches the control when a reading starts and when it stops",
     "src/capabilities/narration/ui/ReadingHost.test.tsx > the host > reads the document the surface committed, and the next one",
     "src/capabilities/narration/ui/ReadingHost.test.tsx > the host > says what book there is, and its language, from the surface",
+    "src/capabilities/narration/ui/ReadingHost.test.tsx > the host > withdraws from a store it is no longer given, and publishes to the one it is",
     "src/capabilities/narration/ui/ReadingHost.test.tsx > the host > withdraws what it said when it goes",
     "src/capabilities/narration/ui/ReadingHost.test.tsx > the pace, as the book’s own turning sees it > is held when a reading starts",
     "src/capabilities/narration/ui/ReadingHost.test.tsx > the pace, as the book’s own turning sees it > is let go when the book closes under a reading",

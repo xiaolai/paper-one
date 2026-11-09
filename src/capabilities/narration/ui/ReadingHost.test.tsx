@@ -15,7 +15,7 @@ import { RATE_SETTING, VOICE_SETTING, VOLUME_SETTING } from '../lib/settings'
 import { FakeSynth, FakeUtterance } from '../lib/speechSynth.testkit'
 import { NO_GOOD_VOICE, type VoiceFacts } from '../lib/voiceChoice'
 import { ListenControl } from './ListenControl'
-import { createReadingStore, type Reading } from './reading'
+import { createReadingStore, type Reading, type ReadingStore } from './reading'
 import { ReadingHost } from './ReadingHost'
 
 /**
@@ -116,18 +116,20 @@ function mount(
   const services = over.services ?? createKernelServices({ fs: null, storage: null })
   const settings = over.settings ?? narrationSettings()
   const api: { driver: SurfaceDriver | null } = { driver: null }
-  const set: { doc?: (doc: Document | null) => void } = {}
+  const set: { doc?: (doc: Document | null) => void; store?: (store: ReadingStore) => void } = {}
   const paging = { next: () => {}, prev: () => {} }
   const walk: BookFacts['sectionTexts'] = async () => ({ sections: [], complete: true })
   function Parent() {
     const [doc, setDoc] = useState(first)
+    const [host, setHost] = useState(store)
     set.doc = setDoc
+    set.store = setHost
     const book = useMemo(() => ({ ...FACTS, doc, sectionTexts: walk }), [doc])
     const driver = useReadingSurface({ doc, place: { bookId: 'book:1', sectionIndex: 0 }, paging, book })
     api.driver = driver
     return (
       <>
-        <ReadingHost context={{ sectionKey: doc, surface: driver.surface }} services={services} settings={settings} store={store} />
+        <ReadingHost context={{ sectionKey: doc, surface: driver.surface }} services={services} settings={settings} store={host} />
         {over.withControl === false ? null : <ListenControl store={store} settings={settings} />}
       </>
     )
@@ -190,6 +192,14 @@ describe('the host', () => {
     expect(store.read()).not.toBeNull()
     view.unmount()
     expect(store.read()).toBeNull()
+  })
+
+  it('withdraws from a store it is no longer given, and publishes to the one it is', () => {
+    const { store, set } = mount(page('<p>Words.</p>'), { withControl: false })
+    const next = createReadingStore()
+    act(() => set.store?.(next))
+    expect(store.read(), 'the store it was given before').toBeNull()
+    expect(next.read()?.hasBook).toBe(true)
   })
 
   it('publishes the voices this machine has, as they arrive', () => {
