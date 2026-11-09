@@ -43,6 +43,8 @@ const sessions = vi.hoisted(() => ({
     deps: Record<string, unknown>[]
     disposed: number
     settings: number
+    /** Whether the host was still in the document at each `dispose`. */
+    hostConnectedAtDispose: boolean[]
   }[],
   /** Held open until a test settles it — this is what "mid-startup" means. */
   finish: null as null | (() => void),
@@ -60,8 +62,11 @@ vi.mock('./session', async (importOriginal) => {
         deps: [] as Record<string, unknown>[],
         disposed: 0,
         settings: 0,
+        hostConnectedAtDispose: [] as boolean[],
       }
-      constructor() {
+      readonly host: HTMLElement
+      constructor(host: HTMLElement) {
+        this.host = host
         sessions.built.push(this.own)
       }
       start(source: unknown, deps: Record<string, unknown>) {
@@ -73,6 +78,7 @@ vi.mock('./session', async (importOriginal) => {
       }
       dispose() {
         this.own.disposed += 1
+        this.own.hostConnectedAtDispose.push(this.host.isConnected)
       }
       /* The surface `FoliateView` reaches for while a book is open. Counting
          the settings calls is how "handed to the open session" is told apart
@@ -329,6 +335,23 @@ describe('unmounting while the book is still opening', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(spies.onError).not.toHaveBeenCalled()
     expect(sessions.built[0]?.disposed).toBe(1)
+  })
+})
+
+describe('closing the book', () => {
+  /**
+   * ⚠️ **THE SESSION IS DISPOSED WHILE ITS HOST IS STILL IN THE DOCUMENT.**
+   * Disposing runs foliate's teardown, and foliate's `View.destroy` stops
+   * watching the section by reading `iframe.contentDocument` — which is null
+   * once the iframe has left the document. Disposed from a passive effect,
+   * React had already removed the host: the observer was never unobserved,
+   * fired on the dead iframe, and `View.expand()` threw a TypeError on
+   * `null.documentElement` on every close.
+   */
+  it('disposes before the host leaves the document', () => {
+    const { unmount } = render(<FoliateView {...props({ ...callbacks(), file: book() })} />)
+    unmount()
+    expect(sessions.built[0]?.hostConnectedAtDispose).toEqual([true])
   })
 })
 

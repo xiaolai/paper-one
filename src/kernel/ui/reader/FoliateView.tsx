@@ -598,7 +598,16 @@ export function FoliateView({
     return () => observer.disconnect()
   }, [])
 
-  useEffect(() => {
+  /* ⚠️ **A LAYOUT EFFECT, BECAUSE OF WHEN ITS CLEANUP RUNS.** React removes
+   * the host from the document before it runs passive cleanups, and runs
+   * layout cleanups before it removes anything. Disposing tears foliate down,
+   * and foliate's `View.destroy` stops watching the section through
+   * `iframe.contentDocument` — null once the iframe is out of the document. So
+   * from a passive cleanup the section's ResizeObserver was never unobserved,
+   * fired on the dead iframe, and `View.expand()` threw a TypeError on every
+   * close. Starting here as well costs nothing: `start` is asynchronous, and
+   * the paint it would delay is of an empty stage. */
+  useLayoutEffect(() => {
     const host = hostRef.current
     if (!host || !file) return
 
