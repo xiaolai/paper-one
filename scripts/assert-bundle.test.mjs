@@ -14,6 +14,7 @@ import {
   loadManifest,
   paperComposition,
   selectPlatform,
+  webSpeechOutsideNarration,
 } from './vite/assert-bundle.mjs'
 
 /**
@@ -60,7 +61,7 @@ const MANIFEST = {
 }
 
 /** Drive the plugin's hooks the way Vite/Rollup would, capturing what it logs and errors. */
-function drive(root, platform, moduleIds) {
+function drive(root, platform, moduleIds, modules) {
   const logged = []
   const plugin = paperComposition({ platform, log: (line) => logged.push(line) })
   plugin.configResolved({ root, command: 'build' })
@@ -72,7 +73,7 @@ function drive(root, platform, moduleIds) {
     },
   }
   const bundle = {
-    'assets/index.js': { type: 'chunk', moduleIds },
+    'assets/index.js': { type: 'chunk', moduleIds, ...(modules === undefined ? {} : { modules }) },
     'assets/index.css': { type: 'asset' },
   }
   let threw = null
@@ -366,6 +367,84 @@ describe('what a refusal says', () => {
     const plugin = paperComposition({ platform: 'ios', log: () => {} })
     plugin.configResolved({ root: '/r', command: 'build' })
     expect(plugin.resolveId('virtual:paper-composition')).toBe(path.resolve('/r', compositionFile('ios')))
+  })
+})
+
+/**
+ * WEB SPEECH IN A BUNDLE THAT DOES NOT COMPOSE NARRATION. Every case above
+ * judges a module by its id, and a kernel id is legal everywhere, so code
+ * that reads aloud written outside narration would pass them all. These judge
+ * the code.
+ */
+const SPEAKING = {
+  both: { id: 'both', ts: 'both', platforms: ['desktop', 'ios', 'android'] },
+  narration: { id: 'narration', ts: 'narration', platforms: ['desktop'] },
+}
+
+/** One chunk whose modules render the given code, and an asset beside it. */
+function rendered(codeById) {
+  const modules = Object.fromEntries(Object.entries(codeById).map(([id, code]) => [id, { code }]))
+  return { 'assets/index.js': { type: 'chunk', moduleIds: Object.keys(codeById), modules }, 'assets/index.css': { type: 'asset' } }
+}
+
+const SPEAKER = {
+  '/r/src/kernel/ui/reader/speaker.ts': 'const synth = window.speechSynthesis;',
+  '/r/src/kernel/ui/reader/utterance.ts': 'export const say = (text) => new SpeechSynthesisUtterance(text);',
+  '/r/src/kernel/ui/reader/plain.ts': 'export const plain = 1;',
+  '/r/src/kernel/ui/reader/voice.ts': 'export const isVoice = (v) => v instanceof SpeechSynthesisVoice;',
+}
+
+describe('webSpeechOutsideNarration', () => {
+  it('names each module that reaches a Web Speech synthesis global, where narration is not composed', () => {
+    const manifest = { capabilities: [SPEAKING.both, SPEAKING.narration] }
+    for (const platform of ['web', 'ios', 'android']) {
+      expect(webSpeechOutsideNarration(platform, rendered(SPEAKER), manifest)).toEqual([
+        '/r/src/kernel/ui/reader/speaker.ts',
+        '/r/src/kernel/ui/reader/utterance.ts',
+        '/r/src/kernel/ui/reader/voice.ts',
+      ])
+    }
+  })
+
+  it('says nothing where narration is composed, since reading aloud is its job there', () => {
+    expect(webSpeechOutsideNarration('desktop', rendered(SPEAKER), { capabilities: [SPEAKING.both, SPEAKING.narration] })).toEqual([])
+  })
+
+  it('applies on every platform when the manifest has no narration to own it', () => {
+    for (const platform of ['desktop', 'web']) {
+      expect(webSpeechOutsideNarration(platform, rendered(SPEAKER), { capabilities: [SPEAKING.both] })).toHaveLength(3)
+    }
+  })
+
+  it('skips a module Rollup rendered nothing of, an asset, and a chunk with no module map', () => {
+    const bundle = { ...rendered({ '/r/src/gone.ts': null }), 'assets/other.js': { type: 'chunk', moduleIds: ['/r/src/other.ts'] } }
+    expect(webSpeechOutsideNarration('web', bundle, { capabilities: [SPEAKING.narration] })).toEqual([])
+  })
+
+  it('fails the build that carries it, naming the modules, one per line, and the platform', () => {
+    const root = fixture({ capabilities: [SPEAKING.both, SPEAKING.narration] })
+    const ids = [`${root}/src/app/composition.ios.ts`, `${root}/src/capabilities/both/index.ts`, `${root}/src/kernel/ui/reader/speaker.ts`, `${root}/src/kernel/ui/reader/utterance.ts`]
+    const modules = {
+      [`${root}/src/app/composition.ios.ts`]: { code: 'export default [];' },
+      [`${root}/src/kernel/ui/reader/speaker.ts`]: { code: 'speechSynthesis.cancel();' },
+      [`${root}/src/kernel/ui/reader/utterance.ts`]: { code: 'new SpeechSynthesisUtterance(t);' },
+    }
+    const { errors, threw, logged } = drive(root, 'ios', ids, modules)
+    expect(threw).not.toBeNull()
+    expect(errors).toEqual([
+      `assert-bundle: the ios bundle names the Web Speech API in 2 module(s), and the manifest does not compose narration on ios:\n  ${root}/src/kernel/ui/reader/speaker.ts\n  ${root}/src/kernel/ui/reader/utterance.ts`,
+    ])
+    expect(logged.some((l) => l.startsWith('assert-bundle:'))).toBe(false)
+  })
+
+  it('passes the desktop build that carries it beside narration, and prints its line', () => {
+    const root = fixture({ capabilities: [SPEAKING.both, SPEAKING.narration] })
+    const ids = [`${root}/src/app/composition.desktop.ts`, `${root}/src/capabilities/both/index.ts`, `${root}/src/capabilities/narration/index.ts`]
+    const modules = { [`${root}/src/capabilities/narration/index.ts`]: { code: 'speechSynthesis.speak(new SpeechSynthesisUtterance(t));' } }
+    const { errors, threw, logged } = drive(root, 'desktop', ids, modules)
+    expect(errors).toEqual([])
+    expect(threw).toBeNull()
+    expect(logged.at(-1)).toBe('assert-bundle: desktop: 2 capability modules from {both, narration}')
   })
 })
 

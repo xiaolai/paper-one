@@ -72,6 +72,41 @@ export function bundleModuleIds(bundle) {
   return [...ids]
 }
 
+/** The capability that may read aloud, and the globals it reads aloud through:
+ *  `speechSynthesis`, and the `SpeechSynthesis…` interfaces (utterance, voice,
+ *  event), which no module outside it has a reason to name. */
+export const WEB_SPEECH_OWNER = 'narration'
+export const WEB_SPEECH = /speechSynthesis/i
+
+/**
+ * WEB SPEECH ONLY WHERE NARRATION IS COMPOSED: the ids of the modules whose
+ * rendered code names the Web Speech API, in a bundle for a platform the
+ * manifest does not compose narration on, or on every platform when it has no
+ * narration entry. Empty where narration is composed.
+ *
+ * `decideBundle` judges a module by where it lives, so it holds only code
+ * that lives in its capability. Until step 5.5 read aloud lived in the kernel,
+ * whose modules are legal in every bundle, and two of them, the voice choice
+ * and the engine voice, shipped to the web and to phones with every finding
+ * clean. They live in narration now, where that rule refuses them. This holds
+ * the other half: code that reads aloud, wherever it is written. Only a
+ * module's code says that, so this reads the code. Logic that merely concerns
+ * voices names no API and passes here; keeping it in narration is what holds
+ * it. A module Rollup rendered nothing of has `code: null`, which `test` reads
+ * as the text `null` and so never names the API. An asset has no `modules`.
+ */
+export function webSpeechOutsideNarration(platform, bundle, manifest) {
+  const owner = manifest.capabilities.find((entry) => entry.id === WEB_SPEECH_OWNER)
+  if (owner !== undefined && owner.platforms.includes(platform)) return []
+  const found = []
+  for (const output of Object.values(bundle)) {
+    for (const [id, { code }] of Object.entries(output.modules ?? {})) {
+      if (WEB_SPEECH.test(code)) found.push(id)
+    }
+  }
+  return found
+}
+
 /** `root` and its realpath, distinct — a symlinked working directory (macOS
  *  `/tmp`) makes Rollup name modules by the real path while the configured
  *  root keeps the link. */
@@ -148,6 +183,14 @@ export function paperComposition(options = {}) {
       if (!decision.ok) {
         const lines = decision.findings.map(formatFinding)
         this.error(`assert-bundle: the ${platform} bundle is not the manifest's ${platform} set (${lines.length} findings):\n  ${lines.join('\n  ')}`)
+      }
+
+      const speech = webSpeechOutsideNarration(platform, bundle, manifest)
+      if (speech.length > 0) {
+        this.error(
+          `assert-bundle: the ${platform} bundle names the Web Speech API in ${speech.length} module(s), and the manifest does not compose ${WEB_SPEECH_OWNER} on ${platform}:\n  ` +
+            speech.join('\n  '),
+        )
       }
       log(bundleSummary(platform, decision))
     },
