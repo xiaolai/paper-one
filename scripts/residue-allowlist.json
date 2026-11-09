@@ -93,6 +93,13 @@
       "reason": "The port-backed library search slot; the kernel owns the slot and draws from it when bound, and it is null when the capability is absent"
     },
     {
+      "id": "narration",
+      "file": "src/kernel/core/settings.ts",
+      "match": "narration.",
+      "count": 1,
+      "reason": "The settings import copies the read-aloud settings from kernel.* to narration.* on every load, with no version bump (plan, D6); the kernel owns the file, and a reader's stored voice and speed must survive the move"
+    },
+    {
       "id": "passages",
       "file": "src/kernel/ui/App.tsx",
       "match": "passages:",

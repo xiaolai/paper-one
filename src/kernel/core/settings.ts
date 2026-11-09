@@ -119,6 +119,56 @@ export const carryLegacySettings: SettingsMigration = (found) => {
   return out
 }
 
+/**
+ * The read-aloud settings that left the kernel for the narration capability.
+ *
+ * Each was stored as `kernel.<name>` until step 5.5 and is read as
+ * `narration.<name>` from it on. The names are otherwise unchanged.
+ */
+export const NARRATION_IMPORT = [
+  'readingVoice',
+  'readingRate',
+  'readingVolume',
+  'readingNotesAloud',
+  'sentenceGapMs',
+  'paragraphGapMs',
+] as const
+
+/**
+ * Copy the read-aloud settings onto the keys the narration capability reads.
+ *
+ * It runs on every load, whatever the stored version, and is the kernel's
+ * rather than a migration hook's: a hook runs only when the version differs,
+ * and this move is made WITHOUT a version bump (plan, D6), so a hook would
+ * never see the file it exists for.
+ *
+ * ⚠️ **A COPY, NOT A RENAME, AND THE NEW KEY WINS.** The `kernel.*` keys stay
+ * in the file, so a build from before the move still finds the reader's voice
+ * and speed in it, and still saves a file this build reads. A `narration.*`
+ * key already there was written by a build that knew the narration
+ * capability, so it is the newer of the two and is never overwritten: a voice
+ * changed on a downgraded build stays on the old key and does not override the
+ * new one. That is also what makes the import safe to run twice.
+ *
+ * VALUES ARE NOT VALIDATED HERE, for the reason `carryLegacySettings` gives:
+ * the narration capability's own `parse` runs on `get`.
+ *
+ * Returns the record it was given when there is nothing to copy, so a file
+ * with no read-aloud settings is not rewritten in memory for nothing.
+ */
+export function carryNarrationSettings(values: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  let out: Record<string, unknown> | null = null
+  for (const name of NARRATION_IMPORT) {
+    const from = `kernel.${name}`
+    const to = `narration.${name}`
+    if (Object.hasOwn(values, from) && !Object.hasOwn(values, to)) {
+      out ??= { ...values }
+      out[to] = values[from]
+    }
+  }
+  return out ?? values
+}
+
 export interface SettingsStoreOptions {
   /** The flat store. `null` — no storage at all — makes a store that lives for the session. */
   readonly storage: MarkStorage | null
@@ -322,9 +372,13 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
      caller's code — a getter on that record runs HERE, not above, so guarding
      only the `migrate` call left the second half of the same door open. A hook
      that returns a record whose getter throws would abort the store exactly as
-     a hook that threw outright did. Same degradation, one reason. */
+     a hook that threw outright did. Same degradation, one reason.
+
+     THE NARRATION IMPORT RUNS HERE, inside the same guard and on every path:
+     a current file, a migrated one and one from the future alike. The last is
+     imported in memory only, because that store never writes. */
   try {
-    values = frozen(values)
+    values = frozen(carryNarrationSettings(values))
   } catch (cause) {
     migrationFailed = true
     console.error('Paper: stored settings could not be read, so this session starts from the defaults', cause)

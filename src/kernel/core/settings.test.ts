@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   BRIGHTNESS,
@@ -24,8 +26,10 @@ import {
   SENTENCE_GAP_MAX,
   SENTENCE_GAP_MIN,
   SETTINGS_STORAGE_KEY,
+  NARRATION_IMPORT,
   SETTINGS_VERSION,
   carryLegacySettings,
+  carryNarrationSettings,
   createSettingsStore,
   readKernelPreferences,
   writeKernelPreferences,
@@ -1508,5 +1512,142 @@ describe('an envelope written with a number JSON cannot hold', () => {
       },
     })
     expect(readKernelPreferences(store).readingRate).toBe(DEFAULTS.readingRate)
+  })
+})
+
+/**
+ * THE READ-ALOUD SETTINGS, CARRIED TO THE NARRATION CAPABILITY (plan, D6).
+ *
+ * The files under `tests/fixtures/settings/` with `5.4` in their name were
+ * written by the code as it stood at step 5.4, before these settings moved:
+ * there were no stored envelopes in the repo, so they were captured from what
+ * that build's own `writeKernelPreferences` put in storage. Never regenerate
+ * them to make this pass — they are what a reader's disk already holds.
+ */
+describe('the read-aloud settings, carried to the narration capability', () => {
+  const fixture = (name: string): string =>
+    readFileSync(fileURLToPath(new URL(`../../../tests/fixtures/settings/${name}`, import.meta.url)), 'utf8').trim()
+
+  /** A store over storage holding exactly `text`, with the storage to read back. */
+  const over = (text: string | null) => {
+    const storage = fakeStorage()
+    if (text !== null) storage.setItem(SETTINGS_STORAGE_KEY, text)
+    return { storage, store: createSettingsStore({ storage, migrate: carryLegacySettings }) }
+  }
+
+  /** What `name` reads as under its new key, through a setting declared there. */
+  const narration = (store: ReturnType<typeof over>['store'], name: string) =>
+    store.get(defineSetting<unknown>(`narration.${name}`, undefined, (raw) => raw))
+
+  /** Any write at all, which is what makes the store save the whole file. */
+  const touch = (store: ReturnType<typeof over>['store']) => store.set(KERNEL_SETTINGS.theme, 'sage')
+
+  const saved = (storage: ReturnType<typeof fakeStorage>) =>
+    JSON.parse(storage.getItem(SETTINGS_STORAGE_KEY) ?? 'null') as { version: number; values: Record<string, unknown> }
+
+  it('reads every read-aloud choice a 5.4 file holds under its new key', () => {
+    /* Spelled out rather than looped over `NARRATION_IMPORT`: a name dropped
+       from that list would drop out of a loop over it too, and still pass. */
+    const { store } = over(fixture('voice-chosen-5.4.json'))
+    expect(narration(store, 'readingVoice')).toEqual({
+      en: 'kokoro:af_heart',
+      zh: 'com.apple.voice.premium.zh-CN.Lilian',
+    })
+    expect(narration(store, 'readingRate')).toBe(1.25)
+    expect(narration(store, 'readingVolume')).toBe(40)
+    expect(narration(store, 'readingNotesAloud')).toBe(true)
+    expect(narration(store, 'sentenceGapMs')).toBe(500)
+    expect(narration(store, 'paragraphGapMs')).toBe(1400)
+  })
+
+  it('carries only what the file holds, so an unchosen setting keeps its fallback', () => {
+    const { store } = over(fixture('rate-only-5.4.json'))
+    expect(narration(store, 'readingRate')).toBe(0.75)
+    expect(Object.keys(store.getSnapshot()).sort()).toEqual(['kernel.readingRate', 'narration.readingRate'])
+  })
+
+  it('carries a pre-kernel file through both moves, the namespace first', () => {
+    /* The flat file the 5.4 build rewrote, and the flat file itself: the
+       legacy migration runs before the import, on the same load. */
+    expect(narration(over(fixture('pre-kernel-carried-5.4.json')).store, 'readingRate')).toBe(1.5)
+    const { store } = over(
+      JSON.stringify({ theme: 'sage', readingRate: 1.5, readingVoice: { en: 'com.apple.voice.compact.en-US.Samantha' } }),
+    )
+    expect(narration(store, 'readingRate')).toBe(1.5)
+    expect(narration(store, 'readingVoice')).toEqual({ en: 'com.apple.voice.compact.en-US.Samantha' })
+  })
+
+  it('is the same file however many times it runs', () => {
+    const first = over(fixture('voice-chosen-5.4.json'))
+    touch(first.store)
+    const once = first.storage.getItem(SETTINGS_STORAGE_KEY)!
+    const second = over(once)
+    touch(second.store)
+    second.store.set(KERNEL_SETTINGS.theme, 'night')
+    second.store.set(KERNEL_SETTINGS.theme, 'sage')
+    expect(second.storage.getItem(SETTINGS_STORAGE_KEY), 'a second load changed the file').toBe(once)
+    expect(carryNarrationSettings(second.store.getSnapshot()), 'nothing left to carry').toBe(
+      second.store.getSnapshot(),
+    )
+  })
+
+  it('never overwrites a new key with the old one', () => {
+    /* ⚠️ A `narration.*` key was written by a build that knew the capability,
+       so it is the newer: a voice changed on a downgraded build stays on the
+       old key and does not override it. */
+    const values = JSON.parse(fixture('voice-chosen-5.4.json')).values as Record<string, unknown>
+    const { store } = over(
+      JSON.stringify(
+        envelope({ ...values, 'narration.readingRate': 2, 'narration.readingVoice': { en: 'kokoro:am_adam' } }),
+      ),
+    )
+    expect(narration(store, 'readingRate')).toBe(2)
+    expect(narration(store, 'readingVoice')).toEqual({ en: 'kokoro:am_adam' })
+    /* The rest, which had no new key, are still carried. */
+    expect(narration(store, 'readingVolume')).toBe(40)
+  })
+
+  it('leaves the file one a 5.4 build reads: the same version, every old key in place', () => {
+    const before = JSON.parse(fixture('voice-chosen-5.4.json')) as { version: number; values: Record<string, unknown> }
+    const { storage, store } = over(fixture('voice-chosen-5.4.json'))
+    touch(store)
+    const after = saved(storage)
+    expect(after.version, 'a version bump would send the 5.4 build down its migration').toBe(before.version)
+    expect(after.version).toBe(1)
+    for (const name of NARRATION_IMPORT) {
+      expect(after.values[`kernel.${name}`], `kernel.${name} left the file`).toEqual(before.values[`kernel.${name}`])
+      expect(after.values[`narration.${name}`], `narration.${name} was not saved`).toEqual(
+        before.values[`kernel.${name}`],
+      )
+    }
+  })
+
+  it('writes nothing until the reader changes something', () => {
+    const text = fixture('voice-chosen-5.4.json')
+    const { storage, store } = over(text)
+    expect(narration(store, 'readingRate')).toBe(1.25)
+    expect(storage.getItem(SETTINGS_STORAGE_KEY), 'loading rewrote the file').toBe(text)
+  })
+
+  it('carries a file from a newer build in memory, and still never writes it', () => {
+    const values = JSON.parse(fixture('voice-chosen-5.4.json')).values as Record<string, unknown>
+    const text = JSON.stringify({ version: SETTINGS_VERSION + 1, values })
+    const { storage, store } = over(text)
+    expect(narration(store, 'readingRate')).toBe(1.25)
+    touch(store)
+    expect(store.persistent).toBe(false)
+    expect(storage.getItem(SETTINGS_STORAGE_KEY)).toBe(text)
+  })
+
+  it('answers the record it was given when there is nothing to carry', () => {
+    const values = { 'kernel.theme': 'night' }
+    expect(carryNarrationSettings(values)).toBe(values)
+    /* An inherited key is not a stored one. */
+    const inherited = Object.create({ 'kernel.readingRate': 2 }) as Record<string, unknown>
+    expect(carryNarrationSettings(inherited)).toBe(inherited)
+    expect(carryNarrationSettings({ 'kernel.readingRate': 2 })).toEqual({
+      'kernel.readingRate': 2,
+      'narration.readingRate': 2,
+    })
   })
 })
