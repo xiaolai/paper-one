@@ -465,17 +465,16 @@ pub fn run() {
         gated by the capability file — an app command is reachable from the
         webview the moment it is registered here, which is why `open_external`
         validates its own argument rather than trusting the caller. */
-        /* ⚠️ **ONE LIST, AND `narrate` IS IN IT ON EVERY PLATFORM.** The two
-         * narration commands answer off macOS too — an empty voice list, and a
-         * refusal by name — because a `#[cfg]` here would mean two
-         * `generate_handler!` lists sharing three entries, which is the
-         * two-lists-that-must-agree shape `commands.rs` opens by warning about.
-         * The platform difference is inside the module instead. */
+        /* ⚠️ **NO PATH-TAKING WRITER BELONGS IN THIS LIST.** `narrate_package`
+         * was here, taking a source and a destination path from the webview with
+         * nothing between it and an arbitrary write but a comment. It moved to
+         * `tauri-plugin-narration` on 2026-11-09, where the destination is a
+         * token from the plugin's own save dialog; `app_commands_are_exactly`
+         * below fails if anything is added here without a look. */
         .invoke_handler(tauri::generate_handler![
             open_external,
             atomic::write_atomic,
-            atomic::fsync_in_data_dir,
-            narrate::narrate_package
+            atomic::fsync_in_data_dir
         ])
         // Scoped by `capabilities/default.json`, not by these registrations —
         // registering a plugin grants nothing on its own.
@@ -565,6 +564,15 @@ pub fn run() {
     #[cfg(feature = "desktop")]
     {
         builder = builder.plugin(tauri_plugin_passages::init());
+    }
+
+    /* The audiobook export. DESKTOP ONLY: its encoder is macOS's `afconvert`,
+     * and it refuses by name on any other desktop. It opens its own save dialog
+     * and hands the window a token rather than a path. Its commands are granted
+     * by `narration:default` in capabilities/desktop.json. */
+    #[cfg(feature = "desktop")]
+    {
+        builder = builder.plugin(tauri_plugin_narration::init());
     }
 
     builder = builder
@@ -848,14 +856,9 @@ pub fn run() {
 /// The kernel's durable writes — see the module.
 mod atomic;
 
-/// Reading a book into a file, in the platform's own voice — see the module.
-///
-/// NOT gated, though its Apple half is: the commands exist everywhere so the
-/// handler needs only one list, and the arithmetic that places word markers is
-/// portable and tested on every platform. AVFoundation's speech synthesis is on
-/// iOS too and the same code would serve it — one `cfg` and a build nobody here
-/// can run, so it waits for somebody with a phone.
-mod narrate;
+/// The voices plugin writes what the narration plugin reads — see the module.
+#[cfg(all(test, feature = "desktop"))]
+mod wav_agreement;
 
 /// The library lock — see the module.
 #[cfg(feature = "desktop")]
@@ -1122,5 +1125,44 @@ mod open_external_tests {
                  launcher directly instead."
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod app_command_tests {
+    /// THE APP'S OWN COMMANDS ARE NOT GATED BY ANY CAPABILITY, so every entry
+    /// in that list is reachable from the webview the moment it is added.
+    ///
+    /// `narrate_package` was one, and took a destination path from the window.
+    /// It moved to `tauri-plugin-narration` on 2026-11-09; this holds the list
+    /// to what is left, so neither it nor another path-taking writer returns
+    /// without this test being changed on purpose. Read from the source, as
+    /// `no_shell_launches_the_link` does: the handler list is a macro argument,
+    /// and there is no value at run time to ask.
+    #[test]
+    fn app_commands_are_exactly() {
+        let source = include_str!("lib.rs");
+        let marker = concat!("generate_handler", "![");
+        assert_eq!(
+            source.matches(marker).count(),
+            1,
+            "one app handler list, or this guard is reading the wrong one"
+        );
+        let at = source.find(marker).expect("the handler list") + marker.len();
+        let end = source[at..].find(']').expect("the list closes") + at;
+        let commands: Vec<&str> = source[at..end]
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "open_external",
+                "atomic::write_atomic",
+                "atomic::fsync_in_data_dir"
+            ]
+        );
+        assert!(!source.contains(concat!("mod ", "narrate;")));
     }
 }

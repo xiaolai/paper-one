@@ -71,7 +71,7 @@ import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
 import { chapterSteps } from './tocOrder'
 import { ReaderControls, WindowHosts } from './reader/readerContributions'
-import { createHostStore, HostedTitleBar, ReadingHost, useHosted, type Hosted } from './reader/readingHost'
+import { createHostStore, HostedTitleBar, ReadingHost } from './reader/readingHost'
 import { useReadingSurface } from './reader/readingSurface'
 import { useAutoAdvance } from './reader/useAutoAdvance'
 import { documentLang } from './reader/speech'
@@ -176,9 +176,6 @@ export interface AppProps {
  */
 const NOTICE_MS = 12_000
 
-/** The export control the host publishes, or null while it has none to offer. */
-const audiobookOf = (hosted: Hosted | null) => hosted?.audiobook ?? null
-
 /**
  * The desktop shell — and at well over two thousand lines, the largest component
  * in the tree. An audit called it a god component and proposed extracting
@@ -228,12 +225,7 @@ export function App({
    * uses when a pack can read the book on screen. Empty and null in a build
    * with no voices capability — a phone, a browser client — where everything
    * below reads exactly as it did before. */
-  const {
-    packs: voicePacks,
-    engine: voiceEngine,
-    findClip: findVoiceClip,
-    holdClips: holdVoiceClips,
-  } = useVoicePacks(services)
+  const { packs: voicePacks, engine: voiceEngine } = useVoicePacks(services)
   /* ⚠️ IT SUBSCRIBES TO THE FLAG, NOT TO THE VALUES, and that is the whole
      point. `persistent` flips the first time the store's write is REFUSED, and
      that refusal happens after `values` has already changed and been published
@@ -409,7 +401,12 @@ export function App({
   })
   const [hostStore] = useState(createHostStore)
   /* The reading below and every contribution around it are told one thing. */
-  const readerContext = { sectionKey: book.doc, surface: readingSurface.surface }
+  const readerContext = {
+    sectionKey: book.doc,
+    surface: readingSurface.surface,
+    /* Until step 5.5 moves the reading's settings out: see `ReaderContext.voice`. */
+    voice: { chosen: state.readingVoice, rate: state.readingRate, notesAloud: state.readingNotesAloud },
+  }
   /**
    * The book turning itself, at the pace the time-left estimate uses.
    *
@@ -825,10 +822,6 @@ export function App({
     const bound = services.bindNotifier(setImportNotice)
     return () => bound.dispose()
   }, [services, setImportNotice])
-  /* The audiobook export, reachable from the command palette and nowhere else —
-     see `useAudiobook` for why that is the whole surface for now. It runs in
-     `ReadingHost`, below. */
-  const audiobook = useHosted(hostStore, audiobookOf)
 
   /* Standing, not transient: a quarantined store is not something the app
      did, it is something the reader has lost, and it stays until they say
@@ -2185,10 +2178,6 @@ export function App({
            a rule nothing measures — no test renders this file and reads the
            palette back. */
         autoAdvance,
-        /* ABSENT OFF macOS and with no book open — `useAudiobook` answers null
-           there, and the palette then omits the row rather than offering one
-           that would be refused. */
-        ...(audiobook ? { exportAudiobook: audiobook } : {}),
         onDuplicate: onDuplicateCommand,
         /* The same faces the settings panel offers — see `offeredFaces`. */
         faces: offeredHere,
@@ -2253,12 +2242,6 @@ export function App({
       jumps,
       markSelection,
       closeBook,
-      /* ⚠️ **READ AT LINE 1934 AND OMITTED HERE.** `running` and `run` both change
-         when an export starts, and without this the palette kept the first pair:
-         selecting the row again started a second export rather than stopping the
-         first. Safe to depend on because `useAudiobook` memoises it — a fresh
-         object per render is what kept it out. */
-      audiobook,
       onDuplicateCommand,
     ],
   )
@@ -2605,22 +2588,6 @@ export function App({
         context={readerContext}
         prefs={speechPrefs}
         engine={voiceEngine}
-        audiobook={{
-          /* The engine is macOS-only and the commands refuse elsewhere by name, so
-             the palette entry follows the same platform the rest of the app reads. */
-          available: platform === 'macos',
-          packs: voicePacks,
-          chosen: state.readingVoice,
-          rate: state.readingRate,
-          /* WI-34.4: the export asks for the reading's own audio before rendering a
-             chapter again. In a build with no voices capability this answers null,
-             which is the truth there — there is no rendered reading at all. */
-          findClip: findVoiceClip,
-          /* The lease that keeps a cached chapter from being evicted under the
-             packer — see `AudiobookPlatform.hold`. */
-          holdClips: holdVoiceClips,
-          say: setImportNotice,
-        }}
         store={hostStore}
       />
       {/* ⚠️ **HERE AND NOT UNDER A SCREEN**, so they outlive the reader; and ahead of

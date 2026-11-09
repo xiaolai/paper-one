@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-narration-begin"
+description = "Enables the narration_begin command without any pre-configured scope."
+commands.allow = ["narration_begin"]
+
+[[permission]]
+identifier = "deny-narration-begin"
+description = "Denies the narration_begin command without any pre-configured scope."
+commands.deny = ["narration_begin"]

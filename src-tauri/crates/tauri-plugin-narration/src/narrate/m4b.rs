@@ -44,6 +44,8 @@
 
 use std::path::Path;
 
+use crate::staged::Staged;
+
 /// The sampling frequencies an ADTS header's 4-bit index can name.
 const SAMPLE_RATES: [u32; 13] = [
     96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
@@ -683,29 +685,17 @@ pub fn write(
      * truncates first, so an interrupted write — a full disk, a crash — left a
      * reader's existing audiobook destroyed or half replaced. A rename within one
      * directory is atomic: the destination is the old file or the whole new one.
-     * `package` stages its own copy too; this is here so the guarantee belongs to
-     * the writer rather than to whoever remembers to call it correctly. */
-    let parent = out
-        .parent()
-        .ok_or_else(|| format!("{} has no directory to write into", out.display()))?;
-    let scratch = parent.join(format!(
-        ".paper-m4b-{}-{}.part",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let written = std::fs::write(&scratch, &file)
-        .map_err(|error| format!("cannot write {}: {error}", scratch.display()))
-        .and_then(|()| {
-            std::fs::rename(&scratch, out)
-                .map_err(|error| format!("cannot move the finished book into place: {error}"))
-        });
-    if written.is_err() {
-        let _ = std::fs::remove_file(&scratch);
-    }
-    written?;
+     *
+     * ⚠️ **AND THE SCRATCH FILE IS CREATED EXCLUSIVELY.** It was a plain
+     * `fs::write` to a predictable name, which follows a link planted there and
+     * truncates whatever it points at. `Staged` creates with `O_EXCL` and removes
+     * the file on every road out but the commit. */
+    let (staged, mut scratch) = Staged::beside(out, "m4b")?;
+    std::io::Write::write_all(&mut scratch, &file)
+        .and_then(|()| scratch.sync_all())
+        .map_err(|error| format!("cannot write {}: {error}", staged.path().display()))?;
+    drop(scratch);
+    staged.commit(out)?;
     Ok(duration_ms)
 }
 
@@ -1011,7 +1001,7 @@ mod tests {
     /// readers, which disagree in ways that matter:
     ///
     /// ```sh
-    /// cargo test -p app --lib narrate::m4b::tests::a_real_book -- --ignored --nocapture
+    /// cargo test -p tauri-plugin-narration --lib narrate::m4b::tests::a_real_book -- --ignored --nocapture
     /// ffprobe -v error -show_chapters /tmp/paper-m4b/book.m4b
     /// swift /tmp/ttsprobe/verify.swift /tmp/paper-m4b/book.m4b
     /// ```
@@ -1088,6 +1078,35 @@ mod tests {
             "wrote {} ({size} bytes, {total}ms, 3 chapters)",
             book.display()
         );
+    }
+
+    #[test]
+    fn a_written_book_leaves_no_scratch_beside_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("book.m4b");
+        std::fs::write(&out, b"an earlier book").expect("earlier");
+        let chapter = Chapter {
+            title: "One".into(),
+            start_ms: 0,
+        };
+        write(&stream(5), &[chapter], &BookMeta::default(), &out).expect("writes");
+        assert_ne!(std::fs::read(&out).expect("read"), b"an earlier book");
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("list")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["book.m4b"]);
+    }
+
+    #[test]
+    fn a_failed_write_keeps_the_book_that_was_there() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("book.m4b");
+        std::fs::write(&out, b"an earlier book").expect("earlier");
+        /* NO CHAPTERS: refused by `build`, before anything is staged. */
+        assert!(write(&stream(5), &[], &BookMeta::default(), &out).is_err());
+        assert_eq!(std::fs::read(&out).expect("read"), b"an earlier book");
+        assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 1);
     }
 
     #[test]

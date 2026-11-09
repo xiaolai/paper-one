@@ -2834,7 +2834,8 @@ export class ReaderSession {
  * pdf.js — while the EPUB backend answers at once, which is why nothing looked
  * wrong. Awaiting takes both shapes, and it is the only defence left for a
  * third backend that answers slowly: PDFs no longer reach this at all, because
- * a book of fixed pages is refused an audiobook (`useAudiobook`).
+ * a book of fixed pages is refused an audiobook (the narration capability's
+ * `useAudiobook`).
  *
  * ⚠️ **ONE TRAVERSAL, `flattenToc`'s.** This walked the tree with a recursion of
  * its own, which is how `tocOrder.ts` says the contents pane and the voice came

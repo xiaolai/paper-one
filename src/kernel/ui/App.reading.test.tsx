@@ -2139,50 +2139,6 @@ describe('the reading transport over a real book', () => {
 })
 
 /**
- * The audiobook export, as the palette offers it.
- *
- * ⚠️ **TWO GATES, AND EACH HAD NO CASE.** The engine exists on macOS alone, so
- * everywhere else the command must not be there at all — offered, it could only
- * refuse. And a book is ready for it only once its document is: the id resolves
- * from the bytes before the parse, and an export started in that gap reported
- * the reader's book as unreadable.
- */
-describe('the audiobook export', () => {
-  afterEach(() => {
-    window.history.replaceState(null, '', '/')
-  })
-
-  async function openBook(platform: 'macos' | 'linux') {
-    /* The platform is resolved once, at mount, from the URL override first. */
-    window.history.replaceState(null, '', `/?platform=${platform}`)
-    reader.prose = '<p>Call me Ishmael.</p>'
-    const moby = await shelved(BYTES, 'Moby-Dick')
-    await mount(fakeFs(moby.files) as unknown as IndexFs, [moby.row])
-    return () => open('Moby-Dick')
-  }
-
-  it('is offered for an open book on the platform with the engine', async () => {
-    const opening = await openBook('macos')
-    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'offered with no book open').toBe(false)
-    await opening()
-    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'the open book was not offered').toBe(true)
-  })
-
-  it('is not offered where there is no engine to write it', async () => {
-    const opening = await openBook('linux')
-    await opening()
-    expect(await paletteOffers('audiobook', 'Export as audiobook…')).toBe(false)
-  })
-
-  it('waits for the book’s document, which is what the walk runs over', async () => {
-    const opening = await openBook('macos')
-    reader.prose = null
-    await opening()
-    expect(await paletteOffers('audiobook', 'Export as audiobook…'), 'a book with no document yet').toBe(false)
-  })
-})
-
-/**
  * WHAT A CAPABILITY ADDS AROUND THE READER, THROUGH THE WHOLE WINDOW.
  *
  * The registry and the two components have cases of their own; what only this can

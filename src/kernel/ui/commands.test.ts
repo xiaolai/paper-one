@@ -109,49 +109,6 @@ describe('buildCommands', () => {
     expect(find(scrolled, 'reading:ruler')).toBeDefined()
   })
 
-  /**
-   * ⚠️ **THE PALETTE IS THE WHOLE OF THE EXPORT'S SURFACE**, so this is the only
-   * place the feature can be found at all — see `KernelCommandContext`. The row
-   * is absent where the engine is (a browser, a phone), because a command that
-   * would be refused is worse than one that is not offered.
-   */
-  it('offers the audiobook export only where the engine is and a book is open', () => {
-    const { ctx } = context()
-    expect(find(buildCommands(ctx), 'book:audiobook')).toBeUndefined()
-
-    const able = { ...ctx, exportAudiobook: { running: false, run: () => {} } }
-    expect(find(buildCommands(able), 'book:audiobook')?.label).toBe('Export as audiobook…')
-
-    /* No book, nothing to export — the same rule every other Book row follows. */
-    const shut = { ...able, hasBook: false }
-    expect(find(buildCommands(shut), 'book:audiobook')).toBeUndefined()
-  })
-
-  it('files the export under Book, and can be found by the words a reader would type', () => {
-    /* ⚠️ **THE KEYWORDS ARE THE ONLY WAY IN.** The palette is the whole of this
-       feature's surface, and a reader looking for it types what they want —
-       "audiobook", "m4b", "read aloud" — not the label's own words. A row with
-       no keywords is a row only somebody who knows its name can reach, and the
-       group is what puts it beside the other things you do to a book. */
-    const { ctx } = context()
-    const row = find(buildCommands({ ...ctx, exportAudiobook: { running: false, run: () => {} } }), 'book:audiobook')
-    expect(row?.group).toBe('Book')
-    for (const word of ['narrate', 'speech', 'm4b', 'listen', 'chapters', 'read aloud', 'file']) {
-      expect(row?.keywords, `a reader typing ${word} would not find it`).toContain(word)
-    }
-  })
-
-  it('turns the export row into a stop while one is running', () => {
-    /* One command, two states: the reader who started it looks in the same place
-       to stop it, rather than hunting for a second row that only sometimes
-       exists. */
-    const { ctx } = context()
-    const running = { ...ctx, exportAudiobook: { running: true, run: () => {} } }
-    const row = find(buildCommands(running), 'book:audiobook')
-    expect(row?.label).toBe('Stop exporting the audiobook')
-    expect(row?.on).toBe(true)
-  })
-
   it('offers marking only when something is selected', () => {
     const { ctx } = context()
     expect(find(buildCommands(ctx), 'book:mark')).toBeUndefined()

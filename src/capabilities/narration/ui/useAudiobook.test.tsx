@@ -1,33 +1,39 @@
 // @vitest-environment jsdom
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
-import {
-  useAudiobook,
-  type AudiobookControl,
-  type AudiobookDeps,
-  type AudiobookSource,
-} from './useAudiobook'
-import type { AudiobookPlatform } from '../reader/audiobook'
-import type { SpeechRequest, VoicePack } from '../../core/ports'
+import { useAudiobook, type AudiobookDeps, type AudiobookSource } from './useAudiobook'
+import type { AudiobookControl } from '../lib/running'
+import type { AudiobookPlatform } from '../lib/audiobook'
+import type { NarrationEngine } from '../lib/wire'
+import type { SpeechRequest, VoicePack } from '../../../kernel'
 
-/* THE PLATFORM HALF IS THE ONLY THING REPLACED. `audiobookTauri` is the save
+/* THE PLATFORM HALF IS THE ONLY THING REPLACED. `platform` is the plugin's save
    dialog and the engine, neither of which exists in a test; `exportAudiobook`
    — the ordering, the cancellation, the tidy-up count — is the real one, so
    what the reader is told is what the real export would make them hear. */
 const tauri = vi.hoisted(() => ({
+  /** The name the reader picks, or null for a cancelled dialog. */
   path: null as string | null,
   platform: null as AudiobookPlatform | null,
   asked: [] as string[],
   opened: 0,
-  /** The packs `tauriAudiobook` was given, so routing can be asserted. */
+  /** The packs `narrationPlatform` was given, so routing can be asserted. */
   packs: [] as readonly unknown[],
+  /** Every destination token given back, in order. */
+  released: [] as string[],
+  /** Whether giving one back fails. */
+  releaseFails: false,
 }))
-vi.mock('../reader/audiobookTauri', () => ({
-  chooseAudiobookPath: async (title: string) => {
+vi.mock('../lib/wire', () => ({
+  pickDestination: async (title: string) => {
     tauri.asked.push(title)
-    return tauri.path
+    return tauri.path === null ? null : { token: TOKEN, name: tauri.path }
   },
-  tauriAudiobook: async (packs: readonly unknown[] = []) => {
+  releaseDestination: async (token: string) => {
+    tauri.released.push(token)
+    if (tauri.releaseFails) throw new Error('the plugin is gone')
+  },
+  narrationPlatform: async (packs: readonly unknown[]) => {
     tauri.opened += 1
     tauri.packs = packs
     if (!tauri.platform) throw new Error('the test named no platform')
@@ -35,12 +41,17 @@ vi.mock('../reader/audiobookTauri', () => ({
   },
 }))
 
+/** The token the stand-in dialog hands back for every pick. */
+const TOKEN = 'destination:1'
+
 beforeEach(() => {
   tauri.path = null
   tauri.platform = null
   tauri.asked = []
   tauri.opened = 0
   tauri.packs = []
+  tauri.released = []
+  tauri.releaseFails = false
 })
 
 /**
@@ -76,12 +87,23 @@ const INSTALLED: VoicePack = {
   installed: true,
 }
 
-function mount(over: Partial<AudiobookDeps> = {}) {
+/** The voices' engine, answering with `packs` when the export asks for them. */
+function voices(packs: readonly VoicePack[]): NarrationEngine {
+  return {
+    catalogue: async () => packs,
+    findClip: async () => null,
+    holdClips: async (stems: readonly string[]) => stems.length,
+    renderFile: async () => ({ sampleRate: 24_000, skipped: [] }),
+  }
+}
+
+/* `packs` stands for the catalogue the engine answers with, and `engine: null`
+   for a build with no voices. */
+function mount({ packs = [INSTALLED], ...over }: Partial<AudiobookDeps> & { readonly packs?: readonly VoicePack[] } = {}) {
   const seen: (AudiobookControl | null)[] = []
   const say = vi.fn()
   const deps: AudiobookDeps = {
-    available: true,
-    packs: [INSTALLED],
+    engine: voices(packs),
     source: {
       bookId: 'book:a',
       title: 'A Measured Book',
@@ -93,8 +115,6 @@ function mount(over: Partial<AudiobookDeps> = {}) {
       sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
     },
     chosen: {},
-    findClip: async () => null,
-    holdClips: async (stems: readonly string[]) => stems.length,
     rate: 1,
     say,
     ...over,
@@ -132,7 +152,7 @@ describe('the control a consumer may depend on', () => {
 
   it('is absent where the engine is not', () => {
     /* The transport and the palette both read absence, not a disabled flag. */
-    expect(mount({ available: false }).seen[0]).toBeNull()
+    expect(mount({ engine: null }).seen[0]).toBeNull()
   })
 
   it('is absent with no book open', () => {
@@ -486,7 +506,7 @@ const SECTIONS = [
   { index: 0, title: 'One', text: 'The first chapter.', textDigest: 'fnv1a64:1:0000000000000000' },
   { index: 2, title: 'Two', text: 'The second chapter.', textDigest: 'fnv1a64:1:0000000000000002' },
 ]
-const WHERE = '/books/A Measured Book.m4b'
+const WHERE = 'A Measured Book.m4b'
 
 function book(over: Partial<AudiobookSource> = {}): AudiobookSource {
   return {
@@ -510,7 +530,7 @@ function book(over: Partial<AudiobookSource> = {}): AudiobookSource {
 function engine(over: Partial<AudiobookPlatform> = {}) {
   const rendered: Parameters<AudiobookPlatform['render']>[0][] = []
   const packaged: Parameters<AudiobookPlatform['package']>[0][] = []
-  const discarded: string[] = []
+  const discarded: number[] = []
   /** The book at the reader's chosen name — `discard` cannot reach it. */
   const books: string[] = []
   /** Every lease the export gave back, in order. */
@@ -522,14 +542,14 @@ function engine(over: Partial<AudiobookPlatform> = {}) {
     },
     package: async (job) => {
       packaged.push(job)
-      return { durationMs: 180_000, chapters: job.chapters.length }
+      return { name: 'A Measured Book.m4b', durationMs: 180_000, chapters: job.chapters.length }
     },
     scratchFor: (index) => `/scratch/chapter-${index}.wav`,
-    discard: async (path) => {
-      discarded.push(path)
+    discard: async (index) => {
+      discarded.push(index)
     },
-    discardBook: async (path: string) => {
-      books.push(path)
+    discardBook: async (destination: string) => {
+      books.push(destination)
     },
     discardScratch: async () => {},
     exists: async () => false,
@@ -651,12 +671,12 @@ describe('an export that runs to the end', () => {
     expect(packaged).toEqual([
       {
         chapters: [
-          { title: 'One', path: '/scratch/chapter-0.wav' },
-          { title: 'Two', path: '/scratch/chapter-2.wav' },
+          { title: 'One', source: { kind: 'scratch', index: 0 } },
+          { title: 'Two', source: { kind: 'scratch', index: 2 } },
         ],
         title: 'A Measured Book',
         author: 'A. Writer',
-        path: WHERE,
+        destination: TOKEN,
       },
     ])
   })
@@ -728,7 +748,7 @@ describe('a stop that came too late to undo the file', () => {
            in flight when the second press arrives. */
         reached = true
         await joining.shut
-        return { durationMs: 180_000, chapters: job.chapters.length }
+        return { name: 'A Measured Book.m4b', durationMs: 180_000, chapters: job.chapters.length }
       },
     })
     const { seen, say } = mount({ source: book() })
@@ -782,8 +802,8 @@ describe('scratch the tidy-up could not remove', () => {
 
   it('says one file, when one would not go and the sweep did not either', async () => {
     engine({
-      discard: async (path) => {
-        if (path === '/scratch/chapter-0.wav') throw new Error('in use')
+      discard: async (index) => {
+        if (index === 0) throw new Error('in use')
       },
       discardScratch: async () => {
         throw new Error('in use')
@@ -892,7 +912,7 @@ describe('a stop the reader asks for', () => {
       held.open()
     })
     expect(rendered).toEqual(['/scratch/chapter-0.wav'])
-    expect(discarded).toEqual(['/scratch/chapter-0.wav'])
+    expect(discarded).toEqual([0])
     expect(say).toHaveBeenLastCalledWith('The export was stopped. Nothing was left behind.')
   })
 
@@ -961,6 +981,74 @@ describe('a reader who closes the save dialog', () => {
   })
 })
 
+describe('the destination the reader picked', () => {
+  /* ⚠️ **GIVEN BACK ON EVERY ROAD OUT.** The plugin holds a bounded number of
+     picked destinations, so one a failed or stopped export kept would be a place
+     the next pick could not have. */
+  it('is given back once the book is written', async () => {
+    engine()
+    const { seen } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(tauri.released).toEqual([TOKEN])
+  })
+
+  it('is given back when the engine refuses', async () => {
+    engine({
+      render: async () => {
+        throw new Error('the voice stalled on chapter 1')
+      },
+    })
+    const { seen } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(tauri.released).toEqual([TOKEN])
+  })
+
+  it('is given back when the reader stops the export', async () => {
+    const held = gate()
+    engine({
+      render: async (job) => {
+        await held.shut
+        return { path: job.path, cached: false, skipped: [] }
+      },
+    })
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    await act(async () => {
+      seen.at(-1)?.run()
+      held.open()
+    })
+    expect(say).toHaveBeenLastCalledWith('The export was stopped. Nothing was left behind.')
+    expect(tauri.released).toEqual([TOKEN])
+  })
+
+  it('is not given back where none was picked', async () => {
+    engine()
+    tauri.path = null
+    const { seen } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(tauri.released).toEqual([])
+  })
+
+  it('does not change what the reader is told when giving it back fails', async () => {
+    engine()
+    tauri.releaseFails = true
+    const { seen, say } = mount({ source: book() })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(say).toHaveBeenLastCalledWith('Exported 2 chapters, 3 minutes, to A Measured Book.m4b.')
+    expect(seen.at(-1)?.running).toBe(false)
+  })
+})
+
 describe('a control held past the book it was for', () => {
   it('does nothing once its export has ended and the book is gone', async () => {
     /* A consumer that kept the control — the palette's memo is one — holds a
@@ -1002,10 +1090,9 @@ describe('exporting on a downloaded voice', () => {
   }
 
   it('renders through the pack, naming the voice the way the reading stores it', async () => {
-    /* ⚠️ THE STRING IS THE ROUTING. `audiobookTauri` reads its shape and sends
-     * an engine-qualified name to the plugin and anything else to
-     * `narrate_render`, so one stored choice serves the reading and the
-     * export alike. */
+    /* ⚠️ THE STRING IS THE ROUTING. `narrationPlatform` refuses anything but
+     * an engine-qualified name, so one stored choice serves the reading and
+     * the export alike. */
     const { rendered } = engine()
     const { seen } = mount({ source: book(), packs: [ENGLISH] })
     await act(async () => {
@@ -1013,6 +1100,21 @@ describe('exporting on a downloaded voice', () => {
     })
     expect(rendered.length).toBeGreaterThan(0)
     expect(new Set(rendered.map((job) => job.voice))).toEqual(new Set(['kokoro:af_heart']))
+    expect(tauri.packs).toEqual([ENGLISH])
+  })
+
+  it('asks for the packs when the export starts, not when it was offered', async () => {
+    /* A list captured at render would be the one from before the reader's last
+       download — so a voice fetched since would be refused. */
+    const { rendered } = engine()
+    let packs: readonly VoicePack[] = []
+    const harness = mount({ source: book() })
+    act(() => harness.change({ engine: { ...voices([]), catalogue: async () => packs } }))
+    packs = [ENGLISH]
+    await act(async () => {
+      harness.seen.at(-1)?.run()
+    })
+    expect(rendered.length).toBeGreaterThan(0)
     expect(tauri.packs).toEqual([ENGLISH])
   })
 

@@ -578,12 +578,11 @@ export interface SpeechEnginePort {
    * before the muxer read them. This writes to the caller's scratch file and
    * touches no clip.
    *
-   * ⚠️ **OPTIONAL, AND ONLY UNTIL IT HAS A CALLER.** The export still reaches the
-   * same command directly (`audiobookTauri.ts`) until the narration capability
-   * takes it over, and nothing reads this before then. Required, it would change
-   * every fake of this port in the tests, including the reading proof's, on the
-   * step whose proof is that test bodies did not change. Its first caller makes
-   * it required.
+   * ⚠️ **OPTIONAL, AND A PORT WITHOUT IT OFFERS NO EXPORT.** Its one caller is
+   * the narration capability, which answers no export control for a port that
+   * cannot render to a file. Required, it would change every fake of this port
+   * in the tests, including the reading proof's, for a member only the export
+   * reads.
    */
   renderFile?(request: SpeechFileRequest): Promise<RenderedFile>
   /**

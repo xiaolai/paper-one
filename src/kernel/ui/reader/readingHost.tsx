@@ -1,7 +1,6 @@
-import { useLayoutEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useLayoutEffect, useState } from 'react'
 import { notifyAll } from '../../core/notify'
 import { TitleBar, type TitleBarProps } from '../shell/TitleBar'
-import { useAudiobook, type AudiobookControl, type AudiobookDeps } from '../hooks/useAudiobook'
 import type { SpeakPrefs } from './speaker'
 import { useSpeech, type ReadingContext, type ReadingEngine, type Speech } from './useSpeech'
 
@@ -9,8 +8,9 @@ import { useSpeech, type ReadingContext, type ReadingEngine, type Speech } from 
  * Read-aloud, run from a child of `App` rather than from `App` itself.
  *
  * It renders nothing. What it has to say goes through a small store, because the
- * things that want it are `App`'s own (the palette's export row) and its other
- * children (the transport in the title bar).
+ * things that want it are `App`'s other children (the transport in the title
+ * bar). The audiobook export, which used to run here too, is the narration
+ * capability's own window host now.
  *
  * ⚠️ **THIS MUST BE THE FIRST THING `App` RENDERS**, so that its layout effect,
  * which publishes, runs before those of everything that reads what it publishes.
@@ -24,7 +24,6 @@ import { useSpeech, type ReadingContext, type ReadingEngine, type Speech } from 
 /** What the host has to say. */
 export interface Hosted {
   readonly speech: Speech
-  readonly audiobook: AudiobookControl | null
 }
 
 export interface HostStore {
@@ -76,21 +75,12 @@ export interface ReadingHostProps {
   readonly context: ReadingContext
   readonly prefs: SpeakPrefs
   readonly engine: ReadingEngine | null
-  /** The export's needs, but for the book, which comes from the surface. */
-  readonly audiobook: Omit<AudiobookDeps, 'source'>
   readonly store: HostStore
 }
 
-export function ReadingHost({ context, prefs, engine, audiobook: deps, store }: ReadingHostProps): null {
-  const { surface } = context
+export function ReadingHost({ context, prefs, engine, store }: ReadingHostProps): null {
   const speech = useSpeech(context, prefs, engine)
-  const book = useSyncExternalStore(surface.subscribeBook, surface.book)
-  /** THE SAME VALUE THE VOICE READS, so the file holds what the reading would
-   *  have said. */
-  const notes = prefs.notesAloud ?? false
-  const source = useMemo(() => book && { ...book, skip: { notes } }, [book, notes])
-  const audiobook = useAudiobook({ ...deps, source })
-  useLayoutEffect(() => store.publish({ speech, audiobook }), [store, speech, audiobook])
+  useLayoutEffect(() => store.publish({ speech }), [store, speech])
   return null
 }
 

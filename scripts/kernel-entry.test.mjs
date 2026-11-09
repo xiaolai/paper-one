@@ -43,6 +43,7 @@ const ORPHANED_BY_A_CUT = Object.freeze({
   archives: ['./core/markMatch'],
   cards: ['./core/bookAccent'],
   circle: ['./core/coverFacts'],
+  narration: ['./ui/reader/engineVoice'],
   passages: ['./ui/reader/bookScripts', './ui/reader/passageText'],
   voices: ['./ui/reader/clipKey'],
 })

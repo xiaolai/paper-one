@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-narration-pick"
+description = "Enables the narration_pick command without any pre-configured scope."
+commands.allow = ["narration_pick"]
+
+[[permission]]
+identifier = "deny-narration-pick"
+description = "Denies the narration_pick command without any pre-configured scope."
+commands.deny = ["narration_pick"]
