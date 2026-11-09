@@ -405,25 +405,39 @@ describe('the volume', () => {
 })
 
 describe('reading footnotes', () => {
-  /* A SWITCH, as the kernel's on-or-off rows are: the state is `checked`, and
-     the name is the label alone, so it does not change under the finger. */
+  /* A SWITCH, as the kernel's on-or-off rows are (`ToggleRow` in the kernel's
+     Settings): a `<button role="switch">` whose state is `aria-checked` and
+     whose name is the label alone, so it does not change under the finger. */
   it('is a switch, off by default, that stores what it is turned to', () => {
     const { settings } = section()
-    const toggle = screen.getByRole('switch', { name: 'Read footnotes' }) as HTMLInputElement
-    expect(toggle.checked).toBe(false)
-    expect(toggle.className).toBe(ui.toggle)
+    const toggle = screen.getByRole('switch', { name: 'Read footnotes' })
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    expect(toggle.textContent).toBe('Off')
     fireEvent.click(toggle)
     expect(settings.get(NOTES_ALOUD_SETTING)).toBe(true)
-    expect(toggle.checked).toBe(true)
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    expect(toggle.textContent).toBe('On')
     fireEvent.click(toggle)
     expect(settings.get(NOTES_ALOUD_SETTING)).toBe(false)
+  })
+
+  it('is a button, so Enter turns it as well as Space', () => {
+    /* A checkbox answers Space alone; a button answers Enter and Space, which
+       is what every other switch in Settings answers. jsdom does not run a
+       browser's key activation, so the element itself is what is pinned. */
+    section()
+    const toggle = screen.getByRole('switch', { name: 'Read footnotes' }) as HTMLButtonElement
+    expect(toggle.tagName).toBe('BUTTON')
+    expect(toggle.type).toBe('button')
+    expect(toggle.className).toBe(ui.button)
+    expect(toggle.parentElement?.className, 'in a row like the steppers around it').toBe(ui.row)
   })
 
   it('stands where the stored value is', () => {
     const settings = narrationSettings()
     settings.set(NOTES_ALOUD_SETTING, true)
     section({}, settings)
-    expect((screen.getByRole('switch', { name: 'Read footnotes' }) as HTMLInputElement).checked).toBe(true)
+    expect(screen.getByRole('switch', { name: 'Read footnotes' }).getAttribute('aria-checked')).toBe('true')
   })
 })
 

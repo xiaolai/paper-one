@@ -87,6 +87,7 @@ export function VoiceSettings({ store, settings }: VoiceSettingsProps) {
     chosen: settings.get(VOICE_SETTING),
   }
   const volume = settings.get(VOLUME_SETTING)
+  const notesAloud = settings.get(NOTES_ALOUD_SETTING)
   return (
     <div className={ui.section}>
       {reading.hasBook ? (
@@ -170,19 +171,23 @@ export function VoiceSettings({ store, settings }: VoiceSettingsProps) {
           run of citations arriving mid-chapter. The label names what is added,
           like the pauses above.
 
-          A SWITCH, as the kernel's on-or-off rows are (#140): the state is
-          `checked`, and the name is the label alone, so it does not change
-          under the reader's finger. */}
-      <label className={ui.row}>
+          A SWITCH, as the kernel's on-or-off rows are (#140): a button, so
+          Enter turns it as well as Space; the state is `aria-checked`, and the
+          name is the label alone, so it does not change under the reader's
+          finger. */}
+      <div className={ui.row}>
         <span className={ui.grow}>Read footnotes</span>
-        <input
-          type="checkbox"
+        <button
+          type="button"
           role="switch"
-          className={ui.toggle}
-          checked={settings.get(NOTES_ALOUD_SETTING)}
-          onChange={() => toggleNotesAloud(settings)}
-        />
-      </label>
+          aria-checked={notesAloud}
+          aria-label="Read footnotes"
+          className={ui.button}
+          onClick={() => toggleNotesAloud(settings)}
+        >
+          {notesAloud ? 'On' : 'Off'}
+        </button>
+      </div>
     </div>
   )
 }

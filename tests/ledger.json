@@ -6271,6 +6271,7 @@
     "src/capabilities/narration/ui/StepRow.test.tsx > a stepped setting > shows its position as pips, lit up to the step it stands at",
     "src/capabilities/narration/ui/StepRow.test.tsx > a stepped setting > writes any other unit as it is",
     "src/capabilities/narration/ui/VoiceSettings.test.tsx > before the reading has published > draws nothing",
+    "src/capabilities/narration/ui/VoiceSettings.test.tsx > reading footnotes > is a button, so Enter turns it as well as Space",
     "src/capabilities/narration/ui/VoiceSettings.test.tsx > reading footnotes > is a switch, off by default, that stores what it is turned to",
     "src/capabilities/narration/ui/VoiceSettings.test.tsx > reading footnotes > stands where the stored value is",
     "src/capabilities/narration/ui/VoiceSettings.test.tsx > the section > follows a setting changed elsewhere — the transport, or another window",
