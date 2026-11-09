@@ -137,15 +137,7 @@ export const PARAGRAPH_GAP_MAX = PARAGRAPH_GAP.steps.at(-1)!
 export const READING_VOLUME_MIN = 0
 export const READING_VOLUME_MAX = 100
 
-/**
- * A number held to `[min, max]`.
- *
- * `Number.isFinite` IS NOT ASKED HERE, and need not be: `Math.max(min,
- * Math.min(max, NaN))` is `NaN`, and the settings store refuses a value its
- * own parser cannot read back, with a line in the log — so a control that
- * sends a non-number changes nothing and says so, rather than storing the
- * minimum in its place and hiding the defect.
- */
+/** A number held to `[min, max]`. Only a finite number is handed to it. */
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value))
 
 /**
@@ -299,18 +291,29 @@ export function chooseVoice(settings: SettingsStore, lang: string, voice: string
  * arrives from disk; this guards what arrives from a control, and the two are
  * different doors into the same value — so what is on disk is always what the
  * reader is shown.
+ *
+ * ⚠️ **A NON-FINITE VALUE IS NOT CLAMPED, IT IS PASSED ON TO BE REFUSED.**
+ * `Math.min(max, Infinity)` is the maximum, so clamping it would store an end
+ * the reader never chose; 5.4's reducer refused every non-finite value for that
+ * reason. Handed on unchanged, NaN and ±Infinity meet the setting's parser,
+ * which reads none of them, and the store refuses what its parser cannot read
+ * back, with a line in the log — so a broken control changes nothing and says
+ * so.
  */
+const fromControl = (value: number, min: number, max: number): number =>
+  Number.isFinite(value) ? clamp(value, min, max) : value
+
 export const setRate = (settings: SettingsStore, rate: number): void =>
-  settings.set(RATE_SETTING, clamp(rate, READING_RATE_MIN, READING_RATE_MAX))
+  settings.set(RATE_SETTING, fromControl(rate, READING_RATE_MIN, READING_RATE_MAX))
 
 export const setVolume = (settings: SettingsStore, volume: number): void =>
-  settings.set(VOLUME_SETTING, clamp(volume, READING_VOLUME_MIN, READING_VOLUME_MAX))
+  settings.set(VOLUME_SETTING, fromControl(volume, READING_VOLUME_MIN, READING_VOLUME_MAX))
 
 export const setSentenceGap = (settings: SettingsStore, ms: number): void =>
-  settings.set(SENTENCE_GAP_SETTING, clamp(ms, SENTENCE_GAP_MIN, SENTENCE_GAP_MAX))
+  settings.set(SENTENCE_GAP_SETTING, fromControl(ms, SENTENCE_GAP_MIN, SENTENCE_GAP_MAX))
 
 export const setParagraphGap = (settings: SettingsStore, ms: number): void =>
-  settings.set(PARAGRAPH_GAP_SETTING, clamp(ms, PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX))
+  settings.set(PARAGRAPH_GAP_SETTING, fromControl(ms, PARAGRAPH_GAP_MIN, PARAGRAPH_GAP_MAX))
 
 /** Read a note's body, or stop reading it. */
 export const toggleNotesAloud = (settings: SettingsStore): void =>

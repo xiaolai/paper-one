@@ -349,9 +349,9 @@ describe('a value from a control', () => {
   })
 
   it('changes nothing for a control that sends a non-number, and says so', () => {
-    /* `Math.max(min, Math.min(max, NaN))` is NaN, and the store refuses a value
-       its own parser cannot read back — so a broken control is a line in the
-       log, not the minimum stored in its place. */
+    /* A NaN is handed on unclamped, and the store refuses a value its own
+       parser cannot read back — so a broken control is a line in the log, not
+       the minimum stored in its place. */
     const said = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       const settings = fresh()
@@ -360,6 +360,32 @@ describe('a value from a control', () => {
       expect(settings.get(RATE_SETTING)).toBe(1.5)
       expect(said).toHaveBeenCalledWith(
         'Paper: the setting narration.readingRate was not changed, because its own parser cannot read that value back',
+      )
+    } finally {
+      said.mockRestore()
+    }
+  })
+
+  it.each([
+    ['reading rate', setRate, RATE_SETTING, 1.5],
+    ['reading volume', setVolume, VOLUME_SETTING, 35],
+    ['sentence gap', setSentenceGap, SENTENCE_GAP_SETTING, 300],
+    ['paragraph gap', setParagraphGap, PARAGRAPH_GAP_SETTING, 900],
+  ] as const)('keeps the %s when handed Infinity or -Infinity, and says so', (_, put, setting, start) => {
+    /* `Math.min(max, Infinity)` is the maximum, so a clamp alone would store
+       an end the reader never chose. 5.4's reducer refused every non-finite
+       value; the store's own parser refuses it here, with its line. */
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const settings = fresh()
+      put(settings, start)
+      put(settings, Number.POSITIVE_INFINITY)
+      expect(settings.get(setting)).toBe(start)
+      put(settings, Number.NEGATIVE_INFINITY)
+      expect(settings.get(setting)).toBe(start)
+      expect(said).toHaveBeenCalledTimes(2)
+      expect(said).toHaveBeenCalledWith(
+        `Paper: the setting ${setting.key} was not changed, because its own parser cannot read that value back`,
       )
     } finally {
       said.mockRestore()
