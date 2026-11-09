@@ -47,11 +47,15 @@ import {
  * the import that carries `kernel.*` to `narration.*` on load.
  */
 
-/** A store over `values` as they would sit on disk, scoped as the registry scopes narration. */
-function storedAs(values: Record<string, unknown> | null): SettingsStore {
+/**
+ * A store over `values` as they would sit on disk, scoped as the registry
+ * scopes narration, and what the disk holds under `key` after it: the value
+ * as written, which `get` would read through the setting's parser.
+ */
+function onDisk(values: Record<string, unknown> | null) {
   const map = new Map<string, string>()
   if (values !== null) map.set(SETTINGS_STORAGE_KEY, JSON.stringify({ version: SETTINGS_VERSION, values }))
-  return scopeSettings(
+  const settings = scopeSettings(
     createSettingsStore({
       storage: {
         getItem: (key) => map.get(key) ?? null,
@@ -60,7 +64,12 @@ function storedAs(values: Record<string, unknown> | null): SettingsStore {
     }),
     'narration',
   )
+  const saved = (key: string): unknown =>
+    (JSON.parse(map.get(SETTINGS_STORAGE_KEY) ?? '{"values":{}}') as { values: Record<string, unknown> }).values[key]
+  return { settings, saved }
 }
+
+const storedAs = (values: Record<string, unknown> | null): SettingsStore => onDisk(values).settings
 
 const fresh = (): SettingsStore => storedAs(null)
 
@@ -261,11 +270,14 @@ describe('choosing a voice', () => {
   })
 
   it('forgets the language on an empty voice, rather than storing an empty string', () => {
-    const settings = fresh()
+    const { settings, saved } = onDisk(null)
     chooseVoice(settings, 'en', 'voice:en')
     chooseVoice(settings, 'zh', 'voice:zh')
     chooseVoice(settings, 'en', '')
     expect(settings.get(VOICE_SETTING)).toEqual({ zh: 'voice:zh' })
+    /* Asked of the file too: the parser drops an empty voice on the way out,
+       so `get` alone cannot tell a forgotten language from a dead key. */
+    expect(saved('narration.readingVoice')).toEqual({ zh: 'voice:zh' })
   })
 
   it('writes nothing for a choice that changes nothing', () => {
@@ -280,6 +292,18 @@ describe('choosing a voice', () => {
     chooseVoice(settings, 'fr', '')
     expect(told).not.toHaveBeenCalled()
     expect(Object.keys(settings.get(VOICE_SETTING))).toEqual(['en', 'zh'])
+  })
+
+  it('writes nothing for Automatic over a language whose stored voice was already unreadable', () => {
+    /* The file holds an empty voice for English, which the parser drops, so
+       the picker already shows Automatic there: choosing it changes nothing a
+       reader can see, and the dead key is not this choice to clean. */
+    const { settings, saved } = onDisk({ 'narration.readingVoice': { en: '', zh: 'voice:zh' } })
+    const told = vi.fn()
+    settings.subscribe(told)
+    chooseVoice(settings, 'en', '')
+    expect(told).not.toHaveBeenCalled()
+    expect(saved('narration.readingVoice')).toEqual({ en: '', zh: 'voice:zh' })
   })
 })
 

@@ -5927,6 +5927,7 @@
     "src/capabilities/narration/lib/settings.test.ts > a value from a control > turns reading footnotes on, and off again",
     "src/capabilities/narration/lib/settings.test.ts > choosing a voice > forgets the language on an empty voice, rather than storing an empty string",
     "src/capabilities/narration/lib/settings.test.ts > choosing a voice > merges one language into the map, leaving the others alone",
+    "src/capabilities/narration/lib/settings.test.ts > choosing a voice > writes nothing for Automatic over a language whose stored voice was already unreadable",
     "src/capabilities/narration/lib/settings.test.ts > choosing a voice > writes nothing for a choice that changes nothing",
     "src/capabilities/narration/lib/settings.test.ts > the choices, as the speaker takes them > follows every setting as it changes",
     "src/capabilities/narration/lib/settings.test.ts > the choices, as the speaker takes them > hands the volume over as a fraction, the only division between the disk and the speakers",
