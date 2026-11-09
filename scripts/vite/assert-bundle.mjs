@@ -46,8 +46,10 @@ export function loadManifest(root) {
   const file = path.join(root, MANIFEST_NAME)
   let text
   try {
+    // Stryker disable next-line StringLiteral: without an encoding this is a Buffer, which `parseManifest` hands to `JSON.parse`, and `JSON.parse` reads a Buffer as its UTF-8 text — the same text `'utf8'` decodes, so no manifest parses differently
     text = readFileSync(file, 'utf8')
   } catch (cause) {
+    // Stryker disable next-line OptionalChaining: `readFileSync` throws only Error objects, so `cause` is never nullish and `?.` reads exactly what `.` does
     throw new Error(`${PLUGIN_NAME}: cannot read ${file}: ${cause?.code ?? cause?.message}`, { cause })
   }
   const parsed = parseManifest(text)
@@ -63,6 +65,7 @@ export function loadManifest(root) {
 export function bundleModuleIds(bundle) {
   const ids = new Set()
   for (const output of Object.values(bundle)) {
+    // Stryker disable next-line ConditionalExpression: a Rollup asset carries neither `moduleIds` nor `modules`, so reading one instead of skipping it adds no id
     if (output.type !== 'chunk') continue
     for (const id of output.moduleIds ?? Object.keys(output.modules ?? {})) ids.add(id)
   }
