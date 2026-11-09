@@ -303,10 +303,11 @@ jobs:
       # on device"; later pushes passed, so the debug build of the whole
       # workspace with `--all-targets` runs close to the runner's free space.
       # The image's .NET, Android, Haskell and CodeQL toolchains are unused
-      # here, so they go. The 30 GB floor is a margin, not a measurement: the
-      # two `df` lines in this step's log are what to resize it from. It turns
-      # a full disk into a named failure before the build, not a link error
-      # halfway through it.
+      # here, so they go. The 30 GB floor is a margin, not a measurement: what
+      # the build needs is the second `df` here minus the one in "Disk left
+      # after the build", and that is what to resize it from. It turns a full
+      # disk into a named failure before the build, not a link error halfway
+      # through it.
       - name: Free disk for the Rust build
         run: |
           df -h /
@@ -332,6 +333,9 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
+      - name: Disk left after the build
+        if: always()
+        run: df -h /
 
   # ⚠️ **THE MUTATION GATE, WHICH GATED NOTHING UNTIL NOW.**
   #
