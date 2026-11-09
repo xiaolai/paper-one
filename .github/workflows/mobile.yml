@@ -74,8 +74,16 @@ jobs:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
         run: pnpm tauri android init --ci
       - name: cargo check (android feature set)
+        # A bare cargo check runs outside the tauri CLI, which sets up the NDK for
+        # `tauri android build`; so crates with C code (ring) look for an unprefixed
+        # `aarch64-linux-android-clang` and fail. Point cc and the linker at the
+        # NDK's API-level wrapper; 24 is tauri's default minSdkVersion, which
+        # tauri.conf.json does not override.
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          CC_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          AR_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
         run: cargo check --manifest-path src-tauri/Cargo.toml -p app --target aarch64-linux-android --release --no-default-features --features android
       - name: tauri android build
         env:
