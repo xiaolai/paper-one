@@ -29,7 +29,7 @@ notices test walks what is installed to hold this list to it.
 | `react-dom` | 19.2.8 | MIT |
 | `lucide-react` | 1.31.0 | ISC |
 | `pdfjs-dist` | 6.2.108 | Apache-2.0 |
-| `foliate-js` | github:xiaolai/foliate-js#eef3cec5b1fb0e46c3417b67ae5175cb3c38603e | MIT |
+| `foliate-js` | github:xiaolai/foliate-js#f8754863fc2c2600db3dfa1a9c5f49ab6a32f7dc | MIT |
 | `@noble/ed25519` | 3.2.0 | MIT |
 | `@noble/hashes` | 2.4.0 | MIT |
 | `@tauri-apps/api` | 2.11.1 | MIT |
