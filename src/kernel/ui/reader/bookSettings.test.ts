@@ -178,6 +178,24 @@ describe('the defaults are what Paper rendered before the settings existed', () 
     expect(v['--paper-note-prose']).toBe('1')
   })
 
+  /* A SWITCH IS ON AS A VALUE. `setProperty(name, '')` removes the property,
+     so an empty string written for "on" would leave the switch off. */
+  it('turns each switch on with a value, never an empty string', () => {
+    const switches: [Partial<ReadingStyle>, string][] = [
+      [{ flourish: 'drop-cap' }, '--paper-drop-cap'],
+      [{ flourish: 'small-caps' }, '--paper-small-caps'],
+      [{ blockquote: 'tint' }, '--paper-quote-rule'],
+      [{ blockquote: 'tint' }, '--paper-quote-tint'],
+      [{ codeWrap: 'wrap' }, '--paper-code-wrap'],
+      [{ figureFrame: 'hairline' }, '--paper-figure-hairline'],
+      [{ figureFrame: 'shadow' }, '--paper-figure-shadow'],
+      [{ wideTables: 'shrink' }, '--paper-table-shrink'],
+      [{ figureScalesWithText: true }, '--paper-figure-scale'],
+      [{ cjkSpacing: true }, '--paper-cjk-space'],
+    ]
+    for (const [style, name] of switches) expect(vars(style)[name as keyof ReturnType<typeof vars>], name).toBe('1')
+  })
+
   it('is the seed the app actually starts from', () => {
     /* Imported rather than restated in `initialState`, so the reducer's seed
        and the stylesheet's own idea of "unchanged" cannot drift apart. */
