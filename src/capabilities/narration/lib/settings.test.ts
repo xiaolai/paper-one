@@ -1,7 +1,10 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import {
   SETTINGS_STORAGE_KEY,
   SETTINGS_VERSION,
+  carryLegacySettings,
   createSettingsStore,
   scopeSettings,
   stepAt,
@@ -374,6 +377,63 @@ describe('the choices, as the speaker takes them', () => {
       volume: 1,
       sentenceGapMs: 0,
       paragraphGapMs: 2000,
+      notesAloud: true,
+    })
+  })
+})
+
+/**
+ * A FILE A 5.4 BUILD SAVED AFTER THIS ONE (plan, D6: "an old build still reads
+ * and saves the file").
+ *
+ * `downgraded-5.4.json` was not written by hand. This build loaded
+ * `voice-chosen-5.4.json` and set the speed to 1.5×; the 5.4 code, run on what
+ * that saved, read the reader's choices back through its own
+ * `readKernelPreferences`, changed the English voice through its own
+ * `writeKernelPreferences` and saved. Never regenerate it to make this pass:
+ * it is what a reader who went back a version and returned has on disk.
+ */
+describe('a file a 5.4 build saved after this one', () => {
+  const fixture = (name: string): string =>
+    readFileSync(fileURLToPath(new URL(`../../../../tests/fixtures/settings/${name}`, import.meta.url)), 'utf8').trim()
+
+  /** A store over storage holding `text`, as the app makes one, with what it saves. */
+  const over = (text: string) => {
+    const map = new Map([[SETTINGS_STORAGE_KEY, text]])
+    const store = createSettingsStore({
+      storage: { getItem: (key) => map.get(key) ?? null, setItem: (key, value) => void map.set(key, value) },
+      migrate: carryLegacySettings,
+    })
+    return { settings: scopeSettings(store, 'narration'), saved: () => map.get(SETTINGS_STORAGE_KEY)! }
+  }
+
+  const values = (text: string) => (JSON.parse(text) as { values: Record<string, unknown> }).values
+  const narrationOf = (record: Record<string, unknown>) =>
+    Object.fromEntries(Object.entries(record).filter(([key]) => key.startsWith('narration.')))
+
+  it('keeps every narration choice this build wrote, through a save by the build that knew none of them', () => {
+    const written = over(fixture('voice-chosen-5.4.json'))
+    setRate(written.settings, 1.5)
+    const ours = narrationOf(values(written.saved()))
+    expect(Object.keys(ours)).toHaveLength(6)
+    const downgraded = values(fixture('downgraded-5.4.json'))
+    expect(narrationOf(downgraded)).toEqual(ours)
+    /* And the 5.4 build did save: the voice it changed is on its own key. */
+    expect(downgraded['kernel.readingVoice']).toEqual({
+      en: 'com.apple.voice.compact.en-US.Samantha',
+      zh: 'com.apple.voice.premium.zh-CN.Lilian',
+    })
+  })
+
+  it('reads the narration keys back over what the 5.4 build changed on the old ones', () => {
+    /* ⚠️ THE NEW KEY WINS, as D6 decides: the voice changed on the older build
+       stays on `kernel.readingVoice` and is not carried over the newer choice. */
+    expect(prefsOf(over(fixture('downgraded-5.4.json')).settings)).toEqual({
+      voices: { en: 'kokoro:af_heart', zh: 'com.apple.voice.premium.zh-CN.Lilian' },
+      rate: 1.5,
+      volume: 0.4,
+      sentenceGapMs: 500,
+      paragraphGapMs: 1400,
       notesAloud: true,
     })
   })

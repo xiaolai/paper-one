@@ -5919,6 +5919,8 @@
     "src/capabilities/narration/lib/readingCursor.test.ts > the edges a step can meet > stops at the last paragraph even with sentences left in it",
     "src/capabilities/narration/lib/readingCursor.test.ts > the edges a step can meet > stops when the paragraph ahead begins inside the section’s last sentence",
     "src/capabilities/narration/lib/readingCursor.test.ts > the plan the hook builds > finds four sentences and two paragraphs",
+    "src/capabilities/narration/lib/settings.test.ts > a file a 5.4 build saved after this one > keeps every narration choice this build wrote, through a save by the build that knew none of them",
+    "src/capabilities/narration/lib/settings.test.ts > a file a 5.4 build saved after this one > reads the narration keys back over what the 5.4 build changed on the old ones",
     "src/capabilities/narration/lib/settings.test.ts > a value from a control > changes nothing for a control that sends a non-number, and says so",
     "src/capabilities/narration/lib/settings.test.ts > a value from a control > stores a number in range as it is",
     "src/capabilities/narration/lib/settings.test.ts > a value from a control > stores the nearest end for a number past either one",
