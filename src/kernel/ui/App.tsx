@@ -70,6 +70,7 @@ import { tagCounts } from '../core/library'
 import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
 import { chapterSteps } from './tocOrder'
+import { ReaderControls, WindowHosts } from './reader/readerContributions'
 import { createHostStore, HostedTitleBar, ReadingHost, useHosted, type Hosted } from './reader/readingHost'
 import { useReadingSurface } from './reader/readingSurface'
 import { useAutoAdvance } from './reader/useAutoAdvance'
@@ -407,10 +408,12 @@ export function App({
     book: speechBook,
   })
   const [hostStore] = useState(createHostStore)
+  /* The reading below and every contribution around it are told one thing. */
+  const readerContext = { sectionKey: book.doc, surface: readingSurface.surface }
   /**
    * The book turning itself, at the pace the time-left estimate uses.
    *
-   * ⚠️ **IT DEFERS TO WHOEVER HOLDS THE PACE, WHICH IS A READING.** Read aloud
+   * ⚠️ **IT DEFERS TO WHOEVER HOLDS THE PACE: A READING, OR A WINDOW HOST.** Read aloud
    * already turns the page, so the two together double-advance; `useAutoAdvance`
    * refuses to start while a reading speaks and gives the book up if one starts
    * under it. One pace at a time.
@@ -2599,7 +2602,7 @@ export function App({
     <>
       {/* ⚠️ **FIRST, BECAUSE IT PUBLISHES IN A LAYOUT EFFECT**: see its header. */}
       <ReadingHost
-        context={{ sectionKey: book.doc, surface: readingSurface.surface }}
+        context={readerContext}
         prefs={speechPrefs}
         engine={voiceEngine}
         audiobook={{
@@ -2620,6 +2623,10 @@ export function App({
         }}
         store={hostStore}
       />
+      {/* ⚠️ **HERE AND NOT UNDER A SCREEN**, so they outlive the reader; and ahead of
+          the shell, so their layout effects run before those of a control that
+          reads what they publish. */}
+      <WindowHosts hosts={composition.windowHosts} context={readerContext} />
       <WindowShell
         state={state}
         platform={platform}
@@ -2634,6 +2641,7 @@ export function App({
             listenRefusal={listenRefusal}
             hasBook={book.source !== null}
             screens={composition.screens}
+            readerControls={<ReaderControls controls={composition.readerControls} context={readerContext} />}
           />
         }
         overlays={

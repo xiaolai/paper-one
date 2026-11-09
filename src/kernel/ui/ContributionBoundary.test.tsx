@@ -106,6 +106,32 @@ describe('a contributed renderer inside its boundary', () => {
   })
 })
 
+describe('a silent boundary', () => {
+  /* FOR WHAT HAS NO PLACE IN THE WINDOW TO SAY IT: a window host draws nothing
+     of its own, so a failure line would land above the whole shell. The log
+     still names it; the window shows nothing where it was. */
+  it('draws nothing when its contribution throws, and still names it in the log', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const view = render(
+        <ContributionBoundary label="A window host" id="narration:host" silent>
+          <ContributionBody
+            id="narration:host"
+            render={() => {
+              throw new Error('engine gone')
+            }}
+            context={{ bookId: null }}
+          />
+        </ContributionBoundary>,
+      )
+      expect(view.container.textContent).toBe('')
+      expect(spy.mock.calls.some((call) => String(call[0]).includes('narration:host failed to draw'))).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
 describe('a boundary asked to draw another contribution', () => {
   it('starts over for the new one instead of keeping the old failure', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})

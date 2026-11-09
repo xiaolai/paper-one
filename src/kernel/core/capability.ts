@@ -1,6 +1,6 @@
 import type { IndexedBook } from './bookIndex'
 import type { Highlight } from './marks'
-import type { Diagnostics, SettingsStore } from './ports'
+import type { Diagnostics, ReadingSurface, SettingsStore } from './ports'
 import type { KernelServices } from './services'
 import type { ContributedPaneId, ContributedScreenId, PaneId, Screen } from './uiTypes'
 import type { OverlayContribution } from './overlay'
@@ -336,6 +336,33 @@ export interface MarkControlTools {
   noteAsWritten(mark: Highlight): Highlight
 }
 
+/**
+ * The reader, as something that works alongside it is given it.
+ *
+ * `sectionKey` is what says the section changed, by render, so the change lands
+ * in one commit with everything else. Compare it; it means nothing else.
+ * Everything else there is to know is `surface`'s to answer, as of the moment it
+ * is asked: see `ReadingSurface` for what makes that safe from a child of the
+ * component that commits it.
+ *
+ * ⚠️ **`surface` IS NEVER NULL.** It is one object for the window's life, because
+ * a host holds it across books, and with no book it says so itself.
+ */
+export interface ReaderContext {
+  readonly sectionKey: unknown
+  readonly surface: ReadingSurface
+}
+
+/** Opaque for the reason `PaneRenderer` is: this file is React-free. */
+export type ReaderRenderer = (context: ReaderContext) => unknown
+
+/** A `windowHosts` or `readerControls` entry. */
+export interface ReaderContribution {
+  /** `<capability>:<name>`, like a pane, so an id says who owns it. */
+  readonly id: `${string}:${string}`
+  readonly render: ReaderRenderer
+}
+
 export interface BookAction {
   readonly id: `${string}:${string}`
   readonly label: string
@@ -500,6 +527,25 @@ export interface Capability {
   readonly bookStatuses?: readonly BookStatus[]
   /** A control on each of the reader's own marks — see `MarkControl`. */
   readonly markControls?: readonly MarkControl[]
+  /**
+   * Something that runs for as long as the window does, and draws nothing: what a
+   * reading needs in order to go on while the reader is on another screen. The
+   * desktop window draws these, ahead of everything that could read what they
+   * publish.
+   *
+   * ⚠️ **ONE PACE AT A TIME.** A host that sets the book's pace takes
+   * `context.surface.holdPace()`, and for as long as anything holds it the book
+   * does not turn itself.
+   *
+   * ⚠️ **A HOST CAN GO WHILE THE WINDOW STAYS**, when it throws: the fault is logged
+   * by id, nothing is drawn, and it does not come back this run. React runs its
+   * effects' cleanups, so a hold taken in an effect is handed back by that effect.
+   * Anything else it published, it must withdraw there too, or a control goes on
+   * reading a host that is gone.
+   */
+  readonly windowHosts?: readonly ReaderContribution[]
+  /** A control in the desktop title bar beside the reading controls, on the reader screen. */
+  readonly readerControls?: readonly ReaderContribution[]
   readonly services?: readonly ServiceContribution[]
   readonly clients?: readonly ClientContribution[]
   /**

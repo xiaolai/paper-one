@@ -20,6 +20,7 @@ import {
   Type,
   X,
 } from 'lucide-react'
+import type { ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ICON, READING_RATE } from '../../core/metrics'
@@ -67,6 +68,12 @@ export interface TitleBarProps {
   bookSubtitle: string
   /** Reading aloud — the Listen control drives this directly. */
   speech: Speech
+  /**
+   * What capabilities put beside the reading controls, already drawn: `App` holds
+   * the context they are given. Required for the reason `screens` is; null says
+   * there are none.
+   */
+  readerControls: ReactNode
   /**
    * Why no voice can read the book on screen, or `null` when one can.
    *
@@ -139,6 +146,7 @@ export function TitleBar({
   listenRefusal,
   hasBook,
   screens,
+  readerControls,
 }: TitleBarProps) {
   const isMac = platform === 'macos'
   const isReader = state.screen === 'reader'
@@ -166,6 +174,10 @@ export function TitleBar({
      show the filter working. It is kept for the next entry, which is the case
      the list's own note records. */
   const railPanes = TITLEBAR_PANES.filter(({ key }) =>
+    /* Stryker disable next-line ObjectLiteral: for a kernel panel the audience
+       decides only `dev`, and the one entry is Contents, which every audience is
+       offered — so no render can tell this from `{}`. Kept for the next entry,
+       for the reason the filter above is. */
     paneFits(state.screen, key, { developer: state.developer, hiddenPanes: state.hiddenPanes }),
   )
   const chromeStyle = {
@@ -186,15 +198,13 @@ export function TitleBar({
       console.error(`Paper: window ${what} failed`, cause)
     })
   }
+  /* KEYED BY THE TITLE, which is already unique, rather than by a second string
+     beside it: a React key on a fixed list of three is never seen by anybody, so
+     a separate `key` field was a value no test could be wrong about. */
   const WINDOW_BUTTONS = [
-    { key: 'minimise', title: 'Minimise', Icon: Minus, run: runWindow('minimise', () => appWindow?.minimize()) },
-    {
-      key: 'maximise',
-      title: 'Maximise',
-      Icon: Square,
-      run: runWindow('maximise', () => appWindow?.toggleMaximize()),
-    },
-    { key: 'close', title: 'Close', Icon: X, run: runWindow('close', () => appWindow?.close()) },
+    { title: 'Minimise', Icon: Minus, run: runWindow('minimise', () => appWindow?.minimize()) },
+    { title: 'Maximise', Icon: Square, run: runWindow('maximise', () => appWindow?.toggleMaximize()) },
+    { title: 'Close', Icon: X, run: runWindow('close', () => appWindow?.close()) },
   ]
 
   return (
@@ -235,9 +245,9 @@ export function TitleBar({
             LIGHTS.map((fill) => (
               <span key={fill} className={styles.light} style={{ background: fill }} />
             ))
-          : WINDOW_BUTTONS.map(({ key, title, Icon, run }) => (
+          : WINDOW_BUTTONS.map(({ title, Icon, run }) => (
               <button
-                key={key}
+                key={title}
                 type="button"
                 className={styles.windowButton}
                 title={title}
@@ -406,6 +416,7 @@ export function TitleBar({
                 <AudioLines size={ICON.control} strokeWidth={ICON.stroke} />
               </button>
             )}
+            {readerControls}
             <button
               type="button"
               className={styles.action}

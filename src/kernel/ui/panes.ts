@@ -1,5 +1,5 @@
 import { isValidElement, type ReactNode } from 'react'
-import type { PaneContext, PaneContribution, PaneRenderer } from '../core/capability'
+import type { PaneContribution } from '../core/capability'
 import { resolvePaneId } from '../core/registry'
 import { paneFits, type KernelPaneId, type PaneAudience, type PaneId, type Screen, type Theme } from './state'
 import type { Platform } from '../core/metrics'
@@ -154,7 +154,7 @@ export function shownPane(
  * with "Objects are not valid as a React child" and no word about which
  * capability sent it. What "plainly" can and cannot see is `isReactNode`'s.
  */
-export function renderContribution(id: string, render: PaneRenderer, context: PaneContext): ReactNode {
+export function renderContribution<Context>(id: string, render: (context: Context) => unknown, context: Context): ReactNode {
   const value = render(context)
   if (isReactNode(value)) return value
   throw new Error(`pane "${id}" rendered ${describe(value)}, which React cannot show`)
@@ -197,26 +197,40 @@ export function renderContribution(id: string, render: PaneRenderer, context: Pa
  * promise is still let through here, deliberately, because React draws one.
  */
 function isReactNode(value: unknown): value is ReactNode {
-  if (!Array.isArray(value)) return isLeafNode(value)
   /* THE PATH FROM THE OUTERMOST ARRAY TO THE ONE BEING READ, each with the
      index it has reached — the call stack the recursive walk used, held where
-     its depth can be counted. */
-  const path: { readonly items: readonly unknown[]; next: number }[] = [{ items: value, next: 0 }]
+     its depth can be counted.
+
+     ⚠️ **THE VALUE IS WALKED AS THE ONE ITEM OF AN ARRAY OF ITS OWN, rather
+     than tested for being an array first** (2026-11-09). Behind a separate
+     `Array.isArray(value)`, a mutant that sent a non-array down the walk read
+     `items.length` as `undefined`, so `next` never met it and the loop ran
+     forever — evaluating no mutated code as it went, so Stryker's hit limit
+     never caught it and only the wall clock did, on every run. One road means
+     an item is classified inside the loop, where every mutant is evaluated
+     each time round. The wrapper is not a level of nesting: `MAX_NESTING`
+     counts past it. */
+  const path: { readonly items: readonly unknown[]; next: number }[] = [{ items: [value], next: 0 }]
   const good = new Set<readonly unknown[]>()
   while (path.length > 0) {
     const top = path[path.length - 1]!
+    /* AN ELSE, NOT A `continue`, for the same reason: with the finished array's
+       block emptied, the walk read past its end and `next` never met `length`
+       again, so the emptied block — the one place the mutant lives — was never
+       reached a second time. As an else, an emptied block leaves `next` at
+       `length` and the walk comes back to it every time round. */
     if (top.next === top.items.length) {
       good.add(top.items)
       path.pop()
-      continue
-    }
-    const item = top.items[top.next]
-    top.next += 1
-    if (!Array.isArray(item)) {
-      if (!isLeafNode(item)) return false
-    } else if (!good.has(item)) {
-      if (path.length === MAX_NESTING) return false
-      path.push({ items: item, next: 0 })
+    } else {
+      const item = top.items[top.next]
+      top.next += 1
+      if (!Array.isArray(item)) {
+        if (!isLeafNode(item)) return false
+      } else if (!good.has(item)) {
+        if (path.length > MAX_NESTING) return false
+        path.push({ items: item, next: 0 })
+      }
     }
   }
   return true

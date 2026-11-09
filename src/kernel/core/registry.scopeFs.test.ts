@@ -187,6 +187,22 @@ describe('the reviewed shapes, edge by edge', () => {
     expect(fs.writeAtomic).not.toHaveBeenCalled()
   })
 
+  /* The circle's two parents are held edge by edge in its own describe above. */
+  it('refuses a public folder with anything before the reviewed shape', async () => {
+    const publicFs = rawFs()
+    await expect(scopeFs(publicFs, 'public')!.mkdir('x/books/b')).rejects.toThrow(/may only mkdir/u)
+    expect(publicFs.mkdir).not.toHaveBeenCalled()
+  })
+
+  it('refuses the public store with anything before or after its name', async () => {
+    const fs = rawFs()
+    const scoped = scopeFs(fs, 'public')!
+    for (const path of ['x/books/b/public.jsonl', 'books/b/public.jsonl.bak']) {
+      await expect(scoped.writeAtomic!(path, bytes, 'full')).rejects.toThrow(/may only writeAtomic/u)
+    }
+    expect(fs.writeAtomic).not.toHaveBeenCalled()
+  })
+
   it('guards appendFile exactly as it guards the rest, and offers it only when the platform has it', async () => {
     const appendFile = vi.fn(async () => {})
     const fs = { ...rawFs(), appendFile } as unknown as NonNullable<KernelServices['fs']> & { appendFile: typeof appendFile }
@@ -195,5 +211,75 @@ describe('the reviewed shapes, edge by edge', () => {
     expect(appendFile).toHaveBeenCalledWith('books/b/circle/p.json', bytes)
     await expect(scoped.appendFile!('books/b/marks.json', bytes)).rejects.toThrow(/may only appendFile/u)
     expect(scopeFs(rawFs(), 'circle')!.appendFile).toBeUndefined()
+  })
+})
+
+describe('what a path resolves to, before the scope reads it', () => {
+  const refusedAs = (op: string, path: unknown) =>
+    expect.objectContaining({ code: 'namespace', message: `capability "circle" may only ${op} under "circle/", not ${JSON.stringify(path)}` })
+
+  /* Each of these is a write outside the circle's folder dressed as one
+     inside it: something not a path, a Windows separator, an absolute path,
+     a climb out through `..`, or no path at all. All refused, by name, and
+     the disk is never touched. */
+  it('refuses a path that is not a string, backslashed, absolute, climbing out, or empty', async () => {
+    const fs = rawFs()
+    const scoped = scopeFs(fs, 'circle')!
+    for (const path of [42, 'circle/..\\..\\books', '/circle/x', 'circle/../books/b/marks.json', '', '.', 'circle/..']) {
+      await expect(scoped.writeFile(path as string, bytes), String(path)).rejects.toThrow(refusedAs('writeFile', path))
+    }
+    expect(fs.writeFile).not.toHaveBeenCalled()
+  })
+
+  /* A drive letter is refused before the namespace is consulted, whatever
+     the id: `c:/x` must not count as "under `c:/`". */
+  it('refuses a drive-lettered path even where it would look like the namespace', async () => {
+    const fs = rawFs()
+    await expect(scopeFs(fs, 'c:')!.writeFile('c:/x', bytes)).rejects.toThrow(/may only writeFile under "c:\/"/u)
+    expect(fs.writeFile).not.toHaveBeenCalled()
+  })
+
+  /* What is legitimately the circle's own still passes after resolution: a
+     colon later in a name, a doubled or leading-dot separator, a step down
+     and back up inside the folder. The original path is what reaches disk. */
+  it('allows a path that resolves inside the namespace or onto a reviewed shape', async () => {
+    const fs = rawFs()
+    const scoped = scopeFs(fs, 'circle')!
+    for (const path of ['circle/notes:1.json', 'books//book_abc/shared.json', './circle/x', 'circle/a/../b.json']) {
+      await expect(scoped.writeFile(path, bytes), path).resolves.toBeUndefined()
+      expect(fs.writeFile).toHaveBeenLastCalledWith(path, bytes)
+    }
+  })
+})
+
+describe('every door of the scoped filesystem', () => {
+  /* Reads are not confined, and answer exactly what the disk answers. */
+  it('passes readDir and exists through', async () => {
+    const fs = rawFs()
+    fs.readDir.mockResolvedValueOnce(['a.json'] as never)
+    fs.exists.mockResolvedValueOnce(false)
+    const scoped = scopeFs(fs, 'circle')!
+    await expect(scoped.readDir('books/b')).resolves.toEqual(['a.json'])
+    await expect(scoped.exists('books/b')).resolves.toBe(false)
+  })
+
+  /* A capability never takes a book's folder down, even at a path a write
+     to a file would be allowed. */
+  it('refuses removeDir on a reviewed file shape', async () => {
+    const fs = rawFs()
+    await expect(scopeFs(fs, 'circle')!.removeDir('books/book_abc/shared.json')).rejects.toThrow(/may only removeDir under "circle\/"/u)
+    expect(fs.removeDir).not.toHaveBeenCalled()
+  })
+
+  /* A remove or a rename outside the folder is refused naming the operation,
+     and a rename is checked on both ends. */
+  it('refuses remove and either side of a rename, by operation', async () => {
+    const fs = rawFs()
+    const scoped = scopeFs(fs, 'circle')!
+    await expect(scoped.remove('books/b/marks.json')).rejects.toThrow(/may only remove under "circle\/"/u)
+    await expect(scoped.rename('books/b/marks.json', 'circle/x')).rejects.toThrow(/may only rename under "circle\/", not "books\/b\/marks.json"/u)
+    await expect(scoped.rename('circle/x', 'books/b/marks.json')).rejects.toThrow(/may only rename under "circle\/", not "books\/b\/marks.json"/u)
+    expect(fs.remove).not.toHaveBeenCalled()
+    expect(fs.rename).not.toHaveBeenCalled()
   })
 })

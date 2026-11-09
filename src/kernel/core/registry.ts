@@ -10,6 +10,7 @@ import type {
   Disposable,
   KernelApi,
   MarkControl,
+  ReaderContribution,
   OverlayContribution,
   PaneContribution,
   ScreenContribution,
@@ -96,6 +97,10 @@ export interface Contributions {
   readonly bookStatuses: readonly BookStatus[]
   /** A control on each of the reader's own marks — see `Capability.markControls`. */
   readonly markControls: readonly MarkControl[]
+  /** What runs for as long as the window does — see `Capability.windowHosts`. */
+  readonly windowHosts: readonly ReaderContribution[]
+  /** What the title bar draws beside the reading controls — see `Capability.readerControls`. */
+  readonly readerControls: readonly ReaderContribution[]
   /** By service name. */
   readonly services: ReadonlyMap<string, ServiceContribution>
   readonly clients: readonly ClientContribution[]
@@ -238,12 +243,17 @@ export function scopeSettings(store: SettingsStore, capId: string): SettingsStor
 
 /**
  * Resolve a webview-relative path to its canonical form, or null for one
- * that cannot be trusted: empty, absolute (POSIX or drive-lettered),
+ * that cannot be trusted: not a string, absolute (POSIX or drive-lettered),
  * backslashed, or climbing above the data root. `a/b/../c` resolves to
  * `a/c`; a `..` with nothing left to pop is an escape and refuses.
+ *
+ * An empty path, or one that resolves to nothing (`.`, `a/..`), comes back
+ * as `''`, which names no capability's directory and matches no reviewed
+ * shape, so the guard refuses it like any other path outside the namespace.
+ * (It was refused here too, which no caller could tell apart.)
  */
 function normalizeRelative(path: string): string | null {
-  if (typeof path !== 'string' || path === '') return null
+  if (typeof path !== 'string') return null
   if (path.includes('\\')) return null
   if (path.startsWith('/') || /^[A-Za-z]:/.test(path)) return null
   const segments: string[] = []
@@ -493,7 +503,9 @@ function checkRequires(caps: readonly Capability[]): void {
   for (const cap of caps) {
     const targets: string[] = []
     for (const need of cap.requires ?? []) {
-      if (typeof need !== 'string' || !ids.has(need)) {
+      /* No `typeof` check: `ids` holds only the strings `checkIds` admitted, so
+         a requirement that is not a string is never in it. */
+      if (!ids.has(need)) {
         throw invalid('missing-requires', cap.id, `capability "${cap.id}" requires ${JSON.stringify(need)}, which is not composed`)
       }
       targets.push(need)
@@ -501,8 +513,11 @@ function checkRequires(caps: readonly Capability[]): void {
     edges.set(cap.id, targets)
   }
   for (const component of stronglyConnectedComponents([...ids], edges)) {
-    const self = component.length === 1 && (edges.get(component[0] ?? '') ?? []).includes(component[0] ?? '')
-    if (component.length < 2 && !self) continue
+    /* A component of one is a cycle only when it requires itself. Tarjan never
+       yields an empty component, and every id has its row in `edges`, so
+       neither needs a fallback. */
+    const [first] = component as [string, ...string[]]
+    if (component.length === 1 && !(edges.get(first) as string[]).includes(first)) continue
     throw invalid('cyclic-requires', null, `requires cycle among: ${[...component].sort().join(', ')}`)
   }
 }
@@ -517,6 +532,7 @@ function stronglyConnectedComponents(nodes: readonly string[], edges: ReadonlyMa
   const index = new Map<string, number>()
   const low = new Map<string, number>()
   const onStack = new Set<string>()
+  /* Stryker disable next-line ArrayDeclaration: anything below the first node pushed is never cut, since every cut starts at a node above it, so a stray bottom entry reaches no component */
   const stack: string[] = []
   const components: string[][] = []
   const work: { node: string; rest: Iterator<string> }[] = []
@@ -536,6 +552,7 @@ function stronglyConnectedComponents(nodes: readonly string[], edges: ReadonlyMa
   }
 
   for (const root of nodes) {
+    /* Stryker disable next-line ConditionalExpression: re-entering a finished root reaches no new node and yields again only the one-node component it is already in, which `checkRequires` has read already; the skip saves that work and changes no answer */
     if (index.has(root)) continue
     enter(root)
     while (work.length > 0) {
@@ -582,10 +599,13 @@ export function registrationOrder(caps: readonly Capability[]): string[] {
   for (const cap of caps) {
     const needs = [...new Set(cap.requires ?? [])]
     pending.set(cap.id, needs.length)
+    /* No empty-list default: a stray entry in one could never become ready
+       (it has no `pending` count of its own), so a default was a clause no
+       ordering could observe. */
     for (const need of needs) {
-      const list = dependents.get(need) ?? []
-      list.push(cap.id)
-      dependents.set(need, list)
+      const list = dependents.get(need)
+      if (list) list.push(cap.id)
+      else dependents.set(need, [cap.id])
     }
   }
   const order: string[] = []
@@ -594,10 +614,13 @@ export function registrationOrder(caps: readonly Capability[]): string[] {
     ready.sort((a, b) => (position.get(a) ?? 0) - (position.get(b) ?? 0))
     const next = ready.shift() as string
     order.push(next)
-    for (const dependent of dependents.get(next) ?? []) {
-      const left = (pending.get(dependent) ?? 0) - 1
-      pending.set(dependent, left)
-      if (left === 0) ready.push(dependent)
+    const waiting = dependents.get(next)
+    if (waiting) {
+      for (const dependent of waiting) {
+        const left = (pending.get(dependent) ?? 0) - 1
+        pending.set(dependent, left)
+        if (left === 0) ready.push(dependent)
+      }
     }
   }
   if (order.length !== caps.length) throw invalid('cyclic-requires', null, 'requires graph has a cycle')
@@ -612,16 +635,18 @@ export function registrationOrder(caps: readonly Capability[]): string[] {
  * Commands are checked when they are built (`Composition.commands`), because
  * they are a function of the palette's context.
  */
+/* Every parameter is required: the one caller passes all four, and a default
+   here was a list nothing could reach. */
 function checkNamespaces(
   caps: readonly Capability[],
-  kernelServices: readonly ServiceContribution[] = [],
-  kernelClients: readonly ClientContribution[] = [],
+  kernelServices: readonly ServiceContribution[],
+  kernelClients: readonly ClientContribution[],
   /* The services AS SNAPSHOTTED, not the capability's own rows: `snapshotOf`
      has read each handler once and refused the ones with nothing to call, and
      this reads the copies it made — a second read of the capability's row
      could answer differently, and would be a check of something other than
      what is called. */
-  capServices: ReadonlyMap<string, readonly ServiceContribution[]> = new Map(),
+  capServices: ReadonlyMap<string, readonly ServiceContribution[]>,
 ): void {
   const panes = new Set<string>()
   const overlays = new Set<string>()
@@ -635,6 +660,8 @@ function checkNamespaces(
      by different code; only the namespace prefix is shared. */
   const statuses = new Set<string>()
   const markControls = new Set<string>()
+  const windowHosts = new Set<string>()
+  const readerControls = new Set<string>()
   const services = new Set<string>()
   const clients = new Set<string>()
 
@@ -755,7 +782,22 @@ function checkNamespaces(
       }
       claim(markControls, 'mark control', control.id, cap.id)
     }
-    for (const service of capServices.get(cap.id) ?? []) {
+    /* ONE RULE FOR BOTH, EACH WITH ITS OWN SET: a host and the control that drives
+       it are the natural pair to give one name. See `statuses` above. */
+    for (const [kind, contributions, claimed] of [
+      ['window host', cap.windowHosts, windowHosts],
+      ['reader control', cap.readerControls, readerControls],
+    ] as const) {
+      for (const contribution of contributions ?? []) {
+        prefixed(`${kind} id`, contribution.id, colon, cap.id)
+        if (typeof contribution.render !== 'function') {
+          throw invalid('namespace', cap.id, `${kind} "${contribution.id}" has no render() to call`)
+        }
+        claim(claimed, kind, contribution.id, cap.id)
+      }
+    }
+    /* Every capability has its row: `composeCapabilities` made one per id. */
+    for (const service of capServices.get(cap.id) as readonly ServiceContribution[]) {
       prefixed('service name', service.name, dot, cap.id)
       prefixed('grant', service.grant, colon, cap.id)
       claim(services, 'service', service.name, cap.id)
@@ -813,8 +855,13 @@ const EMPTY_SECTIONS: readonly SettingsSection[] = Object.freeze([])
 const EMPTY_ACTIONS: readonly BookAction[] = Object.freeze([])
 const EMPTY_STATUSES: readonly BookStatus[] = Object.freeze([])
 const EMPTY_MARK_CONTROLS: readonly MarkControl[] = Object.freeze([])
+const EMPTY_READER_CONTRIBUTIONS: readonly ReaderContribution[] = Object.freeze([])
 const EMPTY_CLIENTS: readonly ClientContribution[] = Object.freeze([])
 const EMPTY_SERVICES: ReadonlyMap<string, ServiceContribution> = new Map()
+
+/** Copied and bound, for the overlay's reason below; named field by named field, for a mark control's. */
+const readerSnapshot = (contributions: readonly ReaderContribution[] | undefined): readonly ReaderContribution[] =>
+  Object.freeze((contributions ?? []).map((one) => Object.freeze({ id: one.id, render: one.render.bind(one) })))
 
 /**
  * A contributed list, arranged: by `order` (unset last), then registration.
@@ -825,21 +872,18 @@ const EMPTY_SERVICES: ReadonlyMap<string, ServiceContribution> = new Map()
  * Storage because sync depends on peer, and for no other reason: a capability
  * gaining a dependency would have reordered a panel nobody had touched.
  *
- * Stability is load-bearing rather than incidental. `sort` is stable in every
- * engine this runs on, and the index tiebreak makes it so regardless — an
- * unordered contribution has to stay exactly where registration put it, or
- * declaring nothing would mean something different on each build.
+ * Stability is load-bearing rather than incidental: an unordered contribution
+ * has to stay exactly where registration put it, or declaring nothing would
+ * mean something different on each build. `Array.prototype.sort` has been
+ * REQUIRED to be stable since ES2019, so that is the language's guarantee and
+ * not this function's; an index tiebreak stood here that could not change
+ * the answer. (An `order` of NaN makes either comparator inconsistent, and
+ * the language leaves such a sort's result to the engine, with or without a
+ * tiebreak.)
  */
 function byOrder<T extends { readonly order?: number }>(all: readonly T[]): readonly T[] {
   return Object.freeze(
-    all
-      .map((one, at) => ({ one, at }))
-      .sort(
-        (a, b) =>
-          (a.one.order ?? Number.MAX_SAFE_INTEGER) - (b.one.order ?? Number.MAX_SAFE_INTEGER) ||
-          a.at - b.at,
-      )
-      .map(({ one }) => one),
+    [...all].sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER)),
   )
 }
 
@@ -1006,6 +1050,8 @@ export async function composeCapabilities(
           }),
         ),
       ),
+      windowHosts: readerSnapshot(cap.windowHosts),
+      readerControls: readerSnapshot(cap.readerControls),
       clients: Object.freeze((cap.clients ?? []).map((client) => Object.freeze({ ...client }))),
       /* Every capability has its row in `capServices`, made above from the
          same list `ordered` is drawn from, so there is no absent row to
@@ -1072,13 +1118,15 @@ export async function composeCapabilities(
   }
 
   const started: { id: string; disposable: Disposable }[] = []
-  const rollback = (cause: unknown, id: string, why: string, extra: readonly unknown[] = []): never => {
+  /* An abort is the only thing that rolls back, so there is no cause to carry
+     beyond the teardowns that failed: `cause` is undefined when none did. */
+  const rollback = (id: string, why: string): never => {
     const failures = disposeAll(started)
     started.length = 0
-    const errors = [...extra, ...failures.map((f) => f.error)]
+    const errors = failures.map((f) => f.error)
     const message = `capability "${id}" ${why}; ${errors.length === 0 ? 'nothing stays registered' : `${errors.length} teardown(s) failed during rollback`}`
     throw new CapabilityError('start-failed', id, message, {
-      cause: errors.length === 0 ? cause : new AggregateError(cause === undefined ? errors : [cause, ...errors], message),
+      cause: errors.length === 0 ? undefined : new AggregateError(errors, message),
     })
   }
 
@@ -1111,7 +1159,7 @@ export async function composeCapabilities(
   }
 
   for (const cap of ordered) {
-    if (signal.aborted) rollback(undefined, cap.id, 'was not started: the composition was aborted')
+    if (signal.aborted) rollback(cap.id, 'was not started: the composition was aborted')
     /* FIRST, ahead of its requirements: a reader who turned this off has not lost
        it to a dependency that failed, and `available` is not asked about
        something nobody wants this run. */
@@ -1147,7 +1195,7 @@ export async function composeCapabilities(
     }
     /* AGAIN, ACROSS THAT AWAIT: the check at the top of this loop was made before
        `available` was asked, and an abort during it must not start anything. */
-    if (signal.aborted) rollback(undefined, cap.id, 'was not started: the composition was aborted')
+    if (signal.aborted) rollback(cap.id, 'was not started: the composition was aborted')
     /* This capability's disposer stack: each resource it acquires registers
      * its own teardown through `onCleanup`. Run in reverse, it undoes a
      * half-finished `start` (so a throw leaves nothing) and, harmlessly
@@ -1241,8 +1289,8 @@ export async function composeCapabilities(
                 errors.push(error)
               }
               errors.push(...unwind())
-              if (errors.length === 1) throw errors[0]
-              if (errors.length > 1) throw new AggregateError(errors, `capability "${cap.id}" teardown failed`)
+              /* One failure is rethrown as itself; only several are wrapped. */
+              if (errors.length > 0) throw errors.length === 1 ? errors[0] : new AggregateError(errors, `capability "${cap.id}" teardown failed`)
             },
           }
     started.push({ id: cap.id, disposable: disposeCap })
@@ -1251,7 +1299,7 @@ export async function composeCapabilities(
      * capability is fully started, but the composition's lifetime is over —
      * unwind everything (including this one) rather than hand back a
      * live-looking composition whose abort has already fired. */
-    if (signal.aborted) rollback(undefined, cap.id, 'was aborted while starting')
+    if (signal.aborted) rollback(cap.id, 'was aborted while starting')
   }
 
   /* THE REGISTRIES ARE WHAT STARTED, from the pre-start snapshot. A capability
@@ -1267,6 +1315,8 @@ export async function composeCapabilities(
   const bookActions = Object.freeze(kept.flatMap((one) => [...one.bookActions]))
   const bookStatuses = Object.freeze(kept.flatMap((one) => [...one.bookStatuses]))
   const markControls = Object.freeze(kept.flatMap((one) => [...one.markControls]))
+  const windowHosts = Object.freeze(kept.flatMap((one) => [...one.windowHosts]))
+  const readerControls = Object.freeze(kept.flatMap((one) => [...one.readerControls]))
   /* Filtered to what STARTED, like every other contribution: a capability that
      failed to start must not have its overlays drawn in a book. */
   const overlays = Object.freeze(kept.flatMap((one) => [...one.overlays]))
@@ -1341,6 +1391,12 @@ export async function composeCapabilities(
     get markControls() {
       return disposed ? EMPTY_MARK_CONTROLS : markControls
     },
+    get windowHosts() {
+      return disposed ? EMPTY_READER_CONTRIBUTIONS : windowHosts
+    },
+    get readerControls() {
+      return disposed ? EMPTY_READER_CONTRIBUTIONS : readerControls
+    },
     get services() {
       return disposed ? EMPTY_SERVICES : services
     },
@@ -1382,7 +1438,9 @@ export async function composeCapabilities(
       api.diagnostics.error('composition.dispose-failed', { message: messageOf(error) })
     }
   }
-  signal.addEventListener('abort', onAbort, { once: true })
+  /* No `once`: a signal aborts once, and `dispose` detaches this listener
+     itself, so the option could change nothing. */
+  signal.addEventListener('abort', onAbort)
   /* The signal may have aborted WHILE the services were being served — after
    * the start-loop's last check, before this listener existed. An 'abort'
    * that has already fired never reaches a newly added listener, so ask once,

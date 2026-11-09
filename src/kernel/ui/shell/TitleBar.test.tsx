@@ -9,6 +9,16 @@ import { TitleBar, clockOf, fractionOf } from './TitleBar'
 
 afterEach(cleanup)
 
+/* THE WINDOW the titlebar draws its controls for, off macOS. Inert until a case
+   says this is Tauri — `inTauri` reads a global — so every other case here sees
+   a plain browser, which is what draws the traffic lights. */
+const shellWindow = vi.hoisted(() => ({
+  minimize: vi.fn(async () => {}),
+  toggleMaximize: vi.fn(async () => {}),
+  close: vi.fn(async () => {}),
+}))
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => shellWindow }))
+
 /**
  * A reading that is not happening, spelled out in full.
  *
@@ -41,6 +51,7 @@ const speech: Speech = {
 function bar(platform: Platform) {
   return render(
     <TitleBar
+      readerControls={null}
       screens={[]}
       state={initialState}
       dispatch={vi.fn()}
@@ -82,6 +93,70 @@ describe('the titlebar off macOS', () => {
   })
 })
 
+/**
+ * THE WINDOW CONTROLS DO WHAT THEY SAY. Off macOS they are the window's only
+ * controls, so a button that drew but did nothing — or minimised when it said
+ * close — would leave the reader no other way to do it.
+ */
+describe('the window controls, inside Tauri', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window, '__TAURI_INTERNALS__')
+    shellWindow.minimize.mockReset().mockImplementation(async () => {})
+    shellWindow.toggleMaximize.mockReset().mockImplementation(async () => {})
+    shellWindow.close.mockReset().mockImplementation(async () => {})
+    vi.restoreAllMocks()
+  })
+
+  const BUTTONS = [
+    ['Minimise', 'minimize', 'minimise'],
+    ['Maximise', 'toggleMaximize', 'maximise'],
+    ['Close', 'close', 'close'],
+  ] as const
+
+  it.each(BUTTONS)('%s asks the window to %s, and nothing else', (name, method) => {
+    // Each press reaches the one call it names; a swapped handler would pass a count alone.
+    Reflect.set(window, '__TAURI_INTERNALS__', {})
+    bar('windows')
+    fireEvent.click(screen.getByRole('button', { name }))
+    for (const [, other] of BUTTONS) {
+      expect(shellWindow[other], other).toHaveBeenCalledTimes(other === method ? 1 : 0)
+    }
+  })
+
+  it.each(BUTTONS)('%s names itself when the window refuses it', async (name, method, what) => {
+    /* A refused minimise or close used to surface as an unhandled rejection with
+       no button named; the line has to say which control failed. */
+    Reflect.set(window, '__TAURI_INTERNALS__', {})
+    const cause = new Error('the window is already gone')
+    shellWindow[method].mockImplementation(async () => {
+      throw cause
+    })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    bar('linux')
+    fireEvent.click(screen.getByRole('button', { name }))
+    await vi.waitFor(() => expect(logged).toHaveBeenCalledWith(`Paper: window ${what} failed`, cause))
+  })
+
+  it('does nothing, and throws nothing, in a plain browser', () => {
+    /* Outside Tauri there is no window to ask, so a press must be a no-op — not
+       a TypeError thrown at the reader from a control they can see. */
+    const thrown: unknown[] = []
+    const onError = (event: ErrorEvent) => {
+      thrown.push(event.error)
+      event.preventDefault()
+    }
+    window.addEventListener('error', onError)
+    try {
+      bar('windows')
+      for (const [name] of BUTTONS) fireEvent.click(screen.getByRole('button', { name }))
+    } finally {
+      window.removeEventListener('error', onError)
+    }
+    expect(thrown).toEqual([])
+    for (const [, method] of BUTTONS) expect(shellWindow[method]).not.toHaveBeenCalled()
+  })
+})
+
 describe('the controls a contributed screen does not have', () => {
   /* ⚠️ **`WindowShell` AND `SidePane` ALREADY REFUSED TO DRAW A PANE THERE, AND
      THE CONTROLS DID NOT KNOW.** The titlebar kept an active "Close pane"
@@ -92,6 +167,7 @@ describe('the controls a contributed screen does not have', () => {
   it('draws no pane toggle on a capability’s screen', () => {
     render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, screen: 'circle:circle' }}
         dispatch={vi.fn()}
@@ -116,6 +192,7 @@ describe('the controls a contributed screen does not have', () => {
       cleanup()
       render(
         <TitleBar
+          readerControls={null}
           screens={[]}
           state={{ ...initialState, screen: which, chromeOn: true }}
           dispatch={vi.fn()}
@@ -143,6 +220,7 @@ describe('the reading speed button', () => {
     const dispatch = vi.fn()
     render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, screen: 'reader', chromeOn: true, readingRate: rate }}
         dispatch={dispatch}
@@ -181,6 +259,7 @@ describe('the Listen control when no voice is good enough', () => {
   function listen(listenRefusal: string | null): HTMLElement {
     render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, screen: 'reader', chromeOn: true }}
         dispatch={vi.fn()}
@@ -227,11 +306,13 @@ function draw(
     screens?: React.ComponentProps<typeof TitleBar>['screens']
     hasBook?: boolean
     listenRefusal?: string | null
+    readerControls?: React.ReactNode
   } = {},
 ) {
   const dispatch = vi.fn()
   render(
     <TitleBar
+      readerControls={over.readerControls ?? null}
       screens={over.screens ?? []}
       state={{ ...initialState, ...over.state }}
       dispatch={dispatch}
@@ -350,6 +431,30 @@ describe('the reading transport', () => {
  * the reader is choosing what to look at — and not in the reader, where the
  * book is the place they are in.
  */
+describe('what a capability put beside the reading controls', () => {
+  const CONTROL = <button type="button">contributed</button>
+
+  it('sits after Listen and before the appearance control', () => {
+    draw({ state: { screen: 'reader', chromeOn: true }, readerControls: CONTROL })
+    const control = screen.getByRole('button', { name: 'contributed' })
+    const listen = screen.getByRole('button', { name: 'Read aloud' })
+    const appearance = screen.getByTitle(/^Appearance/u)
+    expect(listen.compareDocumentPosition(control) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(control.compareDocumentPosition(appearance) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('stays through a reading, beside the transport', () => {
+    draw({ state: { screen: 'reader', chromeOn: true }, speech: { ...speech, available: true, speaking: true }, readerControls: CONTROL })
+    expect(screen.getByRole('group', { name: 'Reading aloud' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'contributed' })).toBeTruthy()
+  })
+
+  it('is not drawn away from the reader', () => {
+    draw({ state: { screen: 'library' }, readerControls: CONTROL })
+    expect(screen.queryByRole('button', { name: 'contributed' })).toBeNull()
+  })
+})
+
 describe('the screens a capability contributed', () => {
   const screens = [{ id: 'circle:circle' as const, label: 'Circle', icon: 'people' as const }]
 
@@ -358,6 +463,7 @@ describe('the screens a capability contributed', () => {
     const library = screen.getByRole('button', { name: 'Library' })
     const circle = screen.getByRole('button', { name: 'Circle' })
     expect(library.getAttribute('aria-pressed'), 'the shelf is where the reader is').toBe('true')
+    expect(library.getAttribute('data-on'), 'drawn lit, not only announced').toBe('true')
     expect(circle.getAttribute('aria-pressed')).toBe('false')
 
     fireEvent.click(circle)
@@ -368,6 +474,7 @@ describe('the screens a capability contributed', () => {
     const dispatch = draw({ state: { screen: 'circle:circle', chromeOn: true }, screens })
     const library = screen.getByRole('button', { name: 'Library' })
     expect(library.getAttribute('aria-pressed')).toBe('false')
+    expect(library.getAttribute('data-on')).toBe('false')
     fireEvent.click(library)
     expect(dispatch).toHaveBeenCalledWith({ type: 'goScreen', screen: 'library' })
   })
@@ -391,14 +498,20 @@ describe('the pane toggle, and the palette', () => {
        the state a case has to ask for. */
     const closed = draw({ state: { screen: 'library', chromeOn: true, pane: null } })
     const open = screen.getByRole('button', { name: 'Open pane' })
+    /* Its own label, not the title standing in for one: an empty aria-label
+       would still be named by the title, and only the attribute tells. */
+    expect(open.getAttribute('aria-label')).toBe('Open pane')
     expect(open.getAttribute('aria-pressed')).toBe('false')
+    expect(open.getAttribute('data-on'), 'drawn dark, not only announced').toBe('false')
     fireEvent.click(open)
     expect(closed).toHaveBeenCalledWith({ type: 'togglePane' })
 
     cleanup()
     draw({ state: { screen: 'library', chromeOn: true, pane: 'toc' } })
     const close = screen.getByRole('button', { name: 'Close pane' })
+    expect(close.getAttribute('aria-label')).toBe('Close pane')
     expect(close.getAttribute('aria-pressed')).toBe('true')
+    expect(close.getAttribute('data-on'), 'drawn lit, not only announced').toBe('true')
   })
 
   it('opens the palette, and says when it is open', () => {
@@ -424,6 +537,7 @@ describe('the traffic lights, in a browser', () => {
   it('draws three of them on macOS, and none elsewhere', () => {
     const { container } = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={initialState}
         dispatch={vi.fn()}
@@ -440,6 +554,7 @@ describe('the traffic lights, in a browser', () => {
 
     const other = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={initialState}
         dispatch={vi.fn()}
@@ -495,6 +610,7 @@ describe('the Listen control, in each state it can be in', () => {
     })
     expect(listen().getAttribute('title')).toBe('Read this chapter aloud')
     expect(listen().hasAttribute('disabled')).toBe(false)
+    expect(listen().getAttribute('data-disabled'), 'drawn as pressable too').toBe('false')
     expect(listen().getAttribute('aria-pressed'), 'it is a verb, not a state').toBe('false')
     fireEvent.click(listen())
     expect(started).toEqual([1])
@@ -508,6 +624,7 @@ describe('what the chrome says without a word', () => {
        for a book that did not exist. The mark belongs to the application. */
     const { container } = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, chromeOn: true }}
         dispatch={vi.fn()}
@@ -524,6 +641,7 @@ describe('what the chrome says without a word', () => {
 
     const open = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, chromeOn: true }}
         dispatch={vi.fn()}
@@ -544,6 +662,7 @@ describe('what the chrome says without a word', () => {
        opposite. */
     const { container } = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, chromeOn: true, side: 'left' }}
         dispatch={vi.fn()}
@@ -617,6 +736,7 @@ describe('what the chrome says without a word', () => {
        that always drew the left one would pass. */
     const { container } = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, chromeOn: true, side: 'right' }}
         dispatch={vi.fn()}
@@ -803,6 +923,80 @@ describe('a reading that stopped on its own', () => {
 })
 
 /**
+ * WHAT EACH PRESS ASKS FOR, and what each control says about itself. Every one
+ * of these drew correctly while doing nothing, or the wrong thing, and no case
+ * pressed it.
+ */
+describe('what each control asks for', () => {
+  it('brings the chrome up when the pointer comes near', () => {
+    // §06: the reader reaches a faded titlebar by moving towards it.
+    const dispatch = draw({ state: { screen: 'reader' }, hasBook: true })
+    const root = screen.getByTitle('Switch book').closest('[data-platform]') as Element
+    fireEvent.mouseEnter(root)
+    expect(dispatch).toHaveBeenCalledWith({ type: 'setChrome', on: true })
+  })
+
+  it('opens the book switcher from the chip', () => {
+    // The chip is the switcher's only door in the chrome.
+    const dispatch = draw({ state: { screen: 'library' } })
+    fireEvent.click(screen.getByTitle('Switch book'))
+    expect(dispatch).toHaveBeenCalledWith({ type: 'toggleLayer', layer: 'switcherOpen' })
+  })
+
+  it('opens the appearance panel', () => {
+    // The control names theme, typeface and size; it must reach the panel holding them.
+    const dispatch = draw({ state: { screen: 'reader', chromeOn: true }, hasBook: true })
+    fireEvent.click(screen.getByTitle(/^Appearance/u))
+    expect(dispatch).toHaveBeenCalledWith({ type: 'openPane', pane: 'settings' })
+  })
+
+  it('goes back to the book from the shelf, and says so with its shortcut', () => {
+    /* Home's other half: the name, the shortcut and the destination come from
+       one place, so a title that dropped either would disagree with the press. */
+    const dispatch = draw({ state: { screen: 'library' }, hasBook: true })
+    const jump = screen.getByRole('button', { name: 'Back to the book' })
+    expect(jump.getAttribute('title')).toBe('Back to the book · ⌘L')
+    fireEvent.click(jump)
+    expect(dispatch).toHaveBeenCalledWith({ type: 'goScreen', screen: 'reader' })
+  })
+
+  it('goes to the shelf from the book', () => {
+    // The way home from an open book, which once was the palette alone.
+    const dispatch = draw({ state: { screen: 'reader', chromeOn: true }, hasBook: true })
+    const jump = screen.getByRole('button', { name: 'Library' })
+    expect(jump.getAttribute('title')).toBe('Library · ⌘L')
+    fireEvent.click(jump)
+    expect(dispatch).toHaveBeenCalledWith({ type: 'goScreen', screen: 'library' })
+  })
+
+  it('lights a contributed screen the reader is on, and only that one', () => {
+    /* §10: lit and announced together. A screen drawn dark while the reader is
+       on it, or lit while they are not, says the wrong room. */
+    const screens = [{ id: 'circle:circle' as const, label: 'Circle', icon: 'people' as const }]
+    draw({ state: { screen: 'circle:circle' }, screens })
+    const on = screen.getByRole('button', { name: 'Circle' })
+    expect(on.getAttribute('aria-pressed')).toBe('true')
+    expect(on.getAttribute('data-on')).toBe('true')
+    /* Its own glyph, not a blank button: the label lives only in the title. */
+    expect(on.querySelector('.lucide-users'), 'the screen’s own icon').toBeTruthy()
+    cleanup()
+
+    draw({ state: { screen: 'library' }, screens })
+    expect(screen.getByRole('button', { name: 'Circle' }).getAttribute('data-on')).toBe('false')
+  })
+
+  it('names the pause control by its own label, not only by its title', () => {
+    /* An empty aria-label would still be named by the title, so only the
+       attribute shows the label is the one a screen reader is meant to read. */
+    listening({ paused: false })
+    expect(screen.getByRole('button', { name: 'Pause' }).getAttribute('aria-label')).toBe('Pause')
+    cleanup()
+    listening({ paused: true })
+    expect(screen.getByRole('button', { name: 'Go on reading' }).getAttribute('aria-label')).toBe('Go on reading')
+  })
+})
+
+/**
  * ⚠️ **THE CHROME HID ITSELF OUT FROM UNDER A CONTROL THE READER WAS USING —
  * FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.** `chromeHidden` sets `visibility:
  * hidden` and `inert`, which take the whole subtree out of the focus order and
@@ -817,6 +1011,7 @@ describe('the chrome, and what keeps it up', () => {
     const dispatch = vi.fn()
     const view = render(
       <TitleBar
+        readerControls={null}
         screens={[]}
         state={{ ...initialState, screen: 'reader', chromeOn: true }}
         dispatch={dispatch}
@@ -943,6 +1138,7 @@ describe('the chrome that fades in the reader', () => {
         bookSubtitle=""
         speech={speech}
         listenRefusal={null}
+        readerControls={null}
         hasBook
       />,
     )
