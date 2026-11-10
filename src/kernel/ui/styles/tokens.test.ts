@@ -141,8 +141,13 @@ function declarations(src: string): { prop: string; value: string; line: number 
 }
 
 function scan(file: string): Offence[] {
+  return scanSource(readFileSync(file, 'utf8'), file)
+}
+
+/** `scan` over CSS already in hand; `file` is the name its offences are reported under. */
+function scanSource(css: string, file: string): Offence[] {
   // Comments hold measurements and prose full of numbers; they are not code.
-  const src = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '))
+  const src = css.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '))
   const offences: Offence[] = []
   const lines = src.split('\n')
   for (const { prop, value, line } of declarations(src)) {
@@ -550,12 +555,10 @@ describe('the design system is used, not restated', () => {
 
 /** The same scan over a string, so the guard can be tested on known input. */
 function scanText(css: string): Offence[] {
-  const tmp = join(HERE, '__scan_probe.css')
-  const { writeFileSync, rmSync } = require('node:fs') as typeof import('node:fs')
-  writeFileSync(tmp, css)
-  try {
-    return scan(tmp)
-  } finally {
-    rmSync(tmp)
-  }
+  /* ⚠️ **NEVER THROUGH A FILE IN THE SOURCE TREE** (2026-11-10). This wrote
+     `__scan_probe.css` beside this file and removed it after the scan, and
+     `tokens.hygiene.test.ts` lists that same tree from another worker and reads
+     every file it listed — so a run that listed the probe and then reached it
+     after it was removed failed with ENOENT, on a test that had nothing wrong. */
+  return scanSource(css, join(HERE, '__scan_probe.css'))
 }
