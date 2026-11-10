@@ -6,6 +6,7 @@ import type { MarkAnchor } from '../reader/markPaint'
 import type { PassOutcome, PendingMark } from '../reader/reanchorPass'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
 import type { StepPace } from '../../core/autoAdvance'
+import type { SectionMove } from '../../core/ports'
 
 /** What a book with no derivable pace answers — `restPerStep` refuses it. */
 const NO_PACE: StepPace = { bookWords: null, sectionBytes: 0, spineBytes: 0, steps: 0 }
@@ -133,6 +134,8 @@ export interface Book extends BookState {
   next: () => void
   /** One hands-free step; false when it moved nothing. See `useAutoAdvance`. */
   step: () => Promise<boolean>
+  /** To the next section's start, once — see `ReadingSurface.nextSection`. */
+  nextSection: () => Promise<SectionMove>
   /** What auto-advance derives its pace from — see `core/autoAdvance.ts`. */
   pace: () => StepPace
   prev: () => void
@@ -499,6 +502,26 @@ export function useBook(): Book {
     // Stryker disable next-line ArrayDeclaration: this reads a ref and nothing else, so the list is constant either way and the callback is built once.
     [],
   )
+  /**
+   * To the next section's start, once, resolving to what happened.
+   *
+   * The step's guard, for the step's reason: the reading asks from a timer, where
+   * a throw reaches nothing. No navigator, or one that cannot answer, is a move
+   * that did not happen — which the reading may ask again — and the session's
+   * own answer covers everything after that.
+   */
+  const nextSection = useCallback(
+    async (): Promise<SectionMove> => {
+      try {
+        // Stryker disable next-line OptionalChaining: a null navigator throws into the catch below and answers the same "unmoved" — the guard `step` has, for the same reason.
+        return (await navigatorRef.current?.nextSection()) ?? 'unmoved'
+      } catch {
+        return 'unmoved'
+      }
+    },
+    // Stryker disable next-line ArrayDeclaration: this reads a ref and nothing else, so the list is constant either way and the callback is built once.
+    [],
+  )
   /** What auto-advance derives its pace from — see `core/autoAdvance.ts`. */
   const pace = useCallback(
     (): StepPace => {
@@ -652,6 +675,7 @@ export function useBook(): Book {
     setFootnoteMount,
     next,
     step,
+    nextSection,
     pace,
     prev,
     goLeft,

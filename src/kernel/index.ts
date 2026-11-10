@@ -264,6 +264,7 @@ export type {
   ReadingSurface,
   ReadyBook,
   RemovableBlobName,
+  SectionMove,
   SectionText,
   Setting,
   SettingKey,

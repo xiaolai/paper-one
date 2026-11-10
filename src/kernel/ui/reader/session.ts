@@ -4,7 +4,7 @@ import { directionOf } from './direction'
 import { collectText } from './speech'
 import { textDigest } from './clipKey'
 import { canonicalTextOf } from './passageText'
-import type { SectionText, SectionTextWalk, SpeechSkipPrefs } from '../../core/ports'
+import type { SectionMove, SectionText, SectionTextWalk, SpeechSkipPrefs } from '../../core/ports'
 import { DEFAULT_SPEECH_SKIP } from './speechSkip'
 import { refuseBookScripts, stripScripts } from './bookScripts'
 import { suppressEmptyGeneratedContent } from './generatedContent'
@@ -426,6 +426,13 @@ export interface SessionNavigator {
    * through here rather than around it.
    */
   step: () => Promise<boolean>
+  /**
+   * Straight to the start of the next section a turn would reach, once.
+   *
+   * For a reading that has run out of words, which used to walk there a page
+   * at a time — see `ReadingSurface.nextSection` for why that turned twice.
+   */
+  nextSection: () => Promise<SectionMove>
   prev: () => void
   /**
    * The page to the left, and to the right — in VISUAL terms.
@@ -1503,6 +1510,34 @@ export class ReaderSession {
            and the caller would schedule another step against it. */
         if (this.#disposed || this.#view !== view) return false
         return true
+      },
+      /**
+       * The next section, and whether it is the one on screen when this settles.
+       *
+       * ⚠️ **"MOVED" IS READ OFF THE LOAD, NOT OFF THE PROMISE.** The paginator's
+       * `goTo` returns at once, moving nothing, while a turn holds its lock — a
+       * reader's own page turn at that instant — and the fork's `goTo` resolves
+       * after catching a section that would not load. Both look like success to
+       * an await. The section that loaded last is the one question both answer.
+       *
+       * ⚠️ **AND A SECTION NOT YET RENDERED IS "UNMOVED", NOT THE END** — the
+       * lesson `atEnd` records above: nothing on screen is not a finished book.
+       */
+      nextSection: async () => {
+        const sections = view.book?.sections
+        const from = this.#renderedIndex
+        if (from === null || !Array.isArray(sections)) return 'unmoved'
+        const to = nextNavigable(sections, from)
+        if (to === null) return 'end'
+        try {
+          await view.goTo(to)
+        } catch (error) {
+          reportNavigation('nextSection')(error)
+          return 'unmoved'
+        }
+        /* A teardown, or another book, while it loaded: the same rule as `step`. */
+        if (this.#disposed || this.#view !== view) return 'unmoved'
+        return this.#renderedIndex === to ? 'moved' : 'unmoved'
       },
       prev: () => void view.prev()?.catch?.(reportNavigation('prev')),
       goLeft: () => void view.goLeft()?.catch?.(reportNavigation('goLeft')),

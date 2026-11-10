@@ -321,9 +321,10 @@ export function App({
          in a right-to-left book, back is to the right. `book.prev` is the
          session's own, and is what the arrow key runs. */
       prev: book.prev,
+      nextSection: book.nextSection,
       chapter: chapterSteps(book.toc, book.position.chapterHref, book.goTo),
     }),
-    [book.next, book.prev, book.goTo, book.toc, book.position.chapterHref],
+    [book.next, book.prev, book.nextSection, book.goTo, book.toc, book.position.chapterHref],
   )
   /**
    * Which book and section the reading is in, so a render can be addressed.

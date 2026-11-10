@@ -117,7 +117,7 @@ function mount(
   const settings = over.settings ?? narrationSettings()
   const api: { driver: SurfaceDriver | null } = { driver: null }
   const set: { doc?: (doc: Document | null) => void; store?: (store: ReadingStore) => void } = {}
-  const paging = { next: () => {}, prev: () => {} }
+  const paging = { next: () => {}, prev: () => {}, nextSection: async () => 'unmoved' as const }
   const walk: BookFacts['sectionTexts'] = async () => ({ sections: [], complete: true })
   function Parent() {
     const [doc, setDoc] = useState(first)

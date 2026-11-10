@@ -3,6 +3,7 @@ import type { TocItem } from 'foliate-js/view.js'
 import type {
   ReadingSurface,
   ReadyBook,
+  SectionMove,
   SectionTextWalk,
   SpeechSkipPrefs,
   SpokenSection,
@@ -73,6 +74,8 @@ export interface SurfacePaging {
    * and the reading carried on off the top of the page.
    */
   readonly prev: () => unknown
+  /** See `ReadingSurface.nextSection`. */
+  readonly nextSection: () => Promise<SectionMove>
   /**
    * A whole chapter away, or absent where the book cannot say.
    *
@@ -264,6 +267,7 @@ export function createReadingSurface(initial: SurfaceSource): SurfaceDriver {
       if (by === 1) source.paging.next()
       else source.paging.prev()
     },
+    nextSection: () => source.paging.nextSection(),
     chapter: {
       can,
       go: (by) => source.paging.chapter?.go(by) ?? false,

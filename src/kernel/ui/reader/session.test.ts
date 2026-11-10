@@ -4757,3 +4757,126 @@ describe('the pace, and the end of the book', () => {
     await expect(stepping).resolves.toBe(false)
   })
 })
+
+describe('the next section a reading out of words asks for', () => {
+  /**
+   * A book open at `at`, whose `goTo` does what `land` says.
+   *
+   * The default lands: the renderer's `load` for the target, before the
+   * promise settles, which is the order the paginator's `#display` keeps.
+   */
+  async function opened(
+    sections: readonly unknown[],
+    at: number | null,
+    land: (view: FakeView, target: number) => Promise<void> = (view, target) => {
+      view.emit('load', { doc: fakeDocument().asDocument(), index: target })
+      return Promise.resolve()
+    },
+  ) {
+    const view = fakeView()
+    Object.assign(view.book as object, { sections })
+    Object.assign(view as object, {
+      goTo: (target: number) => {
+        view.navigations.push(target)
+        return land(view, target)
+      },
+    })
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    view.navigations.length = 0
+    if (at !== null) view.emit('load', { doc: fakeDocument().asDocument(), index: at })
+    const nav = cb.calls['onNavigator']?.[0]?.[0] as { nextSection: () => Promise<string> }
+    return { nav, view, session }
+  }
+
+  it('goes straight to the start of the next section, and says it moved', async () => {
+    const { nav, view } = await opened([{}, {}, {}], 0)
+    await expect(nav.nextSection()).resolves.toBe('moved')
+    expect(view.navigations, 'one move, to a section, not a page').toEqual([1])
+    expect(view.turns.next).toBe(0)
+  })
+
+  it('passes over a section out of the reading order, as a turn would', async () => {
+    const { nav, view } = await opened([{}, { linear: 'no' }, {}], 0)
+    await expect(nav.nextSection()).resolves.toBe('moved')
+    expect(view.navigations).toEqual([2])
+  })
+
+  it('answers end, and goes nowhere, past the last section in the reading order', async () => {
+    const { nav, view } = await opened([{}, {}, { linear: 'no' }], 1)
+    await expect(nav.nextSection()).resolves.toBe('end')
+    expect(view.navigations).toEqual([])
+  })
+
+  it('answers unmoved where the move settled with nothing loaded', async () => {
+    /* The paginator's `goTo` returns at once while a turn holds its lock, and
+       the fork's resolves over a section that would not load. */
+    const { nav, view } = await opened([{}, {}], 0, () => Promise.resolve())
+    await expect(nav.nextSection()).resolves.toBe('unmoved')
+    expect(view.navigations).toEqual([1])
+  })
+
+  it('answers unmoved, not end, before anything is on screen', async () => {
+    const { nav, view } = await opened([{}, {}], null)
+    await expect(nav.nextSection()).resolves.toBe('unmoved')
+    expect(view.navigations).toEqual([])
+  })
+
+  it('answers unmoved for a view with no sections to read', async () => {
+    const { nav } = await opened(undefined as unknown as readonly unknown[], 0)
+    await expect(nav.nextSection()).resolves.toBe('unmoved')
+  })
+
+  it('answers unmoved for a view with no book behind it, rather than throwing', async () => {
+    const { nav, view } = await opened([{}, {}], 0)
+    Object.assign(view as object, { book: undefined })
+    await expect(nav.nextSection()).resolves.toBe('unmoved')
+  })
+
+  it('reports a move that failed as one that did not happen, and names it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { nav } = await opened([{}, {}], 0, () => Promise.reject(new Error('the section would not load')))
+      await expect(nav.nextSection()).resolves.toBe('unmoved')
+      expect(warn.mock.calls.map((c) => String(c[0])).join(' ')).toContain('nextSection')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('does not claim a move that landed after the session was torn down', async () => {
+    let finish!: () => void
+    const { nav, view, session } = await opened([{}, {}], 0, (v, target) => {
+      v.emit('load', { doc: fakeDocument().asDocument(), index: target })
+      return new Promise<void>((resolve) => {
+        finish = resolve
+      })
+    })
+    const moving = nav.nextSection()
+    session.dispose()
+    finish()
+    await expect(moving).resolves.toBe('unmoved')
+    expect(view.navigations).toEqual([1])
+  })
+
+  it('does not claim a move when another book took the view, even one now at the same section', async () => {
+    /* ⚠️ The index alone cannot tell the two apart: the other book's own
+       section 1 is on screen, and "moved" would be a claim about a view this
+       move was never made in. */
+    let finish!: () => void
+    const { nav, session } = await opened([{}, {}], 0, (v, target) => {
+      v.emit('load', { doc: fakeDocument().asDocument(), index: target })
+      return new Promise<void>((resolve) => {
+        finish = resolve
+      })
+    })
+    const moving = nav.nextSection()
+    const other = fakeView()
+    Object.assign(other.book as object, { sections: [{}, {}] })
+    await session.start('other.epub', deps(other))
+    other.emit('load', { doc: fakeDocument().asDocument(), index: 1 })
+    finish()
+    await expect(moving).resolves.toBe('unmoved')
+  })
+})

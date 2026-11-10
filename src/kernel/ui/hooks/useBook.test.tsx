@@ -436,4 +436,48 @@ describe('where a book is before it has been anywhere', () => {
       expect(book().pace().bookWords).toBeNull()
     })
   })
+
+  /* The reading's move to the next section: delegated, and guarded as the step
+     is, because it is asked from a timer where a throw reaches nothing. */
+  describe('the move to the next section', () => {
+    const withNavigator = (over: Record<string, unknown>) => {
+      holdFetch()
+      const book = mount()
+      act(() => book().open('https://example.test/a.epub'))
+      const navigator = over as unknown as Parameters<Book['setNavigator']>[1]
+      act(() => book().setNavigator(book().generation, navigator))
+      return book
+    }
+
+    it.each(['moved', 'end', 'unmoved'] as const)('answers what the navigator answers: %s', async (answer) => {
+      const asked: number[] = []
+      const book = withNavigator({
+        nextSection: () => {
+          asked.push(1)
+          return Promise.resolve(answer)
+        },
+      })
+      await expect(book().nextSection()).resolves.toBe(answer)
+      expect(asked).toHaveLength(1)
+    })
+
+    it('answers unmoved for a navigator without the member', async () => {
+      await expect(withNavigator({})().nextSection()).resolves.toBe('unmoved')
+    })
+
+    it('answers unmoved for a navigator that throws, rather than throwing into a timer', async () => {
+      const throwing = withNavigator({
+        nextSection: () => {
+          throw new TypeError('before layout')
+        },
+      })
+      await expect(throwing().nextSection()).resolves.toBe('unmoved')
+    })
+
+    it('answers unmoved before a navigator arrives at all', async () => {
+      holdFetch()
+      const book = mount()
+      await expect(book().nextSection()).resolves.toBe('unmoved')
+    })
+  })
 })
