@@ -296,7 +296,7 @@ async function renderStoppably(
   wire: VoicesWire,
   query: ClipQuery,
   text: string,
-  { signal }: RenderControl,
+  { signal, onStarted }: RenderControl,
 ): Promise<unknown> {
   signal.throwIfAborted()
   const run = globalThis.crypto.randomUUID()
@@ -305,7 +305,7 @@ async function renderStoppably(
   }
   signal.addEventListener('abort', stop, { once: true })
   try {
-    return await wire.clipRender(query, text, run)
+    return await wire.clipRender(query, text, run, onStarted)
   } finally {
     signal.removeEventListener('abort', stop)
   }

@@ -410,17 +410,21 @@ async fn a_link_planted_at_a_chapter_is_not_written_through() {
 }
 
 #[test]
-fn a_render_stopped_while_it_waited_gives_up() {
+fn a_render_stopped_while_it_waited_gives_up_without_saying_it_started() {
     // The queue is where a stopped render used to cost the most: it waited for
     // the engine, then spent minutes on a reading nobody wanted. It now gives up
-    // the moment the engine is its own.
+    // the moment the engine is its own, and the webview's clock never restarts.
     let (cancel, stopper) = Cancel::new();
     stopper.stop();
-    assert!(begin_speaking(&cancel).is_err());
+    let mut told = false;
+    assert!(begin_speaking(&cancel, || told = true).is_err());
+    assert!(!told, "a stopped render must not report that it started");
 }
 
 #[test]
-fn a_render_nobody_stopped_goes_on() {
+fn a_render_nobody_stopped_says_it_started() {
     let (cancel, _stopper) = Cancel::new();
-    begin_speaking(&cancel).expect("nothing stopped it");
+    let mut told = false;
+    begin_speaking(&cancel, || told = true).expect("nothing stopped it");
+    assert!(told, "the webview's deadline waits for this");
 }

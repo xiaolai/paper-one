@@ -43,7 +43,7 @@ function speakerOver(
   const asked: ClipKey[] = []
   /** Every request the engine was handed, whole — see the rate cases. */
   const requests: SpeechRequest[] = []
-  /** What each render was handed to be stopped by. */
+  /** What each render was handed to be stopped and started by. */
   const controls: RenderControl[] = []
   const speaker = new EngineSpeaker(cb, {
     render: (request, control) => {
@@ -231,6 +231,32 @@ describe('stopping a render at the engine, not only here', () => {
     } finally {
       errors.mockRestore()
     }
+  })
+
+  it('times the render from when it started, not from when it was asked for', async () => {
+    /* ⚠️ **THE DEADLINE COUNTED THE QUEUE.** A render that waited behind another
+       had its wait taken out of its own allowance, and the reader was told the
+       voice did not answer while it was answering someone else. */
+    const { speaker, cb, controls } = speakerOver(never)
+    const deadline = deadlineFor('hello')
+    speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(deadline - 1)
+    controls[0]?.onStarted()
+    await vi.advanceTimersByTimeAsync(deadline - 1)
+    expect(cb.onDone, 'the whole allowance again, from the start').not.toHaveBeenCalled()
+    expect(controls[0]?.signal.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(cb.onDone).toHaveBeenCalledWith('error')
+    expect(controls[0]?.signal.aborted).toBe(true)
+  })
+
+  it('leaves no deadline behind when the start is heard after the answer', async () => {
+    const { speaker, controls } = speakerOver(async () => audio())
+    speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    controls[0]?.onStarted()
+    await vi.advanceTimersByTimeAsync(deadlineFor('hello') + 10)
+    expect(controls[0]?.signal.aborted, 'a finished render is not stopped').toBe(false)
   })
 
   it('leaves a render that answered unstopped', async () => {

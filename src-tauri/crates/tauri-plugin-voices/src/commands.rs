@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Runtime, State};
 
 use crate::cancel::{Cancel, Stopper};
@@ -418,10 +419,11 @@ pub async fn voices_release(state: State<'_, VoicesState>) -> Result<(), String>
 /// (`voices_clip_render`) and reads the file; this is the shared half both roads
 /// go through, and `voices_render_file` is the other caller.
 ///
-/// ⚠️ **`cancel` IS CHECKED ONCE THE ENGINE IS THIS RENDER'S**, after its lock
-/// is held and before any work, and then by the engine between one sentence or
-/// chunk and the next. Renders through one engine run one at a time, so a render
-/// stopped while it waited gives up there, without loading anything.
+/// ⚠️ **`started` IS CALLED ONCE THE ENGINE IS THIS RENDER'S**, after its lock is
+/// held and before any work. Renders through one engine run one at a time, so a
+/// caller timing the render from when it ASKED is timing the queue too; this is
+/// the moment its own clock should start. A render stopped while it waited
+/// gives up there instead, without loading or saying anything.
 ///
 /// # Errors
 /// When the pack is unknown or not installed, when the engine refuses, when
@@ -434,6 +436,7 @@ pub async fn voices_render(
     text: String,
     rate: Option<f32>,
     cancel: Cancel,
+    started: impl FnOnce() + Send + 'static,
 ) -> Result<Rendered, String> {
     let catalogue = catalogue();
     let wanted = pack_of(&catalogue, &pack)?;
@@ -460,8 +463,10 @@ pub async fn voices_render(
             text: &text,
         };
         match family {
-            Family::Kokoro => read_with_kokoro(&dir, &pack, &kokoro, &english, &speaking, rate),
-            Family::Qwen => read_with_qwen(&dir, &pack, &qwen, &speaking),
+            Family::Kokoro => {
+                read_with_kokoro(&dir, &pack, &kokoro, &english, &speaking, rate, started)
+            }
+            Family::Qwen => read_with_qwen(&dir, &pack, &qwen, &speaking, started),
         }
     })
     .await
@@ -475,10 +480,12 @@ struct Speaking<'a> {
     text: &'a str,
 }
 
-/// The engine is this render's now: give up if it was stopped while waiting —
-/// see `voices_render`.
-fn begin_speaking(cancel: &Cancel) -> Result<(), String> {
-    cancel.check().map_err(|e| e.to_string())
+/// The engine is this render's now: give up if it was stopped while waiting,
+/// and otherwise say so — see `voices_render`.
+fn begin_speaking(cancel: &Cancel, started: impl FnOnce()) -> Result<(), String> {
+    cancel.check().map_err(|e| e.to_string())?;
+    started();
+    Ok(())
 }
 
 /// English, through Kokoro: the front end, then the model, with word timings.
@@ -489,21 +496,22 @@ fn read_with_kokoro(
     fronts: &Held<FrontEnd>,
     speaking: &Speaking<'_>,
     rate: Option<f32>,
+    started: impl FnOnce(),
 ) -> Result<Rendered, String> {
     let Speaking {
         cancel,
         voice,
         text,
     } = *speaking;
-    /* BOTH LOCKS BEFORE ANY WORK, in the order they were always taken, so a
-     * render stopped while it waited for either gives up before loading. */
+    /* BOTH LOCKS BEFORE ANY WORK, in the order they were always taken, so the
+     * moment `started` reports is the moment nothing else can be ahead. */
     let mut fronts = fronts
         .lock()
         .map_err(|_| "the voice is poisoned".to_owned())?;
     let mut held = held
         .lock()
         .map_err(|_| "the voice is poisoned".to_owned())?;
-    begin_speaking(cancel)?;
+    begin_speaking(cancel, started)?;
     if fronts.as_ref().is_none_or(|(id, _)| id != pack) {
         let front = FrontEnd::load(&dir.join("lexicon")).map_err(|e| e.to_string())?;
         *fronts = Some((pack.to_owned(), front));
@@ -557,6 +565,7 @@ fn read_with_qwen(
     pack: &str,
     held: &Held<u32>,
     speaking: &Speaking<'_>,
+    started: impl FnOnce(),
 ) -> Result<Rendered, String> {
     let Speaking {
         cancel,
@@ -566,7 +575,7 @@ fn read_with_qwen(
     let mut held = held
         .lock()
         .map_err(|_| "the voice is poisoned".to_owned())?;
-    begin_speaking(cancel)?;
+    begin_speaking(cancel, started)?;
     if held.as_ref().is_none_or(|(id, _)| id != pack) {
         let rate = qwen::engine::load(dir).map_err(|e| e.to_string())?;
         *held = Some((pack.to_owned(), rate));
@@ -643,8 +652,9 @@ pub async fn voices_render_file(
      * nothing — and again by the exclusive create, which is what holds. */
     let target = chapter_target(&state.data_root()?, &path)?;
     /* NO STOP REACHES AN EXPORT'S CHAPTER: the export stops between chapters,
-     * and has no id to give one. */
-    let rendered = voices_render(&state, pack, voice, text, rate, Cancel::never()).await?;
+     * and has no id to give one. Nothing waits on `started` either — the export
+     * sets no deadline. */
+    let rendered = voices_render(&state, pack, voice, text, rate, Cancel::never(), || {}).await?;
     let bytes = crate::wav::bytes(&rendered.samples, rendered.sample_rate)?;
     write_new(&target, &bytes)
         .await
@@ -1036,6 +1046,8 @@ pub async fn voices_clip_find(
 /// until the render has answered, so a stop leaves no part-written artifact and
 /// no checkpoint, which is the bar WI-34.1 states.
 ///
+/// `started` is told once the engine is this render's — see `voices_render`.
+///
 /// # Errors
 /// When the pack is unknown or not installed, when the engine refuses, when
 /// nothing could be said, when the artifact cannot be written, when another
@@ -1046,6 +1058,7 @@ pub async fn voices_clip_render(
     ask: ClipAsk,
     text: String,
     run: String,
+    started: Channel<()>,
 ) -> Result<ClipRow, String> {
     /* ⚠️ **THE KEY'S SPOKEN DIGEST IS CHECKED AGAINST THE TEXT, AND WAS TAKEN ON
      * TRUST — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.** It is the digest OF
@@ -1066,6 +1079,11 @@ pub async fn voices_clip_render(
         text,
         ask.rate,
         cancel,
+        move || {
+            /* A webview that has gone cannot be told, and has nothing left to
+             * time; the render goes on to the store either way. */
+            let _ = started.send(());
+        },
     )
     .await?;
     let words: Vec<Word> = rendered

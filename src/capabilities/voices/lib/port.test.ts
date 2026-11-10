@@ -64,8 +64,8 @@ function requestFor(over: Partial<SpeechRequest> = {}): SpeechRequest {
 }
 
 /** A render nobody stops, or one the case stops through `signal`. */
-function controlOf(signal: AbortSignal = new AbortController().signal) {
-  return { signal }
+function controlOf(signal: AbortSignal = new AbortController().signal, onStarted: () => void = () => {}) {
+  return { signal, onStarted }
 }
 
 /** A wire the case drives. */
@@ -417,11 +417,13 @@ describe('stopping a render', () => {
   function heldWire() {
     const runs: string[] = []
     const cancels: string[] = []
+    const started: Array<() => void> = []
     let answer: (row: unknown) => void = () => {}
     let refuse: (cause: unknown) => void = () => {}
     const wire = wireOver({
-      clipRender: (_query, _text, run) => {
+      clipRender: (_query, _text, run, onStarted) => {
         runs.push(run)
+        started.push(onStarted)
         return new Promise((resolve, reject) => {
           answer = resolve
           refuse = reject
@@ -431,7 +433,7 @@ describe('stopping a render', () => {
         cancels.push(run)
       },
     })
-    return { wire, runs, cancels, answer: (row: unknown) => answer(row), refuse: (cause: unknown) => refuse(cause) }
+    return { wire, runs, cancels, started, answer: (row: unknown) => answer(row), refuse: (cause: unknown) => refuse(cause) }
   }
 
   /** Until every promise already settled has run its callbacks. */
@@ -473,6 +475,15 @@ describe('stopping a render', () => {
     expect(cause).toBeInstanceOf(DOMException)
     expect(held.runs, 'no render was asked for').toEqual([])
     expect(held.cancels, 'and so there was none to stop').toEqual([])
+  })
+
+  it('hands the plugin the caller\'s word that the render has started', async () => {
+    const held = heldWire()
+    const onStarted = vi.fn()
+    void voicesPortOver(held.wire).render(requestFor(), controlOf(undefined, onStarted))
+    await drained()
+    held.started[0]?.()
+    expect(onStarted).toHaveBeenCalledTimes(1)
   })
 
   it('stops nothing once the render has answered', async () => {

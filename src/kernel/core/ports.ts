@@ -255,10 +255,22 @@ export type InstallProgress =
   | { readonly kind: 'verifying' }
   | { readonly kind: 'installed' }
 
-/** What a render answers to while it runs — see `SpeechEnginePort.render`. */
+/**
+ * What a render answers to while it runs — see `SpeechEnginePort.render`.
+ *
+ * ⚠️ **`onStarted` EXISTS BECAUSE A RENDER CAN WAIT BEFORE IT RUNS.** Renders
+ * through one engine run one at a time, so a deadline counted from the ASK
+ * counts the queue in front of it as well — and a reader whose chapter was
+ * queued behind another failed with *"the voice did not answer"* while the
+ * voice was busy answering someone else. It is called once the engine is this
+ * render's, which is the moment a deadline on the render itself should start. A
+ * clip already on disk never waits, and never calls it.
+ */
 export interface RenderControl {
   /** Aborted once nobody wants the render: a Stop, a new reading, or a deadline. */
   readonly signal: AbortSignal
+  /** The engine is this render's now. Called at most once. */
+  readonly onStarted: () => void
 }
 
 /** What to read, in which voice. */

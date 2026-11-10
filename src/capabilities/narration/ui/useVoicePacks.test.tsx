@@ -218,7 +218,7 @@ describe('with one', () => {
     }
     /* THE CONTROL IS FORWARDED TOO: a closure that dropped it would leave a Stop
        stopping this end only, and the engine rendering on for minutes. */
-    const control = { signal: new AbortController().signal }
+    const control = { signal: new AbortController().signal, onStarted: () => {} }
     await expect(seen.current?.engine?.render(request, control)).resolves.toBe(spoken)
     expect(render_).toHaveBeenCalledWith(request, control)
   })

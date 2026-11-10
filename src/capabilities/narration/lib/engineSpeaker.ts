@@ -478,7 +478,17 @@ export class EngineSpeaker {
   }
 
   /**
-   * Render, against a deadline.
+   * Render, against a deadline that starts again once the engine is this
+   * render's.
+   *
+   * ⚠️ **THE DEADLINE COUNTED THE QUEUE — WHICH IS WHY `onStarted` RE-ARMS IT.**
+   * Renders through one engine run one at a time, so a render asked for while
+   * another ran waited first, and the wait came out of its own allowance: a
+   * reader whose chapter queued behind another was told *"the voice did not
+   * answer"* while the voice was answering someone else. The first arming is
+   * still the backstop for a render that never starts at all; the second gives
+   * the render its whole allowance from the moment it begins. A clip already on
+   * disk never queues, and never calls it.
    *
    * ⚠️ **A DEADLINE THAT FIRES ABORTS THE RENDER AS WELL AS REFUSING IT.** It
    * used to refuse only this promise, and the engine went on rendering into a
@@ -488,22 +498,29 @@ export class EngineSpeaker {
   async #render(request: SpeechRequest): Promise<SpokenAudio> {
     const controller = (this.#rendering = new AbortController())
     let timer: ReturnType<typeof setTimeout> | undefined
+    let settled = false
     /* SCALED TO THE PASSAGE — see `RENDER_PER_CHAR_MS`, which records what a flat
        two minutes cost once a section became the unit. */
     const deadline = deadlineFor(request.text)
-    const limit = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        controller.abort()
-        reject(new Error('the voice did not answer'))
-      }, deadline)
-    })
     try {
-      return await Promise.race([this.#deps.render(request, { signal: controller.signal }), limit])
+      return await new Promise<SpokenAudio>((resolve, reject) => {
+        const arm = () => {
+          /* A `started` that arrives after the answer must not leave a timer
+             behind that would abort a render which has already finished. */
+          if (settled) return
+          clearTimeout(timer)
+          timer = setTimeout(() => {
+            controller.abort()
+            reject(new Error('the voice did not answer'))
+          }, deadline)
+        }
+        arm()
+        this.#deps.render(request, { signal: controller.signal, onStarted: arm }).then(resolve, reject)
+      })
     } finally {
-      /* No `timer !== undefined` in front of this: the executor above runs
-         synchronously, so by here it always has one — and `clearTimeout` takes
-         `undefined` without complaint anyway. Left unclear, a deadline of
-         minutes to hours outlives every render that answers normally. */
+      /* Left unclear, a deadline of minutes to hours outlives every render that
+         answers normally. */
+      settled = true
       clearTimeout(timer)
     }
   }

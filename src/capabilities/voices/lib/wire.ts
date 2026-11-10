@@ -22,7 +22,7 @@
  * back through a command of the plugin's own.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 /** What names one rendered section on the wire. */
@@ -57,9 +57,10 @@ export interface VoicesWire {
   /**
    * Render a section and keep it. Minutes, on a blocking thread.
    *
-   * `run` is an id this render can be stopped by — see `clipCancel`.
+   * `run` is an id this render can be stopped by — see `clipCancel` — and
+   * `onStarted` is told once the engine is this render's rather than another's.
    */
-  clipRender(query: ClipQuery, text: string, run: string): Promise<unknown>
+  clipRender(query: ClipQuery, text: string, run: string, onStarted: () => void): Promise<unknown>
   /**
    * Stop the render started under `run`. A stop that arrives before its render
    * is kept by the plugin, so the order the two reach it in does not matter.
@@ -107,7 +108,13 @@ export function voicesWire(): VoicesWire {
        key flat made two commands take eight and nine parameters, which clippy
        refuses and is right to — the shape is a VALUE on both sides. */
     clipFind: (ask) => invoke<unknown>('plugin:voices|voices_clip_find', { ask }),
-    clipRender: (ask, text, run) => invoke<unknown>('plugin:voices|voices_clip_render', { ask, text, run }),
+    clipRender: (ask, text, run, onStarted) => {
+      /* A CHANNEL rather than an event: it belongs to this one call, so a
+         `started` cannot be heard by a render it was not sent for. */
+      const started = new Channel<null>()
+      started.onmessage = () => onStarted()
+      return invoke<unknown>('plugin:voices|voices_clip_render', { ask, text, run, started })
+    },
     clipCancel: (run) => invoke<unknown>('plugin:voices|voices_clip_cancel', { run }),
     /* Flat, as the command declares its arguments: `voices_render_file` has five
        and no `ask`, because it names no clip. */
