@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, onTestFinished } from 'vitest'
@@ -18,6 +18,7 @@ import {
   resultFileFor,
   matchedAcross,
   run,
+  runnersFor,
   sayContested,
   settledVerdict,
   sourceReaders,
@@ -3068,6 +3069,7 @@ describe('what a sweep asks Stryker for', () => {
       vitest: { configFile: 'v.mjs' },
       ignorePatterns: ['.agents', '.claude', '.codex', '.cc-suite', '.stryker-tmp', 'src-tauri/target', 'coverage', 'dist', 'dist-mobile', 'bin', 'dev-docs', 'docs', '.git'],
       timeoutMS: 20_000,
+      concurrency: runnersFor(availableParallelism()),
       thresholds: { high: 100, low: 100, break: 100 },
     })
   })

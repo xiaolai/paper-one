@@ -17,7 +17,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { loadConfigFromFile } from 'vite'
@@ -25,6 +25,7 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { resolveConfig } from 'vitest/node'
 import {
   FIRST_RUN,
+  MAX_RUNNERS,
   REPORT,
   SETTLE_RUN,
   VITEST_DEFAULT_TIMEOUT,
@@ -55,6 +56,7 @@ import {
   resultFileFor,
   reverseImports,
   run,
+  runnersFor,
   sandboxInstallProblem,
   settledVerdict,
   sourceReaders,
@@ -583,8 +585,18 @@ describe('which kind of timeout a report says a mutant met', () => {
     expect(strykerConfig('src/x.ts', 'v.mjs', [], SETTLE_RUN)).toMatchObject(SETTLE_RUN)
     const first = strykerConfig('src/x.ts', 'v.mjs')
     expect(first.timeoutMS).toBe(20_000)
-    expect(first.concurrency).toBeUndefined()
     expect(first.timeoutFactor).toBeUndefined()
+  })
+
+  it('caps every run at four runners, and below that keeps the default Stryker picks', () => {
+    /* ⚠️ Measured 2026-11-10 on a 24-core Mac: above about four processes the
+       file system's metadata operations, not the CPU, set the pace, and at
+       Stryker's default of 23 runners 37 of 134 mutants on 29 lines timed out
+       against none at one. See `MAX_RUNNERS`. A 4-vCPU CI shard is unchanged. */
+    expect(MAX_RUNNERS).toBe(4)
+    expect([1, 2, 3, 4, 5, 8, 24].map(runnersFor)).toEqual([1, 2, 3, 4, 4, 4, 4])
+    expect(strykerConfig('src/x.ts', 'v.mjs').concurrency).toBe(runnersFor(availableParallelism()))
+    expect(strykerConfig('src/x.ts', 'v.mjs', [], SETTLE_RUN).concurrency).toBe(runnersFor(availableParallelism()))
   })
 })
 
@@ -2951,8 +2963,8 @@ describe('a whole sweep, driven with no Stryker', () => {
         vitest.test.include,
         [settings.timeoutMS, settings.timeoutFactor, settings.concurrency],
       ])).toEqual([
-        [false, a, [a], [asGlob(path.join(root, 'src/a.test.mjs'))], [20_000, undefined, undefined]],
-        [true, a, [a], [asGlob(path.join(root, 'src/a.test.mjs'))], [30_000, 4, undefined]],
+        [false, a, [a], [asGlob(path.join(root, 'src/a.test.mjs'))], [20_000, undefined, runnersFor(availableParallelism())]],
+        [true, a, [a], [asGlob(path.join(root, 'src/a.test.mjs'))], [30_000, 4, runnersFor(availableParallelism())]],
       ])
       expect(leftAt(root)).toEqual(NOTHING_LEFT)
     })

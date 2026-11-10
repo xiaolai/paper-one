@@ -21,7 +21,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { createRequire, isBuiltin } from 'node:module'
-import { tmpdir } from 'node:os'
+import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -7542,6 +7542,45 @@ export const FIRST_RUN = { timeoutMS: 20_000 }
 export const SETTLE_RUN = { timeoutMS: 30_000, timeoutFactor: 4 }
 
 /**
+ * The most test runners one Stryker run of this gate starts.
+ *
+ * ⚠️ **ABOVE ABOUT FOUR RUNNERS THE FILE SYSTEM, NOT THE CPU, SETS THE PACE**
+ * (measured 2026-11-10 on a 24-core Mac, APFS). Stryker's own default is one
+ * runner per core less one — 23 there — and the dry run that sets every
+ * mutant's deadline runs with ONE. This file's tests create and remove temp
+ * trees, git repositories and sandbox files by the thousand, and on APFS those
+ * metadata operations contend across the whole volume: with N processes each
+ * making 200 directories, writing 200 files and removing both, the cost of one
+ * operation went from ~55–75 µs at N = 1 to ~90–145 µs at 4, ~220–390 µs at 8,
+ * ~1–2 ms at 16 and ~2.3–5 ms at 23. Total throughput peaks near 4 and at 23
+ * falls BELOW a single process's, while a CPU-only loop slowed not at all and
+ * spawning `node` only 1.5×; `fseventsd` and Spotlight's `mds_stores` add
+ * contention of their own (58 % and 28 % of a core during that run). So at 23
+ * runners the tests ran 7–11× slower than the dry run allowed for, and 37 of
+ * 134 mutants on 29 of this file's lines timed out against 0 at one runner; a
+ * temp directory per runner still left 25, because the contention is the
+ * volume's, not the directory's. At four runners all 134 were killed, none
+ * timed out, and the run took 4 min 55 s — against 6 min 6 s at 23 and
+ * 7 min 58 s at one. Measured with throwaway scripts — `micro.mjs`
+ * (CPU, spawn, git and file-system loops), `micro2.mjs` (each metadata
+ * operation timed on its own) and `micro3.sh` (that at N = 1 … 23) — not kept
+ * in the repository.
+ *
+ * A CI shard has 4 vCPUs, where Stryker's default is already 4, so the cap
+ * changes nothing there; it binds only on a larger machine.
+ */
+export const MAX_RUNNERS = 4
+
+/**
+ * How many runners a Stryker run gets on a machine with `parallelism` cores:
+ * Stryker's default (`n - 1` above 4 cores, else `n`), capped at `MAX_RUNNERS`.
+ * Below the cap the two agree, so this is `min(n, MAX_RUNNERS)`.
+ */
+export function runnersFor(parallelism) {
+  return Math.min(parallelism, MAX_RUNNERS)
+}
+
+/**
  * Stryker's settings for one subject. `symlinks` is `symlinksIn`'s answer for
  * the tree, and `deadline` is `FIRST_RUN` or `SETTLE_RUN`.
  */
@@ -7595,6 +7634,7 @@ export function strykerConfig(subject, vitestConfig, symlinks = [], deadline = F
       ]),
     ],
     ...deadline,
+    concurrency: runnersFor(availableParallelism()),
     /* A survivor is the finding; the score is only how it is summarised. */
     thresholds: { high: 100, low: 100, break: 100 },
   }

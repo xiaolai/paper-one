@@ -1472,6 +1472,7 @@
     "scripts/check-mutants.test.mjs > what the mutation gate chooses to mutate > sees UNTRACKED test files, which is where new work lives",
     "scripts/check-mutants.test.mjs > what the mutation gate chooses to mutate > still blocks a subject that a reading test names by a path reaching it, and not its namesake elsewhere",
     "scripts/check-mutants.test.mjs > what the mutation gate chooses to mutate > tells a URL’s path from the rest of it, and joining from resolving",
+    "scripts/check-mutants.test.mjs > which kind of timeout a report says a mutant met > caps every run at four runners, and below that keeps the default Stryker picks",
     "scripts/check-mutants.test.mjs > which kind of timeout a report says a mutant met > gives the settle run a looser deadline and a factor of four, and the first run neither",
     "scripts/check-mutants.test.mjs > which kind of timeout a report says a mutant met > reads Stryker’s own hit-limit wording as a detection, a reason that is absent as the wall clock, and anything else as one it cannot tell apart",
     "scripts/check-mutants.test.mjs > which kind of timeout a report says a mutant met > takes a timeout at the hit limit for a kill needing no settle run, and a wall-clock one for a question",
