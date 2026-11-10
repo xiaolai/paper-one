@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { messageOf } from '../../../kernel'
 import type { ReadyBook, SpeechSkipPrefs } from '../../../kernel'
 import { ExportCancelled, exportAudiobook, planChapters } from '../lib/audiobook'
@@ -88,6 +88,26 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
   const letGo = useRef<() => void>(() => {})
 
   const { source, chosen, rate, engine, say } = deps
+
+  /**
+   * ⚠️ **A BOOK CLOSED DURING THE JOIN USED TO BE WRITTEN ANYWAY, OVER WHATEVER
+   * THE READER HAD AT THAT NAME.** `cancelled` asks `live()` only between steps,
+   * and the join is one step of minutes, so nothing gave the destination back
+   * until it returned — after the plugin's commit had moved the book onto the
+   * reader's file. The book going is now the reader's stop: the token goes back
+   * as it happens, and the commit refuses it, as `letGo` records for a stop.
+   *
+   * `live()`, NOT IDENTITY: a chapter turn hands in a new book of the same
+   * opening, which is still live and must not end the export. The book leaving
+   * is the one whose cleanup runs. `letGo` does nothing while no destination is
+   * held, so an export not yet at the dialog, or none at all, is not touched.
+   */
+  useEffect(
+    () => () => {
+      if (source && !source.live()) letGo.current()
+    },
+    [source],
+  )
 
   /**
    * ⚠️ **ONE LONG FUNCTION, AND THAT IS THE DECISION RATHER THAN THE DEBT.** An

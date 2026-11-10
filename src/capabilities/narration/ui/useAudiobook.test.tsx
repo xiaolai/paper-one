@@ -1051,6 +1051,46 @@ describe('a book closed or replaced while it exports', () => {
       'The export stopped because the book was closed. Nothing was left behind.',
     )
   })
+
+  it('during the join, gives the destination back at once, so the join cannot write over the file there', async () => {
+    /* ⚠️ **THE JOIN USED TO WRITE IT ANYWAY.** `live` was asked only between
+       steps, so the token stayed held through the join and the plugin's commit
+       moved the book over the reader's existing file. This fake commits as the
+       plugin does: a released token is refused, and the file there is untouched. */
+    const joining = gate()
+    let reached = false
+    let alive = true
+    const { books } = engine({
+      exists: async () => true,
+      package: async (job) => {
+        reached = true
+        await joining.shut
+        if (tauri.released.includes(TOKEN)) {
+          throw new Error('the export was cancelled before the book was written')
+        }
+        return { name: 'A Measured Book.m4b', durationMs: 180_000, chapters: job.chapters.length }
+      },
+    })
+    const { seen, say, change } = mount({ source: book({ live: () => alive }) })
+    await act(async () => {
+      seen.at(-1)?.run()
+      await vi.waitFor(() => expect(reached).toBe(true))
+    })
+    /* A chapter turn is a new book of the same opening, and is not the book going. */
+    act(() => change({ source: book({ live: () => alive }) }))
+    expect(tauri.released, 'a page turn is not a close').toEqual([])
+    alive = false
+    act(() => change({ source: null }))
+    expect(tauri.released, 'given back while the join was still running').toEqual([TOKEN])
+    await act(async () => {
+      joining.open()
+    })
+    expect(books, 'nothing was written, so nothing is removed').toEqual([])
+    expect(say).toHaveBeenLastCalledWith(
+      'The export stopped because the book was closed. Nothing was left behind.',
+    )
+    expect(tauri.released, 'and given back once').toEqual([TOKEN])
+  })
 })
 
 describe('an export the engine refuses', () => {
