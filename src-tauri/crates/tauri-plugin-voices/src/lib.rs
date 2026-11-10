@@ -19,6 +19,7 @@ pub mod manifest;
 pub mod paths;
 pub mod plugin;
 pub mod qwen;
+pub mod renders;
 pub mod wav;
 
 pub use error::{Error, Result};
