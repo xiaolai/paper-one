@@ -197,12 +197,43 @@ fn durations_are_rounded_per_token_before_they_are_summed() {
 }
 
 #[test]
-fn a_negative_duration_counts_as_nothing_rather_than_wrapping() {
-    // `as usize` on a negative float saturates to 0 in Rust, but the clamp says
-    // so out loud: a duration predictor that answers below zero must not make
-    // the frame count enormous.
-    let frames = accounted("af_heart", &[-3.0, 2.0], 2 * FRAME_SAMPLES).expect("accounted");
-    assert_eq!(frames, 2);
+fn a_token_shorter_than_half_a_frame_still_takes_one() {
+    // The model clamps every token to at least a frame, which is what speed 2.5
+    // exposed: these are counted 1 + 1 + 2, not 0 + 0 + 2.
+    let frames = accounted("af_heart", &[0.2, 0.0, 2.0], 4 * FRAME_SAMPLES).expect("accounted");
+    assert_eq!(frames, 4);
+    assert!(
+        accounted("af_heart", &[0.2, 0.0, 2.0], 2 * FRAME_SAMPLES).is_err(),
+        "counting the short tokens as nothing would have accepted two frames"
+    );
+}
+
+#[test]
+fn a_negative_duration_counts_as_one_frame_rather_than_wrapping() {
+    // A duration predictor that answers below zero must not make the frame
+    // count enormous; the model's clamp makes it one frame, like any short token.
+    let frames = accounted("af_heart", &[-3.0, 2.0], 3 * FRAME_SAMPLES).expect("accounted");
+    assert_eq!(frames, 3);
+}
+
+#[test]
+fn a_duration_of_exactly_half_rounds_to_the_even_frame_count() {
+    // Torch rounds half to even: 2.5 is 2 frames and 3.5 is 4. Rounding half
+    // away from zero would say 3 and 4, and refuse this render.
+    let frames = accounted("af_heart", &[2.5, 3.5], 6 * FRAME_SAMPLES).expect("accounted");
+    assert_eq!(frames, 6);
+    assert!(accounted("af_heart", &[2.5], 3 * FRAME_SAMPLES).is_err());
+}
+
+#[test]
+fn a_short_tokens_frame_moves_the_words_after_it() {
+    // The timings count frames by the same rule, so a word after a short token
+    // starts where the audio puts it.
+    let text = text_of("abc", &[(0, 1, 0, 1), (2, 1, 2, 1)]);
+    let words = timings_for(&text, &(0..3), &[1.0, 0.2, 1.0, 1.0, 1.0], 0);
+    let frame_ms = u32::try_from(FRAME_SAMPLES * 1000 / SAMPLE_RATE as usize).expect("small");
+    assert_eq!(words[0].start_ms, frame_ms, "after the leading pad");
+    assert_eq!(words[1].start_ms, 3 * frame_ms, "after the pad and two one-frame tokens");
 }
 
 /// Where an installed pack is, if this machine has one.
