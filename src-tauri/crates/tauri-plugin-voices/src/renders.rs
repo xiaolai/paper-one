@@ -76,11 +76,17 @@ impl Renders {
 
     /// Stop the render under `run`, or the one that arrives with that id.
     ///
+    /// ⚠️ **STOPPED IN PLACE, NOT TAKEN OUT.** A stopped render still runs until
+    /// its engine loop next looks, and it keeps its id until it ends: this used
+    /// to remove the entry, so a second render under the same id was let in
+    /// beside it, and the first one's [`Running`] then removed the second's
+    /// entry when it ended, leaving it out of reach of any stop.
+    ///
     /// # Errors
     /// When the lock is poisoned.
     pub fn stop(&self, run: &str) -> Result<(), String> {
         let mut inner = self.lock()?;
-        if let Some(stopper) = inner.live.remove(run) {
+        if let Some(stopper) = inner.live.get(run) {
             stopper.stop();
             return Ok(());
         }
@@ -166,6 +172,28 @@ mod tests {
         let renders = Renders::default();
         let _first = renders.begin("a").expect("begin");
         assert!(renders.begin("a").is_err());
+    }
+
+    #[test]
+    fn a_stopped_render_keeps_its_id_until_it_ends() {
+        let renders = Renders::default();
+        let first = renders.begin("a").expect("begin");
+        renders.stop("a").expect("stop");
+        assert!(
+            renders.begin("a").is_err(),
+            "a stopped render is still running, so its id is still taken"
+        );
+        drop(first);
+        let (second, _running) = renders.begin("a").expect("the id is free once it ends");
+        assert!(
+            !second.is_cancelled(),
+            "the first render's stop was its own"
+        );
+        renders.stop("a").expect("stop the second");
+        assert!(
+            second.is_cancelled(),
+            "a stop reaches the render now under the id"
+        );
     }
 
     #[test]
