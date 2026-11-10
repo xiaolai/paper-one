@@ -508,8 +508,9 @@ export class EngineSpeaker {
     try {
       return await new Promise<SpokenAudio>((resolve, reject) => {
         const arm = () => {
-          /* A `started` that arrives after the answer must not leave a timer
-             behind that would abort a render which has already finished. */
+          /* A `started` that arrives after the answer must not arm a timer the
+             `finally` has already cleared for: one of minutes to hours, left
+             running for a promise that settled, to refuse nothing. */
           if (settled) return
           clearTimeout(timer)
           timer = setTimeout(() => reject(new Error('the voice did not answer')), deadline)
