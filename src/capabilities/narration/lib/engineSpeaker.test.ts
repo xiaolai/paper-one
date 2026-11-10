@@ -204,6 +204,26 @@ describe('stopping a render at the engine, not only here', () => {
     expect(controls[1]?.signal.aborted, 'the new one is left to run').toBe(false)
   })
 
+  it('has stopped the render of a passage before it asks for that passage again', async () => {
+    /* ⚠️ **THIS IS WHY IDENTICAL RENDERS ARE NOT JOINED IN THE PLUGIN.** This
+       speaker is the only caller that renders into the clip store, there is one
+       of it, and it renders one passage at a time: every ask is preceded by the
+       stop that aborts the last one. So two live renders of one clip key cannot
+       both be wanted, and a join would only keep alive a render nobody wants. */
+    const live: number[] = []
+    let made: ReturnType<typeof speakerOver> | null = null
+    made = speakerOver(() => {
+      live.push(made!.controls.filter((control) => !control.signal.aborted).length)
+      return never()
+    })
+    made.speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    made.speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(made.asked, 'the same clip both times').toEqual([CLIP, CLIP])
+    expect(live, 'each render is the only one live when it is asked for').toEqual([1, 1])
+  })
+
   it('stops the render when the deadline gives up on it', async () => {
     const { speaker, cb, controls } = speakerOver(never)
     speaker.speak('hello', 'en')

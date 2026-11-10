@@ -5829,6 +5829,7 @@
     "src/capabilities/narration/lib/engineSpeaker.test.ts > seeking, which is what one buffer is for > seeking while paused moves the mark and starts no sound",
     "src/capabilities/narration/lib/engineSpeaker.test.ts > seeking, which is what one buffer is for > takes a character offset to the word that covers it",
     "src/capabilities/narration/lib/engineSpeaker.test.ts > seeking, which is what one buffer is for > takes an offset in the whitespace to the word after it",
+    "src/capabilities/narration/lib/engineSpeaker.test.ts > stopping a render at the engine, not only here > has stopped the render of a passage before it asks for that passage again",
     "src/capabilities/narration/lib/engineSpeaker.test.ts > stopping a render at the engine, not only here > leaves a render that answered unstopped",
     "src/capabilities/narration/lib/engineSpeaker.test.ts > stopping a render at the engine, not only here > leaves no deadline behind when the start is heard after the answer",
     "src/capabilities/narration/lib/engineSpeaker.test.ts > stopping a render at the engine, not only here > reports nothing for the render the reader stopped, when it refuses",
