@@ -303,7 +303,9 @@ async function renderStoppably(
   const stop = () => {
     wire.clipCancel(run).catch((cause: unknown) => console.error('Paper: a render could not be stopped', cause))
   }
-  signal.addEventListener('abort', stop, { once: true })
+  /* No `{ once: true }`: a signal is aborted once and only once, and the
+     listener is removed below whatever happens, so the option said nothing. */
+  signal.addEventListener('abort', stop)
   try {
     return await wire.clipRender(query, text, run, onStarted)
   } finally {
