@@ -999,6 +999,20 @@ export function useSpeech(
         /* The whole text IS the utterance, so a boundary's index is already an
            offset into it. */
         baseRef.current = 0
+        /* ⚠️ **AN EMPTY SECTION IS NOT SPOKEN UNDER THE PAUSE, AND IT WAS.** The
+           engine speaker reports `onDone('empty')` before `speak` returns — its
+           own `!text.trim()` — and that walked on, unheld, so the next section
+           with words played under *"Go on reading"*. The platform unit's branch
+           below keeps the walk held instead, and so does this one, by the
+           engine's own test of empty. Nothing is rendered, so nothing is
+           prepared either. */
+        // Stryker disable next-line MethodExpression: `collectText` never answers whitespace-only text (a blank node only separates, and only after words), so `trim` changes nothing today; it keeps this test the engine's own.
+        if (held && !section.text.trim()) {
+          heldContinuation.current = true
+          setPreparing(false)
+          // Stryker disable next-line BooleanLiteral: as below, a hold comes only from the document effect, which does not read the answer.
+          return true
+        }
         /* Spoken and then paused, rather than not spoken: the engine speaker
            honours a pause taken before its first sample (see `#play`), so the
            render goes ahead and `resume` is the ordinary road. */

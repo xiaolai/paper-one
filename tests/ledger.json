@@ -6429,6 +6429,8 @@
     "src/capabilities/narration/ui/useSpeech.test.tsx > five defects an independent audit found > a scrub the speaker refuses destroys nothing either",
     "src/capabilities/narration/ui/useSpeech.test.tsx > five defects an independent audit found > a section that lands under a pause taken during the walk lands paused",
     "src/capabilities/narration/ui/useSpeech.test.tsx > five defects an independent audit found > a step on a reading with no word timings changes nothing at all",
+    "src/capabilities/narration/ui/useSpeech.test.tsx > five defects an independent audit found > an empty section landing under that pause keeps the walk held, on this unit too",
+    "src/capabilities/narration/ui/useSpeech.test.tsx > five defects an independent audit found > an empty section landing with no pause walks on past it",
     "src/capabilities/narration/ui/useSpeech.test.tsx > five defects an independent audit found > does not chase back for a word that has no box on the page",
     "src/capabilities/narration/ui/useSpeech.test.tsx > five defects an independent audit found > reads the notes choice as of the SECTION, not as of the first render",
     "src/capabilities/narration/ui/useSpeech.test.tsx > five defects an independent audit found > stops chasing the page once the voice is on it again",

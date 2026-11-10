@@ -2650,6 +2650,57 @@ describe('five defects an independent audit found', () => {
     second.remove()
   })
 
+  it('an empty section landing under that pause keeps the walk held, on this unit too', async () => {
+    /* Spoken, the engine speaker reports `onDone('empty')` before `speak` returns,
+       and that walked on UNHELD: the next section with words then played under
+       "Go on reading". The platform unit's version is in the reading-through
+       describe above. */
+    /* Blank rather than bare: the engine's test of empty is `trim`, and a
+       space is what tells that from a test of no text at all. */
+    const plate = section(' ', 'en')
+    const second = section('Two sentence.', 'en')
+    const { speech, show, host, nextSection, page, unmount } = await atASectionBoundary(WORDS)
+    act(() => speech().pause())
+    const before = host.sources.length
+    await act(async () => {
+      show(plate.doc)
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(speech().preparing, 'nothing is being made for a plate').toBe(false)
+    nextSection.mockClear()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(CONTINUE_TICK_MS * 4)
+    })
+    expect(nextSection, 'no page turned while paused').not.toHaveBeenCalled()
+    await act(async () => {
+      show(second.doc)
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(speech().paused, 'the transport still says paused').toBe(true)
+    const landed = host.sources.slice(before)
+    expect(landed.every((source) => source.stops > 0 || source.started.length === 0), 'and no sound plays').toBe(true)
+    unmount()
+    page.remove()
+    plate.remove()
+    second.remove()
+  })
+
+  it('an empty section landing with no pause walks on past it', async () => {
+    /* The other side of the hold above: unpaused, a plate is read as nothing and
+       the walk turns past it. */
+    const plate = section(' ', 'en')
+    const { speech, show, nextSection, page, unmount } = await atASectionBoundary(WORDS)
+    await act(async () => {
+      show(plate.doc)
+      await vi.advanceTimersByTimeAsync(CONTINUE_TICK_MS * 2)
+    })
+    expect(speech().paused).toBe(false)
+    expect(nextSection, 'the walk turns past the plate').toHaveBeenCalled()
+    unmount()
+    page.remove()
+    plate.remove()
+  })
+
   it('a held section walk does not survive the section it belonged to', async () => {
     /* ⚠️ `pause` sets `heldContinuation` when it takes down a section walk and
        `resume` reads it as *"restart the walk"*. Left standing across a document
