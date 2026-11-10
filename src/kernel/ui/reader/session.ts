@@ -1537,7 +1537,10 @@ export class ReaderSession {
         }
         /* A teardown, or another book, while it loaded: the same rule as `step`. */
         if (this.#disposed || this.#view !== view) return 'unmoved'
-        return this.#renderedIndex === to ? 'moved' : 'unmoved'
+        /* ⚠️ **ON SCREEN, NOT LOADED LAST.** A fixed-layout spread loads both
+           its pages, and the partner can load after the target, so asking for
+           the last load answered "unmoved" for a move that was made. */
+        return this.#rendered.has(to) ? 'moved' : 'unmoved'
       },
       prev: () => void view.prev()?.catch?.(reportNavigation('prev')),
       goLeft: () => void view.goLeft()?.catch?.(reportNavigation('goLeft')),

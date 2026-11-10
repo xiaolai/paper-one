@@ -4797,6 +4797,16 @@ describe('the next section a reading out of words asks for', () => {
     expect(view.turns.next).toBe(0)
   })
 
+  it('says it moved when the target is one page of a spread whose partner loaded after it', async () => {
+    const { nav, view } = await opened([{}, {}, {}], 0, (v, target) => {
+      v.emit('load', { doc: fakeDocument().asDocument(), index: target })
+      v.emit('load', { doc: fakeDocument().asDocument(), index: target + 1 })
+      return Promise.resolve()
+    })
+    await expect(nav.nextSection()).resolves.toBe('moved')
+    expect(view.navigations).toEqual([1])
+  })
+
   it('passes over a section out of the reading order, as a turn would', async () => {
     const { nav, view } = await opened([{}, { linear: 'no' }, {}], 0)
     await expect(nav.nextSection()).resolves.toBe('moved')

@@ -13273,6 +13273,7 @@
     "src/kernel/ui/reader/session.test.ts > the next section a reading out of words asks for > goes straight to the start of the next section, and says it moved",
     "src/kernel/ui/reader/session.test.ts > the next section a reading out of words asks for > passes over a section out of the reading order, as a turn would",
     "src/kernel/ui/reader/session.test.ts > the next section a reading out of words asks for > reports a move that failed as one that did not happen, and names it",
+    "src/kernel/ui/reader/session.test.ts > the next section a reading out of words asks for > says it moved when the target is one page of a spread whose partner loaded after it",
     "src/kernel/ui/reader/session.test.ts > the pace, and the end of the book > answers about no section before one has rendered",
     "src/kernel/ui/reader/session.test.ts > the pace, and the end of the book > answers no bytes for a section index the spine does not hold",
     "src/kernel/ui/reader/session.test.ts > the pace, and the end of the book > answers no end for a paginated section whose page it cannot read",
