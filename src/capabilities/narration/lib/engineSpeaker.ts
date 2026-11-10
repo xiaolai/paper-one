@@ -490,10 +490,13 @@ export class EngineSpeaker {
    * the render its whole allowance from the moment it begins. A clip already on
    * disk never queues, and never calls it.
    *
-   * ⚠️ **A DEADLINE THAT FIRES ABORTS THE RENDER AS WELL AS REFUSING IT.** It
-   * used to refuse only this promise, and the engine went on rendering into a
-   * store nobody was waiting on — holding the engine against the reader's next
-   * try.
+   * ⚠️ **A DEADLINE THAT FIRES ABORTS THE RENDER AS WELL AS REFUSING IT — BY
+   * WAY OF `stop()`, AND NOT HERE.** It used to refuse only this promise, and the
+   * engine went on rendering into a store nobody was waiting on. The refusal
+   * reaches `#ended`, whose `stop()` aborts `#rendering`; and a render whose
+   * reading is no longer current was aborted already, by the `stop()` that made
+   * it so. An abort in the timer as well was a second road to one state, and the
+   * mutation gate could not tell it from none.
    */
   async #render(request: SpeechRequest): Promise<SpokenAudio> {
     const controller = (this.#rendering = new AbortController())
@@ -509,10 +512,7 @@ export class EngineSpeaker {
              behind that would abort a render which has already finished. */
           if (settled) return
           clearTimeout(timer)
-          timer = setTimeout(() => {
-            controller.abort()
-            reject(new Error('the voice did not answer'))
-          }, deadline)
+          timer = setTimeout(() => reject(new Error('the voice did not answer')), deadline)
         }
         arm()
         this.#deps.render(request, { signal: controller.signal, onStarted: arm }).then(resolve, reject)
