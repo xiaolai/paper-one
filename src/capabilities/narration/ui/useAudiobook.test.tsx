@@ -129,6 +129,7 @@ function mount({ packs = [INSTALLED], ...over }: Partial<AudiobookDeps> & { read
     seen,
     say,
     rerender: () => view.rerender(<Probe />),
+    unmount: () => view.unmount(),
     /* CHANGES THE DEPS THE NEXT RENDER SEES. `deps` is the object the probe
        closes over, so mutating it is how a test says "the reader closed the
        book" — the same thing a new prop would do to the real component. */
@@ -805,6 +806,41 @@ describe('a stop that came too late to undo the file', () => {
     expect(say).toHaveBeenLastCalledWith(
       'The export was stopped, but the book it had written could not be removed from where you chose.',
     )
+  })
+
+  it('names the book closing, not a stop, when that is what came too late', async () => {
+    /* A close noticed only after the commit — the join returned before the host
+       re-rendered — keeps a book it wrote over a file, or one it could not
+       remove, as a stop does. The reader pressed nothing, and is told so. */
+    for (const [over, line] of [
+      [
+        { exists: async () => true },
+        'The export stopped because the book was closed, but the book had already been written over the file you chose.',
+      ],
+      [
+        {
+          discardBook: async () => {
+            throw new Error('the book is open elsewhere')
+          },
+        },
+        'The export stopped because the book was closed, but the book it had written could not be removed from where you chose.',
+      ],
+    ] as const) {
+      let alive = true
+      engine({
+        ...over,
+        package: async (job) => {
+          alive = false
+          return { name: 'A Measured Book.m4b', durationMs: 180_000, chapters: job.chapters.length }
+        },
+      })
+      const { seen, say, unmount } = mount({ source: book({ live: () => alive }) })
+      await act(async () => {
+        seen.at(-1)?.run()
+      })
+      expect(say).toHaveBeenLastCalledWith(line)
+      unmount()
+    }
   })
 })
 

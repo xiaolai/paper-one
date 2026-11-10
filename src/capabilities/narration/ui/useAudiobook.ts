@@ -300,6 +300,10 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
              sentence a reader would act on was the one thing nobody had checked.
              A chapter of a ten-hour book is tens of megabytes. It is counted now,
              and the claim is only made when it is true. */
+          /* Read before the `finally` clears it: a stop the reader asked for is
+             theirs, and one with no stop asked for is the book having gone. Every
+             notice below names which, since either can land too late. */
+          const why = stop.current ? 'The export was stopped' : 'The export stopped because the book was closed'
           /* ⚠️ **A STOP CAN COME TOO LATE TO UNDO THE FILE, AND THE READER USED TO
            * BE TOLD NOTHING ABOUT IT — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.**
            * The join cannot be interrupted, so a stop during it lands after the
@@ -310,7 +314,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
            * replaced one of theirs. */
           if (cause.book === 'replaced') {
             say(
-              `The export was stopped, but the book had already been written over the file you chose.${leftBehindNote(cause.leftBehind)}`,
+              `${why}, but the book had already been written over the file you chose.${leftBehindNote(cause.leftBehind)}`,
             )
             return
           }
@@ -319,14 +323,11 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
              temporary file would send them looking in the wrong place. */
           if (cause.book === 'stuck') {
             say(
-              `The export was stopped, but the book it had written could not be removed from where you chose.${leftBehindNote(cause.leftBehind)}`,
+              `${why}, but the book it had written could not be removed from where you chose.${leftBehindNote(cause.leftBehind)}`,
             )
             return
           }
-          /* Read before the `finally` clears it: a stop the reader asked for is
-             theirs, and one with no stop asked for is the book having gone. */
-          const why = stop.current ? 'The export was stopped.' : 'The export stopped because the book was closed.'
-          say(`${why}${leftBehindNote(cause.leftBehind) || ' Nothing was left behind.'}`)
+          say(`${why}.${leftBehindNote(cause.leftBehind) || ' Nothing was left behind.'}`)
           return
         }
         /* THE ENGINE'S OWN SENTENCE. Every refusal in `narrate` names what it

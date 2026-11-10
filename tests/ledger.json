@@ -6348,6 +6348,7 @@
     "src/capabilities/narration/ui/useAudiobook.test.tsx > a book with nothing to read > says so instead of writing an empty file",
     "src/capabilities/narration/ui/useAudiobook.test.tsx > a control held past the book it was for > does nothing once its export has ended and the book is gone",
     "src/capabilities/narration/ui/useAudiobook.test.tsx > a reader who closes the save dialog > starts nothing and says nothing more",
+    "src/capabilities/narration/ui/useAudiobook.test.tsx > a stop that came too late to undo the file > names the book closing, not a stop, when that is what came too late",
     "src/capabilities/narration/ui/useAudiobook.test.tsx > a stop that came too late to undo the file > says the book is still where the reader chose when it could not be removed",
     "src/capabilities/narration/ui/useAudiobook.test.tsx > a stop that came too late to undo the file > says the book was written over the one the reader chose",
     "src/capabilities/narration/ui/useAudiobook.test.tsx > a stop the reader asks for > between chapters, renders no more of them and removes what it wrote",
