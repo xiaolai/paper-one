@@ -1,7 +1,11 @@
 //! What holds the command inventory's three copies together, and the decisions
 //! the clip commands make before they reach a store.
 
-use super::{describes, effective_rate, family_of, rate_milli, readable, render_key_of, ClipAsk};
+use super::{
+    begin_speaking, describes, effective_rate, family_of, rate_milli, readable, render_key_of,
+    ClipAsk,
+};
+use crate::cancel::Cancel;
 use crate::clips;
 use crate::manifest::Family;
 
@@ -403,4 +407,20 @@ async fn a_link_planted_at_a_chapter_is_not_written_through() {
         std::fs::symlink_metadata(&target).is_ok(),
         "the link was removed"
     );
+}
+
+#[test]
+fn a_render_stopped_while_it_waited_gives_up() {
+    // The queue is where a stopped render used to cost the most: it waited for
+    // the engine, then spent minutes on a reading nobody wanted. It now gives up
+    // the moment the engine is its own.
+    let (cancel, stopper) = Cancel::new();
+    stopper.stop();
+    assert!(begin_speaking(&cancel).is_err());
+}
+
+#[test]
+fn a_render_nobody_stopped_goes_on() {
+    let (cancel, _stopper) = Cancel::new();
+    begin_speaking(&cancel).expect("nothing stopped it");
 }

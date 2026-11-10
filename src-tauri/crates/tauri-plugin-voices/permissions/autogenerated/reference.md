@@ -23,6 +23,9 @@ through the fs plugin's existing `$APPDATA` scope, because a real section is
 Nothing here writes outside `audio/`, and every path is built from a digest of
 the caller's key rather than from a string the webview chose.
 
+`voices_clip_cancel` stops a render the webview started, by the id it gave it,
+and reaches nothing else.
+
 `voices_clip_forget` is how a reader takes that disk back, and
 `voices_clip_usage` is what the row in Settings reads.
 
@@ -36,6 +39,7 @@ the caller's key rather than from a string the webview chose.
 - `allow-voices-release`
 - `allow-voices-clip-find`
 - `allow-voices-clip-render`
+- `allow-voices-clip-cancel`
 - `allow-voices-clip-read`
 - `allow-voices-clip-hold`
 - `allow-voices-clip-usage`
@@ -72,6 +76,32 @@ Enables the voices_catalogue command without any pre-configured scope.
 <td>
 
 Denies the voices_catalogue command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`voices:allow-voices-clip-cancel`
+
+</td>
+<td>
+
+Enables the voices_clip_cancel command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`voices:deny-voices-clip-cancel`
+
+</td>
+<td>
+
+Denies the voices_clip_cancel command without any pre-configured scope.
 
 </td>
 </tr>

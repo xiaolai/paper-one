@@ -54,8 +54,17 @@ export interface VoicesWire {
   remove(pack: string): Promise<void>
   /** The rendered section already on disk, or `null` the first time. */
   clipFind(query: ClipQuery): Promise<unknown>
-  /** Render a section and keep it. Minutes, on a blocking thread. */
-  clipRender(query: ClipQuery, text: string): Promise<unknown>
+  /**
+   * Render a section and keep it. Minutes, on a blocking thread.
+   *
+   * `run` is an id this render can be stopped by — see `clipCancel`.
+   */
+  clipRender(query: ClipQuery, text: string, run: string): Promise<unknown>
+  /**
+   * Stop the render started under `run`. A stop that arrives before its render
+   * is kept by the plugin, so the order the two reach it in does not matter.
+   */
+  clipCancel(run: string): Promise<unknown>
   /** Render into a file the caller names, keeping nothing. */
   renderFile(file: RenderFileQuery): Promise<unknown>
   /**
@@ -98,7 +107,8 @@ export function voicesWire(): VoicesWire {
        key flat made two commands take eight and nine parameters, which clippy
        refuses and is right to — the shape is a VALUE on both sides. */
     clipFind: (ask) => invoke<unknown>('plugin:voices|voices_clip_find', { ask }),
-    clipRender: (ask, text) => invoke<unknown>('plugin:voices|voices_clip_render', { ask, text }),
+    clipRender: (ask, text, run) => invoke<unknown>('plugin:voices|voices_clip_render', { ask, text, run }),
+    clipCancel: (run) => invoke<unknown>('plugin:voices|voices_clip_cancel', { run }),
     /* Flat, as the command declares its arguments: `voices_render_file` has five
        and no `ask`, because it names no clip. */
     renderFile: (file) => invoke<unknown>('plugin:voices|voices_render_file', { ...file }),

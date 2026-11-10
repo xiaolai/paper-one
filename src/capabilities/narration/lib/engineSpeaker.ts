@@ -56,7 +56,7 @@ import { playPcm, type AudioHost, type Playing } from './enginePlayer'
 import type { EngineVoice } from './engineVoice'
 import { audible } from './pcm'
 import type { DoneReason, SpeakPrefs, SpeakerCallbacks } from './speaker'
-import type { ClipKey, SpeechRequest, SpokenAudio } from '../../../kernel'
+import type { ClipKey, RenderControl, SpeechRequest, SpokenAudio } from '../../../kernel'
 
 /** A reading in progress: the sound, its words, and how many have been said. */
 interface Reading {
@@ -70,8 +70,8 @@ export type VoiceChoosing = (lang: string | null, prefs: SpeakPrefs) => { packId
 
 /** What the speaker needs from outside. */
 export interface EngineSpeakerDeps {
-  /** Render a passage. The port's, or a fake. */
-  render: (request: SpeechRequest) => Promise<SpokenAudio>
+  /** Render a passage. The port's, or a fake. See `SpeechEnginePort.render`. */
+  render: (request: SpeechRequest, control: RenderControl) => Promise<SpokenAudio>
   /** Somewhere to play it. Made lazily, because a context costs a device. */
   host: () => AudioHost | null
   /** Which voice reads this language. */
@@ -217,6 +217,17 @@ export class EngineSpeaker {
    * there is no player until it lands. Not on the request: see `SpeakPrefs.volume`.
    */
   #volume = 1
+  /**
+   * What stops the render in flight — at the engine, not only here.
+   *
+   * ⚠️ **ABORTED BY EVERY ROAD OUT OF A RENDER BUT ITS ANSWER**: a Stop, a new
+   * `speak` (which stops first), and the deadline. Each engine renders one
+   * passage at a time, so a render the reader had left used to keep the engine
+   * for minutes, and the passage they asked for next queued behind it. Never
+   * set back to `null`: aborting a render that has already answered does
+   * nothing, so a `null` here would be a second spelling of the same state.
+   */
+  #rendering: AbortController | null = null
   constructor(callbacks: SpeakerCallbacks, deps: EngineSpeakerDeps) {
     this.#cb = callbacks
     this.#deps = deps
@@ -444,6 +455,7 @@ export class EngineSpeaker {
      * lands. Stopping the player alone would leave that render to start a
      * sound nobody asked for, seconds later. */
     this.#current = {}
+    this.#rendering?.abort()
     this.#paused = false
     /* ⚠️ **IT NEVER RESET, SO THE SECOND BOUNDARYLESS READING SAID NOTHING —
      * FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.** `onNoBoundaries` is the
@@ -465,21 +477,33 @@ export class EngineSpeaker {
     this.#reading = null
   }
 
+  /**
+   * Render, against a deadline.
+   *
+   * ⚠️ **A DEADLINE THAT FIRES ABORTS THE RENDER AS WELL AS REFUSING IT.** It
+   * used to refuse only this promise, and the engine went on rendering into a
+   * store nobody was waiting on — holding the engine against the reader's next
+   * try.
+   */
   async #render(request: SpeechRequest): Promise<SpokenAudio> {
+    const controller = (this.#rendering = new AbortController())
     let timer: ReturnType<typeof setTimeout> | undefined
     /* SCALED TO THE PASSAGE — see `RENDER_PER_CHAR_MS`, which records what a flat
        two minutes cost once a section became the unit. */
     const deadline = deadlineFor(request.text)
     const limit = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('the voice did not answer')), deadline)
+      timer = setTimeout(() => {
+        controller.abort()
+        reject(new Error('the voice did not answer'))
+      }, deadline)
     })
     try {
-      return await Promise.race([this.#deps.render(request), limit])
+      return await Promise.race([this.#deps.render(request, { signal: controller.signal }), limit])
     } finally {
       /* No `timer !== undefined` in front of this: the executor above runs
          synchronously, so by here it always has one — and `clearTimeout` takes
-         `undefined` without complaint anyway. Left unclear, a two-minute timer
-         outlives every sentence that renders normally. */
+         `undefined` without complaint anyway. Left unclear, a deadline of
+         minutes to hours outlives every render that answers normally. */
       clearTimeout(timer)
     }
   }

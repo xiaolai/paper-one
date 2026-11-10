@@ -216,8 +216,11 @@ describe('with one', () => {
       text: 'Call me Ishmael.',
       clip: { bookId: 'book:a', section: 0, textDigest: 'fnv1a64:16:0000000000000001' },
     }
-    await expect(seen.current?.engine?.render(request)).resolves.toBe(spoken)
-    expect(render_).toHaveBeenCalledWith(request)
+    /* THE CONTROL IS FORWARDED TOO: a closure that dropped it would leave a Stop
+       stopping this end only, and the engine rendering on for minutes. */
+    const control = { signal: new AbortController().signal }
+    await expect(seen.current?.engine?.render(request, control)).resolves.toBe(spoken)
+    expect(render_).toHaveBeenCalledWith(request, control)
   })
 
   it('asks for the model back when the app goes', async () => {

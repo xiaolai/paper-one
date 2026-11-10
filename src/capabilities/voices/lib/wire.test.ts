@@ -33,6 +33,7 @@ describe('the voices wire', () => {
   it('offers every command the capability may call, and nothing else', () => {
     expect(Object.keys(voicesWire()).sort()).toEqual([
       'catalogue',
+      'clipCancel',
       'clipFind',
       'clipForget',
       'clipHold',
@@ -82,9 +83,13 @@ describe('the voices wire', () => {
       'plugin:voices|voices_clip_find',
       { ask: query },
     ])
-    expect(await called(() => wire.clipRender(query, '春天'))).toEqual([
+    expect(await called(() => wire.clipRender(query, '春天', 'run-1'))).toEqual([
       'plugin:voices|voices_clip_render',
-      { ask: query, text: '春天' },
+      { ask: query, text: '春天', run: 'run-1' },
+    ])
+    expect(await called(() => wire.clipCancel('run-1'))).toEqual([
+      'plugin:voices|voices_clip_cancel',
+      { run: 'run-1' },
     ])
     const file = { pack: 'chinese-qwen', voice: 'Vivian', text: '春天', rate: null, path: '/scratch/chapter-3.wav' }
     expect(await called(() => wire.renderFile(file))).toEqual(['plugin:voices|voices_render_file', file])
@@ -147,7 +152,7 @@ describe('the voices wire', () => {
       spokenDigest: 'fnv1a64:2:0000000000000002',
     }
     await expect(voicesWire().clipFind(query)).resolves.toBe(clip)
-    await expect(voicesWire().clipRender(query, 'A.')).resolves.toBe(clip)
+    await expect(voicesWire().clipRender(query, 'A.', 'run-1')).resolves.toBe(clip)
   })
 
   it('reads a clip as bytes, not as a list of numbers', async () => {

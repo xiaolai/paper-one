@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 
+use crate::cancel::Cancel;
 use crate::english::Phonemised;
 use crate::error::{Error, Result};
 
@@ -173,14 +174,24 @@ impl Kokoro {
     /// # Errors
     /// [`Error::Malformed`] if a phoneme is outside the model's vocabulary, if
     /// the model answers without audio, or if the durations do not account for
-    /// the samples — see the header.
-    pub fn render(&mut self, text: &Phonemised, voice: &str, speed: f32) -> Result<Rendered> {
+    /// the samples — see the header. [`Error::Cancelled`] once `cancel` is
+    /// stopped, which is looked at before every chunk: a chunk is the unit the
+    /// model runs, so a stop costs at most the pass in hand rather than the
+    /// rest of the chapter.
+    pub fn render(
+        &mut self,
+        text: &Phonemised,
+        voice: &str,
+        speed: f32,
+        cancel: &Cancel,
+    ) -> Result<Rendered> {
         let phonemes: Vec<char> = text.phonemes.chars().collect();
         let mut samples: Vec<i16> = Vec::new();
         let mut words: Vec<WordTiming> = Vec::new();
         let mut frames_before = 0usize;
 
         for chunk in chunks(&phonemes, MAX_TOKENS) {
+            cancel.check()?;
             let piece: String = phonemes[chunk.clone()].iter().collect();
             let (chunk_samples, durations) = self.run(&piece, voice, speed)?;
             let frames = accounted(voice, &durations, chunk_samples.len())?;

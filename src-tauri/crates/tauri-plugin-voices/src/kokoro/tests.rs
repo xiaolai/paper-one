@@ -10,6 +10,7 @@
 use super::{
     accounted, chunks, timings_for, Kokoro, Rendered, WordTiming, FRAME_SAMPLES, SAMPLE_RATE,
 };
+use crate::cancel::Cancel;
 use crate::english::{Phonemised, SpokenWord};
 
 fn text_of(phonemes: &str, words: &[(usize, usize, usize, usize)]) -> Phonemised {
@@ -233,7 +234,11 @@ fn a_short_tokens_frame_moves_the_words_after_it() {
     let words = timings_for(&text, &(0..3), &[1.0, 0.2, 1.0, 1.0, 1.0], 0);
     let frame_ms = u32::try_from(FRAME_SAMPLES * 1000 / SAMPLE_RATE as usize).expect("small");
     assert_eq!(words[0].start_ms, frame_ms, "after the leading pad");
-    assert_eq!(words[1].start_ms, 3 * frame_ms, "after the pad and two one-frame tokens");
+    assert_eq!(
+        words[1].start_ms,
+        3 * frame_ms,
+        "after the pad and two one-frame tokens"
+    );
 }
 
 /// Where an installed pack is, if this machine has one.
@@ -258,7 +263,9 @@ fn the_model_speaks_and_its_durations_account_for_every_sample() {
         "this sentence is all in the lexicon"
     );
 
-    let out = kokoro.render(&text, "af_heart", 1.0).expect("render");
+    let out = kokoro
+        .render(&text, "af_heart", 1.0, &Cancel::never())
+        .expect("render");
     // `render` asserts the frame equality itself; this is the audible half.
     assert_eq!(out.sample_rate, SAMPLE_RATE);
     assert!(
@@ -307,7 +314,9 @@ fn a_sound_the_model_cannot_say_is_refused_by_name() {
         }],
         unknown: Vec::new(),
     };
-    let err = kokoro.render(&text, "af_heart", 1.0).expect_err("refused");
+    let err = kokoro
+        .render(&text, "af_heart", 1.0, &Cancel::never())
+        .expect_err("refused");
     assert!(
         format!("{err}").contains('ʘ'),
         "the refusal names the sound: {err}"

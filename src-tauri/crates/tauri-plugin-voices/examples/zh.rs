@@ -12,6 +12,7 @@
 use std::io::Write;
 use std::time::Instant;
 
+use tauri_plugin_voices::cancel::Cancel;
 use tauri_plugin_voices::qwen::engine::{self, Attempt};
 use tauri_plugin_voices::qwen::text;
 
@@ -65,22 +66,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let started = Instant::now();
-    let reading = engine::read(passage, sample_rate, |sentence, seed, cap, room| {
-        let at = Instant::now();
-        let cap = ((cap as f64 * scale).ceil() as usize).max(1);
-        let room = ((room as f64 * room_scale).ceil() as usize).max(1);
-        let attempt =
-            engine::through_bridge(sentence, &voice, &language, sample_rate, seed, cap, room);
-        match &attempt {
-            Attempt::Audio(_, seconds) => println!(
-                "  {seconds:6.2} s of audio in {:5.1} s — {}",
-                at.elapsed().as_secs_f64(),
-                sentence.chars().take(24).collect::<String>()
-            ),
-            Attempt::Failed(failure) => println!("  refused: {}", failure.why()),
-        }
-        attempt
-    });
+    let reading = engine::read(
+        passage,
+        sample_rate,
+        &Cancel::never(),
+        |sentence, seed, cap, room| {
+            let at = Instant::now();
+            let cap = ((cap as f64 * scale).ceil() as usize).max(1);
+            let room = ((room as f64 * room_scale).ceil() as usize).max(1);
+            let attempt =
+                engine::through_bridge(sentence, &voice, &language, sample_rate, seed, cap, room);
+            match &attempt {
+                Attempt::Audio(_, seconds) => println!(
+                    "  {seconds:6.2} s of audio in {:5.1} s — {}",
+                    at.elapsed().as_secs_f64(),
+                    sentence.chars().take(24).collect::<String>()
+                ),
+                Attempt::Failed(failure) => println!("  refused: {}", failure.why()),
+            }
+            attempt
+        },
+    )?;
     let elapsed = started.elapsed().as_secs_f64();
 
     let samples: Vec<i16> = reading

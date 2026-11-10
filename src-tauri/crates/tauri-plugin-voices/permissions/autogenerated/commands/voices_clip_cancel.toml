@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-voices-clip-cancel"
+description = "Enables the voices_clip_cancel command without any pre-configured scope."
+commands.allow = ["voices_clip_cancel"]
+
+[[permission]]
+identifier = "deny-voices-clip-cancel"
+description = "Denies the voices_clip_cancel command without any pre-configured scope."
+commands.deny = ["voices_clip_cancel"]

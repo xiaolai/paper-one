@@ -13,6 +13,7 @@
 use std::io::Write;
 use std::time::Instant;
 
+use tauri_plugin_voices::cancel::Cancel;
 use tauri_plugin_voices::english::FrontEnd;
 use tauri_plugin_voices::kokoro::Kokoro;
 
@@ -43,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(8);
     let mut kokoro = Kokoro::load(&pack, threads)?;
     let started = Instant::now();
-    let rendered = kokoro.render(&prepared, &voice, 1.0)?;
+    let rendered = kokoro.render(&prepared, &voice, 1.0, &Cancel::never())?;
     let elapsed = started.elapsed().as_secs_f64();
     let seconds = f64::from(rendered.duration_ms()) / 1000.0;
     println!(

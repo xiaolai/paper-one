@@ -63,6 +63,11 @@ function requestFor(over: Partial<SpeechRequest> = {}): SpeechRequest {
   }
 }
 
+/** A render nobody stops, or one the case stops through `signal`. */
+function controlOf(signal: AbortSignal = new AbortController().signal) {
+  return { signal }
+}
+
 /** A wire the case drives. */
 function wireOver(over: Partial<VoicesWire> = {}): VoicesWire {
   return {
@@ -72,6 +77,7 @@ function wireOver(over: Partial<VoicesWire> = {}): VoicesWire {
     remove: async () => {},
     clipFind: async () => null,
     clipRender: async () => CLIP,
+    clipCancel: async () => {},
     renderFile: async () => ({ sampleRate: 24_000, skipped: [] }),
     clipHold: async (stems: readonly string[]) => stems.length,
     clipUsage: async () => ({ bytes: 0, budget: 5 * 1024 * 1024 * 1024, clips: 0 }),
@@ -298,7 +304,7 @@ describe('installing a pack', () => {
 
 describe('a rendered section', () => {
   it('reads the samples out of the file, and the timings out of the row', async () => {
-    const audio = await voicesPortOver(wireOver()).render(requestFor())
+    const audio = await voicesPortOver(wireOver()).render(requestFor(), controlOf())
     expect([...audio.pcm]).toEqual([0, 0, 1, 0])
     expect(audio.sampleRate).toBe(24_000)
     expect(audio.words[0]?.endMs).toBe(825)
@@ -312,7 +318,7 @@ describe('a rendered section', () => {
     const clipFind = vi.fn(async () => CLIP)
     const clipRender = vi.fn(async () => CLIP)
     const port = voicesPortOver(wireOver({ clipFind, clipRender }))
-    await port.render(requestFor())
+    await port.render(requestFor(), controlOf())
     expect(clipFind).toHaveBeenCalledTimes(1)
     expect(clipRender, 'a hit renders nothing').not.toHaveBeenCalled()
   })
@@ -321,7 +327,7 @@ describe('a rendered section', () => {
     const clipRender = vi.fn(async () => CLIP)
     const readClip = vi.fn(async () => wavOf([0, 0, 1, 0]))
     const port = voicesPortOver(wireOver({ clipFind: async () => null, clipRender, readClip }))
-    await port.render(requestFor())
+    await port.render(requestFor(), controlOf())
     expect(clipRender).toHaveBeenCalledTimes(1)
     expect(readClip, 'read by the NAME the plugin answered').toHaveBeenCalledWith(CLIP.stem)
   })
@@ -332,7 +338,7 @@ describe('a rendered section', () => {
        a CLIP would hand `clipOf` nothing and refuse the reading. */
     const clipRender = vi.fn(async () => CLIP)
     const port = voicesPortOver(wireOver({ clipFind: async () => undefined, clipRender }))
-    await port.render(requestFor())
+    await port.render(requestFor(), controlOf())
     expect(clipRender).toHaveBeenCalledTimes(1)
   })
 
@@ -343,7 +349,7 @@ describe('a rendered section', () => {
        misplaced word highlights with nothing throwing. */
     const clipFind = vi.fn(async () => CLIP)
     const port = voicesPortOver(wireOver({ clipFind }))
-    await port.render(requestFor({ text: 'foobar', rate: 1.25 }))
+    await port.render(requestFor({ text: 'foobar', rate: 1.25 }), controlOf())
     expect(clipFind).toHaveBeenCalledWith({
       book: 'book:a',
       section: 3,
@@ -369,13 +375,13 @@ describe('a rendered section', () => {
         },
       }),
     )
-    await port.render(requestFor())
+    await port.render(requestFor(), controlOf())
     expect(asked.rate).toBeNull()
   })
 
   it('refuses a row that is not a section', async () => {
     const port = voicesPortOver(wireOver({ clipRender: async () => 7 as never }))
-    const cause = await refusalOf(port.render(requestFor()))
+    const cause = await refusalOf(port.render(requestFor(), controlOf()))
     expect((cause as Error).message).toMatch(/no section/u)
   })
 
@@ -384,13 +390,13 @@ describe('a rendered section', () => {
        through, with nothing failing. The row and the file are two statements of
        one fact, so they are made to agree. */
     const port = voicesPortOver(wireOver({ readClip: async () => wavOf([0, 0], 22_050) }))
-    const cause = await refusalOf(port.render(requestFor()))
+    const cause = await refusalOf(port.render(requestFor(), controlOf()))
     expect((cause as Error).message).toMatch(/says 22050 Hz where the section says 24000 Hz/u)
   })
 
   it('refuses a file that is not the shape Paper writes', async () => {
     const port = voicesPortOver(wireOver({ readClip: async () => new Uint8Array(44) }))
-    const cause = await refusalOf(port.render(requestFor()))
+    const cause = await refusalOf(port.render(requestFor(), controlOf()))
     expect((cause as Error).message).toMatch(/says 0 bytes of audio and holds 0|not the WAV shape/u)
   })
 
@@ -398,8 +404,132 @@ describe('a rendered section', () => {
     const port = voicesPortOver(
       wireOver({ clipRender: async () => ({ ...CLIP, evicted: { clips: 2, bytes: 96_088 } }) }),
     )
-    const audio = await port.render(requestFor())
+    const audio = await port.render(requestFor(), controlOf())
     expect(audio.evicted).toEqual({ clips: 2, bytes: 96_088 })
+  })
+})
+
+describe('stopping a render', () => {
+  /**
+   * A wire whose render answers only when the case says, and which records the
+   * id each render and each stop names.
+   */
+  function heldWire() {
+    const runs: string[] = []
+    const cancels: string[] = []
+    let answer: (row: unknown) => void = () => {}
+    let refuse: (cause: unknown) => void = () => {}
+    const wire = wireOver({
+      clipRender: (_query, _text, run) => {
+        runs.push(run)
+        return new Promise((resolve, reject) => {
+          answer = resolve
+          refuse = reject
+        })
+      },
+      clipCancel: async (run) => {
+        cancels.push(run)
+      },
+    })
+    return { wire, runs, cancels, answer: (row: unknown) => answer(row), refuse: (cause: unknown) => refuse(cause) }
+  }
+
+  /** Until every promise already settled has run its callbacks. */
+  const drained = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  it('stops the render it started, by the id it started it under', async () => {
+    /* ⚠️ **THE STOP MUST NAME THE RENDER IT MEANS.** A stop under any other id is
+       kept by the plugin for a render that never comes, and the one the reader
+       walked away from keeps the engine for minutes. */
+    const held = heldWire()
+    const control = new AbortController()
+    const rendering = refusalOf(voicesPortOver(held.wire).render(requestFor(), controlOf(control.signal)))
+    await drained()
+    expect(held.runs).toHaveLength(1)
+    expect(held.cancels, 'nothing is stopped before the reader stops it').toEqual([])
+    control.abort()
+    expect(held.cancels).toEqual(held.runs)
+    held.refuse(new Error('the reader stopped it'))
+    expect(((await rendering) as Error).message).toMatch(/the reader stopped it/u)
+  })
+
+  it('names every render differently', async () => {
+    /* One id for two renders would be a stop that reaches the wrong one, and the
+       plugin refuses a second render under an id that is still running. */
+    const held = heldWire()
+    const port = voicesPortOver(held.wire)
+    void port.render(requestFor(), controlOf())
+    void port.render(requestFor(), controlOf())
+    await drained()
+    expect(held.runs).toHaveLength(2)
+    expect(held.runs[0]).not.toBe(held.runs[1])
+  })
+
+  it('renders nothing when it was stopped before the render was asked for', async () => {
+    const held = heldWire()
+    const control = new AbortController()
+    control.abort()
+    const cause = await refusalOf(voicesPortOver(held.wire).render(requestFor(), controlOf(control.signal)))
+    expect(cause).toBeInstanceOf(DOMException)
+    expect(held.runs, 'no render was asked for').toEqual([])
+    expect(held.cancels, 'and so there was none to stop').toEqual([])
+  })
+
+  it('stops nothing once the render has answered', async () => {
+    /* A stop after the answer would be kept by the plugin as an early stop for a
+       render that has already finished: harmless once, and a leak of the
+       caller's listener every time. */
+    const held = heldWire()
+    const control = new AbortController()
+    const rendering = voicesPortOver(held.wire).render(requestFor(), controlOf(control.signal))
+    await drained()
+    held.answer(CLIP)
+    await rendering
+    control.abort()
+    expect(held.cancels).toEqual([])
+  })
+
+  it('stops nothing once the render has refused', async () => {
+    const held = heldWire()
+    const control = new AbortController()
+    const rendering = refusalOf(voicesPortOver(held.wire).render(requestFor(), controlOf(control.signal)))
+    await drained()
+    held.refuse(new Error('no such voice'))
+    await rendering
+    control.abort()
+    expect(held.cancels).toEqual([])
+  })
+
+  it('says so when a stop cannot be delivered, rather than swallowing it', async () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const control = new AbortController()
+      const lost = new Error('the plugin is gone')
+      const wire = wireOver({
+        clipRender: () => new Promise(() => {}),
+        clipCancel: async () => {
+          throw lost
+        },
+      })
+      void voicesPortOver(wire).render(requestFor(), controlOf(control.signal))
+      await drained()
+      control.abort()
+      await drained()
+      expect(said).toHaveBeenCalledWith('Paper: a render could not be stopped', lost)
+    } finally {
+      said.mockRestore()
+    }
+  })
+
+  it('asks for no stop where the clip was already on disk', async () => {
+    /* A clip already kept never reaches the engine, so there is nothing to stop
+       and nothing to start. */
+    const held = heldWire()
+    const control = new AbortController()
+    await voicesPortOver({ ...held.wire, clipFind: async () => CLIP }).render(requestFor(), controlOf(control.signal))
+    control.abort()
+    expect(held.runs).toEqual([])
+    expect(held.cancels).toEqual([])
   })
 })
 

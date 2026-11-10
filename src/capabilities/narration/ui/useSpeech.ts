@@ -14,6 +14,7 @@ import { engineVoiceFor } from '../lib/engineVoice'
 import { routedSpeaker, speakerFor, type SeekingSpeaker } from '../lib/speakerRouting'
 import type {
   ClipKey,
+  RenderControl,
   SpeechRequest,
   SpeechSkipPrefs,
   SpokenAudio,
@@ -50,7 +51,7 @@ import type {
  */
 export interface ReadingEngine {
   readonly packs: () => readonly VoicePack[]
-  readonly render: (request: SpeechRequest) => Promise<SpokenAudio>
+  readonly render: (request: SpeechRequest, control: RenderControl) => Promise<SpokenAudio>
   readonly host: () => AudioHost | null
 }
 
@@ -718,7 +719,7 @@ export function useSpeech(
            * If that invariant ever breaks, the `TypeError` is caught by
            * `EngineSpeaker.#render` and reported as `onDone('error')`, which is
            * the same sentence a named refusal would have produced. */
-          render: (request) => downloaded()!.render(request),
+          render: (request, control) => downloaded()!.render(request, control),
           host: () => downloaded()!.host(),
           /* ⚠️ **`?? {}` WAS HERE AND IT IS `engineVoiceFor`'s OWN DEFAULT**, so
            * the two spellings answered alike and no test could tell them

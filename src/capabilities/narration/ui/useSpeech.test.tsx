@@ -4,7 +4,7 @@ import { useLayoutEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeSynth, FakeUtterance } from '../lib/speechSynth.testkit'
 import { FakeAudioHost, pcmOf } from '../lib/enginePlayer.testkit'
-import type { SpeechRequest, SpokenAudio, VoicePack } from '../../../kernel'
+import type { RenderControl, SpeechRequest, SpokenAudio, VoicePack } from '../../../kernel'
 import {
   CONTINUE_GRACE_MS,
   CONTINUE_TICK_MS,
@@ -1621,12 +1621,14 @@ describe('reading on a downloaded voice', () => {
     const host = new FakeAudioHost()
     const asked: string[] = []
     const requests: SpeechRequest[] = []
+    const controls: RenderControl[] = []
     const engine: ReadingEngine = {
       packs: () => packs,
       host: () => host,
-      render: async (request) => {
+      render: async (request, control) => {
         asked.push(request.text)
         requests.push(request)
+        controls.push(control)
         return {
           pcm: pcmOf(2_400),
           sampleRate: 24_000,
@@ -1637,8 +1639,28 @@ describe('reading on a downloaded voice', () => {
         }
       },
     }
-    return { engine, asked, requests, host }
+    return { engine, asked, requests, controls, host }
   }
+
+  it('hands the engine what stops its render', async () => {
+    /* ⚠️ **A WRAPPER THAT DROPS THE CONTROL TYPE-CHECKS NOWHERE BUT HERE.** This
+       hook forwards the render through a closure, and a closure that passed the
+       request alone would leave every Stop stopping this end only — the engine
+       held for minutes by a reading nobody wants, with nothing failing. */
+    const { engine, controls } = downloaded([ENGLISH])
+    const page = section('Hello there.', 'en')
+    const { speech, unmount } = mount(page.doc, { engine })
+    act(() => speech().start())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(controls).toHaveLength(1)
+    expect(controls[0]?.signal.aborted).toBe(false)
+    act(() => speech().stop())
+    expect(controls[0]?.signal.aborted, 'the stop reached the engine').toBe(true)
+    unmount()
+    page.remove()
+  })
 
   it('reads through the engine when the port bound after the first render', async () => {
     /* ⚠️ **THE ROUTER USED TO BE BUILT ONLY IF AN ENGINE WAS ALREADY THERE, AND
@@ -3943,9 +3965,9 @@ describe('a reading under a host that keys its own sections', () => {
     const timed = engine.render
     const once: ReadingEngine = {
       ...engine,
-      render: async (request) => {
+      render: async (request, control) => {
         rendered += 1
-        const audio = await timed(request)
+        const audio = await timed(request, control)
         return rendered === 1 ? audio : { ...audio, words: [] }
       },
     }

@@ -227,6 +227,7 @@ export type {
   SpeechEnginePort,
   SpeechFileRequest,
   SpeechRequest,
+  RenderControl,
   SpokenAudio,
   SpokenClip,
   SpokenWordTiming,

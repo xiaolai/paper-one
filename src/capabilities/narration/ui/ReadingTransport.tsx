@@ -58,10 +58,13 @@ export function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps
    * written honestly, and asks for the stop beside it, because a wait a reader
    * cannot leave is worse than a wait they can.
    *
-   * ⚠️ **AND IT SAYS THE WAIT IS WORTH IT ONCE.** A reader who stops during a
-   * render and presses Listen again gets it at once: the render finishes into the
-   * store whether or not anybody is listening, which is a promise the transport
-   * can make because `staging`-then-rename-then-checkpoint makes it true.
+   * ⚠️ **AND STOP HERE DISCARDS THE WORK, WHICH IS A TRADE MADE ON PURPOSE.**
+   * Until 2026-11-10 a render the reader stopped finished into the store anyway,
+   * so Listen again was instant — and the engine, which renders one passage at a
+   * time, was held for minutes by a render nobody wanted, with the next reading
+   * queued behind it. Stop now reaches the engine (`SpeechEnginePort.render`'s
+   * `control`), and a stopped render leaves nothing in the store: the reader
+   * who comes back waits again, and the reader who moves on does not wait at all.
    */
   if (speech.preparing) {
     return (

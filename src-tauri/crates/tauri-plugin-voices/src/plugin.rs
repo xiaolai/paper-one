@@ -25,6 +25,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::voices_release,
             commands::voices_clip_find,
             commands::voices_clip_render,
+            commands::voices_clip_cancel,
             commands::voices_clip_read,
             commands::voices_clip_hold,
             commands::voices_clip_usage,
