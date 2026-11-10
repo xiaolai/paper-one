@@ -4,6 +4,7 @@ import {
   appendFileSync,
   closeSync,
   constants,
+  copyFileSync,
   existsSync,
   fstatSync,
   lstatSync,
@@ -4399,9 +4400,9 @@ function suppliedTo(at, root, install, timeoutMs) {
        reads exactly like a base on another major version. Every case here passed
        an absolute root, which is why none of them saw it.
 
-       `junction`, because a Windows symbolic link to a directory needs a
-       privilege a runner may not have, and is ignored everywhere else. */
-    symlinkSync(path.resolve(root, 'node_modules'), path.join(at, 'node_modules'), 'junction')
+       ⚠️ **AND ENTRY BY ENTRY, NEVER THE DIRECTORY ITSELF** — see
+       `linkInstall`, which says what one link at `node_modules` cost. */
+    linkInstall(path.resolve(root, 'node_modules'), path.join(at, 'node_modules'))
     return 'linked'
   }
   if (timeoutMs <= 0) {
@@ -4421,6 +4422,44 @@ function suppliedTo(at, root, install, timeoutMs) {
 
 /** What decides whether two commits have the same install. */
 const PINS = ['pnpm-lock.yaml', 'package.json']
+
+/**
+ * The install at `from`, given to a checkout at `to` as a real DIRECTORY whose
+ * every entry is a link to the same entry of `from` — `.pnpm`, `.bin` and every
+ * package alike — and whose plain files are copies.
+ *
+ * ⚠️ **A DIRECTORY, BECAUSE TO STRYKER A LINK IS NOT ONE** (measured
+ * 2026-11-10). This used to be ONE link, `<base>/node_modules` → this
+ * checkout's. Stryker 10 gives its sandbox an install only by finding a
+ * `node_modules` it can walk into — `findNodeModulesList` keeps a `readdir`
+ * entry only where `isDirectory()` is true, and for a link it is false — so the
+ * base's sandbox had none at all. Imports never noticed: Node walks up out of
+ * `.stryker-tmp/sandbox-…` and finds the link one level above. Everything that
+ * names the install by path from the project's root did: `scripts/lib/notices.mjs`
+ * reading a package's licence, and `pnpm build:ios`, which puts
+ * `<root>/node_modules/.bin` on `PATH` and nothing above it, so `vite` was not
+ * found. Both failed at the merge base only, so the comparison broke on exactly
+ * the files those tests cover — and a `PATH` with this checkout's `.bin` on it
+ * hid the second. A directory here is what Stryker links into the sandbox, and
+ * every entry in it reaches this checkout's install, so it is still the same
+ * install by identity — see `suppliedTo`.
+ *
+ * `junction`, because a Windows symbolic link to a directory needs a privilege
+ * a runner may not have, and is ignored everywhere else. A plain file is copied
+ * for the same reason — a junction cannot name one — and the only ones pnpm
+ * leaves at the top of an install are its own small records of it.
+ */
+function linkInstall(from, to) {
+  mkdirSync(to)
+  for (const entry of readdirSync(from, { withFileTypes: true })) {
+    const [there, here] = [path.join(from, entry.name), path.join(to, entry.name)]
+    if (entry.isFile()) copyFileSync(there, here)
+    else {
+      // Stryker disable next-line StringLiteral: the link type is read on Windows alone, and every other platform makes the same link whatever it says
+      symlinkSync(there, here, 'junction')
+    }
+  }
+}
 
 /** Whether two files are there and are the same bytes — a file that is not there is not the same as anything. */
 function sameBytes(one, other) {

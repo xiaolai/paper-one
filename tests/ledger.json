@@ -941,6 +941,7 @@
     "scripts/check-mutants.base.test.mjs > the child that does the measuring, and what it is refused for > runs this gate over the merge base’s own checkout, and reads back what it wrote",
     "scripts/check-mutants.base.test.mjs > the child that does the measuring, and what it is refused for > takes every outcome a measurement can end in as an answer about the merge base",
     "scripts/check-mutants.base.test.mjs > the dependencies the merge base’s own tests are run with > gives the install and the child what is left of the time it allows, and refuses when there is none",
+    "scripts/check-mutants.base.test.mjs > the dependencies the merge base’s own tests are run with > hands the base this checkout’s install as a real directory, every entry a link to the same one here",
     "scripts/check-mutants.base.test.mjs > the dependencies the merge base’s own tests are run with > installs the base’s own dependencies where its lockfile or its manifest is not this one",
     "scripts/check-mutants.base.test.mjs > the dependencies the merge base’s own tests are run with > installs the base’s own dependencies where neither commit pins anything at all",
     "scripts/check-mutants.base.test.mjs > the dependencies the merge base’s own tests are run with > refuses a merge base whose measurement has taken longer than this gate allows for one file",
