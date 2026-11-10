@@ -273,6 +273,7 @@ export type {
   SpokenSection,
 } from './core/ports'
 export { createDiagnostics, defaultDiagnostics, redact } from './core/diagnostics'
+export { noteResizeObserverLoop, reportNoticesTo, RESIZE_OBSERVER_LOOP } from './core/reportFatal'
 export type { DiagnosticsOptions, Sink } from './core/diagnostics'
 export {
   createDiagnosticLog,

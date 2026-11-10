@@ -1,4 +1,7 @@
+import { createDiagnostics } from './diagnostics'
 import { RADIUS } from './metrics'
+import type { Diagnostics } from './ports'
+import { NOOP_DIAGNOSTICS } from './ports'
 /**
  * Last-resort error surface.
  *
@@ -148,16 +151,75 @@ export function reportFatal(label: string, detail: unknown): void {
   banner.append(line)
 }
 
+/**
+ * Where the ResizeObserver notices below go. The fatal handlers are installed
+ * before boot has built the app's own `Diagnostics`, so installing them starts
+ * these on one of the same kind, always on, writing to the console, until boot
+ * hands over its own. Nothing reaches this before the handlers are installed.
+ *
+ * ⚠️ **HANDED OVER ONLY WHEN THE APP'S DIAGNOSTICS ARE ON.** Off, those are the
+ * no-op, and taking them would make the notice vanish from the console it
+ * reached before boot.
+ */
+let notices: Diagnostics = NOOP_DIAGNOSTICS
+
+export function reportNoticesTo(diagnostics: Diagnostics): void {
+  notices = diagnostics
+}
+
+/** One ResizeObserver notice, as a warning — see `isResizeObserverLoop`. */
+export function noteResizeObserverLoop(message: string): void {
+  notices.warn('resize-observer-loop', { message })
+}
+
 export function installFatalHandlers(): void {
   // Clear anything left from a previous load. The banner is append-only during
   // a session on purpose, but surviving a reload would make a fixed error look
   // permanent and mask whatever is behind it.
   document.getElementById(HOST_ID)?.remove()
+  notices = createDiagnostics({ scope: 'window' })
 
   window.addEventListener('error', (event) => {
+    if (isResizeObserverLoop(event)) {
+      noteResizeObserverLoop(event.message)
+      return
+    }
     reportFatal('Uncaught error', event.error ?? event.message)
   })
   window.addEventListener('unhandledrejection', (event) => {
     reportFatal('Unhandled rejection', event.reason)
   })
+}
+
+/**
+ * The browser's notice that a ResizeObserver callback resized something, so
+ * the notifications that change caused are delivered next frame.
+ *
+ * ⚠️ **A NOTICE, NOT A FAULT, SO NOT THE FATAL BANNER.** The ResizeObserver
+ * specification reports it as an `error` event when a frame ends with
+ * observations still pending. Nothing threw and nothing is lost: the
+ * observers run again on the next frame. It had been putting an alert over
+ * the page during every reading run.
+ *
+ * ⚠️ **NOT SWALLOWED EITHER: A FLOOD OF THEM IS A REAL LOOP.** The flood on
+ * Gutenberg Chinese books was one: a figure cap of `95vh` inside a scrolled
+ * section grew the section, which grew the cap. c2880568 removed that cause
+ * by capping figures in pixels measured off the stage (`bookCss.ts`,
+ * `BookCssOptions.pageHeight`), and `FoliateView.session.test.tsx` ("hands
+ * the measured page height to every document the session writes to") pins
+ * the cap in pixels. So every notice is still a warning through the app's
+ * logger — the console, and the diagnostics window once boot has one — and
+ * the reading run's hooks still record each as `page.error`. A loop that
+ * comes back is visible; it is just not called a crash.
+ *
+ * ⚠️ **MATCHED EXACTLY, ONE TEXT.** The event carries no error object, which
+ * is how the browser sends the notice, and the message is exactly the text
+ * WebKit and Chromium use, full stop included. Anything else — an `Error`
+ * thrown with the same words, a message that only begins like it, the older
+ * "loop limit exceeded" text no supported engine sends — is still reported.
+ */
+export const RESIZE_OBSERVER_LOOP = 'ResizeObserver loop completed with undelivered notifications.'
+
+export function isResizeObserverLoop(event: ErrorEvent): boolean {
+  return event.error == null && event.message === RESIZE_OBSERVER_LOOP
 }
