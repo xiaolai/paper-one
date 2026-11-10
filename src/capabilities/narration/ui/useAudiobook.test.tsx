@@ -23,10 +23,13 @@ const tauri = vi.hoisted(() => ({
   released: [] as string[],
   /** Whether giving one back fails. */
   releaseFails: false,
+  /** Runs while the save dialog is open, before the reader answers it. */
+  onPick: null as (() => void) | null,
 }))
 vi.mock('../lib/wire', () => ({
   pickDestination: async (title: string) => {
     tauri.asked.push(title)
+    tauri.onPick?.()
     return tauri.path === null ? null : { token: TOKEN, name: tauri.path }
   },
   releaseDestination: async (token: string) => {
@@ -52,6 +55,7 @@ beforeEach(() => {
   tauri.packs = []
   tauri.released = []
   tauri.releaseFails = false
+  tauri.onPick = null
 })
 
 /**
@@ -1066,20 +1070,14 @@ describe('a book closed or replaced while it exports', () => {
     let alive = true
     const { rendered, packaged } = engine()
     tauri.path = WHERE
-    const walk = vi.fn(async () => ({ sections: SECTIONS, complete: true }))
-    const { seen, say } = mount({
-      source: book({
-        live: () => alive,
-        sectionTexts: async () => {
-          const answer = await walk()
-          alive = false
-          return answer
-        },
-      }),
-    })
+    tauri.onPick = () => {
+      alive = false
+    }
+    const { seen, say } = mount({ source: book({ live: () => alive }) })
     await act(async () => {
       seen.at(-1)?.run()
     })
+    expect(tauri.asked, 'the book closed behind an open dialog').toEqual(['A Measured Book'])
     expect(rendered).toEqual([])
     expect(packaged).toEqual([])
     expect(tauri.released, 'the destination is still given back').toEqual([TOKEN])
