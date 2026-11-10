@@ -471,7 +471,12 @@ describe('stopping a render', () => {
     const held = heldWire()
     const control = new AbortController()
     control.abort()
-    const cause = await refusalOf(voicesPortOver(held.wire).render(requestFor(), controlOf(control.signal)))
+    /* RACED AGAINST A DRAIN, so a port that rendered anyway fails here rather
+       than waiting for ever on a render this fake never answers. */
+    const cause = await Promise.race([
+      refusalOf(voicesPortOver(held.wire).render(requestFor(), controlOf(control.signal))),
+      drained().then(() => 'still waiting'),
+    ])
     expect(cause).toBeInstanceOf(DOMException)
     expect(held.runs, 'no render was asked for').toEqual([])
     expect(held.cancels, 'and so there was none to stop').toEqual([])
