@@ -3,12 +3,10 @@ import {
   DEFAULT_FLUSH_MS,
   DIAGNOSTICS_FILE,
   DIAGNOSTICS_SWITCH,
-  RESIZE_OBSERVER_LOOP,
   SETTINGS_STORAGE_KEY,
   SETTINGS_VERSION,
   STORE_FILE,
   hlcOf,
-  noteResizeObserverLoop,
   onBeforeClose,
   onBeforeDrain,
   reportNoticesTo,
@@ -16,7 +14,7 @@ import {
   type Diagnostics,
   type ServiceContext,
 } from '../kernel'
-import { fakeTrashFs } from '../kernel/testkit'
+import { fakeTrashFs, noteResizeObserverLoop, RESIZE_OBSERVER_LOOP } from '../kernel/testkit'
 import { CARRY_REFUSED_NOTICE } from './boot'
 import { bootApp, shelfAtLaunch, shutdownDepsOf, type BootedApp } from './bootApp'
 import { SHUTDOWN_DONE_EVENT, SHUTDOWN_EVENT, armShutdown } from './shutdown'
