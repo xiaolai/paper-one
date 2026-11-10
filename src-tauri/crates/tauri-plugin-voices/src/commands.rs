@@ -488,6 +488,34 @@ fn begin_speaking(cancel: &Cancel, started: impl FnOnce()) -> Result<(), String>
     Ok(())
 }
 
+/// How often a render queued for an engine looks again, at the lock and at its
+/// stop. Short beside a sentence's render, long beside a lock hand-over.
+const QUEUED_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// An engine's lock, or the stop that arrived while this render queued for it.
+///
+/// ⚠️ **A STOPPED RENDER KEPT ITS PLACE IN THE QUEUE.** `lock()` cannot be
+/// interrupted, so a render stopped while another held the engine waited out
+/// that whole render before it learned it was not wanted, and one stopped
+/// before it asked still took the lock. This asks for the lock without
+/// blocking, and between asks looks at the stop, so a stopped render leaves the
+/// queue within one [`QUEUED_POLL`] and never takes the lock.
+fn lock_unless_stopped<'a, T>(
+    held: &'a Mutex<T>,
+    cancel: &Cancel,
+) -> Result<std::sync::MutexGuard<'a, T>, String> {
+    loop {
+        cancel.check().map_err(|e| e.to_string())?;
+        match held.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err("the voice is poisoned".to_owned())
+            }
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(QUEUED_POLL),
+        }
+    }
+}
+
 /// English, through Kokoro: the front end, then the model, with word timings.
 fn read_with_kokoro(
     dir: &Path,
@@ -505,12 +533,8 @@ fn read_with_kokoro(
     } = *speaking;
     /* BOTH LOCKS BEFORE ANY WORK, in the order they were always taken, so the
      * moment `started` reports is the moment nothing else can be ahead. */
-    let mut fronts = fronts
-        .lock()
-        .map_err(|_| "the voice is poisoned".to_owned())?;
-    let mut held = held
-        .lock()
-        .map_err(|_| "the voice is poisoned".to_owned())?;
+    let mut fronts = lock_unless_stopped(fronts, cancel)?;
+    let mut held = lock_unless_stopped(held, cancel)?;
     begin_speaking(cancel, started)?;
     if fronts.as_ref().is_none_or(|(id, _)| id != pack) {
         let front = FrontEnd::load(&dir.join("lexicon")).map_err(|e| e.to_string())?;
@@ -572,9 +596,7 @@ fn read_with_qwen(
         voice,
         text,
     } = *speaking;
-    let mut held = held
-        .lock()
-        .map_err(|_| "the voice is poisoned".to_owned())?;
+    let mut held = lock_unless_stopped(held, cancel)?;
     begin_speaking(cancel, started)?;
     if held.as_ref().is_none_or(|(id, _)| id != pack) {
         let rate = qwen::engine::load(dir).map_err(|e| e.to_string())?;
