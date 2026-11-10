@@ -332,7 +332,9 @@ export function parseArgs(argv, steps = STEPS) {
   return { steps: selected }
 }
 
-function main(argv) {
+/** The command line: exported so its decisions are measured in-process — a
+ *  spawned child runs none of the mutants under test. */
+export function main(argv) {
   const args = parseArgs(argv)
   if (args.error !== undefined) {
     process.stderr.write(`verify: ${args.error}\nusage: node scripts/verify.mjs [--list] [--from <step>] [--until <step>] [--only <step>]\n`)
@@ -345,7 +347,5 @@ function main(argv) {
   return runSteps(args.steps, (step) => spawnStep(step, REPO_ROOT))
 }
 
-// Stryker disable next-line all: reached only when node starts this file, and a spawned child never runs the mutant under test — `false` and the emptied block are caught only by the CLI test's child, and `true` starts every gate step inside the test runner at import
-if (isProcessEntry(import.meta)) {
-  process.exitCode = main(process.argv.slice(2))
-}
+// Stryker disable next-line all: reached only when node starts this file, and a spawned child never runs the mutant under test — `false` and the dropped `slice` are caught only by the CLI test's child, `true` starts every gate step inside the test runner at import, and every decision is in `main`, which is measured in-process
+if (isProcessEntry(import.meta)) process.exitCode = main(process.argv.slice(2))

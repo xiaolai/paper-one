@@ -1,7 +1,50 @@
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
-import { STEPS, needsShell, parseArgs, plainToken, runSteps, spawnStep } from './verify.mjs'
+import { describe, expect, it, vi } from 'vitest'
+import { REPO_ROOT, STEPS, main, needsShell, parseArgs, plainToken, runSteps, spawnStep } from './verify.mjs'
+
+/* THE REAL `spawnSync`, UNLESS A TEST SAYS OTHERWISE. The suites below start
+   real children; the ones that need to see the options a child was handed,
+   or to stand where no child can (a Windows shell, a signal on demand), swap
+   in a fake for the length of one call through `faking`. */
+vi.mock('node:child_process', async (importOriginal) => {
+  const real = await importOriginal()
+  return { ...real, spawnSync: vi.fn(real.spawnSync) }
+})
+const { spawnSync: realSpawnSync } = await vi.importActual('node:child_process')
+
+/** Run `fn` with `fake` in place of `spawnSync`, then put the real one back. */
+function faking(fake, fn) {
+  vi.mocked(spawnSync).mockImplementation(fake)
+  try {
+    return fn()
+  } finally {
+    vi.mocked(spawnSync).mockImplementation(realSpawnSync)
+  }
+}
+
+/** What `fn` wrote to `stream`, which sees none of it. */
+function capture(stream, fn) {
+  let text = ''
+  const write = vi.spyOn(stream, 'write').mockImplementation((chunk) => ((text += chunk), true))
+  try {
+    fn()
+  } finally {
+    write.mockRestore()
+  }
+  return text
+}
+
+/** Run `fn` with `process.platform` reading `platform`, then restore it. */
+function onPlatform(platform, fn) {
+  const real = Object.getOwnPropertyDescriptor(process, 'platform')
+  Object.defineProperty(process, 'platform', { ...real, value: platform })
+  try {
+    return fn()
+  } finally {
+    Object.defineProperty(process, 'platform', real)
+  }
+}
 
 /**
  * `pnpm verify` — the runner, not the gates it runs (each has its own
@@ -173,6 +216,40 @@ describe('runSteps', () => {
     expect(ran).toEqual(['a', 'b'])
     expect(log.at(-1)).toMatch(/^\n✗ verify: b failed \(exit 3\) after \d+\.\ds; 1 of 3 steps had passed$/)
   })
+
+  it('times each step and the whole run by the clock, in seconds to one place', () => {
+    const now = vi.spyOn(Date, 'now')
+    /* Started; a starts and ends; b starts and ends; the run ends. */
+    for (const ms of [1_000, 1_200, 3_700, 3_750, 4_050, 9_000]) now.mockReturnValueOnce(ms)
+    const log = []
+    try {
+      expect(runSteps(steps.slice(0, 2), () => 0, (l) => log.push(l))).toBe(0)
+    } finally {
+      now.mockRestore()
+    }
+    expect(log).toEqual([
+      '\n▶ verify [1/2] a — x 1',
+      '✓ verify: a passed in 2.5s',
+      '\n▶ verify [2/2] b — y',
+      '✓ verify: b passed in 0.3s',
+      '\n✓ verify: all 2 steps passed in 8.0s',
+    ])
+  })
+
+  it('writes to stdout, one line at a time, when handed no log', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(5_000)
+    let code
+    let out
+    try {
+      out = capture(process.stdout, () => {
+        code = runSteps([], () => 0)
+      })
+    } finally {
+      now.mockRestore()
+    }
+    expect(code).toBe(0)
+    expect(out).toBe('\n✓ verify: all 0 steps passed in 0.0s\n')
+  })
 })
 
 describe('spawnStep', () => {
@@ -214,6 +291,56 @@ describe('spawnStep', () => {
        legitimate precisely because no shell reads them. */
     for (const step of STEPS) expect(needsShell(step.cmd, 'win32'), step.name).toBe(true)
     expect(needsShell(process.execPath, process.platform)).toBe(false)
+  })
+
+  it('hands the child the directory, the terminal (less stdout when quiet), and the parent\'s environment', () => {
+    const seen = []
+    const fake = (cmd, args, options) => (seen.push({ cmd, args, options }), { status: 0, signal: null })
+    faking(fake, () => {
+      expect(spawnStep({ name: 'loud', cmd: process.execPath, args: ['a'] }, '/some/dir')).toBe(0)
+      expect(spawnStep({ name: 'quiet', cmd: process.execPath, args: [], quiet: true }, '/some/dir', { VERIFY_TEST_EXTRA: 'yes' })).toBe(0)
+    })
+    expect(seen).toHaveLength(2)
+    expect(seen[0]).toEqual({ cmd: process.execPath, args: ['a'], options: { cwd: '/some/dir', stdio: 'inherit', shell: false, env: process.env } })
+    expect(seen[0].options.env).toBe(process.env)
+    expect(seen[1].options).toEqual({
+      cwd: '/some/dir',
+      stdio: ['inherit', 'ignore', 'inherit'],
+      shell: false,
+      env: { ...process.env, VERIFY_TEST_EXTRA: 'yes' },
+    })
+  })
+
+  it('says why a step could not start, or what killed it', () => {
+    let codes
+    const err = capture(process.stderr, () => {
+      codes = [
+        faking(() => ({ error: new Error('spawn gone ENOENT'), status: null, signal: null }), () => spawnStep({ name: 'gone', cmd: process.execPath, args: [] })),
+        faking(() => ({ status: null, signal: 'SIGTERM' }), () => spawnStep({ name: 'stopped', cmd: process.execPath, args: [] })),
+      ]
+    })
+    expect(codes).toEqual([127, 128])
+    expect(err).toBe(`verify: could not start ${process.execPath}: spawn gone ENOENT\nverify: stopped was killed by SIGTERM\n`)
+  })
+
+  /* THE REFUSAL ITSELF, WHERE IT FIRES. The predicate is asserted above for
+     both platforms; this drives `spawnStep` as the Windows leg would, with a
+     fake in place of the spawn so no shell is ever started here. */
+  it('refuses, where cmd.exe would read them, arguments that are not plain tokens', () => {
+    const shells = []
+    const fake = (cmd, args, options) => (shells.push(options.shell), { status: 0, signal: null })
+    let codes
+    const err = onPlatform('win32', () =>
+      capture(process.stderr, () => {
+        codes = faking(fake, () => [
+          spawnStep({ name: 'risky', cmd: 'pnpm', args: ['ok', 'a b'] }),
+          spawnStep({ name: 'plain', cmd: 'pnpm', args: ['ok', 'also-ok'] }),
+        ])
+      }),
+    )
+    expect(codes).toEqual([126, 0])
+    expect(err).toBe('verify: refusing to run risky: argument "a b" is not a plain token\n')
+    expect(shells).toEqual([true])
   })
 })
 
@@ -281,6 +408,28 @@ describe('parseArgs', () => {
     expect(parseArgs(['--list', '--only', 'build'])).toEqual({ error: '--list cannot be combined with --from, --until or --only' })
     expect(parseArgs(['--from', 'build', '--list'])).toEqual({ error: '--list cannot be combined with --from, --until or --only' })
   })
+
+  describe('over a table of its own', () => {
+    const steps = [{ name: 'a' }, { name: 'b' }, { name: 'c' }]
+    const names = (argv) => parseArgs(argv, steps).steps?.map((s) => s.name)
+
+    it('takes a flag after a selector as a missing value, not as a step name', () => {
+      expect(parseArgs(['--only', '--list'], steps)).toEqual({ error: '--only needs a step name' })
+    })
+
+    it('refuses only the selector that is repeated, whatever came before it', () => {
+      expect(parseArgs(['--until', 'b', '--until', 'c'], steps)).toEqual({ error: '--until was given twice' })
+      expect(names(['--until', 'c', '--from', 'b'])).toEqual(['b', 'c'])
+      expect(names(['--only', 'b', '--until', 'c'])).toEqual(['b'])
+      expect(names(['--until', 'c', '--only', 'b'])).toEqual(['b'])
+    })
+
+    it('names exactly the selectors given when they select nothing', () => {
+      const why = 'select no steps; --until and --only must name a step at or after --from'
+      expect(parseArgs(['--until', 'a', '--only', 'b'], steps)).toEqual({ error: `--until "a" and --only "b" ${why}` })
+      expect(parseArgs(['--from', 'c', '--only', 'a'], steps)).toEqual({ error: `--from "c" and --only "a" ${why}` })
+    })
+  })
 })
 
 describe('the CLI', () => {
@@ -293,5 +442,45 @@ describe('the CLI', () => {
     const bad = spawnSync(process.execPath, [SCRIPT, '--nope'], { encoding: 'utf8' })
     expect(bad.status).toBe(2)
     expect(bad.stderr).toContain('unknown argument "--nope"')
+  })
+})
+
+describe('main', () => {
+  const usage = 'usage: node scripts/verify.mjs [--list] [--from <step>] [--until <step>] [--only <step>]\n'
+
+  it('refuses a bad argument with 2 and the usage, and runs nothing', () => {
+    const spawned = []
+    let code
+    const err = capture(process.stderr, () => {
+      code = faking((...call) => (spawned.push(call), { status: 0, signal: null }), () => main(['--nope']))
+    })
+    expect(code).toBe(2)
+    expect(err).toBe(`verify: unknown argument "--nope"\n${usage}`)
+    expect(spawned).toEqual([])
+  })
+
+  it('lists each step, padded, beside the command it runs, and runs nothing', () => {
+    const spawned = []
+    let code
+    const out = capture(process.stdout, () => {
+      code = faking((...call) => (spawned.push(call), { status: 0, signal: null }), () => main(['--list']))
+    })
+    expect(code).toBe(0)
+    expect(spawned).toEqual([])
+    const lines = out.split('\n')
+    expect(lines.pop()).toBe('')
+    expect(lines).toHaveLength(STEPS.length)
+    expect(lines[0]).toBe('architecture:check           pnpm architecture:check')
+  })
+
+  it('runs the steps selected from the repository root, and returns their code', () => {
+    const spawned = []
+    let codes
+    capture(process.stdout, () => {
+      codes = [0, 5].map((status) => faking((cmd, args, options) => (spawned.push({ cmd, args, cwd: options.cwd }), { status, signal: null }), () => main(['--only', 'boundaries'])))
+    })
+    expect(codes).toEqual([0, 5])
+    const boundaries = STEPS.find((s) => s.name === 'boundaries')
+    expect(spawned).toEqual([0, 5].map(() => ({ cmd: boundaries.cmd, args: [...boundaries.args], cwd: REPO_ROOT })))
   })
 })
