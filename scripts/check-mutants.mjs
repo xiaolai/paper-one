@@ -4442,7 +4442,8 @@ const PINS = ['pnpm-lock.yaml', 'package.json']
  * the files those tests cover — and a `PATH` with this checkout's `.bin` on it
  * hid the second. A directory here is what Stryker links into the sandbox, and
  * every entry in it reaches this checkout's install, so it is still the same
- * install by identity — see `suppliedTo`.
+ * install by identity — see `suppliedTo`. `sandboxInstallProblem` is what
+ * refuses a sandbox without one.
  *
  * `junction`, because a Windows symbolic link to a directory needs a privilege
  * a runner may not have, and is ignored everywhere else. A plain file is copied
@@ -4459,6 +4460,24 @@ function linkInstall(from, to) {
       symlinkSync(there, here, 'junction')
     }
   }
+}
+
+/**
+ * Why a Stryker run at `root` would give its sandbox no install of its own, or
+ * `null` when it will: what Stryker links into the sandbox is a `node_modules`
+ * that is a real directory, and what `pnpm` puts on `PATH` for a script run
+ * there is that directory's `.bin` and nothing above it. See `linkInstall` for
+ * the sandbox that had neither, and passed every import.
+ */
+export function sandboxInstallProblem(root) {
+  const install = path.join(root, 'node_modules')
+  const found = entryAt(install)
+  if (found === null) return `there is no ${install}`
+  if (!found.isDirectory()) {
+    return `${install} is ${found.isSymbolicLink() ? 'a link' : 'not a directory'}, and Stryker gives its sandbox only a node_modules that is a real directory`
+  }
+  if (!existsSync(path.join(install, '.bin'))) return `${install} has no .bin, which is what pnpm puts on PATH for a script run in the sandbox`
+  return null
 }
 
 /** Whether two files are there and are the same bytes — a file that is not there is not the same as anything. */
@@ -6566,6 +6585,11 @@ export function foldSummary(written, into, limit = SUMMARY_LIMIT) {
  * its own name changes nothing else.
  */
 export function strykerRun(config, root) {
+  /* ⚠️ **NO SANDBOX WITHOUT AN INSTALL** — refused here rather than found as a
+     test that cannot read a package, at one side of the comparison only. See
+     `sandboxInstallProblem`. */
+  const problem = sandboxInstallProblem(root)
+  if (problem !== null) throw new Refusal(`check-mutants: Stryker's sandbox for ${config} would have no install of its own — ${problem}`)
   const temp = mkdtempSync(path.join(tmpdir(), 'check-mutants-stryker-'))
   /* What this run writes for the step summary waits here: see `foldSummary`. */
   const summary = process.env.GITHUB_STEP_SUMMARY

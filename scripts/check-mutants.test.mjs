@@ -55,6 +55,7 @@ import {
   resultFileFor,
   reverseImports,
   run,
+  sandboxInstallProblem,
   settledVerdict,
   sourceReaders,
   strykerConfig,
@@ -8338,6 +8339,8 @@ describe('what a shard leaves in its step summary', () => {
     /** A Stryker stand-in at `root` that writes this much to the summary it is given, and says which file that was. */
     const standIn = (root, bytes) =>
       plant(root, {
+        /* An install Stryker would give its sandbox — see `sandboxInstallProblem`. */
+        'node_modules/.bin/stryker': '',
         'node_modules/@stryker-mutator/core/package.json': JSON.stringify({ bin: './stand-in.mjs' }),
         'node_modules/@stryker-mutator/core/stand-in.mjs':
           "import { appendFileSync, writeFileSync } from 'node:fs'\n" +
@@ -8390,6 +8393,62 @@ describe('what a shard leaves in its step summary', () => {
 
         expect(readFileSync(told, 'utf8')).toBe('undefined')
       })
+    })
+  })
+})
+
+/**
+ * ⚠️ **A SANDBOX WITHOUT AN INSTALL IS REFUSED BEFORE STRYKER STARTS** (found
+ * 2026-11-10). Stryker gives its sandbox only a `node_modules` that is a real
+ * directory; a link there left the merge base's sandbox with none, and only the
+ * tests that name the install by path noticed — at one side of the comparison.
+ * See `linkInstall`.
+ */
+describe('the install Stryker’s sandbox is given', () => {
+  it('takes a real directory with a .bin in it', () => {
+    inScratch('mutants-install-', (root) => {
+      plant(root, { 'node_modules/.bin/vite': '' })
+
+      expect(sandboxInstallProblem(root)).toBeNull()
+    })
+  })
+
+  it('names a missing install, a linked one, one that is a file, and one with no .bin, each in its own words', () => {
+    inScratch('mutants-install-', (root) => {
+      const install = path.join(root, 'node_modules')
+      expect(sandboxInstallProblem(root)).toBe(`there is no ${install}`)
+
+      plant(root, { 'elsewhere/.bin/vite': '' })
+      symlinkSync(path.join(root, 'elsewhere'), install, 'junction')
+      expect(sandboxInstallProblem(root)).toBe(
+        `${install} is a link, and Stryker gives its sandbox only a node_modules that is a real directory`,
+      )
+
+      rmSync(install)
+      writeFileSync(install, '')
+      expect(sandboxInstallProblem(root)).toBe(
+        `${install} is not a directory, and Stryker gives its sandbox only a node_modules that is a real directory`,
+      )
+
+      rmSync(install)
+      mkdirSync(install)
+      expect(sandboxInstallProblem(root)).toBe(`${install} has no .bin, which is what pnpm puts on PATH for a script run in the sandbox`)
+    })
+  })
+
+  it('refuses to start Stryker over a linked install, and starts nothing', () => {
+    inScratch('mutants-install-', (root) => {
+      plant(root, {
+        'elsewhere/.bin/stryker': '',
+        'elsewhere/@stryker-mutator/core/package.json': JSON.stringify({ bin: './stand-in.mjs' }),
+        'elsewhere/@stryker-mutator/core/stand-in.mjs': "import { writeFileSync } from 'node:fs'\nwriteFileSync('started.txt', '')\n",
+      })
+      symlinkSync(path.join(root, 'elsewhere'), path.join(root, 'node_modules'), 'junction')
+
+      expect(() => strykerRun('config.json', root)).toThrow(
+        `check-mutants: Stryker's sandbox for config.json would have no install of its own — ${path.join(root, 'node_modules')} is a link`,
+      )
+      expect(existsSync(path.join(root, 'started.txt'))).toBe(false)
     })
   })
 })
