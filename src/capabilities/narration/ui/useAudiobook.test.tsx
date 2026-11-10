@@ -112,6 +112,7 @@ function mount({ packs = [INSTALLED], ...over }: Partial<AudiobookDeps> & { read
       toc: [],
       fixedLayout: false,
       skip: { notes: false },
+      live: () => true,
       sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
     },
     chosen: {},
@@ -182,6 +183,7 @@ describe('a book laid out in fixed pages', () => {
         toc: [],
         fixedLayout: true,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: read,
       },
     })
@@ -206,6 +208,7 @@ describe('a book laid out in fixed pages', () => {
         toc: [],
         fixedLayout: true,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
       },
     })
@@ -310,6 +313,7 @@ describe('a book with no voice this app would choose', () => {
         toc: [],
         fixedLayout: false,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => ({
           sections: [{ index: 0, title: '第一章', text: '春天来了。', textDigest: 'fnv1a64:1:0000000000000000' }],
           complete: true,
@@ -352,6 +356,7 @@ describe('two calls before React has committed anything', () => {
         toc: [],
         fixedLayout: false,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => {
           calls += 1
           reads.push(calls)
@@ -390,6 +395,7 @@ describe('a walk that did not finish', () => {
         toc: [],
         fixedLayout: false,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => ({
           sections: [{ index: 0, title: 'One', text: 'Some real text.', textDigest: 'fnv1a64:1:0000000000000000' }],
           complete: false,
@@ -415,6 +421,7 @@ describe('a walk that did not finish', () => {
         toc: [],
         fixedLayout: false,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => ({
           sections: [{ index: 0, title: 'One', text: 'Some real text.', textDigest: 'fnv1a64:1:0000000000000000' }],
           complete: true,
@@ -467,6 +474,7 @@ describe('the control while an export is under way', () => {
         toc: [],
         fixedLayout: false,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => {
           await held
           return { sections: [], complete: true }
@@ -517,6 +525,7 @@ function book(over: Partial<AudiobookSource> = {}): AudiobookSource {
     toc: [],
     fixedLayout: false,
     skip: { notes: false },
+    live: () => true,
     sectionTexts: vi.fn(async () => ({ sections: SECTIONS, complete: true })),
     ...over,
   }
@@ -977,6 +986,69 @@ describe('a stop the reader asks for', () => {
     })
     expect(say).toHaveBeenLastCalledWith(
       'The export was stopped. 2 temporary audio files could not be removed.',
+    )
+  })
+})
+
+describe('a book closed or replaced while it exports', () => {
+  /**
+   * ⚠️ **THE EXPORT USED TO CARRY ON FOR A BOOK THE READER HAD LEFT.** It checked
+   * only the reader's stop between chapters, so opening another book went on
+   * rendering and then wrote the first one's file: `manual-run-5.2.md` step 8
+   * asks for a refusal with no file written, and the run found an export still
+   * going. The book's own `live` is the answer, the same one its walk uses.
+   */
+  it('between chapters, renders no more of them, writes no file, and says why', async () => {
+    const held = gate()
+    let alive = true
+    const { rendered, packaged, discarded } = engine({
+      render: async (job) => {
+        rendered.push(job)
+        await held.shut
+        return { path: job.path, cached: false, skipped: [] }
+      },
+    })
+    const { seen, say } = mount({ source: book({ live: () => alive }) })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    alive = false
+    await act(async () => {
+      held.open()
+    })
+    expect(rendered.map((job) => job.path)).toEqual(['/scratch/chapter-0.wav'])
+    expect(packaged, 'no file is written for a book that has gone').toEqual([])
+    expect(discarded).toEqual([0])
+    expect(say).toHaveBeenLastCalledWith(
+      'The export stopped because the book was closed. Nothing was left behind.',
+    )
+    expect(seen.at(-1)?.running).toBe(false)
+  })
+
+  it('while the save dialog is open, renders nothing', async () => {
+    /* The dialog is the reader's to answer, and a book can be opened behind it. */
+    let alive = true
+    const { rendered, packaged } = engine()
+    tauri.path = WHERE
+    const walk = vi.fn(async () => ({ sections: SECTIONS, complete: true }))
+    const { seen, say } = mount({
+      source: book({
+        live: () => alive,
+        sectionTexts: async () => {
+          const answer = await walk()
+          alive = false
+          return answer
+        },
+      }),
+    })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(rendered).toEqual([])
+    expect(packaged).toEqual([])
+    expect(tauri.released, 'the destination is still given back').toEqual([TOKEN])
+    expect(say).toHaveBeenLastCalledWith(
+      'The export stopped because the book was closed. Nothing was left behind.',
     )
   })
 })

@@ -253,7 +253,12 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
                   : `Reading ${title} — ${done + 1} of ${total}…`,
               )
             },
-            cancelled: () => stop.current,
+            /* ⚠️ **AND THE BOOK GOING IS A STOP TOO.** This asked only for the
+               reader's stop, so opening another book mid-export went on
+               rendering the old one for minutes and then wrote its file.
+               `manual-run-5.2.md` step 8 asks for a refusal with no file
+               written; `live` is the same answer the walk above stops on. */
+            cancelled: () => stop.current || !source.live(),
           })
           say(
             `Exported ${result.chapters} chapters, ${Math.round(result.durationMs / 60_000)} minutes, to ${result.name}.` +
@@ -298,7 +303,10 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
             )
             return
           }
-          say(`The export was stopped.${leftBehindNote(cause.leftBehind) || ' Nothing was left behind.'}`)
+          /* Read before the `finally` clears it: a stop the reader asked for is
+             theirs, and one with no stop asked for is the book having gone. */
+          const why = stop.current ? 'The export was stopped.' : 'The export stopped because the book was closed.'
+          say(`${why}${leftBehindNote(cause.leftBehind) || ' Nothing was left behind.'}`)
           return
         }
         /* THE ENGINE'S OWN SENTENCE. Every refusal in `narrate` names what it
@@ -330,11 +338,9 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
    * ⚠️ **AND A RUNNING EXPORT KEEPS ITS CONTROL EVEN WHEN THE BOOK GOES.**
    * This was once `if (!available || !source) return null`, so closing the book mid
    * export took the only way to stop it off the palette while the operation
-   * carried on — reading, rendering and writing a file the reader could no longer
-   * reach, and with `source` gone they could not start another to get the row
-   * back either. The export captured everything it needs when it began; it does
-   * not read `source` again, which is exactly why it survives, and exactly why
-   * the control has to.
+   * carried on. The export now ends on its own at the next chapter once the book
+   * is not `live`, but a chapter is minutes of rendering, and until it ends the
+   * row is still the only thing that says an export is under way.
    *
    * `running` rather than `inFlight.current` on purpose: this decides what is
    * RENDERED, and a ref does not re-render when it changes. The ref is the

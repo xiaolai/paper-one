@@ -680,6 +680,15 @@ describe('a walk of the book', () => {
     expect(shouldStop()).toBe(true)
   })
 
+  it('says it is no longer live once the book is replaced', () => {
+    /* What an export of minutes asks between chapters: see `useAudiobook`. */
+    const { one, driver, book } = opened(async () => ({ sections: [], complete: true }))
+    expect(book.live()).toBe(true)
+    driver.commit(nextOpening(one))
+    expect(book.live()).toBe(false)
+    expect(driver.surface.book()?.live(), 'the next opening is').toBe(true)
+  })
+
   it('walks nothing, and says so, if the book had already been replaced', async () => {
     const walk = vi.fn<BookFacts['sectionTexts']>(async () => ({ sections: [], complete: true }))
     const { one, driver, book } = opened(walk)
