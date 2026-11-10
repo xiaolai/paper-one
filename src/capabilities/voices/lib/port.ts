@@ -10,6 +10,7 @@ import type {
   ClipUsage,
   ClipsEvicted,
   InstallProgress,
+  RenderControl,
   RenderedFile,
   SpeechEnginePort,
   SpeechFileRequest,
@@ -205,13 +206,15 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
      * plugin writes a file and answers its path, and the fs plugin reads it as
      * bytes through the `$APPDATA` scope that was already granted.
      */
-    async render(request: SpeechRequest): Promise<SpokenAudio> {
+    async render(request: SpeechRequest, control: RenderControl): Promise<SpokenAudio> {
       const query = queryOf(request)
       /* ASKED BEFORE RENDERING, which is the whole of what this phase buys: a
          section the reader has heard before plays without the wait. */
       const found = await wire.clipFind(query)
       const clip = clipOf(
-        found === null || found === undefined ? await wire.clipRender(query, request.text) : found,
+        found === null || found === undefined
+          ? await renderStoppably(wire, query, request.text, control)
+          : found,
       )
       const bytes = await wire.readClip(clip.stem)
       return {
@@ -268,6 +271,45 @@ export function voicesPortOver(wire: VoicesWire = voicesWire()): SpeechEnginePor
     async release(): Promise<void> {
       await wire.release()
     },
+  }
+}
+
+/**
+ * Render a section under an id its signal can stop it by.
+ *
+ * ⚠️ **AN ABORTED SIGNAL REACHES THE ENGINE, NOT ONLY THIS PROMISE.** The
+ * plugin is told `clipCancel(run)`, and the engine gives its lock up between
+ * one sentence or chunk and the next — which is what lets the reading the
+ * reader asked for NEXT begin, rather than wait minutes behind this one. The
+ * promise itself is left to the plugin's answer: it rejects once the engine has
+ * stopped, and the caller has already moved on.
+ *
+ * ⚠️ **A RANDOM ID AND NOT A COUNTER.** The plugin outlives a webview that
+ * reloads, and a counter that started again at 1 would ask for a render under
+ * an id one from before the reload still holds — which the plugin refuses.
+ *
+ * A stop that cannot be delivered is SAID, not swallowed: the render then runs
+ * to its end, which is the old cost, and the console is the one place that can
+ * explain a reading that took minutes to start.
+ */
+async function renderStoppably(
+  wire: VoicesWire,
+  query: ClipQuery,
+  text: string,
+  { signal, onStarted }: RenderControl,
+): Promise<unknown> {
+  signal.throwIfAborted()
+  const run = globalThis.crypto.randomUUID()
+  const stop = () => {
+    wire.clipCancel(run).catch((cause: unknown) => console.error('Paper: a render could not be stopped', cause))
+  }
+  /* No `{ once: true }`: a signal is aborted once and only once, and the
+     listener is removed below whatever happens, so the option said nothing. */
+  signal.addEventListener('abort', stop)
+  try {
+    return await wire.clipRender(query, text, run, onStarted)
+  } finally {
+    signal.removeEventListener('abort', stop)
   }
 }
 

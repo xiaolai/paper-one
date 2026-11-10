@@ -55,8 +55,9 @@ pub enum Error {
         expected: String,
         got: String,
     },
-    /// The reader stopped it. Not a failure, and reported as neither.
-    #[error("the download was stopped")]
+    /// The reader stopped it — a download or a render. Not a failure, and
+    /// reported as neither.
+    #[error("the reader stopped it")]
     Cancelled,
 }
 

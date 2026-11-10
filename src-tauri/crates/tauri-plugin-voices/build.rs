@@ -41,6 +41,7 @@ const COMMANDS: &[&str] = &[
     "voices_release",
     "voices_clip_find",
     "voices_clip_render",
+    "voices_clip_cancel",
     "voices_clip_read",
     "voices_clip_hold",
     "voices_clip_usage",

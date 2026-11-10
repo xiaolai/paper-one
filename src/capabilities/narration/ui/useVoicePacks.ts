@@ -101,7 +101,10 @@ export function useVoicePacks(services: KernelServices): VoicesState {
       packs,
       engine: {
         packs: () => packsRef.current,
-        render: (request) => bound.render(request),
+        /* BOTH ARGUMENTS, and a test says so: a wrapper written `(request) => …`
+           type-checks and drops the stop on the floor, which is how the last
+           signal this port had was lost. */
+        render: (request, control) => bound.render(request, control),
         host: () => {
           /* ⚠️ **A CACHED CONTEXT IS ASKED AGAIN WHETHER IT IS RUNNING**, and it
            * was not. A context is suspended until a gesture in several engines,

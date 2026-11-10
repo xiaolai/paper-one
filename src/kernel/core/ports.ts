@@ -255,6 +255,24 @@ export type InstallProgress =
   | { readonly kind: 'verifying' }
   | { readonly kind: 'installed' }
 
+/**
+ * What a render answers to while it runs — see `SpeechEnginePort.render`.
+ *
+ * ⚠️ **`onStarted` EXISTS BECAUSE A RENDER CAN WAIT BEFORE IT RUNS.** Renders
+ * through one engine run one at a time, so a deadline counted from the ASK
+ * counts the queue in front of it as well — and a reader whose chapter was
+ * queued behind another failed with *"the voice did not answer"* while the
+ * voice was busy answering someone else. It is called once the engine is this
+ * render's, which is the moment a deadline on the render itself should start. A
+ * clip already on disk never waits, and never calls it.
+ */
+export interface RenderControl {
+  /** Aborted once nobody wants the render: a Stop, a new reading, or a deadline. */
+  readonly signal: AbortSignal
+  /** The engine is this render's now. Called at most once. */
+  readonly onStarted: () => void
+}
+
 /** What to read, in which voice. */
 export interface SpeechRequest {
   readonly packId: string
@@ -560,22 +578,21 @@ export interface SpeechEnginePort {
   /**
    * Read some text aloud into samples.
    *
-   * ⚠️ **NO `AbortSignal`, AND ITS ABSENCE IS THE HONEST SHAPE.** This declared
-   * one until 2026-09-23 and nothing in the stack could keep it: the plugin's
-   * `voices_stop` cancels a DOWNLOAD — it holds the fetch loop's token and
-   * nothing else — no caller ever passed a signal, and the wrapper in
-   * `useVoicePacks` dropped the parameter on the floor, which TypeScript
-   * permits. A port that declares a capability nothing implements is the shape
-   * `paper/share-notes/1` had when it went a whole phase with no client.
+   * ⚠️ **`control` IS REQUIRED, AND IT REACHES THE ENGINE LOOP.** This declared
+   * an optional `AbortSignal` until 2026-09-23 that nothing could keep, and lost
+   * it for that reason. It came back on 2026-11-10 because something needed it:
+   * each engine is one model behind one lock, so a render the reader had
+   * stopped ran on for minutes and the reading they asked for next waited
+   * behind it — with its deadline already counting. The signal is now carried
+   * to the plugin as a cancel, which the engine honours between one sentence
+   * or chunk and the next.
    *
-   * What the reading does instead is `Promise.race` against its own deadline
-   * (`EngineSpeaker`), and what a reader presses Stop for is the PLAYBACK,
-   * which stops at once. A render that is already running finishes into a
-   * buffer nobody plays. Giving this a real signal means a cancellation token
-   * through the plugin to the engine loop, which is a change to make when
-   * something needs it rather than a parameter to leave lying here.
+   * REQUIRED rather than optional because the last one was dropped on the floor
+   * by a wrapper (`useVoicePacks`), which an optional parameter lets TypeScript
+   * permit without a word; a wrapper written as `(request) => …` still
+   * type-checks, so each one that forwards it has a test that says so.
    */
-  render(request: SpeechRequest): Promise<SpokenAudio>
+  render(request: SpeechRequest, control: RenderControl): Promise<SpokenAudio>
   /**
    * Read some text aloud into a file at a path the caller names.
    *

@@ -21,6 +21,7 @@
 use std::path::Path;
 
 use super::text::{self, Verdict, FRAMES_PER_SECOND};
+use crate::cancel::Cancel;
 use crate::{Error, Result};
 
 /// How many renders one sentence may have before it is refused.
@@ -247,7 +248,17 @@ where
 /// A sentence that cannot be said is recorded and the rest are still read: a
 /// reader who loses one sentence and is told so has a book; a reader whose
 /// chapter stops at the first hard sentence does not.
-pub fn read<F>(passage: &str, sample_rate: u32, mut render: F) -> Reading
+///
+/// ⚠️ **THE STOP IS LOOKED AT BEFORE EVERY SENTENCE.** A chapter is minutes of
+/// sentences, and the engine is one model behind one lock: a render the reader
+/// has walked away from used to run to its end, and every render asked for after
+/// it waited behind it. A sentence is the unit the bridge can be interrupted
+/// between, so a stop costs at most the sentence in hand.
+///
+/// # Errors
+/// [`Error::Cancelled`] once `cancel` is stopped. Nothing else: a sentence that
+/// cannot be said is a `skipped`, not an error.
+pub fn read<F>(passage: &str, sample_rate: u32, cancel: &Cancel, mut render: F) -> Result<Reading>
 where
     F: FnMut(&str, u64, usize, usize) -> Attempt,
 {
@@ -257,6 +268,7 @@ where
         sample_rate,
     };
     for sentence in text::sentences(passage) {
+        cancel.check()?;
         let trimmed = sentence.trim();
         if trimmed.is_empty() {
             continue;
@@ -268,7 +280,7 @@ where
             Err(skipped) => reading.skipped.push(skipped),
         }
     }
-    reading
+    Ok(reading)
 }
 
 /// Refuse a pack this machine has too little memory for.

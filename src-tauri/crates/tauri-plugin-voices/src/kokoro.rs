@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
 
+use crate::cancel::Cancel;
 use crate::english::Phonemised;
 use crate::error::{Error, Result};
 
@@ -97,18 +98,33 @@ impl Rendered {
     }
 }
 
+/// How many whole frames the model spends on one token, given its duration.
+///
+/// ⚠️ **THE MODEL'S OWN RULE, NOT A ROUNDING OF OUR CHOOSING.** Kokoro's forward
+/// pass turns each duration into frames as `round(duration / speed)` clamped to
+/// at least 1, and torch rounds half to even. The `durations` output is the
+/// value before that step, already divided by the speed. This counted
+/// `round().max(0)` instead, which agrees with the model only while no token is
+/// shorter than half a frame. At speed 2.5 many are, and each one the model
+/// still voices for a frame was counted here as none: renders were refused with
+/// 318 frames accounted against 368 spoken, and 414 against 493. Rounding half
+/// away from zero would differ again on every duration of exactly n + 0.5.
+fn frames_of(duration: f32) -> usize {
+    duration.round_ties_even().max(1.0) as usize
+}
+
 /// How many whole frames the durations account for, refusing audio they do not.
 ///
 /// Rounding happens per token and before the sum, which is the WI-30.0
 /// measurement: the float sum of one render's durations gave 80 264 samples for
 /// an 81 000-sample waveform, and the rounded sum gave exactly 81 000. The
 /// equality is what proves the timings describe this audio and not another
-/// render's.
+/// render's. Each token is counted by [`frames_of`].
 ///
 /// # Errors
 /// [`Error::Malformed`] when the frames do not account for every sample.
 fn accounted(voice: &str, durations: &[f32], samples: usize) -> Result<usize> {
-    let frames: usize = durations.iter().map(|d| d.round().max(0.0) as usize).sum();
+    let frames: usize = durations.iter().copied().map(frames_of).sum();
     if frames * FRAME_SAMPLES != samples {
         return Err(Error::Malformed {
             route: format!("kokoro:{voice}"),
@@ -158,14 +174,24 @@ impl Kokoro {
     /// # Errors
     /// [`Error::Malformed`] if a phoneme is outside the model's vocabulary, if
     /// the model answers without audio, or if the durations do not account for
-    /// the samples — see the header.
-    pub fn render(&mut self, text: &Phonemised, voice: &str, speed: f32) -> Result<Rendered> {
+    /// the samples — see the header. [`Error::Cancelled`] once `cancel` is
+    /// stopped, which is looked at before every chunk: a chunk is the unit the
+    /// model runs, so a stop costs at most the pass in hand rather than the
+    /// rest of the chapter.
+    pub fn render(
+        &mut self,
+        text: &Phonemised,
+        voice: &str,
+        speed: f32,
+        cancel: &Cancel,
+    ) -> Result<Rendered> {
         let phonemes: Vec<char> = text.phonemes.chars().collect();
         let mut samples: Vec<i16> = Vec::new();
         let mut words: Vec<WordTiming> = Vec::new();
         let mut frames_before = 0usize;
 
         for chunk in chunks(&phonemes, MAX_TOKENS) {
+            cancel.check()?;
             let piece: String = phonemes[chunk.clone()].iter().collect();
             let (chunk_samples, durations) = self.run(&piece, voice, speed)?;
             let frames = accounted(voice, &durations, chunk_samples.len())?;
@@ -335,7 +361,7 @@ fn timings_for(
     let mut frames = 0usize;
     cumulative.push(0usize);
     for d in durations {
-        frames += d.round().max(0.0) as usize;
+        frames += frames_of(*d);
         cumulative.push(frames);
     }
     let at = |phoneme: usize| -> u32 {

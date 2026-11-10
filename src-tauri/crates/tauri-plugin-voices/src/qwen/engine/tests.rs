@@ -9,6 +9,8 @@ use std::cell::RefCell;
 use super::{
     buffer_samples, memory_allows, read, say, seed_for, to_pcm16, Attempt, Failure, ATTEMPTS,
 };
+use crate::cancel::Cancel;
+use crate::error::Error;
 use crate::qwen::text;
 
 const RATE: u32 = 24_000;
@@ -150,13 +152,19 @@ fn one_hard_sentence_does_not_end_the_passage() {
     // The point of reading a sentence at a time: the reader loses a sentence
     // and is told which, rather than losing the rest of the chapter.
     let passage = "First one. Second one. Third one.";
-    let reading = read(passage, RATE, |sentence, _seed, _cap, _room| {
-        if sentence.contains("Second") {
-            Attempt::Failed(Failure::GenerationFailed)
-        } else {
-            audio(text::expected_seconds(sentence))
-        }
-    });
+    let reading = read(
+        passage,
+        RATE,
+        &Cancel::never(),
+        |sentence, _seed, _cap, _room| {
+            if sentence.contains("Second") {
+                Attempt::Failed(Failure::GenerationFailed)
+            } else {
+                audio(text::expected_seconds(sentence))
+            }
+        },
+    )
+    .expect("nothing stopped it");
     assert_eq!(reading.spoken.len(), 2, "the other two are still read");
     assert_eq!(reading.skipped.len(), 1);
     assert!(
@@ -170,10 +178,16 @@ fn one_hard_sentence_does_not_end_the_passage() {
 fn a_passage_is_read_one_sentence_at_a_time_and_not_all_at_once() {
     let asked = RefCell::new(Vec::new());
     let passage = "\u{5929}\u{6C14}\u{5F88}\u{597D}\u{3002}\u{4F60}\u{5462}\u{FF1F}";
-    let reading = read(passage, RATE, |sentence, _seed, _cap, _room| {
-        asked.borrow_mut().push(sentence.to_owned());
-        audio(text::expected_seconds(sentence))
-    });
+    let reading = read(
+        passage,
+        RATE,
+        &Cancel::never(),
+        |sentence, _seed, _cap, _room| {
+            asked.borrow_mut().push(sentence.to_owned());
+            audio(text::expected_seconds(sentence))
+        },
+    )
+    .expect("nothing stopped it");
     assert_eq!(
         asked.borrow().len(),
         2,
@@ -186,11 +200,50 @@ fn a_passage_is_read_one_sentence_at_a_time_and_not_all_at_once() {
 
 #[test]
 fn nothing_at_all_is_read_as_nothing_rather_than_refused() {
-    let reading = read("   \n  ", RATE, |_s, _seed, _cap, _room| {
-        panic!("nothing to render")
-    });
+    let reading = read(
+        "   \n  ",
+        RATE,
+        &Cancel::never(),
+        |_s, _seed, _cap, _room| panic!("nothing to render"),
+    )
+    .expect("nothing stopped it");
     assert!(reading.spoken.is_empty());
     assert!(reading.skipped.is_empty());
+}
+
+#[test]
+fn a_stopped_reading_says_no_further_sentence() {
+    // The stop lands between sentences: the one in hand finishes, and nothing
+    // after it is sent to the bridge — that is what frees the engine for the
+    // reading the reader asked for next.
+    let (cancel, stopper) = Cancel::new();
+    let asked = RefCell::new(Vec::new());
+    let passage = "First one. Second one. Third one.";
+    let outcome = read(passage, RATE, &cancel, |sentence, _seed, _cap, _room| {
+        asked.borrow_mut().push(sentence.to_owned());
+        stopper.stop();
+        audio(text::expected_seconds(sentence))
+    });
+    assert!(
+        matches!(outcome, Err(Error::Cancelled)),
+        "a stop is not a reading"
+    );
+    assert_eq!(
+        asked.borrow().len(),
+        1,
+        "only the sentence in hand: {:?}",
+        asked.borrow()
+    );
+}
+
+#[test]
+fn a_reading_stopped_before_it_begins_says_nothing() {
+    let (cancel, stopper) = Cancel::new();
+    stopper.stop();
+    let outcome = read("First one.", RATE, &cancel, |_s, _seed, _cap, _room| {
+        panic!("a stopped reading must not reach the bridge")
+    });
+    assert!(matches!(outcome, Err(Error::Cancelled)));
 }
 
 #[test]

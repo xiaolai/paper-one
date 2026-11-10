@@ -17,9 +17,13 @@ const seam = vi.hoisted(() => ({
     (_event: string, _handler: (event: { payload: unknown }) => void): Promise<() => void> =>
       Promise.resolve(() => {}),
   ),
+  /** Tauri's `Channel`, as far as the wire uses one: a handler and nothing else. */
+  Channel: class {
+    onmessage: (message: unknown) => void = () => {}
+  },
 }))
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: seam.invoke }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: seam.invoke, Channel: seam.Channel }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: seam.listen }))
 
 beforeEach(() => {
@@ -33,6 +37,7 @@ describe('the voices wire', () => {
   it('offers every command the capability may call, and nothing else', () => {
     expect(Object.keys(voicesWire()).sort()).toEqual([
       'catalogue',
+      'clipCancel',
       'clipFind',
       'clipForget',
       'clipHold',
@@ -82,9 +87,12 @@ describe('the voices wire', () => {
       'plugin:voices|voices_clip_find',
       { ask: query },
     ])
-    expect(await called(() => wire.clipRender(query, '春天'))).toEqual([
-      'plugin:voices|voices_clip_render',
-      { ask: query, text: '春天' },
+    const [name, args] = await called(() => wire.clipRender(query, '春天', 'run-1', () => {}))
+    expect(name).toBe('plugin:voices|voices_clip_render')
+    expect(args).toEqual({ ask: query, text: '春天', run: 'run-1', started: expect.any(seam.Channel) })
+    expect(await called(() => wire.clipCancel('run-1'))).toEqual([
+      'plugin:voices|voices_clip_cancel',
+      { run: 'run-1' },
     ])
     const file = { pack: 'chinese-qwen', voice: 'Vivian', text: '春天', rate: null, path: '/scratch/chapter-3.wav' }
     expect(await called(() => wire.renderFile(file))).toEqual(['plugin:voices|voices_render_file', file])
@@ -147,7 +155,29 @@ describe('the voices wire', () => {
       spokenDigest: 'fnv1a64:2:0000000000000002',
     }
     await expect(voicesWire().clipFind(query)).resolves.toBe(clip)
-    await expect(voicesWire().clipRender(query, 'A.')).resolves.toBe(clip)
+    await expect(voicesWire().clipRender(query, 'A.', 'run-1', () => {})).resolves.toBe(clip)
+  })
+
+  it('tells the caller a render has started when the plugin says so, and not before', async () => {
+    /* ⚠️ **THE CHANNEL IS HOW THE DEADLINE LEARNS THE QUEUE IS OVER.** A handler
+       left unset, or set to the wrong thing, type-checks and leaves every render
+       timed from the moment it was asked for — which is the defect it exists to
+       end. */
+    const onStarted = vi.fn()
+    const query = {
+      book: 'book:a',
+      section: 1,
+      pack: 'english-kokoro',
+      voice: 'Heart',
+      rate: null,
+      textDigest: 'fnv1a64:2:0000000000000001',
+      spokenDigest: 'fnv1a64:2:0000000000000002',
+    }
+    await voicesWire().clipRender(query, 'A.', 'run-1', onStarted)
+    expect(onStarted, 'nothing has started yet').not.toHaveBeenCalled()
+    const { started } = seam.invoke.mock.calls[0]?.[1] as { started: { onmessage: (message: unknown) => void } }
+    started.onmessage(null)
+    expect(onStarted).toHaveBeenCalledTimes(1)
   })
 
   it('reads a clip as bytes, not as a list of numbers', async () => {

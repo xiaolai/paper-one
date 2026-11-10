@@ -1,7 +1,11 @@
 //! What holds the command inventory's three copies together, and the decisions
 //! the clip commands make before they reach a store.
 
-use super::{describes, effective_rate, family_of, rate_milli, readable, render_key_of, ClipAsk};
+use super::{
+    begin_speaking, describes, effective_rate, family_of, lock_unless_stopped, rate_milli,
+    readable, render_key_of, ClipAsk,
+};
+use crate::cancel::Cancel;
 use crate::clips;
 use crate::manifest::Family;
 
@@ -402,5 +406,89 @@ async fn a_link_planted_at_a_chapter_is_not_written_through() {
     assert!(
         std::fs::symlink_metadata(&target).is_ok(),
         "the link was removed"
+    );
+}
+
+#[test]
+fn a_render_stopped_while_it_waited_gives_up_without_saying_it_started() {
+    // The queue is where a stopped render used to cost the most: it waited for
+    // the engine, then spent minutes on a reading nobody wanted. It now gives up
+    // the moment the engine is its own, and the webview's clock never restarts.
+    let (cancel, stopper) = Cancel::new();
+    stopper.stop();
+    let mut told = false;
+    assert!(begin_speaking(&cancel, || told = true).is_err());
+    assert!(!told, "a stopped render must not report that it started");
+}
+
+#[test]
+fn a_render_nobody_stopped_says_it_started() {
+    let (cancel, _stopper) = Cancel::new();
+    let mut told = false;
+    begin_speaking(&cancel, || told = true).expect("nothing stopped it");
+    assert!(told, "the webview's deadline waits for this");
+}
+
+#[test]
+fn a_render_stopped_before_it_queues_never_takes_the_engine() {
+    let engine = std::sync::Mutex::new(());
+    let (cancel, stopper) = Cancel::new();
+    stopper.stop();
+    assert!(lock_unless_stopped(&engine, &cancel).is_err());
+    assert!(engine.try_lock().is_ok(), "the lock was never taken");
+}
+
+#[test]
+fn a_render_stopped_while_queued_leaves_without_the_engine() {
+    // Another render holds the engine for as long as this test runs.
+    let engine = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let busy = engine.lock().expect("the other render");
+    let (cancel, stopper) = Cancel::new();
+    let queued = {
+        let engine = std::sync::Arc::clone(&engine);
+        std::thread::spawn(move || lock_unless_stopped(&engine, &cancel).map(|_| ()))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(!queued.is_finished(), "it waits while nothing stopped it");
+    stopper.stop();
+    let answer = queued.join().expect("the queued render");
+    assert!(
+        answer.is_err(),
+        "a stop reaches a render still in the queue"
+    );
+    drop(busy);
+}
+
+#[test]
+fn a_render_nobody_stopped_takes_the_engine_once_it_is_free() {
+    let engine = std::sync::Arc::new(std::sync::Mutex::new(0_u8));
+    let busy = engine.lock().expect("the other render");
+    let (cancel, _stopper) = Cancel::new();
+    let queued = {
+        let engine = std::sync::Arc::clone(&engine);
+        std::thread::spawn(move || lock_unless_stopped(&engine, &cancel).map(|mut held| *held += 1))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    drop(busy);
+    queued
+        .join()
+        .expect("the queued render")
+        .expect("it took the engine");
+    assert_eq!(*engine.lock().expect("lock"), 1);
+}
+
+#[test]
+fn a_poisoned_engine_is_refused_by_name() {
+    let engine = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let poisoner = std::sync::Arc::clone(&engine);
+    let _ = std::thread::spawn(move || {
+        let _held = poisoner.lock().expect("lock");
+        panic!("a render panicked holding the engine");
+    })
+    .join();
+    let (cancel, _stopper) = Cancel::new();
+    assert_eq!(
+        lock_unless_stopped(&engine, &cancel).map(|_| ()),
+        Err("the voice is poisoned".to_owned())
     );
 }

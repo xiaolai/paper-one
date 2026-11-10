@@ -9,7 +9,7 @@ import {
   wordAtOffset,
 } from './engineSpeaker'
 import { FakeAudioHost, pcmOf } from './enginePlayer.testkit'
-import type { ClipKey, SpeechRequest, SpokenAudio } from '../../../kernel'
+import type { ClipKey, RenderControl, SpeechRequest, SpokenAudio } from '../../../kernel'
 import type { SpeakerCallbacks } from './speaker'
 
 const RATE = 24_000
@@ -43,17 +43,20 @@ function speakerOver(
   const asked: ClipKey[] = []
   /** Every request the engine was handed, whole — see the rate cases. */
   const requests: SpeechRequest[] = []
+  /** What each render was handed to be stopped and started by. */
+  const controls: RenderControl[] = []
   const speaker = new EngineSpeaker(cb, {
-    render: (request) => {
+    render: (request, control) => {
       asked.push(request.clip)
       requests.push(request)
+      controls.push(control)
       return render(request.text)
     },
     host: () => host,
     choose: (lang) => (lang === 'xx' ? null : { packId: 'english-kokoro', voiceId: 'af_heart' }),
     clip: () => clip,
   })
-  return { speaker, cb, host, asked, requests }
+  return { speaker, cb, host, asked, requests, controls }
 }
 
 beforeEach(() => {
@@ -171,6 +174,118 @@ describe('when a render fails', () => {
     speaker.speak('hello', 'en')
     await vi.advanceTimersByTimeAsync(0)
     expect(cb.onDone).toHaveBeenCalledWith('error')
+  })
+})
+
+describe('stopping a render at the engine, not only here', () => {
+  /* ⚠️ **EACH ENGINE RENDERS ONE PASSAGE AT A TIME.** A render this speaker had
+     given up on used to run on to its end, and the reading asked for next
+     queued behind it — so every road out of a render but its answer must reach
+     the render's signal, or the engine is held by a reading nobody wants. */
+  const never = () => new Promise<SpokenAudio>(() => {})
+
+  it('stops the render when the reader stops', async () => {
+    const { speaker, controls } = speakerOver(never)
+    speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(controls[0]?.signal.aborted, 'nothing has stopped it yet').toBe(false)
+    speaker.stop()
+    expect(controls[0]?.signal.aborted).toBe(true)
+  })
+
+  it('stops the render it leaves when it is asked to read something else', async () => {
+    const { speaker, controls } = speakerOver(never)
+    speaker.speak('first one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    speaker.speak('second one', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(controls).toHaveLength(2)
+    expect(controls[0]?.signal.aborted).toBe(true)
+    expect(controls[1]?.signal.aborted, 'the new one is left to run').toBe(false)
+  })
+
+  it('has stopped the render of a passage before it asks for that passage again', async () => {
+    /* ⚠️ **THIS IS WHY IDENTICAL RENDERS ARE NOT JOINED IN THE PLUGIN.** This
+       speaker is the only caller that renders into the clip store, there is one
+       of it, and it renders one passage at a time: every ask is preceded by the
+       stop that aborts the last one. So two live renders of one clip key cannot
+       both be wanted, and a join would only keep alive a render nobody wants. */
+    const live: number[] = []
+    let made: ReturnType<typeof speakerOver> | null = null
+    made = speakerOver(() => {
+      live.push(made!.controls.filter((control) => !control.signal.aborted).length)
+      return never()
+    })
+    made.speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    made.speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(made.asked, 'the same clip both times').toEqual([CLIP, CLIP])
+    expect(live, 'each render is the only one live when it is asked for').toEqual([1, 1])
+  })
+
+  it('stops the render when the deadline gives up on it', async () => {
+    const { speaker, cb, controls } = speakerOver(never)
+    speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(deadlineFor('hello') - 1)
+    expect(controls[0]?.signal.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(controls[0]?.signal.aborted).toBe(true)
+    expect(cb.onDone).toHaveBeenCalledWith('error')
+  })
+
+  it('reports nothing for the render the reader stopped, when it refuses', async () => {
+    /* The engine answers a stop with a refusal, and that refusal is the reader's
+       own Stop arriving back — not a failure to tell anyone about. */
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      let refuse: (cause: unknown) => void = () => {}
+      const { speaker, cb } = speakerOver(() => new Promise<SpokenAudio>((_resolve, reject) => (refuse = reject)))
+      speaker.speak('hello', 'en')
+      await vi.advanceTimersByTimeAsync(0)
+      speaker.stop()
+      refuse(new Error('the reader stopped it'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(cb.onDone).not.toHaveBeenCalledWith('error')
+      expect(errors).not.toHaveBeenCalled()
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
+  it('times the render from when it started, not from when it was asked for', async () => {
+    /* ⚠️ **THE DEADLINE COUNTED THE QUEUE.** A render that waited behind another
+       had its wait taken out of its own allowance, and the reader was told the
+       voice did not answer while it was answering someone else. */
+    const { speaker, cb, controls } = speakerOver(never)
+    const deadline = deadlineFor('hello')
+    speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(deadline - 1)
+    controls[0]?.onStarted()
+    await vi.advanceTimersByTimeAsync(deadline - 1)
+    expect(cb.onDone, 'the whole allowance again, from the start').not.toHaveBeenCalled()
+    expect(controls[0]?.signal.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(cb.onDone).toHaveBeenCalledWith('error')
+    expect(controls[0]?.signal.aborted).toBe(true)
+  })
+
+  it('leaves no deadline behind when the start is heard after the answer', async () => {
+    const { speaker, controls } = speakerOver(async () => audio())
+    speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(0)
+    const pending = vi.getTimerCount()
+    controls[0]?.onStarted()
+    expect(vi.getTimerCount(), 'no deadline is armed for an answer already in').toBe(pending)
+    await vi.advanceTimersByTimeAsync(deadlineFor('hello') + 10)
+    expect(controls[0]?.signal.aborted, 'a finished render is not stopped').toBe(false)
+  })
+
+  it('leaves a render that answered unstopped', async () => {
+    const { speaker, controls } = speakerOver(async () => audio())
+    speaker.speak('hello', 'en')
+    await vi.advanceTimersByTimeAsync(deadlineFor('hello') + 10)
+    expect(controls[0]?.signal.aborted).toBe(false)
   })
 })
 
