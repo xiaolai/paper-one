@@ -36,7 +36,7 @@ const FACTS: Omit<BookFacts, 'doc'> = {
   fixedLayout: false,
   sectionTexts: async () => ({ sections: [], complete: true }),
 }
-const PAGING = { next: () => {}, prev: () => {} }
+const PAGING = { next: () => {}, prev: () => {}, nextSection: async () => 'unmoved' as const }
 
 async function mount(capability: Omit<Capability, 'id'>, first: Document | null = page('First.')) {
   const composition = await composeCapabilities(

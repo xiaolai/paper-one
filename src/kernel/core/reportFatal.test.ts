@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { explainFatal, installFatalHandlers, reportFatal } from './reportFatal'
+import type { Diagnostics } from './ports'
+import {
+  RESIZE_OBSERVER_LOOP,
+  explainFatal,
+  installFatalHandlers,
+  noteResizeObserverLoop,
+  reportFatal,
+  reportNoticesTo,
+} from './reportFatal'
 
 /**
  * THE FATAL SURFACE HAS TO STATE THE FAULT, not the victim.
@@ -242,5 +250,63 @@ describe('the error banner', () => {
       expect.stringMatching(/^Uncaught error — Error: the error itself\n/),
       'Unhandled rejection — rejected',
     ])
+  })
+
+  /* A ResizeObserver loop is the browser saying "next frame", not a fault: it
+     had put an alert over the page during every reading run. NOT SWALLOWED:
+     a flood is a real loop (c2880568 removed the last one), so each notice is
+     a warning through the app's logger, `[paper:window]`, in the console. */
+  it('warns of the exact notice through the app’s logger and raises no banner', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const handlers = installed()
+    handlers.get('error')?.(new ErrorEvent('error', { message: RESIZE_OBSERVER_LOOP }))
+    expect(banner()).toBeNull()
+    expect(console.error).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalledExactlyOnceWith('[paper:window] resize-observer-loop', { message: RESIZE_OBSERVER_LOOP })
+  })
+
+  it('is the text WebKit sends, full stop and all', () => {
+    expect(RESIZE_OBSERVER_LOOP).toBe('ResizeObserver loop completed with undelivered notifications.')
+  })
+
+  /* Boot hands the app's own diagnostics over once it has them, and a fresh
+     install starts again from the console, so nothing outlives a reload. */
+  it('warns through the diagnostics it is handed, until the handlers are installed again', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const handed = { warn: vi.fn() }
+    installed()
+    reportNoticesTo(handed as unknown as Diagnostics)
+    noteResizeObserverLoop('handed')
+    expect(handed.warn).toHaveBeenCalledExactlyOnceWith('resize-observer-loop', { message: 'handed' })
+    expect(warn).not.toHaveBeenCalled()
+
+    const again = installed()
+    again.get('error')?.(new ErrorEvent('error', { message: RESIZE_OBSERVER_LOOP }))
+    expect(handed.warn).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('still reports an error thrown with the same words', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const handlers = installed()
+    const thrown = new Error(RESIZE_OBSERVER_LOOP)
+    handlers.get('error')?.(new ErrorEvent('error', { message: thrown.message, error: thrown }))
+    expect(lines()).toEqual([expect.stringMatching(/^Uncaught error — Error: ResizeObserver loop completed with undelivered notifications\.\n/)])
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  /* EXACTLY ONE TEXT, by the owner's ruling of 2026-11-10: only the benign
+     notice is spared the banner, so anything near it is still a fault. */
+  it.each([
+    'ResizeObserver loop completed with undelivered notifications',
+    'ResizeObserver loop completed with undelivered notifications.X',
+    ' ResizeObserver loop completed with undelivered notifications.',
+    'ResizeObserver loop limit exceeded',
+  ])('still reports %j, which is not exactly the notice', (message) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const handlers = installed()
+    handlers.get('error')?.(new ErrorEvent('error', { message }))
+    expect(lines()).toEqual([`Uncaught error — ${message}`])
+    expect(warn).not.toHaveBeenCalled()
   })
 })

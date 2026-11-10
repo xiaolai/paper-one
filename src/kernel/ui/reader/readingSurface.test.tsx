@@ -80,7 +80,7 @@ const facts = (over: Partial<BookFacts> = {}): BookFacts => ({
   ...over,
 })
 
-const NOTHING_TO_TURN = { next: () => {}, prev: () => {} }
+const NOTHING_TO_TURN = { next: () => {}, prev: () => {}, nextSection: async () => 'unmoved' as const }
 
 function source(doc: Document | null, over: Partial<SurfaceSource> = {}): SurfaceSource {
   return {
@@ -259,9 +259,20 @@ describe('the section and the book being replaced', () => {
     expect(section.sectionIndex).toBe(9)
   })
 
+  it('asks for the next section through whatever was last committed, and passes its answer on', async () => {
+    const before = { ...NOTHING_TO_TURN, nextSection: vi.fn(async () => 'moved' as const) }
+    const after = { ...NOTHING_TO_TURN, nextSection: vi.fn(async () => 'end' as const) }
+    const one = page('<p>Words.</p>')
+    const driver = createReadingSurface(source(one.doc, { paging: before }))
+    driver.commit(source(one.doc, { paging: after }))
+    await expect(driver.surface.nextSection()).resolves.toBe('end')
+    expect(before.nextSection).not.toHaveBeenCalled()
+    expect(after.nextSection).toHaveBeenCalledTimes(1)
+  })
+
   it('turns pages through whatever was last committed, in reading order', () => {
-    const before = { next: vi.fn(), prev: vi.fn() }
-    const after = { next: vi.fn(), prev: vi.fn() }
+    const before = { ...NOTHING_TO_TURN, next: vi.fn(), prev: vi.fn() }
+    const after = { ...NOTHING_TO_TURN, next: vi.fn(), prev: vi.fn() }
     const one = page('<p>Words.</p>')
     const driver = createReadingSurface(source(one.doc, { paging: before }))
     driver.commit(source(one.doc, { paging: after }))

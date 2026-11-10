@@ -505,6 +505,9 @@ export interface ReadyBook {
   sectionTexts(shouldStop: () => boolean, skip: SpeechSkipPrefs): Promise<SectionTextWalk>
 }
 
+/** What `ReadingSurface.nextSection` did. */
+export type SectionMove = 'moved' | 'end' | 'unmoved'
+
 /**
  * The reader, as something that reads along with it sees it.
  *
@@ -518,6 +521,20 @@ export interface ReadingSurface {
   /** The section on screen, read with these skips, or null with no document. */
   speakable(skip: SpeechSkipPrefs): SpokenSection | null
   turn(by: 1 | -1): void
+  /**
+   * Go to the start of the next section, once, and say what happened.
+   *
+   * ⚠️ **FOR A READING THAT RAN OUT OF WORDS, AND `turn` WAS WRONG FOR IT.** The
+   * reading walked a page per tick until the next section arrived, so a section
+   * slower to load than a tick was asked for twice: the paginator remembers a
+   * turn asked during one in flight, and played it in the section that had just
+   * landed — the reader one page in, or a page further (manual run 5.2).
+   *
+   * `end` where the book has no further section; `unmoved` where the move did
+   * not happen — nothing on screen yet, a turn already running, a load that
+   * failed — and asking again later is safe.
+   */
+  nextSection(): Promise<SectionMove>
   chapter: {
     can(by: 1 | -1): boolean
     /** Whether it moved: a step that declines must leave a reading undisturbed. */

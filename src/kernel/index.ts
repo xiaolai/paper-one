@@ -264,6 +264,7 @@ export type {
   ReadingSurface,
   ReadyBook,
   RemovableBlobName,
+  SectionMove,
   SectionText,
   Setting,
   SettingKey,
@@ -272,6 +273,7 @@ export type {
   SpokenSection,
 } from './core/ports'
 export { createDiagnostics, defaultDiagnostics, redact } from './core/diagnostics'
+export { reportNoticesTo } from './core/reportFatal'
 export type { DiagnosticsOptions, Sink } from './core/diagnostics'
 export {
   createDiagnosticLog,

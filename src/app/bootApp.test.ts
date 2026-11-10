@@ -9,11 +9,12 @@ import {
   hlcOf,
   onBeforeClose,
   onBeforeDrain,
+  reportNoticesTo,
   type Capability,
   type Diagnostics,
   type ServiceContext,
 } from '../kernel'
-import { fakeTrashFs } from '../kernel/testkit'
+import { fakeTrashFs, noteResizeObserverLoop, RESIZE_OBSERVER_LOOP } from '../kernel/testkit'
 import { CARRY_REFUSED_NOTICE } from './boot'
 import { bootApp, shelfAtLaunch, shutdownDepsOf, type BootedApp } from './bootApp'
 import { SHUTDOWN_DONE_EVENT, SHUTDOWN_EVENT, armShutdown } from './shutdown'
@@ -411,6 +412,26 @@ describe('the launch sequence, run', () => {
     app.onDiagnosticsCleared?.()
     await vi.advanceTimersByTimeAsync(DEFAULT_FLUSH_MS)
     await vi.waitFor(() => expect(textAt(DIAGNOSTICS_FILE), 'the file kept what the window threw away').toBe(''))
+  })
+
+  /* THE WINDOW'S RESIZEOBSERVER NOTICES JOIN THE RECORD WHEN THERE IS ONE —
+     see `reportFatal.ts`. A flood is a real loop, so the file a harness reads
+     has to carry it; and with diagnostics off the notices stay on the console
+     they already reached, rather than going to the no-op. */
+  it('hands the window’s notices to its diagnostics, and only while they are on', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const app = await launch()
+    noteResizeObserverLoop(RESIZE_OBSERVER_LOOP)
+    expect(app.diagnosticLog?.entries()).toContainEqual(
+      expect.objectContaining({ level: 'warn', scope: 'kernel.window', event: 'resize-observer-loop', fields: { message: RESIZE_OBSERVER_LOOP } }),
+    )
+
+    vi.stubEnv('DEV', false)
+    const before = { warn: vi.fn() }
+    reportNoticesTo(before as unknown as Diagnostics)
+    await launch()
+    noteResizeObserverLoop('after a release launch')
+    expect(before.warn).toHaveBeenCalledExactlyOnceWith('resize-observer-loop', { message: 'after a release launch' })
   })
 
   /* ON IN DEV, AND IN A RELEASE ONLY IF THE SWITCH FILE ASKS — and a switch that

@@ -14,6 +14,7 @@ import { engineVoiceFor } from '../lib/engineVoice'
 import { routedSpeaker, speakerFor, type SeekingSpeaker } from '../lib/speakerRouting'
 import type {
   ClipKey,
+  SectionMove,
   SpeechRequest,
   SpeechSkipPrefs,
   SpokenAudio,
@@ -169,34 +170,31 @@ export interface Speech {
 export const TURN_SETTLE_MS = 500
 
 /**
- * At the end of a section: how often `next` is asked for, and for how long,
- * while no new document arrives.
+ * At the end of a section: how often the walk looks for the next one.
  *
- * The voice walks the readable text, and a section can end with pages still
- * to turn — plates, a figure, a colophon. `next` is a page, not a section, and
- * nothing reports whether it moved; so it is asked once per tick until the
- * document changes, which is the next section arriving and being spoken. The
- * grace is what ends the reading at the end of the book, where `next` moves
- * nothing at all and the control would otherwise stay lit over silence. A
- * section loads well inside it; a scanned PDF page decoding on pdf.js's
- * fallback is the slow case, and it is inside it too.
+ * The voice walks the readable text, and a section can end with pages still to
+ * show — plates, a figure, a colophon. The walk asks the surface ONCE for the
+ * next section (`nextSection`) and then only looks, a tick at a time, for its
+ * document to arrive, which is the next section being spoken.
+ *
+ * ⚠️ **ONCE, AND IT WAS A PAGE A TICK — MANUAL RUN 5.2.** `next` turned a page
+ * per tick until the document changed, and nothing said whether the last turn
+ * was still in flight. A section slower to load than a tick was asked for
+ * twice; the paginator remembers a turn asked during one in flight and played
+ * it in the section that had just landed, so the reader started one page in,
+ * or a section further.
  */
 export const CONTINUE_TICK_MS = 800
 /**
- * ⚠️ **A HEURISTIC, AND AN AUDIT SAID SO — THE FIX IS THE ONE `chapter.go` GOT,
- * AND IT HAS NOWHERE TO LAND YET.** End of book is inferred from `next` moving
- * nothing for this long, because `SpeechPaging.next` returns nothing: a section
- * that takes longer than this to arrive reads as the book ending, and `next` is
- * re-asked every tick without knowing whether the last one is still in flight.
+ * How long a walk waits for a section that is not being loaded.
  *
- * The chapter step had the same shape and was fixed by making `go` answer
- * whether it moved. `next` cannot be fixed that way from here: it is the
- * session's page turn over foliate's paginator, which does not report a
- * position change, so a boolean returned by this layer would be a guess wearing
- * a type. The number is sized against the slow case that was measured — a
- * scanned PDF page decoding on pdf.js's JS fallback — which is why it is four
- * seconds and not one. When the paginator reports whether a turn landed, this
- * grace and the tick both go, and `next` becomes `(): boolean` beside `go`.
+ * The end of the book is no longer this: `nextSection` answers `end` there, and
+ * the reading finishes at the next tick. The grace is for a move that did not
+ * happen (`unmoved` — asked again each tick), or one that reported a landing
+ * whose document never came. It is NOT spent while a move is loading: a slow
+ * section is not a finished book, and a scanned PDF page decoding on pdf.js's
+ * fallback is slow. It is a total rather than a time since the last answer,
+ * because an `unmoved` answered every tick would otherwise restart it forever.
  */
 export const CONTINUE_GRACE_MS = 4000
 
@@ -393,6 +391,17 @@ export function useSpeech(
   /** A section walk `pause` took down, waiting for `resume` to start it again. */
   const heldContinuation = useRef(false)
   /**
+   * The move to the next section, asked from the section on screen. The
+   * layout effect below drops it once another section is, so whatever is here
+   * belongs to the section a walk is on.
+   *
+   * ⚠️ **ON THE HOOK, NOT THE WALK, BECAUSE A WALK IS RESTARTED.** `resume`
+   * starts a fresh walk after a pause, and a walk that asked again while the
+   * first move was still loading would load the section twice. `settled` is when
+   * the answer came, which is where the grace counts from.
+   */
+  const nextAsk = useRef<{ outcome: SectionMove | 'asking'; settled: number } | null>(null)
+  /**
    * The silence between two sentences, while it is being waited out.
    *
    * ⚠️ **A GAP IS A STATE THE READING CAN BE INTERRUPTED IN**, which is the whole
@@ -446,6 +455,9 @@ export function useSpeech(
    * below it answers for this one, because React flushes every layout effect of a
    * commit before any passive one. */
   useLayoutEffect(() => {
+    /* A move asked from a section is over once another is on screen; kept, a
+     * reader coming back to that section later would find its old answer. */
+    if (sectionKeyRef.current !== sectionKey) nextAsk.current = null
     sectionKeyRef.current = sectionKey
     surfaceRef.current = surface
     prefsRef.current = prefs
@@ -532,21 +544,44 @@ export function useSpeech(
         spokenRef.current = null
         turnedAt.current = null
         const from = sectionKeyRef.current
-        const started = Date.now()
+        /* The grace spent so far, and when it was last counted: see
+         * `CONTINUE_GRACE_MS` for why a move in flight does not spend it. */
+        let waited = 0
+        let counted = Date.now()
+        const ask = () => {
+          const mine = { outcome: 'asking' as SectionMove | 'asking', settled: 0 }
+          nextAsk.current = mine
+          const settle = (outcome: SectionMove) => {
+            mine.outcome = outcome
+            mine.settled = Date.now()
+          }
+          /* A move that threw did not happen. The session reports its own
+           * failures; left at "asking", the walk would wait over a lit control
+           * for ever. */
+          void surfaceRef.current.nextSection().then(settle, () => settle('unmoved'))
+        }
         const tick = () => {
           continuing.current = null
           if (!readingRef.current) return
           /* Already moved: the new document's effect is about to speak it, or
-           * has. Asking `next` again here would turn its first page away before
-           * a word of it was read. `sectionKeyRef` commits in the layout effect
-           * above, which runs before that document effect, so this sees the
-           * arrival first. */
+           * has. `sectionKeyRef` commits in the layout effect above, which runs
+           * before that document effect, so this sees the arrival first. */
           if (sectionKeyRef.current !== from) return
-          if (Date.now() - started >= CONTINUE_GRACE_MS) {
+          /* Of this section: the layout effect drops an answer when the section
+           * changes, and the walk has returned above if it did. */
+          const asked = nextAsk.current
+          if (asked?.outcome === 'end') {
             finish()
             return
           }
-          surfaceRef.current.turn(1)
+          const now = Date.now()
+          if (asked?.outcome !== 'asking') waited += now - Math.max(counted, asked?.settled ?? 0)
+          counted = now
+          if (waited >= CONTINUE_GRACE_MS) {
+            finish()
+            return
+          }
+          if (asked === null || asked.outcome === 'unmoved') ask()
           continuing.current = setTimeout(tick, CONTINUE_TICK_MS)
         }
         tick()
@@ -885,7 +920,7 @@ export function useSpeech(
    * why `start` marks the reading as under way only once this has answered.
    */
   const speakDocument = useCallback(
-    (section: SpokenSection, from = 0): boolean => {
+    (section: SpokenSection, from = 0, held = false): boolean => {
       /* NO `if (!speaker) return false`, AND THERE WAS ONE: both callers already
        * hold a speaker — `start` refuses without one, and the document effect runs
        * only inside a reading, which cannot begin without one. */
@@ -935,8 +970,15 @@ export function useSpeech(
        * taken while the reading was paused started the new section's audio while
        * the transport still said *"Go on reading"*, and the only control that
        * could get back in step was Stop. `speakSentence` clears it on the
-       * platform's unit and nothing cleared it on this one. */
-      setPaused(false)
+       * platform's unit and nothing cleared it on this one.
+       *
+       * ⚠️ **UNLESS THE READER PAUSED THE WALK THAT BROUGHT IT — MANUAL RUN 5.2,
+       * STEP 6.** `held` is that pause, and it outlives the walk: the walk turns
+       * its first page in the tick the section ends, so the next section is
+       * already on its way when the reader presses Pause, and it used to land,
+       * clear `paused` and speak. A chapter step is not this case — it is the
+       * reader asking for that chapter, and `stepChapter` spends the hold. */
+      setPaused(held)
       /* ⚠️ **SET FROM THE UNIT, FOR EVERY SECTION — AND THE PLATFORM ROAD USED TO
        * SET NOTHING, SO IT LEAKED — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.**
        * An engine section leaves this true while it renders, and the effect below
@@ -957,7 +999,26 @@ export function useSpeech(
         /* The whole text IS the utterance, so a boundary's index is already an
            offset into it. */
         baseRef.current = 0
-        return speaker!.speak(section.text, lang, prefsRef.current)
+        /* ⚠️ **AN EMPTY SECTION IS NOT SPOKEN UNDER THE PAUSE, AND IT WAS.** The
+           engine speaker reports `onDone('empty')` before `speak` returns — its
+           own `!text.trim()` — and that walked on, unheld, so the next section
+           with words played under *"Go on reading"*. The platform unit's branch
+           below keeps the walk held instead, and so does this one, by the
+           engine's own test of empty. Nothing is rendered, so nothing is
+           prepared either. */
+        // Stryker disable next-line MethodExpression: `collectText` never answers whitespace-only text (a blank node only separates, and only after words), so `trim` changes nothing today; it keeps this test the engine's own.
+        if (held && !section.text.trim()) {
+          heldContinuation.current = true
+          setPreparing(false)
+          // Stryker disable next-line BooleanLiteral: as below, a hold comes only from the document effect, which does not read the answer.
+          return true
+        }
+        /* Spoken and then paused, rather than not spoken: the engine speaker
+           honours a pause taken before its first sample (see `#play`), so the
+           render goes ahead and `resume` is the ordinary road. */
+        const began = speaker!.speak(section.text, lang, prefsRef.current)
+        if (held && began) speaker!.pause()
+        return began
       }
 
       /* ⚠️ **A SECTION WITH NO SENTENCES GOES TO THE ENGINE ANYWAY, AND SKIPPING
@@ -971,6 +1032,23 @@ export function useSpeech(
        * Handing the collected text to `speak` is what the reading did before it
        * was sentence-at-a-time, so the empty section keeps its one tested path
        * instead of gaining a second. */
+      if (held) {
+        /* Nothing is spoken under a pause on this unit. An empty section keeps
+           the walk held, because speaking it would report `onDone('empty')` at
+           once and walk on; a section with sentences holds its first one the way
+           a paused gap does, for `resume` to speak. */
+        if (plan.sentences.length === 0) {
+          heldContinuation.current = true
+          // Stryker disable next-line BooleanLiteral: a hold comes only from the document effect, which does not read the answer; `start`, the one caller that does, never holds.
+          return true
+        }
+        /* The cursor and not the base: a step under the pause steps from here,
+           and nothing reads the base until `speakSentence` writes it. */
+        cursorRef.current = from
+        pendingNext.current = from
+        // Stryker disable next-line BooleanLiteral: as above, nothing that holds reads this.
+        return true
+      }
       if (plan.sentences.length === 0) {
         cursorRef.current = 0
         /* The whole text IS the utterance here, so a boundary's index is already
@@ -1401,6 +1479,9 @@ export function useSpeech(
       if (!surfaceRef.current.chapter.go(by)) return
       clearGap()
       clearContinuation()
+      /* A step taken under a held walk plays, as a step taken under any pause
+         does: the reader asked for that chapter. */
+      heldContinuation.current = false
     },
     // Stryker disable next-line ArrayDeclaration: neither clear has a dependency, so this list is constant either way.
     [clearGap, clearContinuation],
@@ -1475,7 +1556,11 @@ export function useSpeech(
      * across a document change, a reader who paused during the OLD section's walk
      * and then resumed the NEW section's utterance restarted a page walk instead
      * of releasing the speaker: pages turned under a paused voice. The flag is
-     * about a walk that no longer exists. */
+     * about a walk that no longer exists.
+     *
+     * ⚠️ **BUT THE PAUSE IT RECORDS IS THE READER'S, AND IT IS KEPT.** The
+     * section that ended the walk lands paused — see `speakDocument`. */
+    const held = heldContinuation.current
     heldContinuation.current = false
     const section = surfaceRef.current.speakable(skipOf(prefsRef.current))
     if (!section) {
@@ -1487,7 +1572,7 @@ export function useSpeech(
     /* NO `if (queued) setSpeaking(true)`, AND THERE WAS ONE — `moveTo`'s reason:
        this effect has returned unless a reading is under way, and `speaking` is
        written only beside `readingRef`, so it is already true. */
-    speakDocument(section)
+    speakDocument(section, 0, held)
   }, [speaker, sectionKey, speakDocument, endReading, clearGap, clearContinuation])
 
   /* `clearBand` DOES NOTHING HERE FOR A DOCUMENT THAT WAS REPLACED, WHICH IS FINE:

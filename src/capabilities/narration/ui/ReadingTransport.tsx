@@ -48,6 +48,24 @@ export function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps
     </button>
   )
 
+  /* One control in both views: see the preparing view for why it is there too. */
+  const pauseOrGoOn = (
+    <button
+      type="button"
+      className={`${ui.barButton} ${ui.transportButton}`}
+      title={speech.paused ? 'Go on reading' : 'Pause'}
+      aria-label={speech.paused ? 'Go on reading' : 'Pause'}
+      aria-pressed={speech.paused}
+      onClick={() => (speech.paused ? speech.resume() : speech.pause())}
+    >
+      {speech.paused ? (
+        <Play size={ICON.window} strokeWidth={ICON.stroke} />
+      ) : (
+        <Pause size={ICON.window} strokeWidth={ICON.stroke} />
+      )}
+    </button>
+  )
+
   /**
    * A section being made into audio.
    *
@@ -62,6 +80,12 @@ export function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps
    * render and presses Listen again gets it at once: the render finishes into the
    * store whether or not anybody is listening, which is a promise the transport
    * can make because `staging`-then-rename-then-checkpoint makes it true.
+   *
+   * ⚠️ **AND PAUSE STAYS, BECAUSE THIS VIEW IS NOT ONLY A LONG WAIT.** A chapter
+   * the store already holds is "prepared" for the 25–270 ms it takes to read the
+   * clip, so a reader pressing Pause as one chapter ran into the next found no
+   * Pause there at all (`2026-11-01-d4-pause-closed.md`). The speaker honours a
+   * pause before its first sample, so the control means the same thing here.
    */
   if (speech.preparing) {
     return (
@@ -69,6 +93,7 @@ export function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps
         <span className={ui.preparing} role="status">
           Making this chapter’s audio…
         </span>
+        {pauseOrGoOn}
         {step('Stop reading aloud', Square, () => speech.stop())}
       </div>
     )
@@ -79,20 +104,7 @@ export function ReadingTransport({ speech, rate, onRate }: ReadingTransportProps
       {speech.chapters.back ? step('Previous chapter', ChevronsLeft, () => speech.stepChapter(-1)) : null}
       {step('Previous paragraph', SkipBack, () => speech.stepParagraph(-1))}
       {step('Previous sentence', ChevronLeft, () => speech.stepSentence(-1))}
-      <button
-        type="button"
-        className={`${ui.barButton} ${ui.transportButton}`}
-        title={speech.paused ? 'Go on reading' : 'Pause'}
-        aria-label={speech.paused ? 'Go on reading' : 'Pause'}
-        aria-pressed={speech.paused}
-        onClick={() => (speech.paused ? speech.resume() : speech.pause())}
-      >
-        {speech.paused ? (
-          <Play size={ICON.window} strokeWidth={ICON.stroke} />
-        ) : (
-          <Pause size={ICON.window} strokeWidth={ICON.stroke} />
-        )}
-      </button>
+      {pauseOrGoOn}
       {step('Next sentence', ChevronRight, () => speech.stepSentence(1))}
       {step('Next paragraph', SkipForward, () => speech.stepParagraph(1))}
       {speech.chapters.forward ? step('Next chapter', ChevronsRight, () => speech.stepChapter(1)) : null}

@@ -204,7 +204,7 @@ describe('the next speed', () => {
 })
 
 describe('a section being made into audio', () => {
-  it('says so, and offers a stop and nothing else', () => {
+  it('says so, and offers a pause and a stop and nothing else', () => {
     /* ⚠️ **"MAKING" AND NOT "LOADING" — WI-34.5's ONE NEW SENTENCE.** WI-34.0
        measured a real section at 315 s on an idle M4 Max. Nothing is arriving
        over a wire, so calling it buffering would be a lie about a five-minute
@@ -214,13 +214,26 @@ describe('a section being made into audio', () => {
     const status = screen.getByRole('status')
     expect(status.textContent).toBe('Making this chapter’s audio…')
     expect(status.className).toBe(ui.preparing)
-    /* Nothing else is drawn, because there is nothing yet for it to act on. */
+    /* Nothing else is drawn, because there is nothing yet to step or scrub. */
     expect(screen.getAllByRole('button').map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Pause',
       'Stop reading aloud',
     ])
     expect(screen.queryByRole('slider')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
     fireEvent.click(screen.getByRole('button', { name: 'Stop reading aloud' }))
-    expect(asked).toEqual(['stop'])
+    expect(asked).toEqual(['pause', 'stop'])
+  })
+
+  it('keeps Pause while the next chapter is prepared, and Go on once paused', () => {
+    /* ⚠️ **THE PAUSE CONTROL VANISHED AT EVERY CHAPTER CROSSING.** A clip the store
+       already holds is prepared for 25–270 ms, and this view drew only Stop, so a
+       press in that window found nothing (`2026-11-01-d4-pause-closed.md`). */
+    const { asked } = listening({ preparing: true, paused: true })
+    const goOn = screen.getByRole('button', { name: 'Go on reading' })
+    expect(goOn.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(goOn)
+    expect(asked).toEqual(['resume'])
   })
 
   it('gives the ordinary transport back once there is something to hear', () => {

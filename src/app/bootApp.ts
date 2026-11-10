@@ -59,6 +59,7 @@ import {
   flushBeforeClose,
   kernelApi,
   messageOf,
+  reportNoticesTo,
   serviceClients,
 } from '../kernel'
 import type {
@@ -279,6 +280,14 @@ export async function bootApp(capabilities: readonly Capability[]): Promise<Boot
         : {}),
     }),
   })
+
+  /* THE WINDOW'S RESIZEOBSERVER NOTICES, INTO THE SAME RECORD — see
+     `reportFatal.ts`. They reached the console from the moment the fatal
+     handlers were installed; with diagnostics on they are now also in the
+     window and the file, where a harness over ssh can read them. Off, the
+     services' diagnostics are the no-op, and handing them over would take the
+     notices out of the console they already reach. */
+  if (diagnosticsOn) reportNoticesTo(services.diagnostics.child('window'))
 
   /* THE TRASH IS EMPTIED AT BOOT, ON EACH BOOK'S LANE. Not on a timer and
    * not when the reader removes something: a timer deletes a reader's work

@@ -53,3 +53,9 @@ export { useReadingSurface, type BookFacts, type SpeechPlace, type SurfaceDriver
    app reaches both through `ReadingSurface.speakable`. */
 export { collectText } from './ui/reader/speech'
 export { sentenceSpansOf } from './ui/reader/wordSnap/sentenceOf'
+
+/* One ResizeObserver notice, as the window's handler raises it, for the launch
+   test that proves boot hands the notices to its diagnostics. Only the window's
+   own `error` handler raises one in the app, so the production entry does not
+   carry it. */
+export { noteResizeObserverLoop, RESIZE_OBSERVER_LOOP } from './core/reportFatal'
