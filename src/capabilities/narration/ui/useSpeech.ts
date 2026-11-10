@@ -885,7 +885,7 @@ export function useSpeech(
    * why `start` marks the reading as under way only once this has answered.
    */
   const speakDocument = useCallback(
-    (section: SpokenSection, from = 0): boolean => {
+    (section: SpokenSection, from = 0, held = false): boolean => {
       /* NO `if (!speaker) return false`, AND THERE WAS ONE: both callers already
        * hold a speaker — `start` refuses without one, and the document effect runs
        * only inside a reading, which cannot begin without one. */
@@ -935,8 +935,15 @@ export function useSpeech(
        * taken while the reading was paused started the new section's audio while
        * the transport still said *"Go on reading"*, and the only control that
        * could get back in step was Stop. `speakSentence` clears it on the
-       * platform's unit and nothing cleared it on this one. */
-      setPaused(false)
+       * platform's unit and nothing cleared it on this one.
+       *
+       * ⚠️ **UNLESS THE READER PAUSED THE WALK THAT BROUGHT IT — MANUAL RUN 5.2,
+       * STEP 6.** `held` is that pause, and it outlives the walk: the walk turns
+       * its first page in the tick the section ends, so the next section is
+       * already on its way when the reader presses Pause, and it used to land,
+       * clear `paused` and speak. A chapter step is not this case — it is the
+       * reader asking for that chapter, and `stepChapter` spends the hold. */
+      setPaused(held)
       /* ⚠️ **SET FROM THE UNIT, FOR EVERY SECTION — AND THE PLATFORM ROAD USED TO
        * SET NOTHING, SO IT LEAKED — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.**
        * An engine section leaves this true while it renders, and the effect below
@@ -957,7 +964,12 @@ export function useSpeech(
         /* The whole text IS the utterance, so a boundary's index is already an
            offset into it. */
         baseRef.current = 0
-        return speaker!.speak(section.text, lang, prefsRef.current)
+        /* Spoken and then paused, rather than not spoken: the engine speaker
+           honours a pause taken before its first sample (see `#play`), so the
+           render goes ahead and `resume` is the ordinary road. */
+        const began = speaker!.speak(section.text, lang, prefsRef.current)
+        if (held && began) speaker!.pause()
+        return began
       }
 
       /* ⚠️ **A SECTION WITH NO SENTENCES GOES TO THE ENGINE ANYWAY, AND SKIPPING
@@ -971,6 +983,21 @@ export function useSpeech(
        * Handing the collected text to `speak` is what the reading did before it
        * was sentence-at-a-time, so the empty section keeps its one tested path
        * instead of gaining a second. */
+      if (held) {
+        /* Nothing is spoken under a pause on this unit. An empty section keeps
+           the walk held, because speaking it would report `onDone('empty')` at
+           once and walk on; a section with sentences holds its first one the way
+           a paused gap does, for `resume` to speak. */
+        if (plan.sentences.length === 0) {
+          heldContinuation.current = true
+          return true
+        }
+        /* The cursor and not the base: a step under the pause steps from here,
+           and nothing reads the base until `speakSentence` writes it. */
+        cursorRef.current = from
+        pendingNext.current = from
+        return true
+      }
       if (plan.sentences.length === 0) {
         cursorRef.current = 0
         /* The whole text IS the utterance here, so a boundary's index is already
@@ -1401,6 +1428,9 @@ export function useSpeech(
       if (!surfaceRef.current.chapter.go(by)) return
       clearGap()
       clearContinuation()
+      /* A step taken under a held walk plays, as a step taken under any pause
+         does: the reader asked for that chapter. */
+      heldContinuation.current = false
     },
     // Stryker disable next-line ArrayDeclaration: neither clear has a dependency, so this list is constant either way.
     [clearGap, clearContinuation],
@@ -1475,7 +1505,11 @@ export function useSpeech(
      * across a document change, a reader who paused during the OLD section's walk
      * and then resumed the NEW section's utterance restarted a page walk instead
      * of releasing the speaker: pages turned under a paused voice. The flag is
-     * about a walk that no longer exists. */
+     * about a walk that no longer exists.
+     *
+     * ⚠️ **BUT THE PAUSE IT RECORDS IS THE READER'S, AND IT IS KEPT.** The
+     * section that ended the walk lands paused — see `speakDocument`. */
+    const held = heldContinuation.current
     heldContinuation.current = false
     const section = surfaceRef.current.speakable(skipOf(prefsRef.current))
     if (!section) {
@@ -1487,7 +1521,7 @@ export function useSpeech(
     /* NO `if (queued) setSpeaking(true)`, AND THERE WAS ONE — `moveTo`'s reason:
        this effect has returned unless a reading is under way, and `speaking` is
        written only beside `readingRef`, so it is already true. */
-    speakDocument(section)
+    speakDocument(section, 0, held)
   }, [speaker, sectionKey, speakDocument, endReading, clearGap, clearContinuation])
 
   /* `clearBand` DOES NOTHING HERE FOR A DOCUMENT THAT WAS REPLACED, WHICH IS FINE:

@@ -1315,6 +1315,84 @@ describe('pausing between two sections', () => {
     expect(speech().speaking).toBe(true)
     a.remove()
   })
+
+  it('a pause taken while the next section is on its way holds when it lands', () => {
+    /* ⚠️ **MANUAL RUN 5.2, STEP 6: A PAUSE PRESSED AS ONE CHAPTER RAN INTO THE NEXT
+       WAS LOST.** The walk turns its first page in the same tick the section ends,
+       so the next section is already on its way when the reader pauses. It
+       arrived anyway, and speaking it cleared the hold and said `paused: false`
+       — the reader's pause undone by a page they did not turn. */
+    const a = section('Only this.')
+    const b = section('Second section.')
+    const { speech, show } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    act(() => speech().pause())
+    const before = synth.queued.length
+    show(b.doc)
+    expect(speech().paused, 'still paused once the section lands').toBe(true)
+    expect(synth.queued.length, 'and nothing of it spoken').toBe(before)
+
+    act(() => speech().resume())
+    expect(speech().paused).toBe(false)
+    expect(spoken().at(-1), 'resume reads the section that landed').toBe('Second section.')
+    a.remove()
+    b.remove()
+  })
+
+  it('a step under that pause steps through the section that landed', () => {
+    /* From the landed section's first sentence: the old section's cursor, left
+       standing, would step from its own last sentence — off the end of this one. */
+    const a = section(['One.', 'Two.'])
+    const b = section(['Three.', 'Four.'])
+    const { speech, show } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    ends()
+    act(() => speech().pause())
+    show(b.doc)
+    act(() => speech().stepSentence(1))
+    expect(spoken().at(-1)).toBe('Four.')
+    a.remove()
+    b.remove()
+  })
+
+  it('an empty section landing under that pause keeps the walk held', () => {
+    /* Spoken, a plate reports `onDone('empty')` at once and walks on — pages
+       turning under the pause this was meant to keep. */
+    const a = section('Only this.')
+    const plate = section('')
+    const { speech, show, next } = mount(a.doc)
+    act(() => speech().start())
+    ends()
+    act(() => speech().pause())
+    show(plate.doc)
+    next.mockClear()
+    act(() => vi.advanceTimersByTime(CONTINUE_TICK_MS * 4))
+    expect(next, 'no page turned while paused').not.toHaveBeenCalled()
+    expect(speech().paused).toBe(true)
+    act(() => speech().resume())
+    act(() => vi.advanceTimersByTime(CONTINUE_TICK_MS))
+    expect(next, 'resume walks on past the plate').toHaveBeenCalled()
+    a.remove()
+    plate.remove()
+  })
+
+  it('a chapter step taken under that pause plays the chapter', () => {
+    /* The reader asked for that chapter, which a step under any pause means. */
+    const a = section('Only this.')
+    const b = section('Second section.')
+    const { speech, show } = mount(a.doc, { chapters: true })
+    act(() => speech().start())
+    ends()
+    act(() => speech().pause())
+    act(() => speech().stepChapter(1))
+    show(b.doc)
+    expect(speech().paused).toBe(false)
+    expect(spoken().at(-1)).toBe('Second section.')
+    a.remove()
+    b.remove()
+  })
 })
 
 /**
@@ -2440,6 +2518,28 @@ describe('five defects an independent audit found', () => {
     expect(speech().paused, 'the transport agrees with the voice').toBe(false)
     unmount()
     first.remove()
+    second.remove()
+  })
+
+  it('a section that lands under a pause taken during the walk lands paused', async () => {
+    /* The downloaded voices' half of manual run 5.2, step 6: the render of the
+       section the walk reached finished into a speaker that was told to speak,
+       so it spoke over the reader's pause. */
+    const second = section('Two sentence.', 'en')
+    const { speech, show, host, page, unmount } = await atASectionBoundary(WORDS)
+    act(() => speech().pause())
+    const before = host.sources.length
+    await act(async () => {
+      show(second.doc)
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(speech().paused, 'the transport still says paused').toBe(true)
+    const landed = host.sources.slice(before)
+    expect(landed.every((source) => source.stops > 0 || source.started.length === 0), 'and no sound plays').toBe(true)
+    act(() => speech().resume())
+    expect(speech().paused).toBe(false)
+    unmount()
+    page.remove()
     second.remove()
   })
 
