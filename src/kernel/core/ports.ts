@@ -494,6 +494,13 @@ export interface ReadyBook {
   readonly lang: string | null
   readonly toc: readonly TocItem[]
   readonly fixedLayout: boolean
+  /**
+   * False once this opening is closed or replaced, and never true again.
+   *
+   * What an operation of minutes asks between its steps, so it ends with the
+   * book rather than finishing for one the reader has left: see `useAudiobook`.
+   */
+  live(): boolean
   /** Incomplete, rather than the next book's text, once this book is replaced. */
   sectionTexts(shouldStop: () => boolean, skip: SpeechSkipPrefs): Promise<SectionTextWalk>
 }

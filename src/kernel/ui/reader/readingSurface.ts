@@ -148,6 +148,7 @@ export function readyBookOf(facts: BookFacts, current: () => number): ReadyBook 
        from the view rather than guessed from the file's extension: see
        `SessionCallbacks.onFixedLayout`. */
     fixedLayout: facts.fixedLayout,
+    live,
     sectionTexts: async (shouldStop, skip) => {
       if (!live()) return { sections: [], complete: false }
       const walk = await facts.sectionTexts(facts.toc, () => shouldStop() || !live(), skip)

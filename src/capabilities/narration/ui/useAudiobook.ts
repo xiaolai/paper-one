@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { messageOf } from '../../../kernel'
 import type { ReadyBook, SpeechSkipPrefs } from '../../../kernel'
 import { ExportCancelled, exportAudiobook, planChapters } from '../lib/audiobook'
@@ -88,6 +88,26 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
   const letGo = useRef<() => void>(() => {})
 
   const { source, chosen, rate, engine, say } = deps
+
+  /**
+   * ⚠️ **A BOOK CLOSED DURING THE JOIN USED TO BE WRITTEN ANYWAY, OVER WHATEVER
+   * THE READER HAD AT THAT NAME.** `cancelled` asks `live()` only between steps,
+   * and the join is one step of minutes, so nothing gave the destination back
+   * until it returned — after the plugin's commit had moved the book onto the
+   * reader's file. The book going is now the reader's stop: the token goes back
+   * as it happens, and the commit refuses it, as `letGo` records for a stop.
+   *
+   * `live()`, NOT IDENTITY: a chapter turn hands in a new book of the same
+   * opening, which is still live and must not end the export. The book leaving
+   * is the one whose cleanup runs. `letGo` does nothing while no destination is
+   * held, so an export not yet at the dialog, or none at all, is not touched.
+   */
+  useEffect(
+    () => () => {
+      if (source && !source.live()) letGo.current()
+    },
+    [source],
+  )
 
   /**
    * ⚠️ **ONE LONG FUNCTION, AND THAT IS THE DECISION RATHER THAN THE DEBT.** An
@@ -253,7 +273,12 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
                   : `Reading ${title} — ${done + 1} of ${total}…`,
               )
             },
-            cancelled: () => stop.current,
+            /* ⚠️ **AND THE BOOK GOING IS A STOP TOO.** This asked only for the
+               reader's stop, so opening another book mid-export went on
+               rendering the old one for minutes and then wrote its file.
+               `manual-run-5.2.md` step 8 asks for a refusal with no file
+               written; `live` is the same answer the walk above stops on. */
+            cancelled: () => stop.current || !source.live(),
           })
           say(
             `Exported ${result.chapters} chapters, ${Math.round(result.durationMs / 60_000)} minutes, to ${result.name}.` +
@@ -275,6 +300,10 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
              sentence a reader would act on was the one thing nobody had checked.
              A chapter of a ten-hour book is tens of megabytes. It is counted now,
              and the claim is only made when it is true. */
+          /* Read before the `finally` clears it: a stop the reader asked for is
+             theirs, and one with no stop asked for is the book having gone. Every
+             notice below names which, since either can land too late. */
+          const why = stop.current ? 'The export was stopped' : 'The export stopped because the book was closed'
           /* ⚠️ **A STOP CAN COME TOO LATE TO UNDO THE FILE, AND THE READER USED TO
            * BE TOLD NOTHING ABOUT IT — FOUND BY AN INDEPENDENT AUDIT, 2026-09-30.**
            * The join cannot be interrupted, so a stop during it lands after the
@@ -285,7 +314,7 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
            * replaced one of theirs. */
           if (cause.book === 'replaced') {
             say(
-              `The export was stopped, but the book had already been written over the file you chose.${leftBehindNote(cause.leftBehind)}`,
+              `${why}, but the book had already been written over the file you chose.${leftBehindNote(cause.leftBehind)}`,
             )
             return
           }
@@ -294,11 +323,11 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
              temporary file would send them looking in the wrong place. */
           if (cause.book === 'stuck') {
             say(
-              `The export was stopped, but the book it had written could not be removed from where you chose.${leftBehindNote(cause.leftBehind)}`,
+              `${why}, but the book it had written could not be removed from where you chose.${leftBehindNote(cause.leftBehind)}`,
             )
             return
           }
-          say(`The export was stopped.${leftBehindNote(cause.leftBehind) || ' Nothing was left behind.'}`)
+          say(`${why}.${leftBehindNote(cause.leftBehind) || ' Nothing was left behind.'}`)
           return
         }
         /* THE ENGINE'S OWN SENTENCE. Every refusal in `narrate` names what it
@@ -330,11 +359,9 @@ export function useAudiobook(deps: AudiobookDeps): AudiobookControl | null {
    * ⚠️ **AND A RUNNING EXPORT KEEPS ITS CONTROL EVEN WHEN THE BOOK GOES.**
    * This was once `if (!available || !source) return null`, so closing the book mid
    * export took the only way to stop it off the palette while the operation
-   * carried on — reading, rendering and writing a file the reader could no longer
-   * reach, and with `source` gone they could not start another to get the row
-   * back either. The export captured everything it needs when it began; it does
-   * not read `source` again, which is exactly why it survives, and exactly why
-   * the control has to.
+   * carried on. The export now ends on its own at the next chapter once the book
+   * is not `live`, but a chapter is minutes of rendering, and until it ends the
+   * row is still the only thing that says an export is under way.
    *
    * `running` rather than `inFlight.current` on purpose: this decides what is
    * RENDERED, and a ref does not re-render when it changes. The ref is the

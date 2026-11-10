@@ -109,7 +109,7 @@ function surfaceOf(first: ReadyBook | null) {
 }
 
 function bookOf(walk: ReadyBook['sectionTexts'] = async () => ({ sections: [], complete: true }), over: Partial<ReadyBook> = {}): ReadyBook {
-  return { bookId: 'book:1', title: 'Le Horla', author: 'Maupassant', lang: 'en', toc: [], fixedLayout: false, sectionTexts: walk, ...over }
+  return { bookId: 'book:1', title: 'Le Horla', author: 'Maupassant', lang: 'en', toc: [], fixedLayout: false, live: () => true, sectionTexts: walk, ...over }
 }
 
 /** Narration's own settings, as the registry hands them to its `start`. */

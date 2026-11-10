@@ -23,10 +23,13 @@ const tauri = vi.hoisted(() => ({
   released: [] as string[],
   /** Whether giving one back fails. */
   releaseFails: false,
+  /** Runs while the save dialog is open, before the reader answers it. */
+  onPick: null as (() => void) | null,
 }))
 vi.mock('../lib/wire', () => ({
   pickDestination: async (title: string) => {
     tauri.asked.push(title)
+    tauri.onPick?.()
     return tauri.path === null ? null : { token: TOKEN, name: tauri.path }
   },
   releaseDestination: async (token: string) => {
@@ -52,6 +55,7 @@ beforeEach(() => {
   tauri.packs = []
   tauri.released = []
   tauri.releaseFails = false
+  tauri.onPick = null
 })
 
 /**
@@ -112,6 +116,7 @@ function mount({ packs = [INSTALLED], ...over }: Partial<AudiobookDeps> & { read
       toc: [],
       fixedLayout: false,
       skip: { notes: false },
+      live: () => true,
       sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
     },
     chosen: {},
@@ -128,6 +133,7 @@ function mount({ packs = [INSTALLED], ...over }: Partial<AudiobookDeps> & { read
     seen,
     say,
     rerender: () => view.rerender(<Probe />),
+    unmount: () => view.unmount(),
     /* CHANGES THE DEPS THE NEXT RENDER SEES. `deps` is the object the probe
        closes over, so mutating it is how a test says "the reader closed the
        book" — the same thing a new prop would do to the real component. */
@@ -182,6 +188,7 @@ describe('a book laid out in fixed pages', () => {
         toc: [],
         fixedLayout: true,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: read,
       },
     })
@@ -206,6 +213,7 @@ describe('a book laid out in fixed pages', () => {
         toc: [],
         fixedLayout: true,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => ({ sections: [], complete: true })),
       },
     })
@@ -310,6 +318,7 @@ describe('a book with no voice this app would choose', () => {
         toc: [],
         fixedLayout: false,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => ({
           sections: [{ index: 0, title: '第一章', text: '春天来了。', textDigest: 'fnv1a64:1:0000000000000000' }],
           complete: true,
@@ -352,6 +361,7 @@ describe('two calls before React has committed anything', () => {
         toc: [],
         fixedLayout: false,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => {
           calls += 1
           reads.push(calls)
@@ -390,6 +400,7 @@ describe('a walk that did not finish', () => {
         toc: [],
         fixedLayout: false,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => ({
           sections: [{ index: 0, title: 'One', text: 'Some real text.', textDigest: 'fnv1a64:1:0000000000000000' }],
           complete: false,
@@ -415,6 +426,7 @@ describe('a walk that did not finish', () => {
         toc: [],
         fixedLayout: false,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => ({
           sections: [{ index: 0, title: 'One', text: 'Some real text.', textDigest: 'fnv1a64:1:0000000000000000' }],
           complete: true,
@@ -467,6 +479,7 @@ describe('the control while an export is under way', () => {
         toc: [],
         fixedLayout: false,
         skip: { notes: false },
+        live: () => true,
         sectionTexts: vi.fn(async () => {
           await held
           return { sections: [], complete: true }
@@ -517,6 +530,7 @@ function book(over: Partial<AudiobookSource> = {}): AudiobookSource {
     toc: [],
     fixedLayout: false,
     skip: { notes: false },
+    live: () => true,
     sectionTexts: vi.fn(async () => ({ sections: SECTIONS, complete: true })),
     ...over,
   }
@@ -797,6 +811,41 @@ describe('a stop that came too late to undo the file', () => {
       'The export was stopped, but the book it had written could not be removed from where you chose.',
     )
   })
+
+  it('names the book closing, not a stop, when that is what came too late', async () => {
+    /* A close noticed only after the commit — the join returned before the host
+       re-rendered — keeps a book it wrote over a file, or one it could not
+       remove, as a stop does. The reader pressed nothing, and is told so. */
+    for (const [over, line] of [
+      [
+        { exists: async () => true },
+        'The export stopped because the book was closed, but the book had already been written over the file you chose.',
+      ],
+      [
+        {
+          discardBook: async () => {
+            throw new Error('the book is open elsewhere')
+          },
+        },
+        'The export stopped because the book was closed, but the book it had written could not be removed from where you chose.',
+      ],
+    ] as const) {
+      let alive = true
+      engine({
+        ...over,
+        package: async (job) => {
+          alive = false
+          return { name: 'A Measured Book.m4b', durationMs: 180_000, chapters: job.chapters.length }
+        },
+      })
+      const { seen, say, unmount } = mount({ source: book({ live: () => alive }) })
+      await act(async () => {
+        seen.at(-1)?.run()
+      })
+      expect(say).toHaveBeenLastCalledWith(line)
+      unmount()
+    }
+  })
 })
 
 describe('scratch the tidy-up could not remove', () => {
@@ -978,6 +1027,103 @@ describe('a stop the reader asks for', () => {
     expect(say).toHaveBeenLastCalledWith(
       'The export was stopped. 2 temporary audio files could not be removed.',
     )
+  })
+})
+
+describe('a book closed or replaced while it exports', () => {
+  /**
+   * ⚠️ **THE EXPORT USED TO CARRY ON FOR A BOOK THE READER HAD LEFT.** It checked
+   * only the reader's stop between chapters, so opening another book went on
+   * rendering and then wrote the first one's file: `manual-run-5.2.md` step 8
+   * asks for a refusal with no file written, and the run found an export still
+   * going. The book's own `live` is the answer, the same one its walk uses.
+   */
+  it('between chapters, renders no more of them, writes no file, and says why', async () => {
+    const held = gate()
+    let alive = true
+    const { rendered, packaged, discarded } = engine({
+      render: async (job) => {
+        rendered.push(job)
+        await held.shut
+        return { path: job.path, cached: false, skipped: [] }
+      },
+    })
+    const { seen, say } = mount({ source: book({ live: () => alive }) })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    alive = false
+    await act(async () => {
+      held.open()
+    })
+    expect(rendered.map((job) => job.path)).toEqual(['/scratch/chapter-0.wav'])
+    expect(packaged, 'no file is written for a book that has gone').toEqual([])
+    expect(discarded).toEqual([0])
+    expect(say).toHaveBeenLastCalledWith(
+      'The export stopped because the book was closed. Nothing was left behind.',
+    )
+    expect(seen.at(-1)?.running).toBe(false)
+  })
+
+  it('while the save dialog is open, renders nothing', async () => {
+    /* The dialog is the reader's to answer, and a book can be opened behind it. */
+    let alive = true
+    const { rendered, packaged } = engine()
+    tauri.path = WHERE
+    tauri.onPick = () => {
+      alive = false
+    }
+    const { seen, say } = mount({ source: book({ live: () => alive }) })
+    await act(async () => {
+      seen.at(-1)?.run()
+    })
+    expect(tauri.asked, 'the book closed behind an open dialog').toEqual(['A Measured Book'])
+    expect(rendered).toEqual([])
+    expect(packaged).toEqual([])
+    expect(tauri.released, 'the destination is still given back').toEqual([TOKEN])
+    expect(say).toHaveBeenLastCalledWith(
+      'The export stopped because the book was closed. Nothing was left behind.',
+    )
+  })
+
+  it('during the join, gives the destination back at once, so the join cannot write over the file there', async () => {
+    /* ⚠️ **THE JOIN USED TO WRITE IT ANYWAY.** `live` was asked only between
+       steps, so the token stayed held through the join and the plugin's commit
+       moved the book over the reader's existing file. This fake commits as the
+       plugin does: a released token is refused, and the file there is untouched. */
+    const joining = gate()
+    let reached = false
+    let alive = true
+    const { books } = engine({
+      exists: async () => true,
+      package: async (job) => {
+        reached = true
+        await joining.shut
+        if (tauri.released.includes(TOKEN)) {
+          throw new Error('the export was cancelled before the book was written')
+        }
+        return { name: 'A Measured Book.m4b', durationMs: 180_000, chapters: job.chapters.length }
+      },
+    })
+    const { seen, say, change } = mount({ source: book({ live: () => alive }) })
+    await act(async () => {
+      seen.at(-1)?.run()
+      await vi.waitFor(() => expect(reached).toBe(true))
+    })
+    /* A chapter turn is a new book of the same opening, and is not the book going. */
+    act(() => change({ source: book({ live: () => alive }) }))
+    expect(tauri.released, 'a page turn is not a close').toEqual([])
+    alive = false
+    act(() => change({ source: null }))
+    expect(tauri.released, 'given back while the join was still running').toEqual([TOKEN])
+    await act(async () => {
+      joining.open()
+    })
+    expect(books, 'nothing was written, so nothing is removed').toEqual([])
+    expect(say).toHaveBeenLastCalledWith(
+      'The export stopped because the book was closed. Nothing was left behind.',
+    )
+    expect(tauri.released, 'and given back once').toEqual([TOKEN])
   })
 })
 
