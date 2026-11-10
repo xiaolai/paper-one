@@ -17,7 +17,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { loadConfigFromFile } from 'vite'
@@ -25,6 +25,7 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { resolveConfig } from 'vitest/node'
 import {
   FIRST_RUN,
+  MAX_RUNNERS,
   REPORT,
   SETTLE_RUN,
   VITEST_DEFAULT_TIMEOUT,
@@ -55,6 +56,8 @@ import {
   resultFileFor,
   reverseImports,
   run,
+  runnersFor,
+  sandboxInstallProblem,
   settledVerdict,
   sourceReaders,
   strykerConfig,
@@ -582,8 +585,18 @@ describe('which kind of timeout a report says a mutant met', () => {
     expect(strykerConfig('src/x.ts', 'v.mjs', [], SETTLE_RUN)).toMatchObject(SETTLE_RUN)
     const first = strykerConfig('src/x.ts', 'v.mjs')
     expect(first.timeoutMS).toBe(20_000)
-    expect(first.concurrency).toBeUndefined()
     expect(first.timeoutFactor).toBeUndefined()
+  })
+
+  it('caps every run at four runners, and below that keeps the default Stryker picks', () => {
+    /* ⚠️ Measured 2026-11-10 on a 24-core Mac: above about four processes the
+       file system's metadata operations, not the CPU, set the pace, and at
+       Stryker's default of 23 runners 37 of 134 mutants on 29 lines timed out
+       against none at one. See `MAX_RUNNERS`. A 4-vCPU CI shard is unchanged. */
+    expect(MAX_RUNNERS).toBe(4)
+    expect([1, 2, 3, 4, 5, 8, 24].map(runnersFor)).toEqual([1, 2, 3, 4, 4, 4, 4])
+    expect(strykerConfig('src/x.ts', 'v.mjs').concurrency).toBe(runnersFor(availableParallelism()))
+    expect(strykerConfig('src/x.ts', 'v.mjs', [], SETTLE_RUN).concurrency).toBe(runnersFor(availableParallelism()))
   })
 })
 
@@ -2950,8 +2963,8 @@ describe('a whole sweep, driven with no Stryker', () => {
         vitest.test.include,
         [settings.timeoutMS, settings.timeoutFactor, settings.concurrency],
       ])).toEqual([
-        [false, a, [a], [asGlob(path.join(root, 'src/a.test.mjs'))], [20_000, undefined, undefined]],
-        [true, a, [a], [asGlob(path.join(root, 'src/a.test.mjs'))], [30_000, 4, undefined]],
+        [false, a, [a], [asGlob(path.join(root, 'src/a.test.mjs'))], [20_000, undefined, runnersFor(availableParallelism())]],
+        [true, a, [a], [asGlob(path.join(root, 'src/a.test.mjs'))], [30_000, 4, runnersFor(availableParallelism())]],
       ])
       expect(leftAt(root)).toEqual(NOTHING_LEFT)
     })
@@ -8338,6 +8351,8 @@ describe('what a shard leaves in its step summary', () => {
     /** A Stryker stand-in at `root` that writes this much to the summary it is given, and says which file that was. */
     const standIn = (root, bytes) =>
       plant(root, {
+        /* An install Stryker would give its sandbox — see `sandboxInstallProblem`. */
+        'node_modules/.bin/stryker': '',
         'node_modules/@stryker-mutator/core/package.json': JSON.stringify({ bin: './stand-in.mjs' }),
         'node_modules/@stryker-mutator/core/stand-in.mjs':
           "import { appendFileSync, writeFileSync } from 'node:fs'\n" +
@@ -8390,6 +8405,62 @@ describe('what a shard leaves in its step summary', () => {
 
         expect(readFileSync(told, 'utf8')).toBe('undefined')
       })
+    })
+  })
+})
+
+/**
+ * ⚠️ **A SANDBOX WITHOUT AN INSTALL IS REFUSED BEFORE STRYKER STARTS** (found
+ * 2026-11-10). Stryker gives its sandbox only a `node_modules` that is a real
+ * directory; a link there left the merge base's sandbox with none, and only the
+ * tests that name the install by path noticed — at one side of the comparison.
+ * See `linkInstall`.
+ */
+describe('the install Stryker’s sandbox is given', () => {
+  it('takes a real directory with a .bin in it', () => {
+    inScratch('mutants-install-', (root) => {
+      plant(root, { 'node_modules/.bin/vite': '' })
+
+      expect(sandboxInstallProblem(root)).toBeNull()
+    })
+  })
+
+  it('names a missing install, a linked one, one that is a file, and one with no .bin, each in its own words', () => {
+    inScratch('mutants-install-', (root) => {
+      const install = path.join(root, 'node_modules')
+      expect(sandboxInstallProblem(root)).toBe(`there is no ${install}`)
+
+      plant(root, { 'elsewhere/.bin/vite': '' })
+      symlinkSync(path.join(root, 'elsewhere'), install, 'junction')
+      expect(sandboxInstallProblem(root)).toBe(
+        `${install} is a link, and Stryker gives its sandbox only a node_modules that is a real directory`,
+      )
+
+      rmSync(install)
+      writeFileSync(install, '')
+      expect(sandboxInstallProblem(root)).toBe(
+        `${install} is not a directory, and Stryker gives its sandbox only a node_modules that is a real directory`,
+      )
+
+      rmSync(install)
+      mkdirSync(install)
+      expect(sandboxInstallProblem(root)).toBe(`${install} has no .bin, which is what pnpm puts on PATH for a script run in the sandbox`)
+    })
+  })
+
+  it('refuses to start Stryker over a linked install, and starts nothing', () => {
+    inScratch('mutants-install-', (root) => {
+      plant(root, {
+        'elsewhere/.bin/stryker': '',
+        'elsewhere/@stryker-mutator/core/package.json': JSON.stringify({ bin: './stand-in.mjs' }),
+        'elsewhere/@stryker-mutator/core/stand-in.mjs': "import { writeFileSync } from 'node:fs'\nwriteFileSync('started.txt', '')\n",
+      })
+      symlinkSync(path.join(root, 'elsewhere'), path.join(root, 'node_modules'), 'junction')
+
+      expect(() => strykerRun('config.json', root)).toThrow(
+        `check-mutants: Stryker's sandbox for config.json would have no install of its own — ${path.join(root, 'node_modules')} is a link`,
+      )
+      expect(existsSync(path.join(root, 'started.txt'))).toBe(false)
     })
   })
 })

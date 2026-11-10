@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -448,7 +448,7 @@ describe('the merge base as a checkout of its own', () => {
         '  child: (where, subject, into) => {',
         /* Read INSIDE the child, because the worktree is gone by the time
            `measureAtBase` answers. */
-        "    seen.push({ linked: realpathSync(path.join(where, 'node_modules')), versions: runnerVersionsAt(where) })",
+        "    seen.push({ linked: realpathSync(path.join(where, 'node_modules', 'vitest')), versions: runnerVersionsAt(where) })",
         `    writeFileSync(into, ${JSON.stringify(JSON.stringify(measurement({ subject: 'src/a.ts' })))})`,
         '  },',
         "  install: () => { throw new Error('two commits pinning the same bytes share an install') },",
@@ -467,7 +467,7 @@ describe('the merge base as a checkout of its own', () => {
       /* The measurement RAN, which is the half a refusal hides: with the link
          pointing at itself the child was never started at all. */
       expect(seen).toHaveLength(1)
-      expect(seen[0].linked).toBe(realpathSync(path.join(root, 'node_modules')))
+      expect(seen[0].linked).toBe(realpathSync(path.join(root, 'node_modules', 'vitest')))
       /* And what is read THROUGH the link is this checkout's own install,
          which is the question that refused every base measurement. */
       expect(seen[0].versions).toEqual({ '@stryker-mutator/core': '10.0.0', '@stryker-mutator/vitest-runner': '10.0.0', vitest: '4.1.11' })
@@ -807,10 +807,40 @@ describe('the child that does the measuring, and what it is refused for', () => 
    * The install is THIS checkout's, reached by a link — which is what
    * `suppliedTo` does for a base pinning the same bytes, so the base worktree
    * gets it the same way the real thing does.
+   *
+   * ⚠️ **AND THE SANDBOX HAS AN INSTALL AT ITS OWN ROOT, `.bin` INCLUDED** (found
+   * 2026-11-10). Stryker 10 gives its sandbox a `node_modules` only by finding a
+   * real DIRECTORY of that name in the project — `findNodeModulesList` keeps a
+   * `readdir` entry only when `isDirectory()`, and a link is not one. The base
+   * worktree's install used to BE a link, so its sandbox had none at all, and
+   * nothing that imports noticed: Node walks up out of the sandbox and finds the
+   * worktree's link one level above. What did notice is everything that names
+   * the install by path from the project root — `scripts/lib/notices.mjs`
+   * reading a package's licence, `pnpm build:ios` looking for `vite` in
+   * `<root>/node_modules/.bin` — and those failed at the base only, so the
+   * comparison broke on exactly the files those tests cover. So the test in
+   * this project names the install from its root as well as importing, and the
+   * dry run it must pass is what proves the sandbox has one.
+   *
+   * ⚠️ **ONE REAL STRYKER, NOT TWO.** That check rides in this case rather than
+   * a case of its own: every mutant of this gate whose tests reach here starts a
+   * nested Stryker per real case, and a third one made the gate's own sweep slow
+   * enough, on a many-core machine, to time out on load rather than on mutants.
    */
   it('measures the merge base for real — a spawned child, a real Stryker, a real report, real survivors', async () => {
     await inScratch('mutants-base-', async (root) => {
-      const { at } = repository(root, INSTALLED_PROJECT, Object.keys(RUNNERS))
+      /* The project's root as `check-third-party-notices.test.mjs` takes it,
+         and the install named from there, as `scripts/lib/notices.mjs` names it. */
+      const reading =
+        "import { existsSync, readFileSync } from 'node:fs'\nimport path from 'node:path'\nimport { fileURLToPath } from 'node:url'\n" +
+        "import { expect, it } from 'vitest'\nimport { grade } from './a'\n\n" +
+        "it('grades a big number beside an install of its own', () => {\n" +
+        "  const install = path.join(fileURLToPath(new URL('..', import.meta.url)), 'node_modules')\n" +
+        "  expect(JSON.parse(readFileSync(path.join(install, 'vitest', 'package.json'), 'utf8')).name).toBe('vitest')\n" +
+        "  expect(existsSync(path.join(install, '.bin', 'vitest'))).toBe(true)\n" +
+        "  expect(grade(2)).toBe('big')\n" +
+        '})\n'
+      const { at } = repository(root, { ...INSTALLED_PROJECT, 'src/a.test.ts': reading }, Object.keys(RUNNERS))
       symlinkSync(THIS_INSTALL, path.join(root, 'node_modules'), 'junction')
 
       const answer = await measureAtBase('src/a.ts', at, {
@@ -822,8 +852,11 @@ describe('the child that does the measuring, and what it is refused for', () => 
 
       expect(answer.install).toBe('linked')
       /* A real run of a real file: `grade(2)` is the only call any test makes, so
-         the `'small'` branch is never taken and its mutants are alive. */
+         the `'small'` branch is never taken and its mutants are alive. Measured,
+         not refused, so the dry run passed — and with it the test that reads the
+         install by path, which found one where the sandbox's root says it is. */
       expect(answer.outcome).toBe('survived')
+      expect(Object.keys(answer.first.report.testFiles)).toEqual(['src/a.test.ts'])
       expect(answer.sha256).toBe(digestOf(INSTALLED_PROJECT['src/a.ts']))
       expect(answer.first.exitedCleanly).toBe(false)
       /* ⚠️ **A REAL REPORT NAMES THE FILE RELATIVE TO WHERE STRYKER RAN**, which
@@ -946,6 +979,56 @@ describe('the dependencies the merge base’s own tests are run with', () => {
       expect(installs).toEqual([])
       expect(answer.install).toBe('linked')
       expect(measuring.seen[0].installed).toBe(true)
+    })
+  })
+
+  /**
+   * ⚠️ **A DIRECTORY OF LINKS, NOT ONE LINK** — because Stryker gives its sandbox
+   * only a `node_modules` that is a real directory. See `linkInstall`, and the
+   * real-Stryker case above that reads the install by path from inside the
+   * sandbox; this one says what the base worktree is handed, entry by entry.
+   */
+  it('hands the base this checkout’s install as a real directory, every entry a link to the same one here', async () => {
+    await inScratch('mutants-base-', async (root) => {
+      const { at } = repository(root)
+      plant(root, { 'node_modules/.bin/vitest': '#!/bin/sh\n', 'node_modules/.modules.yaml': 'layoutVersion: 5\n' })
+      const seen = []
+      const child = (where, subject, into) => {
+        const install = path.join(where, 'node_modules')
+        const shape = (name) => {
+          const entry = lstatSync(path.join(install, name))
+          return { link: entry.isSymbolicLink(), directory: entry.isDirectory() }
+        }
+        seen.push({
+          install: shape('.'),
+          names: readdirSync(install).sort(),
+          bin: shape('.bin'),
+          binIs: realpathSync(path.join(install, '.bin')),
+          vitest: shape('vitest'),
+          vitestIs: realpathSync(path.join(install, 'vitest')),
+          record: shape('.modules.yaml'),
+          recordSays: readFileSync(path.join(install, '.modules.yaml'), 'utf8'),
+        })
+        writeFileSync(into, JSON.stringify(measurement({ subject })))
+      }
+
+      const { answer, installs } = await measure(root, 'src/a.ts', at, { child })
+
+      expect(installs).toEqual([])
+      expect(answer.install).toBe('linked')
+      expect(seen).toEqual([
+        {
+          install: { link: false, directory: true },
+          names: ['.bin', '.modules.yaml', '@stryker-mutator', 'vitest'],
+          bin: { link: true, directory: false },
+          binIs: realpathSync(path.join(root, 'node_modules', '.bin')),
+          vitest: { link: true, directory: false },
+          vitestIs: realpathSync(path.join(root, 'node_modules', 'vitest')),
+          /* A copy, because a junction cannot name a file. */
+          record: { link: false, directory: false },
+          recordSays: 'layoutVersion: 5\n',
+        },
+      ])
     })
   })
 

@@ -4,6 +4,7 @@ import {
   appendFileSync,
   closeSync,
   constants,
+  copyFileSync,
   existsSync,
   fstatSync,
   lstatSync,
@@ -20,7 +21,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { createRequire, isBuiltin } from 'node:module'
-import { tmpdir } from 'node:os'
+import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -4399,9 +4400,9 @@ function suppliedTo(at, root, install, timeoutMs) {
        reads exactly like a base on another major version. Every case here passed
        an absolute root, which is why none of them saw it.
 
-       `junction`, because a Windows symbolic link to a directory needs a
-       privilege a runner may not have, and is ignored everywhere else. */
-    symlinkSync(path.resolve(root, 'node_modules'), path.join(at, 'node_modules'), 'junction')
+       ⚠️ **AND ENTRY BY ENTRY, NEVER THE DIRECTORY ITSELF** — see
+       `linkInstall`, which says what one link at `node_modules` cost. */
+    linkInstall(path.resolve(root, 'node_modules'), path.join(at, 'node_modules'))
     return 'linked'
   }
   if (timeoutMs <= 0) {
@@ -4421,6 +4422,63 @@ function suppliedTo(at, root, install, timeoutMs) {
 
 /** What decides whether two commits have the same install. */
 const PINS = ['pnpm-lock.yaml', 'package.json']
+
+/**
+ * The install at `from`, given to a checkout at `to` as a real DIRECTORY whose
+ * every entry is a link to the same entry of `from` — `.pnpm`, `.bin` and every
+ * package alike — and whose plain files are copies.
+ *
+ * ⚠️ **A DIRECTORY, BECAUSE TO STRYKER A LINK IS NOT ONE** (measured
+ * 2026-11-10). This used to be ONE link, `<base>/node_modules` → this
+ * checkout's. Stryker 10 gives its sandbox an install only by finding a
+ * `node_modules` it can walk into — `findNodeModulesList` keeps a `readdir`
+ * entry only where `isDirectory()` is true, and for a link it is false — so the
+ * base's sandbox had none at all. Imports never noticed: Node walks up out of
+ * `.stryker-tmp/sandbox-…` and finds the link one level above. Everything that
+ * names the install by path from the project's root did: `scripts/lib/notices.mjs`
+ * reading a package's licence, and `pnpm build:ios`, which puts
+ * `<root>/node_modules/.bin` on `PATH` and nothing above it, so `vite` was not
+ * found. Both failed at the merge base only, so the comparison broke on exactly
+ * the files those tests cover — and a `PATH` with this checkout's `.bin` on it
+ * hid the second. A directory here is what Stryker links into the sandbox, and
+ * every entry in it reaches this checkout's install, so it is still the same
+ * install by identity — see `suppliedTo`. `sandboxInstallProblem` is what
+ * refuses a sandbox without one.
+ *
+ * `junction`, because a Windows symbolic link to a directory needs a privilege
+ * a runner may not have, and is ignored everywhere else. A plain file is copied
+ * for the same reason — a junction cannot name one — and the only ones pnpm
+ * leaves at the top of an install are its own small records of it.
+ */
+function linkInstall(from, to) {
+  mkdirSync(to)
+  for (const entry of readdirSync(from, { withFileTypes: true })) {
+    const [there, here] = [path.join(from, entry.name), path.join(to, entry.name)]
+    if (entry.isFile()) copyFileSync(there, here)
+    else {
+      // Stryker disable next-line StringLiteral: the link type is read on Windows alone, and every other platform makes the same link whatever it says
+      symlinkSync(there, here, 'junction')
+    }
+  }
+}
+
+/**
+ * Why a Stryker run at `root` would give its sandbox no install of its own, or
+ * `null` when it will: what Stryker links into the sandbox is a `node_modules`
+ * that is a real directory, and what `pnpm` puts on `PATH` for a script run
+ * there is that directory's `.bin` and nothing above it. See `linkInstall` for
+ * the sandbox that had neither, and passed every import.
+ */
+export function sandboxInstallProblem(root) {
+  const install = path.join(root, 'node_modules')
+  const found = entryAt(install)
+  if (found === null) return `there is no ${install}`
+  if (!found.isDirectory()) {
+    return `${install} is ${found.isSymbolicLink() ? 'a link' : 'not a directory'}, and Stryker gives its sandbox only a node_modules that is a real directory`
+  }
+  if (!existsSync(path.join(install, '.bin'))) return `${install} has no .bin, which is what pnpm puts on PATH for a script run in the sandbox`
+  return null
+}
 
 /** Whether two files are there and are the same bytes — a file that is not there is not the same as anything. */
 function sameBytes(one, other) {
@@ -6527,6 +6585,11 @@ export function foldSummary(written, into, limit = SUMMARY_LIMIT) {
  * its own name changes nothing else.
  */
 export function strykerRun(config, root) {
+  /* ⚠️ **NO SANDBOX WITHOUT AN INSTALL** — refused here rather than found as a
+     test that cannot read a package, at one side of the comparison only. See
+     `sandboxInstallProblem`. */
+  const problem = sandboxInstallProblem(root)
+  if (problem !== null) throw new Refusal(`check-mutants: Stryker's sandbox for ${config} would have no install of its own — ${problem}`)
   const temp = mkdtempSync(path.join(tmpdir(), 'check-mutants-stryker-'))
   /* What this run writes for the step summary waits here: see `foldSummary`. */
   const summary = process.env.GITHUB_STEP_SUMMARY
@@ -7479,6 +7542,45 @@ export const FIRST_RUN = { timeoutMS: 20_000 }
 export const SETTLE_RUN = { timeoutMS: 30_000, timeoutFactor: 4 }
 
 /**
+ * The most test runners one Stryker run of this gate starts.
+ *
+ * ⚠️ **ABOVE ABOUT FOUR RUNNERS THE FILE SYSTEM, NOT THE CPU, SETS THE PACE**
+ * (measured 2026-11-10 on a 24-core Mac, APFS). Stryker's own default is one
+ * runner per core less one — 23 there — and the dry run that sets every
+ * mutant's deadline runs with ONE. This file's tests create and remove temp
+ * trees, git repositories and sandbox files by the thousand, and on APFS those
+ * metadata operations contend across the whole volume: with N processes each
+ * making 200 directories, writing 200 files and removing both, the cost of one
+ * operation went from ~55–75 µs at N = 1 to ~90–145 µs at 4, ~220–390 µs at 8,
+ * ~1–2 ms at 16 and ~2.3–5 ms at 23. Total throughput peaks near 4 and at 23
+ * falls BELOW a single process's, while a CPU-only loop slowed not at all and
+ * spawning `node` only 1.5×; `fseventsd` and Spotlight's `mds_stores` add
+ * contention of their own (58 % and 28 % of a core during that run). So at 23
+ * runners the tests ran 7–11× slower than the dry run allowed for, and 37 of
+ * 134 mutants on 29 of this file's lines timed out against 0 at one runner; a
+ * temp directory per runner still left 25, because the contention is the
+ * volume's, not the directory's. At four runners all 134 were killed, none
+ * timed out, and the run took 4 min 55 s — against 6 min 6 s at 23 and
+ * 7 min 58 s at one. Measured with throwaway scripts — `micro.mjs`
+ * (CPU, spawn, git and file-system loops), `micro2.mjs` (each metadata
+ * operation timed on its own) and `micro3.sh` (that at N = 1 … 23) — not kept
+ * in the repository.
+ *
+ * A CI shard has 4 vCPUs, where Stryker's default is already 4, so the cap
+ * changes nothing there; it binds only on a larger machine.
+ */
+export const MAX_RUNNERS = 4
+
+/**
+ * How many runners a Stryker run gets on a machine with `parallelism` cores:
+ * Stryker's default (`n - 1` above 4 cores, else `n`), capped at `MAX_RUNNERS`.
+ * Below the cap the two agree, so this is `min(n, MAX_RUNNERS)`.
+ */
+export function runnersFor(parallelism) {
+  return Math.min(parallelism, MAX_RUNNERS)
+}
+
+/**
  * Stryker's settings for one subject. `symlinks` is `symlinksIn`'s answer for
  * the tree, and `deadline` is `FIRST_RUN` or `SETTLE_RUN`.
  */
@@ -7532,6 +7634,7 @@ export function strykerConfig(subject, vitestConfig, symlinks = [], deadline = F
       ]),
     ],
     ...deadline,
+    concurrency: runnersFor(availableParallelism()),
     /* A survivor is the finding; the score is only how it is summarised. */
     thresholds: { high: 100, low: 100, break: 100 },
   }

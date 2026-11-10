@@ -1844,9 +1844,11 @@ describe('what a scratch checkout links its dependencies from', () => {
   /* ⚠️ **AND A FIXED DEPTH IS THE SAME TRAP ONE STEP REMOVED** (2026-09-18). A
      sweep found five: `THIS_INSTALL` in `check-mutants.base.test.mjs`, and four
      kernel tests that read `foliate-js` through `../../../node_modules/…`. From
-     inside the Stryker sandbox of a merge-base worktree, which has no install of
-     its own, each named nothing — the gate's own base measurement died on the
-     first, and a base measurement of any file the other four cover would have. An
+     inside the Stryker sandbox of a merge-base worktree, which then had no install
+     of its own, each named nothing — the gate's own base measurement died on the
+     first, and a base measurement of any file the other four cover would have.
+     (That sandbox has one since 2026-11-10 — see `linkInstall` — and the rule
+     stands: a depth counted from a test is a guess about where it runs.) An
      install is searched for upwards — `installAbove`, or Node's own
      `import.meta.resolve` — and never reached by counting directories. Every test
      file in the checkout is read, through paths built from a listing for the
